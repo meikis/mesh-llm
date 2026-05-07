@@ -301,8 +301,7 @@ fn canonicalize_interest_model_ref_accepts_catalog_names() {
         source_repo: "unsloth/Qwen3-8B-GGUF".to_string(),
         variants,
     };
-    let _catalog_guard =
-        crate::models::remote_catalog::set_catalog_entries_for_test(vec![entry]);
+    let _catalog_guard = crate::models::remote_catalog::set_catalog_entries_for_test(vec![entry]);
     let canonical = canonicalize_interest_model_ref("Qwen3-8B-Q4_K_M").unwrap();
     assert_eq!(canonical, "unsloth/Qwen3-8B-GGUF:Q4_K_M");
 }

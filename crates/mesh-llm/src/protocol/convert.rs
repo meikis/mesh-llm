@@ -797,6 +797,7 @@ pub(crate) fn proto_config_to_mesh(
             assignment,
             parallel: None,
         },
+        telemetry: Default::default(),
         models,
         plugins,
     }

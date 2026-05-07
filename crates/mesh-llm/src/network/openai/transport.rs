@@ -1716,6 +1716,8 @@ async fn route_remote_attempt(
                     session,
                     host_pub,
                     host_id,
+                    retry_context_overflow,
+                    response_adapter,
                 )
                 .await;
             }
@@ -3250,20 +3252,26 @@ pub async fn pipeline_proxy_local(
 }
 
 /// Handle an encrypted response from a remote host tunnel.
-/// Reads the magic byte, raw sender public key, and length-prefixed encrypted
-/// chunks, then writes plaintext HTTP response bytes to the client.
+///
+/// The remote tunnel sends an encrypted stream header followed by
+/// length-prefixed encrypted chunks. This function verifies the advertised
+/// sender key against gossip, decrypts chunks into an in-memory pipe, then
+/// reuses the normal HTTP response relay path. Reusing `relay_probed_response`
+/// keeps response translation (`/v1/responses` adapters), context-overflow
+/// retry detection, error remapping, and token accounting consistent with the
+/// plaintext tunnel path.
 ///
 /// `known_host_pub` is the host's gossiped inference public key — we use it to
-/// verify the response sender, NOT the self-declared key in the response payload.
+/// verify the response sender, NOT the self-declared key in the response stream.
 async fn handle_encrypted_response(
     quic_recv: &mut iroh::endpoint::RecvStream,
     tcp_stream: &mut TcpStream,
     session: &crate::crypto::inference_encryption::EphemeralSession,
     known_host_pub: &crypto_box::PublicKey,
     host_id: iroh::EndpointId,
+    retry_context_overflow: bool,
+    response_adapter: ResponseAdapter,
 ) -> RouteAttemptResult {
-    use tokio::io::AsyncWriteExt;
-
     // Read header: MAGIC (1 byte) + sender public key (32 bytes raw)
     let mut magic = [0u8; 1];
     if let Err(e) = quic_recv.read_exact(&mut magic).await {
@@ -3299,39 +3307,21 @@ async fn handle_encrypted_response(
         return RouteAttemptResult::RetryableUnavailable;
     }
 
-    // Build decryption box: our ephemeral secret + host's public key.
+    // Decrypt the whole encrypted response into a buffer and then let the
+    // normal plaintext response relay consume it. This keeps response adapters,
+    // context-overflow retries, error remapping, and completion-token metrics
+    // consistent with the plaintext tunnel path. The encrypted response still
+    // streams over QUIC from the host; buffering here is intentionally bounded
+    // by chunk size validation in `read_encrypted_chunk` and avoids committing
+    // subtly divergent adapter behavior on this security-sensitive path.
     let resp_box =
         crate::crypto::inference_encryption::make_salsa_box(&session.secret, known_host_pub);
-
-    // Decrypt and forward chunks to the client as they arrive (streaming).
-    let mut total: u64 = 0;
-    let mut status_code: u16 = 200;
-    let mut is_first_chunk = true;
+    let mut decrypted_response = Vec::with_capacity(64 * 1024);
     loop {
         match crate::crypto::inference_encryption::read_encrypted_chunk(quic_recv, &resp_box).await
         {
-            Ok(None) => break, // end sentinel
-            Ok(Some(plaintext)) => {
-                total += plaintext.len() as u64;
-                // Parse HTTP status from the first chunk (e.g. "HTTP/1.1 200 OK\r\n").
-                if is_first_chunk {
-                    is_first_chunk = false;
-                    status_code = parse_http_status_from_chunk(&plaintext);
-                }
-                if let Err(e) = tcp_stream.write_all(&plaintext).await {
-                    if is_client_disconnect_error(&anyhow::Error::from(e)) {
-                        return RouteAttemptResult::ClientDisconnected;
-                    }
-                    tracing::warn!("API proxy: failed to write decrypted chunk to client");
-                    return RouteAttemptResult::RetryableUnavailable;
-                }
-                // Flush after each chunk so SSE events reach the client immediately.
-                if let Err(e) = tcp_stream.flush().await {
-                    if is_client_disconnect_error(&anyhow::Error::from(e)) {
-                        return RouteAttemptResult::ClientDisconnected;
-                    }
-                }
-            }
+            Ok(None) => break,
+            Ok(Some(plaintext)) => decrypted_response.extend_from_slice(&plaintext),
             Err(e) => {
                 tracing::warn!(
                     "API proxy: failed to decrypt chunk from {}: {e}",
@@ -3342,33 +3332,59 @@ async fn handle_encrypted_response(
         }
     }
 
+    let total = decrypted_response.len();
+    let mut plaintext_reader = std::io::Cursor::new(decrypted_response);
+    let probe = match probe_http_response(&mut plaintext_reader).await {
+        Ok(probe) => probe,
+        Err(err) => {
+            tracing::warn!(
+                "API proxy: failed to parse decrypted response from {}: {err}",
+                host_id.fmt_short()
+            );
+            if is_timeout_error(&err) {
+                return RouteAttemptResult::RetryableTimeout;
+            }
+            return RouteAttemptResult::RetryableUnavailable;
+        }
+    };
+    let status_code = probe.status_code;
+
+    let result = match relay_probed_response(
+        tcp_stream,
+        &mut plaintext_reader,
+        probe,
+        retry_context_overflow,
+        response_adapter,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            if is_client_disconnect_error(&err) {
+                tracing::info!(
+                    "API proxy: downstream client disconnected during encrypted relay from {}",
+                    host_id.fmt_short()
+                );
+                return RouteAttemptResult::ClientDisconnected;
+            }
+            tracing::debug!(
+                "API proxy: encrypted relay from {} ended after commit: {err}",
+                host_id.fmt_short()
+            );
+            RouteAttemptResult::Delivered {
+                status_code,
+                completion_tokens: None,
+            }
+        }
+    };
+
     tracing::debug!(
-        "Decrypted streaming response from {} ({total} bytes, status={status_code})",
+        "Decrypted response from {} ({} bytes plaintext)",
         host_id.fmt_short(),
+        total
     );
 
-    RouteAttemptResult::Delivered {
-        status_code,
-        completion_tokens: None,
-    }
-}
-
-/// Parse the HTTP status code from the first chunk of a raw HTTP response.
-/// Returns 200 if parsing fails (best-effort).
-fn parse_http_status_from_chunk(chunk: &[u8]) -> u16 {
-    // Look for "HTTP/1.1 NNN" or "HTTP/1.0 NNN"
-    if chunk.len() < 12 {
-        return 200;
-    }
-    if !chunk.starts_with(b"HTTP/") {
-        return 200;
-    }
-    // Status code starts at byte 9 in "HTTP/1.1 200 ..."
-    let status_str = match std::str::from_utf8(&chunk[9..12]) {
-        Ok(s) => s,
-        Err(_) => return 200,
-    };
-    status_str.parse().unwrap_or(200)
+    result
 }
 
 /// Encrypt prefetched HTTP request bytes for a remote host if they have an inference key.
@@ -4228,27 +4244,5 @@ mod tests {
     #[test]
     fn extract_model_from_http_no_header_separator() {
         assert_eq!(extract_model_from_http(b"just garbage"), None);
-    }
-
-    #[test]
-    fn parse_http_status_200() {
-        let chunk = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true}";
-        assert_eq!(parse_http_status_from_chunk(chunk), 200);
-    }
-
-    #[test]
-    fn parse_http_status_500() {
-        let chunk = b"HTTP/1.1 500 Internal Server Error\r\n\r\n";
-        assert_eq!(parse_http_status_from_chunk(chunk), 500);
-    }
-
-    #[test]
-    fn parse_http_status_too_short() {
-        assert_eq!(parse_http_status_from_chunk(b"HTTP/1"), 200);
-    }
-
-    #[test]
-    fn parse_http_status_not_http() {
-        assert_eq!(parse_http_status_from_chunk(b"data: {\"choices\":[]}"), 200);
     }
 }

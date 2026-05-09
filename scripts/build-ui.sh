@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-UI_DIR="${1:?usage: build-ui.sh /path/to/ui}"
+UI_DIR="$(cd "${1:?usage: build-ui.sh /path/to/ui}" && pwd)"
 
 # Build the preview console app and copy its dist/ to the crate root so
 # build.rs finds it at $CARGO_MANIFEST_DIR/dist unchanged.

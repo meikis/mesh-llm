@@ -1,4 +1,5 @@
-use clap::{Subcommand, ValueEnum};
+use clap::{ArgAction, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum ModelSearchSort {
@@ -17,13 +18,28 @@ pub enum ModelSearchSort {
 // CLI enums mirror clap's argument shape; boxing these fields would make the parser harder to maintain.
 #[allow(clippy::large_enum_variant)]
 pub enum ModelsCommand {
-    /// Package a GGUF model for distributed inference by splitting it into layer files on Hugging Face Jobs.
+    /// Package a GGUF model for distributed inference.
     Package {
         /// Source Hugging Face model ref (e.g. unsloth/Qwen3-235B-A22B-GGUF:UD-Q4_K_XL).
         source_repo: Option<String>,
-        /// Quantization variant (deprecated; prefer source refs like repo:Q4_K_M).
+        /// Run packaging on Hugging Face Jobs. Without this, writes a local package.
+        #[arg(long, action = ArgAction::SetTrue)]
+        hf_job: bool,
+        /// Local output directory for local packaging.
         #[arg(long)]
-        quant: Option<String>,
+        out_dir: Option<PathBuf>,
+        /// Local projector GGUF(s) to include in the package.
+        #[arg(long = "projector")]
+        projectors: Vec<PathBuf>,
+        /// Source repo identity for local path packaging.
+        #[arg(long = "source-repo")]
+        source_identity_repo: Option<String>,
+        /// Source revision identity for local path packaging.
+        #[arg(long)]
+        source_revision: Option<String>,
+        /// Source file identity for local path packaging.
+        #[arg(long)]
+        source_file: Option<String>,
         /// Target repo for the layer package (auto-derived if omitted).
         #[arg(long)]
         target: Option<String>,
@@ -39,6 +55,9 @@ pub enum ModelsCommand {
         /// Branch or tag of mesh-llm to build in the job.
         #[arg(long, default_value = "main")]
         mesh_llm_ref: String,
+        /// Docker image for the HF Job. Use auto for the latest published image when mesh-llm-ref is main.
+        #[arg(long, default_value = "auto")]
+        job_image: String,
         /// Explicitly keep this as a dry run. This is the default unless --confirm is set.
         #[arg(long)]
         dry_run: bool,
@@ -100,30 +119,131 @@ pub enum ModelsCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Certify a Skippy layer package can be resolved, verified, and smoke-tested.
+    /// Certify a Skippy layer package locally, or certify a GGUF family on Hugging Face Jobs.
     Certify {
-        /// Exact layer package ref, local package dir, or catalog model ref with a package mapping.
-        model: String,
-        /// Write the JSON certification report to this path.
+        /// Local package/catalog ref, or remote source GGUF ref with --hf-job.
+        model: Option<String>,
+        /// Run family certification on Hugging Face Jobs.
+        #[arg(long, action = ArgAction::SetTrue)]
+        hf_job: bool,
+        /// Write the JSON certification report to this path for local certification.
         #[arg(long)]
-        report_out: Option<std::path::PathBuf>,
+        report_out: Option<PathBuf>,
         /// Emit JSON output.
         #[arg(long)]
         json: bool,
         /// Stop after package resolution, integrity checks, and local stage materialization.
         #[arg(long)]
         package_only: bool,
-        /// Existing mesh-llm OpenAI-compatible API base for runtime smoke gates.
+        /// Existing mesh-llm OpenAI-compatible API base for local runtime smoke gates.
         #[arg(long)]
         api_base: Option<String>,
-        /// Prompt for runtime smoke gates.
-        #[arg(long, default_value = "Say ok.")]
-        prompt: String,
-        /// Maximum tokens for runtime smoke gates.
+        /// Prompt for local runtime smoke gates or remote correctness lanes.
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Maximum tokens for local runtime smoke gates.
         #[arg(long, default_value_t = 2)]
         max_tokens: u32,
+        /// Family label to certify (for example mimo2, qwen3-dense, or gemma2).
+        #[arg(long)]
+        family: Option<String>,
+        /// Dataset repo for certification artifacts. If omitted, artifacts remain in the job workspace.
+        #[arg(long)]
+        artifact_repo: Option<String>,
+        /// Override model ID in certification artifacts.
+        #[arg(long)]
+        model_id: Option<String>,
+        /// HF Job hardware flavor. Use auto for the default CPU certification baseline.
+        #[arg(long, default_value = "auto")]
+        flavor: String,
+        /// Requested job timeout; used as the HF max-cost cap for family certification.
+        #[arg(long, default_value = "8h")]
+        timeout: String,
+        /// Branch, tag, or commit SHA of mesh-llm to build in the job.
+        #[arg(long, default_value = "main")]
+        mesh_llm_ref: String,
+        /// Docker image for the HF Job. Use auto for the latest published image when mesh-llm-ref is main.
+        #[arg(long, default_value = "auto")]
+        job_image: String,
+        /// Explicitly keep this as a dry run. This is the default unless --confirm is set.
+        #[arg(long)]
+        dry_run: bool,
+        /// Actually submit the HF Job. Without this, the command only prints plan, spec, and max cost.
+        #[arg(long)]
+        confirm: bool,
+        /// Stream job logs after submission until completion.
+        #[arg(long)]
+        follow: bool,
+        /// Check status of a previously submitted job.
+        #[arg(long)]
+        status: Option<String>,
+        /// Fetch logs for a previously submitted job.
+        #[arg(long)]
+        logs: Option<String>,
+        /// Cancel a running job.
+        #[arg(long)]
+        cancel: Option<String>,
+        /// List recent certification jobs.
+        #[arg(long)]
+        list: bool,
+        /// Upload the latest certification job script to the meshllm bucket.
+        #[arg(long)]
+        update_script: bool,
+        /// Run ID for output artifacts.
+        #[arg(long)]
+        run_id: Option<String>,
+        /// Final layer for staged correctness lanes.
+        #[arg(long)]
+        layer_end: Option<String>,
+        /// Single split layer for single-step and dtype lanes.
+        #[arg(long)]
+        split_layer: Option<String>,
+        /// Chain split layers, for example 10,20.
+        #[arg(long)]
+        splits: Option<String>,
+        /// Hidden width for exact state-handoff lane.
+        #[arg(long)]
+        activation_width: Option<String>,
+        /// Context size.
+        #[arg(long)]
+        ctx_size: Option<String>,
+        /// llama.cpp GPU layers.
+        #[arg(long)]
+        n_gpu_layers: Option<String>,
+        /// Stage server startup timeout seconds.
+        #[arg(long)]
+        startup_timeout_secs: Option<String>,
+        /// Default activation wire dtype.
+        #[arg(long)]
+        wire_dtype: Option<String>,
+        /// Dtype matrix list, for example f32,f16,q8.
+        #[arg(long)]
+        wire_dtypes: Option<String>,
+        /// Prefix length for state/cache smoke.
+        #[arg(long)]
+        prefix_token_count: Option<String>,
+        /// Repeated cache hits for state/cache smoke.
+        #[arg(long)]
+        cache_hit_repeats: Option<String>,
+        /// Allow mismatch in single-step and chain lanes.
+        #[arg(long)]
+        allow_mismatch: bool,
+        /// Make dtype-matrix mismatch a hard failure.
+        #[arg(long)]
+        strict_dtype: bool,
+        /// Skip correctness/state lanes.
+        #[arg(long)]
+        skip_correctness: bool,
+        /// Skip dtype matrix.
+        #[arg(long)]
+        skip_dtype: bool,
+        /// Skip state handoff.
+        #[arg(long)]
+        skip_state: bool,
+        /// Borrow resident KV sessions for ResidentKv hits.
+        #[arg(long)]
+        borrow_resident_hits: bool,
     },
-    // Delete variant defined with explicit clap args later in file (existing block).
     /// List remote catalog models.
     #[command(hide = true)]
     List {

@@ -35,6 +35,7 @@ struct Args {
     flavor: String,
     timeout_seconds: u64,
     mesh_llm_ref: String,
+    job_image: String,
     retry_queued_after: Duration,
     split_candidate_vram_bytes: u64,
     quant_preference: Vec<String>,
@@ -308,6 +309,7 @@ impl Args {
             flavor: "auto".to_string(),
             timeout_seconds: parse_duration_seconds("1h")?,
             mesh_llm_ref: "main".to_string(),
+            job_image: "auto".to_string(),
             retry_queued_after: Duration::from_secs(30 * 60 * 60),
             split_candidate_vram_bytes: DEFAULT_SPLIT_CANDIDATE_VRAM_BYTES,
             quant_preference: DEFAULT_QUANT_PREFERENCE
@@ -337,6 +339,7 @@ impl Args {
                     args.timeout_seconds = parse_duration_seconds(&next_value(&mut iter, &flag)?)?
                 }
                 "--mesh-llm-ref" => args.mesh_llm_ref = next_value(&mut iter, &flag)?,
+                "--job-image" => args.job_image = next_value(&mut iter, &flag)?,
                 "--retry-queued-after-hours" => {
                     let hours: u64 = parse_next(&mut iter, &flag)?;
                     args.retry_queued_after = Duration::from_secs(hours * 60 * 60);
@@ -424,6 +427,7 @@ fn print_help() {
            --job-namespace NAME\n\
            --flavor HF_JOB_FLAVOR (default: auto CPU)\n\
            --timeout DURATION (requested; raised by size-based minimum)\n\
+           --job-image IMAGE|auto|ubuntu (default: auto)\n\
            --wait-for-jobs\n\
            --job-poll-seconds N\n\
            --split-candidate-vram-gib GiB\n\
@@ -863,7 +867,10 @@ fn job_spec(
     secrets.insert("HF_TOKEN".into(), jobs_client.token().to_string());
 
     Ok(JobSpec {
-        docker_image: "ubuntu:22.04".into(),
+        docker_image: model_package::jobs::resolve_hf_jobs_image(
+            &args.mesh_llm_ref,
+            Some(&args.job_image),
+        ),
         command: vec!["bash".into(), "/bucket/split-model-job.sh".into()],
         arguments: vec![],
         environment,
@@ -881,7 +888,7 @@ fn job_spec(
                 volume_type: "bucket".into(),
                 source: "meshllm/layer-split-output".into(),
                 mount_path: "/bucket".into(),
-                read_only: Some(true),
+                read_only: None,
             },
         ],
     })
@@ -956,12 +963,10 @@ fn model_family_key(repo_id: &str) -> String {
         .filter(|token| !token.is_empty())
         .collect::<Vec<_>>();
 
-    if tokens.iter().any(|token| *token == "kimi") {
+    if tokens.contains(&"kimi") {
         return "kimi".to_string();
     }
-    if tokens.iter().any(|token| *token == "deepseek")
-        || tokens.windows(2).any(|window| window == ["deep", "seek"])
-    {
+    if tokens.contains(&"deepseek") || tokens.windows(2).any(|window| window == ["deep", "seek"]) {
         return "deepseek".to_string();
     }
     if tokens
@@ -970,7 +975,7 @@ fn model_family_key(repo_id: &str) -> String {
     {
         return "qwen".to_string();
     }
-    if tokens.iter().any(|token| *token == "llama") {
+    if tokens.contains(&"llama") {
         return "llama".to_string();
     }
     if tokens.iter().any(|token| token.starts_with("gemma")) {
@@ -982,13 +987,13 @@ fn model_family_key(repo_id: &str) -> String {
     if tokens.iter().any(|token| token.starts_with("mixtral")) {
         return "mixtral".to_string();
     }
-    if tokens.iter().any(|token| *token == "glm") {
+    if tokens.contains(&"glm") {
         return "glm".to_string();
     }
-    if tokens.iter().any(|token| *token == "phi") {
+    if tokens.contains(&"phi") {
         return "phi".to_string();
     }
-    if tokens.iter().any(|token| *token == "nemotron") {
+    if tokens.contains(&"nemotron") {
         return "nemotron".to_string();
     }
     if tokens.windows(2).any(|window| window == ["gpt", "oss"]) {

@@ -5,6 +5,7 @@ mod discover;
 mod download;
 mod gpus;
 mod integrations;
+mod model_certify;
 mod model_package;
 mod models;
 mod plugin;
@@ -98,44 +99,6 @@ pub(crate) async fn dispatch(cli: &Cli) -> Result<bool> {
         }
         Command::Plugin { command } => run_plugin_command(command, cli).await,
         Command::Benchmark { command } => dispatch_benchmark_command(command).await,
-        Command::ModelPrepare {
-            source_repo,
-            quant,
-            target,
-            model_id,
-            flavor,
-            timeout,
-            mesh_llm_ref,
-            dry_run,
-            confirm,
-            follow,
-            json,
-            status,
-            logs,
-            cancel,
-            list,
-            update_script,
-        } => {
-            model_package::dispatch_model_package(model_package::ModelPrepareArgs {
-                source_repo: source_repo.as_deref(),
-                quant: quant.as_deref(),
-                target: target.as_deref(),
-                model_id: model_id.as_deref(),
-                flavor,
-                timeout,
-                mesh_llm_ref,
-                dry_run: *dry_run,
-                confirm: *confirm,
-                follow: *follow,
-                json: *json,
-                status: status.as_deref(),
-                logs: logs.as_deref(),
-                cancel: cancel.as_deref(),
-                list: *list,
-                update_script: *update_script,
-            })
-            .await
-        }
         Command::Auth { command } => match command {
             AuthCommand::Init {
                 owner_key,

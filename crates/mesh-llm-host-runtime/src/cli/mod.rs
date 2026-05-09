@@ -420,7 +420,7 @@ pub(crate) enum Command {
     /// Manage model storage, migration, and update checks.
     Models {
         #[command(subcommand)]
-        command: models::ModelsCommand,
+        command: Box<models::ModelsCommand>,
     },
     /// Download a model from the remote catalog or Hugging Face
     Download {
@@ -599,77 +599,6 @@ pub(crate) enum Command {
     Benchmark {
         #[command(subcommand)]
         command: BenchmarkCommand,
-    },
-    /// Prepare a model for distributed inference by splitting it into
-    /// per-layer files on HF compute.
-    ///
-    /// Submits an HF Job that builds skippy-model-package from source,
-    /// splits the model, publishes the layer package, and updates the
-    /// meshllm/catalog.
-    #[command(name = "model-prepare", hide = true, alias = "model-package")]
-    ModelPrepare {
-        /// Source HuggingFace model ref (e.g. unsloth/Qwen3-235B-A22B-GGUF:UD-Q4_K_XL).
-        source_repo: Option<String>,
-
-        /// Quantization variant (deprecated; prefer source refs like repo:Q4_K_M).
-        #[arg(long)]
-        quant: Option<String>,
-
-        /// Target repo for the layer package (auto-derived if omitted).
-        #[arg(long)]
-        target: Option<String>,
-
-        /// Override model ID in the manifest.
-        #[arg(long)]
-        model_id: Option<String>,
-
-        /// HF Job hardware flavor. Use auto for the default CPU splitter baseline.
-        #[arg(long, default_value = "auto")]
-        flavor: String,
-
-        /// Requested job timeout; raised automatically by model-size minimums.
-        #[arg(long, default_value = "1h")]
-        timeout: String,
-
-        /// Branch or tag of mesh-llm to build in the job [default: main].
-        #[arg(long, default_value = "main")]
-        mesh_llm_ref: String,
-
-        /// Explicitly keep this as a dry run. This is the default unless --confirm is set.
-        #[arg(long)]
-        dry_run: bool,
-
-        /// Actually submit the HF Job. Without this, the command only prints plan, spec, and max cost.
-        #[arg(long)]
-        confirm: bool,
-
-        /// Stream job logs after submission until completion.
-        #[arg(long)]
-        follow: bool,
-
-        /// Emit JSON output.
-        #[arg(long)]
-        json: bool,
-
-        /// Check status of a previously submitted job.
-        #[arg(long)]
-        status: Option<String>,
-
-        /// Fetch logs for a previously submitted job.
-        #[arg(long)]
-        logs: Option<String>,
-
-        /// Cancel a running job.
-        #[arg(long)]
-        cancel: Option<String>,
-
-        /// List recent model-package jobs.
-        #[arg(long)]
-        list: bool,
-
-        /// Upload the latest job script to the meshllm bucket (requires org access).
-        #[arg(long)]
-        update_script: bool,
     },
     /// Manage owner identity and keystore.
     Auth {
@@ -1267,13 +1196,13 @@ mod tests {
         ]);
 
         match cli.command.expect("models command expected") {
-            Command::Models {
-                command:
-                    ModelsCommand::Search {
-                        sort: ModelSearchSort::ParametersDesc,
-                        ..
-                    },
-            } => {}
+            Command::Models { command } => match command.as_ref() {
+                ModelsCommand::Search {
+                    sort: ModelSearchSort::ParametersDesc,
+                    ..
+                } => {}
+                other => panic!("unexpected models command: {other:?}"),
+            },
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -1290,13 +1219,13 @@ mod tests {
         ]);
 
         match cli.command.expect("models command expected") {
-            Command::Models {
-                command:
-                    ModelsCommand::Search {
-                        sort: ModelSearchSort::ParametersDesc,
-                        ..
-                    },
-            } => {}
+            Command::Models { command } => match command.as_ref() {
+                ModelsCommand::Search {
+                    sort: ModelSearchSort::ParametersDesc,
+                    ..
+                } => {}
+                other => panic!("unexpected models command: {other:?}"),
+            },
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -1319,22 +1248,84 @@ mod tests {
         ]);
 
         match cli.command.expect("models command expected") {
-            Command::Models {
-                command:
-                    ModelsCommand::Certify {
-                        model,
-                        package_only: true,
-                        json: true,
-                        report_out: Some(report_out),
-                        prompt,
-                        max_tokens: 2,
-                        ..
-                    },
-            } => {
-                assert_eq!(model, "hf://meshllm/demo-layers@abc123");
-                assert_eq!(report_out, std::path::PathBuf::from("/tmp/cert.json"));
-                assert_eq!(prompt, "Say ok.");
-            }
+            Command::Models { command } => match command.as_ref() {
+                ModelsCommand::Certify {
+                    model: Some(model),
+                    package_only: true,
+                    json: true,
+                    report_out: Some(report_out),
+                    prompt: Some(prompt),
+                    max_tokens: 2,
+                    ..
+                } => {
+                    assert_eq!(model, "hf://meshllm/demo-layers@abc123");
+                    assert_eq!(*report_out, std::path::PathBuf::from("/tmp/cert.json"));
+                    assert_eq!(prompt, "Say ok.");
+                }
+                other => panic!("unexpected models command: {other:?}"),
+            },
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn models_certify_family_parses_hf_job_options() {
+        let cli = Cli::parse_from([
+            "mesh-llm",
+            "models",
+            "certify",
+            "unsloth/MiMo-V2-Flash-GGUF:IQ4_XS",
+            "--hf-job",
+            "--family",
+            "mimo2",
+            "--confirm",
+            "--json",
+        ]);
+
+        match cli.command.expect("models command expected") {
+            Command::Models { command } => match command.as_ref() {
+                ModelsCommand::Certify {
+                    model: Some(source_repo),
+                    hf_job: true,
+                    family: Some(family),
+                    confirm: true,
+                    json: true,
+                    ..
+                } => {
+                    assert_eq!(source_repo, "unsloth/MiMo-V2-Flash-GGUF:IQ4_XS");
+                    assert_eq!(family, "mimo2");
+                }
+                other => panic!("unexpected models command: {other:?}"),
+            },
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn models_package_parses_submit_confirmation() {
+        let cli = Cli::parse_from([
+            "mesh-llm",
+            "models",
+            "package",
+            "unsloth/Kimi-K2.5-GGUF:Q4_1",
+            "--hf-job",
+            "--confirm",
+            "--json",
+        ]);
+
+        match cli.command.expect("models command expected") {
+            Command::Models { command } => match command.as_ref() {
+                ModelsCommand::Package {
+                    source_repo: Some(source_repo),
+                    hf_job: true,
+                    confirm: true,
+                    json: true,
+                    ..
+                } => {
+                    assert_eq!(source_repo, "unsloth/Kimi-K2.5-GGUF:Q4_1");
+                }
+                other => panic!("unexpected models command: {other:?}"),
+            },
             other => panic!("unexpected command: {other:?}"),
         }
     }

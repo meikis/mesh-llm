@@ -794,6 +794,43 @@ fn control_frame_roundtrip() {
     assert_eq!(decoded.peers[0].role, NodeRole::Worker as i32);
 }
 
+#[test]
+fn relay_only_endpoint_addr_keeps_relays_and_drops_direct_ips() {
+    use iroh::TransportAddr;
+
+    let peer_id = EndpointId::from(SecretKey::from_bytes(&[0x7a; 32]).public());
+    let relay: TransportAddr = TransportAddr::Relay(
+        "https://aps1-1.relay.michaelneale.mesh-llm.iroh.link./"
+            .parse()
+            .unwrap(),
+    );
+    let private_ip: TransportAddr = TransportAddr::Ip("192.168.86.26:52398".parse().unwrap());
+    let tailscale_ip: TransportAddr = TransportAddr::Ip("100.107.22.123:52398".parse().unwrap());
+    let addr = EndpointAddr::from_parts(
+        peer_id,
+        [relay.clone(), private_ip, tailscale_ip].into_iter(),
+    );
+
+    let relay_only = super::relay_only_endpoint_addr(&addr).expect("relay should be preserved");
+
+    assert_eq!(relay_only.id, peer_id);
+    assert_eq!(relay_only.addrs.len(), 1);
+    assert!(relay_only.addrs.contains(&relay));
+}
+
+#[test]
+fn relay_only_endpoint_addr_returns_none_without_relay() {
+    use iroh::TransportAddr;
+
+    let peer_id = EndpointId::from(SecretKey::from_bytes(&[0x7b; 32]).public());
+    let addr = EndpointAddr::from_parts(
+        peer_id,
+        [TransportAddr::Ip("10.0.0.1:52398".parse().unwrap())].into_iter(),
+    );
+
+    assert!(super::relay_only_endpoint_addr(&addr).is_none());
+}
+
 fn make_test_peer_info(peer_id: EndpointId) -> PeerInfo {
     PeerInfo {
         id: peer_id,

@@ -14,7 +14,7 @@ pub use mesh_llm_types::mesh::{
 use anyhow::{Context, Result};
 use base64::Engine;
 use iroh::endpoint::Connection;
-use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
+use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey, TransportAddr};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -45,6 +45,41 @@ fn emit_mesh_warning(message: String) {
         message,
         context: None,
     });
+}
+
+fn relay_only_endpoint_addr(addr: &EndpointAddr) -> Option<EndpointAddr> {
+    let addrs = addr
+        .addrs
+        .iter()
+        .filter(|transport| matches!(transport, TransportAddr::Relay(_)))
+        .cloned()
+        .collect();
+    Some(EndpointAddr { id: addr.id, addrs }).filter(|addr| !addr.addrs.is_empty())
+}
+
+async fn connect_peer_once(
+    endpoint: &Endpoint,
+    peer_id: EndpointId,
+    addr: EndpointAddr,
+) -> Result<Connection> {
+    match tokio::time::timeout(
+        PEER_CONNECT_AND_GOSSIP_TIMEOUT,
+        connect_mesh(endpoint, addr),
+    )
+    .await
+    {
+        Ok(Ok(c)) => Ok(c),
+        Ok(Err(e)) => {
+            anyhow::bail!("Failed to connect to {}: {e}", peer_id.fmt_short());
+        }
+        Err(_) => {
+            anyhow::bail!(
+                "Timeout connecting to {} ({}s)",
+                peer_id.fmt_short(),
+                PEER_CONNECT_AND_GOSSIP_TIMEOUT.as_secs()
+            );
+        }
+    }
 }
 
 fn now_secs() -> u64 {
@@ -5498,22 +5533,25 @@ impl Node {
         }
 
         tracing::info!("Connecting to peer {}...", peer_id.fmt_short());
-        let conn = match tokio::time::timeout(
-            PEER_CONNECT_AND_GOSSIP_TIMEOUT,
-            connect_mesh(&self.endpoint, addr.clone()),
-        )
-        .await
-        {
-            Ok(Ok(c)) => c,
-            Ok(Err(e)) => {
-                anyhow::bail!("Failed to connect to {}: {e}", peer_id.fmt_short());
-            }
-            Err(_) => {
-                anyhow::bail!(
-                    "Timeout connecting to {} ({}s)",
-                    peer_id.fmt_short(),
-                    PEER_CONNECT_AND_GOSSIP_TIMEOUT.as_secs()
+        let relay_fallback_addr =
+            relay_only_endpoint_addr(&addr).filter(|relay_addr| relay_addr.addrs != addr.addrs);
+        let conn = match connect_peer_once(&self.endpoint, peer_id, addr).await {
+            Ok(conn) => conn,
+            Err(first_err) => {
+                let Some(relay_addr) = relay_fallback_addr else {
+                    return Err(first_err);
+                };
+                tracing::warn!(
+                    "Peer {} was not reachable via advertised direct addresses; retrying with relay-only address",
+                    peer_id.fmt_short()
                 );
+                connect_peer_once(&self.endpoint, peer_id, relay_addr)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "relay-only retry failed after full endpoint address failed: {first_err}"
+                        )
+                    })?
             }
         };
 

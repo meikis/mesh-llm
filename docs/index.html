@@ -1,412 +1,823 @@
 <!doctype html>
 <html lang="en">
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>mesh-llm — Decentralised LLM Inference</title>
-    <meta name="description" content="Turn spare capacity into an auto-configured p2p inference cloud. Serve many models, access your private models from anywhere, or share compute with others, let your agents collaborate p2p.">
-    <style>
-        :root { --bg:#0a0a0a; --bg2:#0d0d0d; --border:#1a1a1a; --text:#d0d0d0; --text2:#888; --text3:#555; --green:#4c4; --green-dim:#2a5a2a; --green-bg:#0a1a0a; --blue:#6cf; --blue-dim:#1a3a5c; --orange:#c84; --orange-dim:#5a4a2a; }
-        * { box-sizing:border-box; margin:0; padding:0; }
-        html { scroll-behavior:smooth; }
-        body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); line-height:1.7; -webkit-font-smoothing:antialiased; }
-        a { color:var(--blue); text-decoration:none; } a:hover { text-decoration:underline; }
-        code,.mono { font-family:"SF Mono","Fira Code",monospace; }
-        nav { position:fixed; top:0; left:0; right:0; z-index:100; background:rgba(10,10,10,0.85); backdrop-filter:blur(12px); border-bottom:1px solid var(--border); padding:0.7rem 2rem; display:flex; align-items:center; gap:1rem; }
-        nav .logo { display:flex; align-items:center; }
-        nav .logo img { height:30px; width:auto; display:block; }
-        nav .links { margin-left:auto; display:flex; gap:1.5rem; font-size:0.8rem; } nav .links a { color:var(--text2); } nav .links a:hover { color:#fff; text-decoration:none; }
-        section { max-width:860px; margin:0 auto; padding:4rem 2rem; }
-        .hero { min-height:85vh; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding-top:5rem; }
-        .hero-badge { display:inline-flex; align-items:center; gap:0.4rem; font-size:0.7rem; color:var(--green); background:var(--green-bg); border:1px solid var(--green-dim); border-radius:20px; padding:0.25rem 0.8rem; margin-bottom:1.5rem; }
-        .hero-badge .dot { width:5px; height:5px; border-radius:50%; background:var(--green); }
-        .hero h1 { font-size:clamp(2.2rem,5vw,3.2rem); font-weight:700; letter-spacing:-0.03em; line-height:1.15; color:#fff; max-width:660px; margin-bottom:1rem; }
-        .hero p { font-size:1.05rem; color:var(--text2); max-width:540px; margin-bottom:2rem; }
-        .hero-ctas { display:flex; gap:0.8rem; flex-wrap:wrap; justify-content:center; }
-        .btn { display:inline-flex; align-items:center; gap:0.4rem; padding:0.6rem 1.4rem; border-radius:8px; font-size:0.85rem; font-weight:500; cursor:pointer; border:none; transition:all 0.15s; }
-        .btn-primary { background:#fff; color:#000; } .btn-primary:hover { background:#e0e0e0; text-decoration:none; }
-        .btn-secondary { background:transparent; color:var(--text); border:1px solid #333; } .btn-secondary:hover { border-color:#666; text-decoration:none; }
-        .mesh-demo { margin:2.5rem auto 0; max-width:580px; width:100%; }
-        .mesh-demo svg { width:100%; height:auto; display:block; }
-        .tags { display:flex; gap:0.5rem; flex-wrap:wrap; justify-content:center; margin-top:2rem; font-size:0.7rem; }
-        .tag { padding:0.2rem 0.6rem; border-radius:4px; color:var(--text3); border:1px solid var(--border); }
-        .section-tag { font-size:0.65rem; text-transform:uppercase; letter-spacing:0.1em; color:var(--green); margin-bottom:0.5rem; }
-        h2 { font-size:1.7rem; font-weight:700; color:#fff; letter-spacing:-0.02em; margin-bottom:0.5rem; }
-        .section-lead { color:var(--text2); font-size:0.95rem; margin-bottom:2rem; max-width:540px; }
-        .steps { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:1.5rem; }
-        .step { background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:1.3rem; }
-        .step-num { font-size:0.65rem; font-weight:700; color:var(--green); background:var(--green-bg); border:1px solid var(--green-dim); width:22px; height:22px; border-radius:50%; display:flex; align-items:center; justify-content:center; margin-bottom:0.7rem; }
-        .step h3 { font-size:0.9rem; color:#fff; margin-bottom:0.3rem; }
-        .step p { font-size:0.78rem; color:var(--text2); line-height:1.6; }
-        .code-block { background:var(--bg2); border:1px solid var(--border); border-radius:8px; padding:1rem 1.3rem; overflow-x:auto; font-size:0.8rem; line-height:1.8; margin:1.5rem 0; }
-        .code-block .comment { color:var(--text3); } .code-block .cmd { color:var(--green); } .code-block .flag { color:var(--blue); } .code-block .val { color:var(--orange); }
-        .features { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:1rem; }
-        .feature { background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:1.2rem; }
-        .feature h3 { font-size:0.85rem; color:#fff; margin-bottom:0.25rem; }
-        .feature p { font-size:0.76rem; color:var(--text2); line-height:1.55; }
-        .feature-icon { font-size:1.1rem; margin-bottom:0.5rem; }
-        .cta-section { text-align:center; border-top:1px solid var(--border); padding-top:3rem; }
-        .cta-section p { color:var(--text2); margin-bottom:1.5rem; }
-        .cta-buttons { display:flex; gap:0.8rem; justify-content:center; flex-wrap:wrap; }
-        footer { text-align:center; padding:2rem; font-size:0.7rem; color:var(--text3); border-top:1px solid var(--border); }
-        @media (max-width:600px) { section { padding:3rem 1.2rem; } nav { padding:0.6rem 1rem; } .steps,.features { grid-template-columns:1fr; } }
-    </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mesh LLM - Multi-machine model serving</title>
+  <meta name="description" content="Mesh serves large local models across multiple machines through one OpenAI-compatible endpoint. Install Mesh, join the public mesh, or browse mesh-ready models and layer packages.">
+  <link rel="icon" href="mesh-llm-logo.svg" type="image/svg+xml">
+  <style>
+    :root {
+      color-scheme: dark;
+      --background: #09090b;
+      --surface: #0c0c0f;
+      --surface-2: #111114;
+      --border: #27272a;
+      --border-soft: #1f1f23;
+      --text: #f4f4f5;
+      --muted: #a1a1aa;
+      --subtle: #71717a;
+      --blue: #3b82f6;
+      --blue-soft: rgba(59, 130, 246, 0.12);
+      --green: #22c55e;
+      --green-soft: rgba(34, 197, 94, 0.12);
+      --amber: #f59e0b;
+      --amber-soft: rgba(245, 158, 11, 0.12);
+      --radius: 8px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--background);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+
+    a { color: inherit; text-decoration: none; }
+    a:hover { color: white; }
+    code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+
+    .shell {
+      width: min(1120px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid var(--border-soft);
+      background: rgba(9, 9, 11, 0.88);
+      backdrop-filter: blur(16px);
+    }
+
+    .nav-inner {
+      height: 64px;
+      display: flex;
+      align-items: center;
+      gap: 24px;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .brand img {
+      width: 118px;
+      height: auto;
+      object-fit: contain;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      margin-left: auto;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 38px;
+      padding: 0 14px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+
+    .button.primary {
+      border-color: white;
+      background: white;
+      color: #09090b;
+    }
+
+    .button.primary:hover { color: #09090b; background: #e4e4e7; }
+    .button.ghost { background: transparent; }
+
+    .hero {
+      position: relative;
+      padding: 88px 0 40px;
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(360px, 0.95fr);
+      gap: 48px;
+      align-items: center;
+      overflow: visible;
+      isolation: isolate;
+    }
+
+    .hero > * {
+      position: relative;
+      z-index: 2;
+    }
+
+    .hero-viz {
+      position: absolute;
+      top: -90px;
+      bottom: -20px;
+      left: 50%;
+      width: 100vw;
+      transform: translateX(-50%);
+      z-index: 0;
+      pointer-events: none;
+      opacity: 0.5;
+    }
+
+    .hero-viz svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .hero-viz .mesh-line {
+      stroke-dasharray: 9 13;
+      animation: mesh-dash 9s linear infinite, mesh-line-pulse 4.8s ease-in-out infinite;
+    }
+
+    .hero-viz .mesh-packet {
+      filter: drop-shadow(0 0 8px currentColor);
+    }
+
+    .hero-viz .mesh-ring {
+      transform-box: fill-box;
+      transform-origin: center;
+      animation: mesh-ring 4.8s ease-out infinite;
+    }
+
+    .hero-viz .mesh-ring.slow {
+      animation-duration: 6.8s;
+      animation-delay: -2.2s;
+    }
+
+    .hero-viz .mesh-node {
+      filter: drop-shadow(0 0 12px rgba(59, 130, 246, 0.3));
+    }
+
+    .hero-viz .node-core {
+      transform-box: fill-box;
+      transform-origin: center;
+      animation: mesh-node-pulse 4.4s ease-in-out infinite;
+    }
+
+    .hero-viz .node-core.alt {
+      animation-delay: -1.7s;
+      animation-duration: 5.6s;
+    }
+
+    @keyframes mesh-dash {
+      to { stroke-dashoffset: -88; }
+    }
+
+    @keyframes mesh-line-pulse {
+      0%, 100% { opacity: 0.28; }
+      50% { opacity: 0.62; }
+    }
+
+    @keyframes mesh-ring {
+      0% { opacity: 0.34; transform: scale(0.72); }
+      72% { opacity: 0; transform: scale(1.7); }
+      100% { opacity: 0; transform: scale(1.7); }
+    }
+
+    @keyframes mesh-node-pulse {
+      0%, 100% { opacity: 0.82; transform: scale(1); }
+      50% { opacity: 1; transform: scale(1.22); }
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      width: fit-content;
+      margin-bottom: 18px;
+      padding: 5px 10px;
+      border: 1px solid rgba(59, 130, 246, 0.25);
+      border-radius: 999px;
+      background: var(--blue-soft);
+      color: #bfdbfe;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: var(--green);
+    }
+
+    h1 {
+      max-width: 760px;
+      margin: 0 0 20px;
+      font-size: clamp(42px, 6vw, 76px);
+      line-height: 0.98;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      max-width: 650px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 19px;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 30px;
+    }
+
+    .terminal {
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: #050506;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+    }
+
+    .terminal-head {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      height: 38px;
+      padding: 0 14px;
+      border-bottom: 1px solid var(--border-soft);
+      color: var(--subtle);
+      font-size: 12px;
+    }
+
+    .terminal-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: #3f3f46;
+    }
+
+    pre {
+      margin: 0;
+      padding: 18px;
+      overflow-x: auto;
+      color: #e4e4e7;
+      font-size: 13px;
+      line-height: 1.8;
+    }
+
+    .comment { color: var(--subtle); }
+    .cmd { color: #86efac; }
+    .flag { color: #93c5fd; }
+    .value { color: #fbbf24; }
+
+    .section {
+      padding: 64px 0;
+      border-top: 1px solid var(--border-soft);
+    }
+
+    .section-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 24px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: clamp(28px, 4vw, 44px);
+      line-height: 1.05;
+      letter-spacing: 0;
+    }
+
+    .section-copy {
+      max-width: 620px;
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .card {
+      min-height: 100%;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      padding: 18px;
+    }
+
+    .card h3 {
+      margin: 0 0 8px;
+      font-size: 16px;
+    }
+
+    .card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 0 8px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+
+    .badge.green { color: #bbf7d0; border-color: rgba(34, 197, 94, 0.25); background: var(--green-soft); }
+    .badge.blue { color: #bfdbfe; border-color: rgba(59, 130, 246, 0.25); background: var(--blue-soft); }
+    .badge.amber { color: #fde68a; border-color: rgba(245, 158, 11, 0.25); background: var(--amber-soft); }
+
+    .status-strip {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      padding-bottom: 56px;
+    }
+
+    .status-item {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      padding: 13px 14px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .status-item strong {
+      display: block;
+      margin-bottom: 2px;
+      color: var(--text);
+      font-size: 14px;
+    }
+
+    .table-card {
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    th, td {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border-soft);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--subtle);
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+    td { color: var(--muted); }
+    td strong { color: var(--text); }
+
+    .docs-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .doc-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .footer {
+      border-top: 1px solid var(--border-soft);
+      padding: 34px 0;
+      color: var(--subtle);
+      font-size: 13px;
+    }
+
+    .footer-grid {
+      display: grid;
+      grid-template-columns: minmax(220px, 1.5fr) repeat(4, minmax(120px, 1fr));
+      gap: 28px;
+      align-items: start;
+    }
+
+    .footer-brand {
+      display: grid;
+      gap: 12px;
+      max-width: 360px;
+    }
+
+    .footer-brand img {
+      width: 118px;
+      height: auto;
+    }
+
+    .footer-brand p,
+    .footer-col a {
+      margin: 0;
+      color: var(--subtle);
+    }
+
+    .footer-col {
+      display: grid;
+      gap: 8px;
+    }
+
+    .footer-col h2 {
+      margin: 0 0 4px;
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.2;
+    }
+
+    .footer-col a {
+      font-size: 13px;
+    }
+
+    .footer-bottom {
+      margin-top: 28px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border-soft);
+      color: var(--subtle);
+    }
+
+    @media (max-width: 900px) {
+      .hero { grid-template-columns: 1fr; padding-top: 56px; }
+      .hero-viz { top: -80px; bottom: 240px; opacity: 0.32; }
+      .grid, .status-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .footer-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .nav-links a:not(.button) { display: none; }
+      .section-head { align-items: start; flex-direction: column; }
+    }
+
+    @media (max-width: 640px) {
+      .shell { width: min(100% - 24px, 1120px); }
+      .nav-inner { height: 58px; }
+      .brand img { width: 104px; }
+      .grid, .status-strip, .docs-grid, .footer-grid { grid-template-columns: 1fr; }
+      th:nth-child(3), td:nth-child(3) { display: none; }
+      .button { width: 100%; }
+      .nav .button { width: auto; }
+    }
+  </style>
 </head>
 <body>
-    <nav>
-        <a class="logo" href="#"><img src="mesh-llm-logo.svg" alt="mesh-llm"></a>
-        <div class="links">
-            <a href="#install">Quick start</a>
-            <a href="#models">Models</a>
-            <a href="#agents">Agents</a>
-            <a href="#blackboard">Blackboard</a>
-            <a href="#features">Features</a>
-            <a href="https://github.com/Mesh-LLM/mesh-llm">GitHub</a>
-        </div>
-    </nav>
+  <nav class="nav">
+    <div class="shell nav-inner">
+      <a class="brand" href="/">
+        <img src="mesh-llm-logo.svg" alt="">
+      </a>
+      <div class="nav-links">
+        <a href="catalog/">Catalog</a>
+        <a href="docs/">Docs</a>
+        <a href="https://public.meshllm.cloud">Public Mesh</a>
+        <a href="https://github.com/Mesh-LLM/mesh-llm">GitHub</a>
+        <a class="button primary" href="#install">Install</a>
+      </div>
+    </div>
+  </nav>
 
-    <section class="hero">
-        <div class="hero-badge" style="background:rgba(200,160,60,0.12); border-color:rgba(200,160,60,0.3);"><span class="dot" style="background:#c8a03c;"></span> Work in progress — use with caution</div>
-        <h1>Pool compute to run powerful open models</h1>
-        <p>Turn spare capacity into an auto-configured p2p inference cloud. Serve many models, access your private models from anywhere, or share compute with others, let your agents collaborate p2p.</p>
-        <div class="hero-ctas">
-            <a href="https://www.anarchai.org/dashboard" class="btn btn-primary">Try it now</a>
-            <a href="https://github.com/Mesh-LLM/mesh-llm" class="btn btn-secondary">View on GitHub</a>
-        </div>
+  <main>
+    <section class="shell hero">
+      <div class="hero-viz" aria-hidden="true">
+        <svg viewBox="0 0 1200 620" preserveAspectRatio="xMidYMid slice" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <radialGradient id="hero-node-blue" cx="50%" cy="50%" r="55%">
+              <stop offset="0%" stop-color="#60a5fa" stop-opacity="0.95"/>
+              <stop offset="42%" stop-color="#3b82f6" stop-opacity="0.42"/>
+              <stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="hero-node-green" cx="50%" cy="50%" r="55%">
+              <stop offset="0%" stop-color="#86efac" stop-opacity="0.9"/>
+              <stop offset="42%" stop-color="#22c55e" stop-opacity="0.34"/>
+              <stop offset="100%" stop-color="#22c55e" stop-opacity="0"/>
+            </radialGradient>
+            <radialGradient id="hero-vignette" cx="45%" cy="48%" r="70%">
+              <stop offset="0%" stop-color="#0f172a" stop-opacity="0.36"/>
+              <stop offset="62%" stop-color="#09090b" stop-opacity="0.18"/>
+              <stop offset="100%" stop-color="#09090b" stop-opacity="0"/>
+            </radialGradient>
+            <pattern id="hero-grid" width="34" height="34" patternUnits="userSpaceOnUse">
+              <path d="M 34 0 L 0 0 0 34" fill="none" stroke="#27272a" stroke-opacity="0.35" stroke-width="1"/>
+            </pattern>
+          </defs>
 
-        <div class="mesh-demo">
-            <svg viewBox="0 0 580 260" xmlns="http://www.w3.org/2000/svg">
-                <line x1="290" y1="76" x2="130" y2="170" stroke="#2a5a2a" stroke-width="1.5"/>
-                <line x1="290" y1="76" x2="450" y2="170" stroke="#2a5a2a" stroke-width="1.5"/>
-                <line x1="130" y1="170" x2="450" y2="170" stroke="#1a3a5c" stroke-width="1" stroke-dasharray="4,3"/>
-                <circle r="2.5" fill="#4c4" opacity="0.7"><animateMotion dur="2s" repeatCount="indefinite" path="M290,76 L130,170"/></circle>
-                <circle r="2.5" fill="#6cf" opacity="0.5"><animateMotion dur="2s" repeatCount="indefinite" path="M130,170 L290,76"/></circle>
-                <circle r="2.5" fill="#4c4" opacity="0.7"><animateMotion dur="2.2s" repeatCount="indefinite" path="M290,76 L450,170"/></circle>
-                <text x="195" y="118" text-anchor="middle" fill="#333" font-size="9" font-family="monospace">QUIC · RPC</text>
-                <text x="385" y="118" text-anchor="middle" fill="#333" font-size="9" font-family="monospace">QUIC · RPC</text>
-                <text x="290" y="185" text-anchor="middle" fill="#333" font-size="9" font-family="monospace">gossip</text>
-                <!-- Host -->
-                <rect x="220" y="8" width="140" height="68" rx="6" fill="#0a1a12" stroke="#4c4" stroke-width="2"/>
-                <text x="290" y="26" text-anchor="middle" fill="#4c4" font-size="9" font-family="monospace" font-weight="600">GLM-4.7-Flash</text>
-                <text x="290" y="40" text-anchor="middle" fill="#6cf" font-size="10" font-family="monospace">host (103 GB)</text>
-                <text x="290" y="52" text-anchor="middle" fill="#4c4" font-size="7.5" font-family="monospace">llama-server · :9337</text>
-                <rect x="234" y="58" width="112" height="4" rx="1.5" fill="#151515"/><rect x="234" y="58" width="73" height="4" rx="1.5" fill="#2a5a2a"/>
-                <text x="234" y="72" fill="#444" font-size="7" font-family="monospace">18GB / 103GB</text>
-                <!-- Worker -->
-                <rect x="60" y="170" width="140" height="68" rx="6" fill="#0d1a26" stroke="#1a3a5c" stroke-width="1.5"/>
-                <text x="130" y="188" text-anchor="middle" fill="#6cf" font-size="9" font-family="monospace" font-weight="600">GLM-4.7-Flash</text>
-                <text x="130" y="202" text-anchor="middle" fill="#6cf" font-size="10" font-family="monospace">worker (52 GB)</text>
-                <text x="130" y="214" text-anchor="middle" fill="#3a3a3a" font-size="7.5" font-family="monospace">rpc-server</text>
-                <rect x="74" y="220" width="112" height="4" rx="1.5" fill="#151515"/><rect x="74" y="220" width="35" height="4" rx="1.5" fill="#1a3a5c"/>
-                <text x="74" y="234" fill="#444" font-size="7" font-family="monospace">18GB / 52GB</text>
-                <!-- Second model -->
-                <rect x="380" y="170" width="140" height="68" rx="6" fill="#0d1a26" stroke="#1a3a5c" stroke-width="1.5"/>
-                <text x="450" y="188" text-anchor="middle" fill="#c84" font-size="9" font-family="monospace" font-weight="600">Qwen2.5-3B</text>
-                <text x="450" y="202" text-anchor="middle" fill="#6cf" font-size="10" font-family="monospace">solo (13 GB)</text>
-                <text x="450" y="214" text-anchor="middle" fill="#4c4" font-size="7.5" font-family="monospace">llama-server · :9337</text>
-                <rect x="394" y="220" width="112" height="4" rx="1.5" fill="#151515"/><rect x="394" y="220" width="14" height="4" rx="1.5" fill="#5a4a2a"/>
-                <text x="394" y="234" fill="#444" font-size="7" font-family="monospace">2GB / 13GB</text>
-            </svg>
-        </div>
+          <rect width="1200" height="620" fill="url(#hero-grid)" opacity="0.2"/>
+          <rect width="1200" height="620" fill="url(#hero-vignette)"/>
+          <g fill="none" stroke-linecap="round" stroke-width="1.4">
+            <path class="mesh-line" d="M120 250 C230 120 430 150 560 250 S830 395 1040 220" stroke="#3b82f6" stroke-opacity="0.42"/>
+            <path class="mesh-line" d="M190 430 C360 310 470 385 610 310 S840 185 1030 360" stroke="#22c55e" stroke-opacity="0.36" style="animation-delay:-2.2s"/>
+            <path class="mesh-line" d="M120 250 C280 350 405 260 560 250 S830 255 1030 360" stroke="#94a3b8" stroke-opacity="0.28" style="animation-delay:-4s"/>
+            <path class="mesh-line" d="M300 160 C380 250 470 300 610 310 S805 350 1040 220" stroke="#38bdf8" stroke-opacity="0.34" style="animation-delay:-1.2s"/>
+            <path class="mesh-line" d="M20 360 C185 235 290 480 470 390 S770 130 1180 155" stroke="#60a5fa" stroke-opacity="0.2" style="animation-delay:-5.1s"/>
+            <path class="mesh-line" d="M40 120 C240 45 365 75 560 250 S840 500 1160 435" stroke="#22c55e" stroke-opacity="0.18" style="animation-delay:-3.5s"/>
+          </g>
 
-        <div class="tags">
-            <span class="tag">OpenAI-compatible API</span>
-            <span class="tag">Pipeline + expert parallelism</span>
-            <span class="tag">Multi-model routing</span>
-            <span class="tag">Inter-model collaboration</span>
-            <span class="tag">Demand-aware rebalancing</span>
-            <span class="tag">Nostr discovery</span>
-            <span class="tag">Agent gossip</span>
-            <span class="tag">macOS + Linux</span>
+          <g color="#60a5fa">
+            <circle class="mesh-packet" r="3.5" fill="currentColor">
+              <animateMotion dur="9s" repeatCount="indefinite" path="M120 250 C230 120 430 150 560 250 S830 395 1040 220"/>
+            </circle>
+            <circle class="mesh-packet" r="2.7" fill="currentColor" opacity="0.72">
+              <animateMotion dur="7.2s" begin="-3s" repeatCount="indefinite" path="M20 360 C185 235 290 480 470 390 S770 130 1180 155"/>
+            </circle>
+          </g>
+          <g color="#86efac">
+            <circle class="mesh-packet" r="3.5" fill="currentColor">
+              <animateMotion dur="8s" repeatCount="indefinite" path="M190 430 C360 310 470 385 610 310 S840 185 1030 360"/>
+            </circle>
+            <circle class="mesh-packet" r="2.8" fill="currentColor" opacity="0.78">
+              <animateMotion dur="10.5s" begin="-4.5s" repeatCount="indefinite" path="M40 120 C240 45 365 75 560 250 S840 500 1160 435"/>
+            </circle>
+          </g>
+          <g color="#93c5fd">
+            <circle class="mesh-packet" r="3" fill="currentColor">
+              <animateMotion dur="10s" repeatCount="indefinite" path="M300 160 C380 250 470 300 610 310 S805 350 1040 220"/>
+            </circle>
+            <circle class="mesh-packet" r="2.5" fill="currentColor" opacity="0.68">
+              <animateMotion dur="8.8s" begin="-6s" repeatCount="indefinite" path="M120 250 C280 350 405 260 560 250 S830 255 1030 360"/>
+            </circle>
+          </g>
+
+          <g class="mesh-node">
+            <circle cx="120" cy="250" r="44" fill="url(#hero-node-blue)"/>
+            <circle class="mesh-ring slow" cx="120" cy="250" r="16" fill="none" stroke="#60a5fa" stroke-width="1.4"/>
+            <circle class="node-core" cx="120" cy="250" r="6" fill="#93c5fd"/>
+            <circle cx="300" cy="160" r="34" fill="url(#hero-node-blue)" opacity="0.75"/>
+            <circle class="node-core alt" cx="300" cy="160" r="5" fill="#60a5fa"/>
+            <circle cx="560" cy="250" r="50" fill="url(#hero-node-green)"/>
+            <circle class="mesh-ring" cx="560" cy="250" r="18" fill="none" stroke="#86efac" stroke-width="1.5"/>
+            <circle class="mesh-ring slow" cx="560" cy="250" r="26" fill="none" stroke="#22c55e" stroke-width="1"/>
+            <circle class="node-core" cx="560" cy="250" r="7" fill="#86efac"/>
+            <circle cx="610" cy="310" r="36" fill="url(#hero-node-blue)" opacity="0.7"/>
+            <circle class="node-core alt" cx="610" cy="310" r="5" fill="#7dd3fc"/>
+            <circle cx="1030" cy="360" r="42" fill="url(#hero-node-green)" opacity="0.68"/>
+            <circle class="mesh-ring" cx="1030" cy="360" r="15" fill="none" stroke="#86efac" stroke-width="1.4"/>
+            <circle class="node-core" cx="1030" cy="360" r="6" fill="#86efac"/>
+            <circle cx="1040" cy="220" r="30" fill="url(#hero-node-blue)" opacity="0.62"/>
+            <circle class="node-core alt" cx="1040" cy="220" r="5" fill="#93c5fd"/>
+          </g>
+        </svg>
+      </div>
+      <div>
+        <div class="eyebrow"><span class="dot"></span> Public Mesh available at public.meshllm.cloud</div>
+        <h1>Run large models across every machine you own</h1>
+        <p class="lead">Mesh pools machines into a distributed inference network, so you can serve large models across multiple devices through one OpenAI-compatible endpoint.</p>
+        <div class="hero-actions">
+          <a class="button primary" href="#install">Install Mesh</a>
+          <a class="button" href="https://public.meshllm.cloud">Open Public Mesh</a>
+          <a class="button ghost" href="catalog/">Browse Catalog</a>
         </div>
+      </div>
+
+      <div class="terminal" id="install">
+        <div class="terminal-head">
+          <span class="terminal-dot"></span>
+          <span class="terminal-dot"></span>
+          <span class="terminal-dot"></span>
+          <span class="mono">quickstart</span>
+        </div>
+        <pre><code><span class="comment"># Install Mesh</span>
+<span class="cmd">curl</span> <span class="flag">-fsSL</span> <span class="value">https://mesh-llm.cloud/install.sh</span> | <span class="cmd">sh</span>
+
+<span class="comment"># Join the public mesh and serve if this machine can</span>
+<span class="cmd">mesh-llm</span> <span class="value">serve</span> <span class="flag">--auto</span>
+
+<span class="comment"># Or join as an API-only client</span>
+<span class="cmd">mesh-llm</span> <span class="value">client</span> <span class="flag">--auto</span>
+
+<span class="comment"># Or serve a local model</span>
+<span class="cmd">mesh-llm</span> <span class="value">serve</span> <span class="flag">--model</span> <span class="value">Qwen3-8B</span>
+
+<span class="comment"># Point agents at Mesh</span>
+<span class="cmd">export</span> <span class="value">OPENAI_BASE_URL=http://localhost:3131/v1</span></code></pre>
+      </div>
     </section>
 
-    <blockquote style="max-width:640px; margin:2.5rem auto; padding:1.5rem 2rem; border-left:3px solid #646cff; background:#1a1a2e; border-radius:8px; font-style:italic; color:#ccc; line-height:1.7;">
-        As part of the <a href="https://github.com/block/goose" style="color:#646cff;">goose</a> project, we wanted to let people try more open models, but many didn't have capacity on their own. Open models continue to improve apace so it makes sense to make it easy to host and share as they get more capable and larger. That is what this experiment is about.
-        <div style="margin-top:0.75rem; font-style:normal; font-size:0.9em; color:#999;">— Mic N</div>
-    </blockquote>
+    <div class="shell status-strip" aria-label="Mesh highlights">
+      <div class="status-item"><strong>Public Mesh</strong>Join a running network</div>
+      <div class="status-item"><strong>OpenAI API</strong>Use existing clients</div>
+      <div class="status-item"><strong>macOS</strong>Apple Silicon support</div>
+      <div class="status-item"><strong>Linux</strong>CUDA, ROCm, CPU</div>
+      <div class="status-item"><strong>Windows</strong>Setup docs planned</div>
+    </div>
 
-    <section id="features">
-        <div class="section-tag">Features</div>
-        <h2>Distributed and decentralized inference</h2>
-
-        <div class="features">
-            <div class="feature">
-                <div class="feature-icon">⚡</div>
-                <h3>Automatic distribution</h3>
-                <p>Model fits on one machine? Solo mode, full speed. Too big? Dense models pipeline-split by layers across nodes. Splits are latency-aware — low-RTT peers preferred for tighter coordination.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">🧩</div>
-                <h3>Stage lifecycle</h3>
-                <p>The planner chooses peers and layer ranges, loads stages downstream-to-upstream, waits for readiness, then publishes the stage-0 route.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">🔀</div>
-                <h3>Multi-model routing</h3>
-                <p>Different nodes serve different models. API proxy routes by <code>model</code> field. Nodes auto-assigned based on what's needed and what's on disk.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">📊</div>
-                <h3>Demand-aware rebalancing</h3>
-                <p>Unified demand map propagates across the mesh via gossip. Standby nodes promote to serve unserved or hot models. Dead hosts replaced within 60 seconds.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">📡</div>
-                <h3>Nostr discovery</h3>
-                <p>Publish your mesh to Nostr relays. Others find it with <code>--auto</code> or join by name with <code>--discover "my-mesh"</code>. Smart scoring: region match, VRAM, health probe before joining.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">🚀</div>
-                <h3>Zero-transfer loading</h3>
-                <p>Weights read from local GGUF files, not sent over the network. Model load: 111s → 5s. Per-token RPC round-trips: 558 → 8.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">📈</div>
-                <h3>Scales passively</h3>
-                <p>GPU nodes gossip. Clients use lightweight routing tables — zero per-client server state. Event-driven: cost proportional to topology changes, not node count.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">🎯</div>
-                <h3>Speculative decoding</h3>
-                <p>Draft model runs locally, proposes tokens verified in one batched pass. +38% throughput on code. Auto-detected from catalog.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">💻</div>
-                <h3>Web console</h3>
-                <p>Live topology, VRAM bars, model picker, built-in chat. API-driven — everything the console shows comes from JSON endpoints.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">🧠</div>
-                <h3>Inter-model collaboration</h3>
-                <p>Models help each other during inference. Text-only model gets an image? A vision peer captions it silently. Small model uncertain? Peers race a second opinion. Repetition loop? Another model nudges it out. The caller sees one seamless response. Inspired by <a href="https://arxiv.org/pdf/2601.16863">Mixture of Models</a> — the mesh is the ensemble.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">🤖</div>
-                <h3>Works with agents</h3>
-                <p>OpenAI-compatible API on <code>localhost:9337</code>. Use with goose, pi, opencode, or any tool that supports custom OpenAI endpoints.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">🔗</div>
-                <h3>External backends</h3>
-                <p>Already running vLLM, TGI, or Ollama? Add the <code>openai-endpoint</code> plugin with a <code>url</code> to your config. mesh-llm discovers the models and routes requests — the backend does all the inference work.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">📝</div>
-                <h3>Agent gossip</h3>
-                <p>Have your agents gossip over the mesh — share status, findings, and questions via CLI or MCP. Works standalone with any LLM setup, no GPU needed. <a href="#blackboard">Learn more →</a></p>
-            </div>
+    <section class="section">
+      <div class="shell">
+        <div class="section-head">
+          <div>
+            <h2>One endpoint, many machines</h2>
+            <p class="section-copy">Mesh handles discovery, placement, routing, and model serving so tools can talk to a single local API while the work happens across available machines.</p>
+          </div>
         </div>
+        <div class="grid">
+          <article class="card">
+            <h3>Join or create a mesh</h3>
+            <p>Start with one machine, join the public mesh, or create a private mesh for your team, lab, or home network.</p>
+          </article>
+          <article class="card">
+            <h3>Serve models locally</h3>
+            <p>Use catalog names, Hugging Face GGUF URLs, or local model files. Mesh exposes an OpenAI-compatible endpoint.</p>
+          </article>
+          <article class="card">
+            <h3>Run beyond one device</h3>
+            <p>Large models can use layer packages so multiple machines participate in one served model.</p>
+          </article>
+        </div>
+      </div>
     </section>
 
-    <section id="install">
-        <div class="section-tag">Quick start</div>
-        <h2>Install &amp; run</h2>
-        <p class="section-lead">macOS or Linux. One command to install, one to run.</p>
-
-        <div class="code-block">
-            <span class="comment"># Install on macOS (downloads ~18MB bundle)</span><br>
-            <span class="cmd">curl</span> <span class="flag">-fsSL</span> <span class="val">https://github.com/Mesh-LLM/mesh-llm/releases/latest/download/mesh-bundle.tar.gz</span> | <span class="cmd">tar</span> xz &amp;&amp; mkdir -p ~/.local/bin &amp;&amp; mv mesh-bundle/* ~/.local/bin/<br><br>
-            <span class="comment"># Install on Linux (build from source — needs just, cmake, nvcc, Rust, Node.js)</span><br>
-            <span class="cmd">git clone</span> <span class="val">https://github.com/Mesh-LLM/mesh-llm</span> &amp;&amp; <span class="cmd">cd</span> mesh-llm &amp;&amp; <span class="cmd">just</span> build<br><br>
-            <span class="comment"># Join the public mesh — instant chat, zero config</span><br>
-            <span class="cmd">mesh-llm</span> <span class="flag">--auto</span><br><br>
-            <span class="comment"># Or start your own mesh with a model</span><br>
-            <span class="cmd">mesh-llm</span> <span class="flag">--model</span> <span class="val">GLM-4.7-Flash</span><br><br>
-            <span class="comment"># Launch goose with the mesh (picks strongest model automatically)</span><br>
-            <span class="cmd">mesh-llm</span> goose<br><br>
-            <span class="comment"># Launch Claude Code with the mesh</span><br>
-            <span class="cmd">mesh-llm</span> claude
+    <section class="section">
+      <div class="shell">
+        <div class="section-head">
+          <div>
+            <h2>Catalog</h2>
+            <p class="section-copy">Browse mesh-ready models, layer packages, Hugging Face repositories, hardware guidance, and commands for public or private meshes.</p>
+          </div>
+          <a class="button" href="catalog/">Open Catalog</a>
         </div>
-    </section>
-
-    <section id="agents">
-        <div class="section-tag">Integrations</div>
-        <h2>Use with coding agents</h2>
-        <p class="section-lead">Standard OpenAI API on <code>localhost:9337</code>. Works with anything.</p>
-
-        <details style="margin-bottom:1rem;" open>
-            <summary style="cursor:pointer; font-size:0.9rem; font-weight:600; color:#fff; padding:0.8rem 0;">▸ goose (built-in launcher)</summary>
-            <p style="font-size:0.8rem; color:var(--text2); margin:0.5rem 0;">Uses a local mesh if present; otherwise auto-starts a client node. Picks the strongest model automatically. Cleans up on exit.</p>
-            <div class="code-block" style="margin-top:0.5rem;">
-                <span class="cmd">mesh-llm</span> goose<br><br>
-                <span class="comment"># Specify model explicitly (example: MiniMax)</span><br>
-                <span class="cmd">mesh-llm</span> goose <span class="flag">--model</span> <span class="val">MiniMax-M2.5-Q4_K_M</span>
-            </div>
-        </details>
-
-        <details style="margin-bottom:1rem;">
-            <summary style="cursor:pointer; font-size:0.9rem; font-weight:600; color:#fff; padding:0.8rem 0;">▸ pi (built-in launcher)</summary>
-            <div class="code-block" style="margin-top:0.5rem;">
-                <span class="cmd">mesh-llm</span> pi<br><br>
-                <span class="comment"># Or pick a specific model</span><br>
-                <span class="cmd">mesh-llm</span> pi <span class="flag">--model</span> <span class="val">MiniMax-M2.5-Q4_K_M</span><br><br>
-                <span class="comment"># Only write ~/.pi/agent/models.json</span><br>
-                <span class="cmd">mesh-llm</span> pi <span class="flag">--write</span><br><br>
-                <span class="comment"># Target a remote mesh host or URL</span><br>
-                <span class="cmd">mesh-llm</span> pi <span class="flag">--write</span> <span class="flag">--host</span> <span class="val">carrack.patio51.com:9337</span>
-            </div>
-            <p style="font-size:0.8rem; color:var(--text2); margin:0.5rem 0;">Writes every mesh model into <code>~/.pi/agent/models.json</code>, including Pi <code>contextWindow</code>/<code>maxTokens</code> when mesh metadata is available, and launches pi unless <code>--write</code> is set. Use <code>--host</code> for a remote mesh host or full URL.</p>
-        </details>
-
-        <details style="margin-bottom:1rem;">
-            <summary style="cursor:pointer; font-size:0.9rem; font-weight:600; color:#fff; padding:0.8rem 0;">▸ opencode</summary>
-            <div class="code-block" style="margin-top:0.5rem;">
-                <span class="cmd">OPENAI_API_KEY</span>=dummy <span class="cmd">OPENAI_BASE_URL</span>=<span class="val">http://localhost:9337/v1</span> \<br>
-                &nbsp;&nbsp;opencode <span class="flag">-m</span> <span class="val">openai/GLM-4.7-Flash-Q4_K_M</span>
-            </div>
-        </details>
-
-        <details style="margin-bottom:1rem;" open>
-            <summary style="cursor:pointer; font-size:0.9rem; font-weight:600; color:#fff; padding:0.8rem 0;">▸ claude code (built-in launcher)</summary>
-            <p style="font-size:0.8rem; color:var(--text2); margin:0.5rem 0;">Uses a local mesh if present; otherwise auto-starts a client node. Picks the strongest model automatically. Cleans up on exit.</p>
-            <div class="code-block" style="margin-top:0.5rem;">
-                <span class="cmd">mesh-llm</span> claude<br><br>
-                <span class="comment"># Specify model explicitly (example: MiniMax)</span><br>
-                <span class="cmd">mesh-llm</span> claude <span class="flag">--model</span> <span class="val">MiniMax-M2.5-Q4_K_M</span>
-            </div>
-        </details>
-
-        <details style="margin-bottom:1rem;">
-            <summary style="cursor:pointer; font-size:0.9rem; font-weight:600; color:#fff; padding:0.8rem 0;">▸ curl / any OpenAI client</summary>
-            <div class="code-block" style="margin-top:0.5rem;">
-                <span class="cmd">curl</span> <span class="val">http://localhost:9337/v1/chat/completions</span> \<br>
-                &nbsp;&nbsp;<span class="flag">-H</span> <span class="val">"Content-Type: application/json"</span> \<br>
-                &nbsp;&nbsp;<span class="flag">-d</span> <span class="val">'{"model":"GLM-4.7-Flash-Q4_K_M","messages":[{"role":"user","content":"hello"}]}'</span>
-            </div>
-        </details>
-    </section>
-
-    <section id="models">
-        <div class="section-tag">Models</div>
-        <h2>Specifying models</h2>
-        <p class="section-lead"><code>--model</code> accepts catalog names, URLs, or local paths. Hugging Face-backed models are auto-downloaded into the standard Hugging Face cache on first use with resume support.</p>
-
-        <div class="code-block">
-            <span class="comment"># Short name (fuzzy match — finds Qwen3-8B-Q4_K_M)</span><br>
-            <span class="cmd">mesh-llm</span> <span class="flag">--model</span> <span class="val">Qwen3-8B</span><br><br>
-            <span class="comment"># Full catalog name</span><br>
-            <span class="cmd">mesh-llm</span> <span class="flag">--model</span> <span class="val">Qwen3-8B-Q4_K_M</span><br><br>
-            <span class="comment"># Any GGUF from HuggingFace (auto-downloaded)</span><br>
-            <span class="cmd">mesh-llm</span> <span class="flag">--model</span> <span class="val">https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf</span><br><br>
-            <span class="comment"># HuggingFace shorthand (org/repo/file.gguf)</span><br>
-            <span class="cmd">mesh-llm</span> <span class="flag">--model</span> <span class="val">bartowski/Llama-3.2-3B-Instruct-GGUF/Llama-3.2-3B-Instruct-Q4_K_M.gguf</span><br><br>
-            <span class="comment"># Local GGUF file</span><br>
-            <span class="cmd">mesh-llm</span> <span class="flag">--model</span> <span class="val">~/my-models/custom-model.gguf</span><br><br>
-            <span class="comment"># Browse the catalog</span><br>
-            <span class="cmd">mesh-llm</span> download
-        </div>
-
-        <h3 style="font-size:0.95rem; color:#fff; margin:2rem 0 1rem;">Built-in catalog</h3>
-        <p style="font-size:0.82rem; color:var(--text2); margin-bottom:1rem;">The catalog is a convenience — it changes as new models come out. Catalog models auto-download with their draft model for speculative decoding. Any GGUF model works, whether it's in the catalog or not.</p>
-        <div style="overflow-x:auto;">
-        <table style="width:100%; font-size:0.75rem; border-collapse:collapse; color:var(--text);">
+        <div class="table-card">
+          <table>
             <thead>
-                <tr style="border-bottom:1px solid var(--border); text-align:left;">
-                    <th style="padding:0.4rem 0.8rem; color:var(--text2);">VRAM</th>
-                    <th style="padding:0.4rem 0.8rem; color:var(--text2);">Model</th>
-                    <th style="padding:0.4rem 0.8rem; color:var(--text2);">Size</th>
-                    <th style="padding:0.4rem 0.8rem; color:var(--text2);">Notes</th>
-                </tr>
+              <tr>
+                <th>Model</th>
+                <th>Runtime</th>
+                <th>Source</th>
+                <th>Status</th>
+              </tr>
             </thead>
             <tbody>
-                <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.3rem 0.8rem; color:var(--text3);">≤3GB</td><td style="padding:0.3rem 0.8rem;"><code>Qwen3-4B</code></td><td style="padding:0.3rem 0.8rem;">2.5GB</td><td style="padding:0.3rem 0.8rem; color:var(--text2);">Thinking modes</td></tr>
-                <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.3rem 0.8rem;"></td><td style="padding:0.3rem 0.8rem;"><code>Qwen2.5-3B</code></td><td style="padding:0.3rem 0.8rem;">2.1GB</td><td style="padding:0.3rem 0.8rem; color:var(--text2);">Small &amp; fast</td></tr>
-                <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.3rem 0.8rem;"></td><td style="padding:0.3rem 0.8rem;"><code>Llama-3.2-3B</code></td><td style="padding:0.3rem 0.8rem;">2.0GB</td><td style="padding:0.3rem 0.8rem; color:var(--text2);">Good tool calling</td></tr>
-                <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.3rem 0.8rem; color:var(--text3);">6-8GB</td><td style="padding:0.3rem 0.8rem;"><code>Qwen3-8B</code></td><td style="padding:0.3rem 0.8rem;">5.0GB</td><td style="padding:0.3rem 0.8rem; color:var(--text2);">Strong for its size</td></tr>
-                <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.3rem 0.8rem;"></td><td style="padding:0.3rem 0.8rem;"><code>Gemma-3-12B</code></td><td style="padding:0.3rem 0.8rem;">7.3GB</td><td style="padding:0.3rem 0.8rem; color:var(--text2);">Punches above weight</td></tr>
-                <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.3rem 0.8rem; color:var(--text3);">11-17GB</td><td style="padding:0.3rem 0.8rem;"><code>Qwen3-14B</code></td><td style="padding:0.3rem 0.8rem;">9.0GB</td><td style="padding:0.3rem 0.8rem; color:var(--text2);">Thinking modes</td></tr>
-                <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.3rem 0.8rem;"></td><td style="padding:0.3rem 0.8rem;"><code>Devstral-Small-2505</code></td><td style="padding:0.3rem 0.8rem;">14.3GB</td><td style="padding:0.3rem 0.8rem; color:var(--text2);">Agentic coding</td></tr>
-                <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.3rem 0.8rem;"></td><td style="padding:0.3rem 0.8rem;"><code>Qwen3-32B</code></td><td style="padding:0.3rem 0.8rem;">19.8GB</td><td style="padding:0.3rem 0.8rem; color:var(--text2);">Best dense Qwen3</td></tr>
-                <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.3rem 0.8rem;"></td><td style="padding:0.3rem 0.8rem;"><code>Qwen2.5-Coder-32B</code></td><td style="padding:0.3rem 0.8rem;">20GB</td><td style="padding:0.3rem 0.8rem; color:var(--text2);">Matches GPT-4o on code</td></tr>
-                <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.3rem 0.8rem;"></td><td style="padding:0.3rem 0.8rem;"><code>Qwen3.5-27B</code></td><td style="padding:0.3rem 0.8rem;">17GB</td><td style="padding:0.3rem 0.8rem; color:var(--text2);">Latest Qwen dense</td></tr>
-                <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.3rem 0.8rem; color:var(--text3);">40GB+</td><td style="padding:0.3rem 0.8rem;"><code>Qwen3-Coder-Next</code></td><td style="padding:0.3rem 0.8rem;">48GB</td><td style="padding:0.3rem 0.8rem; color:var(--text2);">~85B dense, frontier coding</td></tr>
-                <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.3rem 0.8rem;"></td><td style="padding:0.3rem 0.8rem;"><code>Llama-3.3-70B</code></td><td style="padding:0.3rem 0.8rem;">43GB</td><td style="padding:0.3rem 0.8rem; color:var(--text2);">Strong all-around</td></tr>
-                <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.3rem 0.8rem;"></td><td style="padding:0.3rem 0.8rem;"><code>Qwen2.5-72B</code></td><td style="padding:0.3rem 0.8rem;">47GB</td><td style="padding:0.3rem 0.8rem; color:var(--text2);">Flagship Qwen2.5</td></tr>
-                <tr><td style="padding:0.3rem 0.8rem;"></td><td style="padding:0.3rem 0.8rem;"><code>Llama-3.1-405B</code></td><td style="padding:0.3rem 0.8rem;">149GB</td><td style="padding:0.3rem 0.8rem; color:var(--text2);">Largest dense (Q2_K)</td></tr>
+              <tr>
+                <td><strong>Qwen3 32B</strong><br><span>Text, reasoning, GGUF</span></td>
+                <td>Multi-machine</td>
+                <td>Hugging Face</td>
+                <td><span class="badge green">Layer packages available</span></td>
+              </tr>
+              <tr>
+                <td><strong>Llama 3.1 8B</strong><br><span>Text, tools, GGUF</span></td>
+                <td>Single-machine</td>
+                <td>Mesh catalog</td>
+                <td><span class="badge blue">Mesh-ready</span></td>
+              </tr>
+              <tr>
+                <td><strong>Large community models</strong><br><span>Catalog entries coming next</span></td>
+                <td>Single or multi-machine</td>
+                <td>Hugging Face</td>
+                <td><span class="badge amber">Contribution path planned</span></td>
+              </tr>
             </tbody>
-        </table>
+          </table>
         </div>
-        <p style="font-size:0.75rem; color:var(--text3); margin-top:0.8rem;">Full catalog: <code>mesh-llm download</code> · Not in the catalog? Use a HuggingFace URL — any GGUF works.</p>
+      </div>
     </section>
 
-    <section id="blackboard">
-        <div class="section-tag">Collaboration</div>
-        <h2>Blackboard</h2>
-        <p class="section-lead">Have your agents gossip over the mesh to collaborate amongst themselves. Status updates, findings, and questions propagate across the mesh — no central server, no cloud.</p>
-        <p style="font-size:0.82rem; color:var(--text2); margin-top:0.8rem;">Works standalone — using your own API keys or cloud models? Just run <code>mesh-llm client</code> to give your agents a gossip layer. No GPU needed, no model needed. Blackboard is on by default for private meshes.</p>
-
-        <div class="features" style="margin-bottom:2rem;">
-            <div class="feature">
-                <div class="feature-icon">🔍</div>
-                <h3>Search before you start</h3>
-                <p>Has someone already worked on this? Multi-term OR search finds relevant posts across the team. No embeddings, no external services — just fast local text matching.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">📢</div>
-                <h3>Share as you go</h3>
-                <p>Post what you're working on, what you found, what broke. Convention prefixes — <code>STATUS:</code>, <code>FINDING:</code>, <code>QUESTION:</code>, <code>TIP:</code>, <code>DONE:</code> — make search easy.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">🤝</div>
-                <h3>Avoid doubling up</h3>
-                <p>Multiple agents working across repos? The blackboard keeps them coordinated. No one duplicates work, no one misses a fix someone else already found.</p>
-            </div>
-            <div class="feature">
-                <div class="feature-icon">🔒</div>
-                <h3>Stays in the mesh</h3>
-                <p>Blackboard propagates only to nodes in your mesh — no cloud, no external relays. PII is auto-scrubbed (paths, keys, secrets). Ephemeral: messages fade after 48 hours. Use a private mesh to keep it between your team.</p>
-            </div>
+    <section class="section">
+      <div class="shell">
+        <div class="section-head">
+          <div>
+            <h2>Use Mesh with agents</h2>
+            <p class="section-copy">Point OpenAI-compatible tools at Mesh and run agents through your local, private, or public mesh.</p>
+          </div>
         </div>
-
-        <div class="code-block">
-            <span class="comment"># Start a node — blackboard is on by default</span><br>
-            <span class="cmd">mesh-llm</span> <span class="flag">client --join</span> <span class="val">&lt;token&gt;</span><br><br>
-            <span class="comment"># Install the agent skill (works with pi, goose, others)</span><br>
-            <span class="cmd">mesh-llm</span> blackboard <span class="val">install-skill</span><br><br>
-            <span class="comment"># Post, search, read (talks to the running node)</span><br>
-            <span class="cmd">mesh-llm</span> blackboard <span class="val">"STATUS: working on auth refactor"</span><br>
-            <span class="cmd">mesh-llm</span> blackboard <span class="flag">--search</span> <span class="val">"CUDA OOM"</span><br>
-            <span class="cmd">mesh-llm</span> blackboard
+        <div class="grid">
+          <article class="card">
+            <h3>Goose</h3>
+            <p>Launch Goose against the strongest model available through your mesh.</p>
+            <div class="badge-row"><span class="badge blue">OpenAI-compatible</span></div>
+          </article>
+          <article class="card">
+            <h3>Pi</h3>
+            <p>Write Mesh models into Pi config and use local or remote mesh endpoints.</p>
+            <div class="badge-row"><span class="badge blue">Agent workflow</span></div>
+          </article>
+          <article class="card">
+            <h3>opencode</h3>
+            <p>Use Mesh as the OpenAI provider for coding agents and command-line workflows.</p>
+            <div class="badge-row"><span class="badge blue">Coding agents</span></div>
+          </article>
         </div>
-
-        <p style="font-size:0.82rem; color:var(--text2); margin-top:1.5rem;">
-            Blackboard is on by default for private meshes (<code>--join</code>). The CLI commands and MCP tools talk to the running node via its local API.
-        </p>
-        <p style="font-size:0.82rem; color:var(--text2); margin-top:0.8rem;">
-            With the skill installed, agents proactively search before starting work, post their status, share findings, and answer each other's questions — all through the mesh.
-        </p>
-        <p style="font-size:0.82rem; color:var(--text2); margin-top:0.8rem;">
-            Also available as an <strong>MCP server</strong> — run <code>mesh-llm blackboard --mcp</code> and add it to any MCP-compatible agent's config. Tools: <code>blackboard_post</code>, <code>blackboard_search</code>, <code>blackboard_feed</code>.
-        </p>
-        <p style="font-size:0.82rem; color:#e5a700; margin-top:0.8rem;">
-            ⚠️ On a public mesh (<code>--auto</code>), your posts are visible to all peers. For private use, create your own mesh or join with <code>--join &lt;token&gt;</code>.
-        </p>
+      </div>
     </section>
 
-    <section class="cta-section">
-        <h2>Try it</h2>
-        <p>One binary. macOS Apple Silicon plus Linux/Windows for CUDA, HIP, Vulkan, or CPU. MIT licensed.</p>
-        <div class="cta-buttons">
-            <a href="https://www.anarchai.org/dashboard" class="btn btn-primary">Try it now</a>
-            <a href="#install" class="btn btn-secondary">Install</a>
-            <a href="https://github.com/Mesh-LLM/mesh-llm" class="btn btn-secondary">GitHub →</a>
-            <a href="https://github.com/Mesh-LLM/mesh-llm/blob/main/ROADMAP.md" class="btn btn-secondary">Roadmap</a>
+    <section class="section">
+      <div class="shell docs-grid">
+        <article class="card">
+          <h3>Get started</h3>
+          <p>Install Mesh, run the quickstart, and update to new versions.</p>
+          <div class="doc-list">
+            <a href="USAGE.md">Installing Mesh</a>
+            <a href="CLI.md">CLI reference</a>
+            <a href="docs/">Documentation index</a>
+          </div>
+        </article>
+        <article class="card">
+          <h3>Running models</h3>
+          <p>Run your first model, use multi-machine model serving, contribute layer packages, and certify new model families.</p>
+          <div class="doc-list">
+            <a href="specs/layer-package-repos.md">Layer package repos</a>
+            <a href="skippy/FAMILY_CERTIFY.md">Model family certification</a>
+            <a href="BENCHMARKS.md">Benchmarks</a>
+            <a href="catalog/">Catalog</a>
+          </div>
+        </article>
+        <article class="card">
+          <h3>Meshes</h3>
+          <p>Join the public mesh, create private meshes, and publish your own mesh.</p>
+          <div class="doc-list">
+            <a href="USAGE.md">Usage docs</a>
+            <a href="design/DESIGN.md">Design notes</a>
+            <a href="https://public.meshllm.cloud">Public Mesh</a>
+          </div>
+        </article>
+        <article class="card">
+          <h3>Integrations</h3>
+          <p>Use Goose, Pi, opencode, curl, and OpenAI-compatible clients.</p>
+          <div class="doc-list">
+            <a href="AGENTS.md">Agent setup</a>
+            <a href="plugins/README.md">Plugins</a>
+            <a href="https://github.com/Mesh-LLM/mesh-llm">GitHub</a>
+          </div>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="shell">
+      <div class="footer-grid">
+        <div class="footer-brand">
+          <img src="mesh-llm-logo.svg" alt="Mesh LLM">
+          <p>Run bigger local models by linking the machines you already have.</p>
         </div>
-    </section>
-
-    <section style="max-width:640px; margin:0 auto; padding:2rem 1.5rem 3rem; font-size:0.82rem; color:var(--text3); line-height:1.7;">
-        <h3 style="font-size:0.85rem; color:var(--text2); margin-bottom:1rem;">Research &amp; roadmap</h3>
-        <p>We're exploring how to scale mesh inference with mixtures of models — routing and combining responses from heterogeneous LLMs. Inter-model collaboration is live: models consult each other during inference for image captioning, uncertainty resolution, and loop recovery. Papers informing this work:</p>
-        <ul style="margin:0.8rem 0; padding-left:1.2rem;">
-            <li><a href="https://arxiv.org/html/2507.00507v1" style="color:#646cff;">LLM-Mesh</a> — resource-efficient serverless LLM inference across heterogeneous hardware</li>
-            <li><a href="https://arxiv.org/pdf/2601.16863" style="color:#646cff;">Mixture of Models / NSED</a> — self-evaluating deliberation across models (Peeramid Labs)</li>
-            <li><a href="https://nvidianews.nvidia.com/news/nvidia-launches-nemotron-coalition-of-leading-global-ai-labs-to-advance-open-frontier-models" style="color:#646cff;">NVIDIA Nemotron Coalition</a> — advancing open frontier models across leading AI labs</li>
-        </ul>
-        <p>For current plans and work items, see the <a href="https://github.com/Mesh-LLM/mesh-llm/blob/main/ROADMAP.md" style="color:#646cff;">Roadmap</a> and <a href="https://github.com/Mesh-LLM/mesh-llm/blob/main/crates/mesh-llm/TODO.md" style="color:#646cff;">TODO</a> on GitHub.</p>
-        <p style="margin-top:0.8rem;">Come say hi on <a href="https://github.com/block/goose?tab=readme-ov-file#goose-around-with-us" style="color:#646cff;">Discord</a> — we're in the goose community.</p>
-    </section>
-
-    <footer><p>mesh-llm — open source under MIT. Built with Rust, iroh, llama.cpp.</p></footer>
+        <div class="footer-col">
+          <h2>Product</h2>
+          <a href="catalog/">Catalog</a>
+          <a href="https://public.meshllm.cloud">Public Mesh</a>
+          <a href="#install">Install</a>
+        </div>
+        <div class="footer-col">
+          <h2>Docs</h2>
+          <a href="docs/">Documentation</a>
+          <a href="USAGE.md">Install and usage</a>
+          <a href="CLI.md">CLI reference</a>
+        </div>
+        <div class="footer-col">
+          <h2>Models</h2>
+          <a href="catalog/">Mesh-ready models</a>
+          <a href="specs/layer-package-repos.md">Layer packages</a>
+          <a href="skippy/FAMILY_CERTIFY.md">Family certification</a>
+          <a href="BENCHMARKS.md">Benchmarks</a>
+        </div>
+        <div class="footer-col">
+          <h2>Project</h2>
+          <a href="https://github.com/Mesh-LLM/mesh-llm">GitHub</a>
+          <a href="https://github.com/Mesh-LLM/mesh-llm/blob/main/ROADMAP.md">Roadmap</a>
+          <a href="https://github.com/Mesh-LLM/mesh-llm/blob/main/LICENSE">License</a>
+        </div>
+      </div>
+      <div class="footer-bottom">Mesh LLM is open source under MIT. Built with Rust, QUIC networking, and llama.cpp.</div>
+    </div>
+  </footer>
 </body>
 </html>

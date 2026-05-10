@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Docs - Mesh LLM</title>
+  <meta name="description" content="Mesh LLM documentation for installing Mesh, running models, joining meshes, using the Catalog, and connecting agents.">
+  <link rel="icon" href="../mesh-llm-logo.svg" type="image/svg+xml">
+  <style>
+    :root {
+      color-scheme: dark;
+      --background: #09090b;
+      --surface: #0c0c0f;
+      --surface-2: #111114;
+      --border: #27272a;
+      --border-soft: #1f1f23;
+      --text: #f4f4f5;
+      --muted: #a1a1aa;
+      --subtle: #71717a;
+      --radius: 8px;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--background); color: var(--text); font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+    a { color: inherit; text-decoration: none; }
+    a:hover { color: white; }
+    .shell { width: min(1120px, calc(100% - 32px)); margin: 0 auto; }
+    .nav { position: sticky; top: 0; z-index: 20; border-bottom: 1px solid var(--border-soft); background: rgba(9, 9, 11, 0.88); backdrop-filter: blur(16px); }
+    .nav-inner { height: 64px; display: flex; align-items: center; gap: 24px; }
+    .brand { display: inline-flex; align-items: center; }
+    .brand img { width: 118px; height: auto; object-fit: contain; }
+    .nav-links { display: flex; align-items: center; gap: 18px; margin-left: auto; color: var(--muted); font-size: 14px; }
+    .button { display: inline-flex; align-items: center; justify-content: center; min-height: 38px; padding: 0 14px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface-2); color: var(--text); font-size: 14px; font-weight: 500; white-space: nowrap; }
+    .button.primary { border-color: white; background: white; color: #09090b; }
+    .hero { padding: 72px 0 34px; border-bottom: 1px solid var(--border-soft); }
+    h1 { max-width: 760px; margin: 0 0 16px; font-size: clamp(38px, 6vw, 68px); line-height: 1; letter-spacing: 0; }
+    .lead { max-width: 760px; margin: 0; color: var(--muted); font-size: 18px; }
+    .docs-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; padding: 34px 0 72px; }
+    .card { min-height: 100%; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: 18px; }
+    .card h2 { margin: 0 0 8px; font-size: 16px; line-height: 1.2; }
+    .card p { margin: 0; color: var(--muted); font-size: 14px; }
+    .links { display: grid; gap: 8px; margin-top: 14px; color: var(--muted); font-size: 14px; }
+    .links a { color: var(--muted); }
+    .links a:hover { color: white; }
+    .footer { border-top: 1px solid var(--border-soft); padding: 34px 0; color: var(--subtle); font-size: 13px; }
+    .footer-grid { display: grid; grid-template-columns: minmax(220px, 1.5fr) repeat(4, minmax(120px, 1fr)); gap: 28px; align-items: start; }
+    .footer-brand { display: grid; gap: 12px; max-width: 360px; }
+    .footer-brand img { width: 118px; height: auto; }
+    .footer-brand p, .footer-col a { margin: 0; color: var(--subtle); }
+    .footer-col { display: grid; gap: 8px; }
+    .footer-col h2 { margin: 0 0 4px; color: var(--text); font-size: 13px; line-height: 1.2; }
+    .footer-col a { font-size: 13px; }
+    .footer-bottom { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border-soft); color: var(--subtle); }
+    @media (max-width: 900px) {
+      .docs-grid, .footer-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .nav-links a:not(.button) { display: none; }
+    }
+    @media (max-width: 640px) {
+      .shell { width: min(100% - 24px, 1120px); }
+      .docs-grid, .footer-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <nav class="nav">
+    <div class="shell nav-inner">
+      <a class="brand" href="../"><img src="../mesh-llm-logo.svg" alt="Mesh LLM"></a>
+      <div class="nav-links">
+        <a href="../catalog/">Catalog</a>
+        <a href="./">Docs</a>
+        <a href="https://public.meshllm.cloud">Public Mesh</a>
+        <a href="https://github.com/Mesh-LLM/mesh-llm">GitHub</a>
+        <a class="button primary" href="../#install">Install</a>
+      </div>
+    </div>
+  </nav>
+
+  <header class="shell hero">
+    <h1>Documentation</h1>
+    <p class="lead">Install Mesh, join or publish meshes, run models across machines, contribute layer packages, certify model families, and connect agents.</p>
+  </header>
+
+  <main class="shell docs-grid">
+    <article class="card">
+      <h2>Get started</h2>
+      <p>Install Mesh, run the quickstart, and update to new versions.</p>
+      <div class="links">
+        <a href="../USAGE.md">Install and usage</a>
+        <a href="../CLI.md">CLI reference</a>
+        <a href="../README.md">Repository docs index</a>
+      </div>
+    </article>
+    <article class="card">
+      <h2>Running models</h2>
+      <p>Serve local models, use Hugging Face GGUFs, and run larger models with layer packages.</p>
+      <div class="links">
+        <a href="../specs/layer-package-repos.md">Layer package repos</a>
+        <a href="../BENCHMARKS.md">Benchmarks</a>
+        <a href="../catalog/">Catalog</a>
+      </div>
+    </article>
+    <article class="card">
+      <h2>Catalog</h2>
+      <p>Browse mesh-ready models and understand how Catalog entries are contributed.</p>
+      <div class="links">
+        <a href="../catalog/">Browse Catalog</a>
+        <a href="../specs/layer-package-repos.md">Contributing layer packages</a>
+        <a href="../skippy/FAMILY_CERTIFY.md">Family certification</a>
+      </div>
+    </article>
+    <article class="card">
+      <h2>Meshes</h2>
+      <p>Join the public mesh, create private meshes, and publish your own mesh.</p>
+      <div class="links">
+        <a href="../USAGE.md">Mesh usage</a>
+        <a href="https://public.meshllm.cloud">Public Mesh</a>
+        <a href="../design/DESIGN.md">Design notes</a>
+      </div>
+    </article>
+    <article class="card">
+      <h2>Integrations</h2>
+      <p>Use Mesh with Goose, Pi, opencode, curl, and OpenAI-compatible tools.</p>
+      <div class="links">
+        <a href="../AGENTS.md">Agent setup</a>
+        <a href="../plugins/README.md">Plugins</a>
+        <a href="../CLI.md">Command reference</a>
+      </div>
+    </article>
+    <article class="card">
+      <h2>Contributing</h2>
+      <p>Understand the roadmap, testing requirements, and project contribution workflow.</p>
+      <div class="links">
+        <a href="../../CONTRIBUTING.md">Contributing guide</a>
+        <a href="../design/TESTING.md">Testing playbook</a>
+        <a href="../../ROADMAP.md">Roadmap</a>
+      </div>
+    </article>
+  </main>
+
+  <footer class="footer">
+    <div class="shell">
+      <div class="footer-grid">
+        <div class="footer-brand">
+          <img src="../mesh-llm-logo.svg" alt="Mesh LLM">
+          <p>Run bigger local models by linking the machines you already have.</p>
+        </div>
+        <div class="footer-col">
+          <h2>Product</h2>
+          <a href="../catalog/">Catalog</a>
+          <a href="https://public.meshllm.cloud">Public Mesh</a>
+          <a href="../#install">Install</a>
+        </div>
+        <div class="footer-col">
+          <h2>Docs</h2>
+          <a href="./">Documentation</a>
+          <a href="../USAGE.md">Install and usage</a>
+          <a href="../CLI.md">CLI reference</a>
+        </div>
+        <div class="footer-col">
+          <h2>Models</h2>
+          <a href="../catalog/">Mesh-ready models</a>
+          <a href="../specs/layer-package-repos.md">Layer packages</a>
+          <a href="../skippy/FAMILY_CERTIFY.md">Family certification</a>
+        </div>
+        <div class="footer-col">
+          <h2>Project</h2>
+          <a href="https://github.com/Mesh-LLM/mesh-llm">GitHub</a>
+          <a href="https://github.com/Mesh-LLM/mesh-llm/blob/main/ROADMAP.md">Roadmap</a>
+          <a href="https://github.com/Mesh-LLM/mesh-llm/blob/main/LICENSE">License</a>
+        </div>
+      </div>
+      <div class="footer-bottom">Mesh LLM is open source under MIT. Built with Rust, QUIC networking, and llama.cpp.</div>
+    </div>
+  </footer>
+</body>
+</html>

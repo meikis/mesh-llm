@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mesh Catalog - Mesh LLM</title>
+  <meta name="description" content="Browse mesh-ready models, layer packages, Hugging Face repositories, and run commands for Mesh LLM.">
+  <link rel="icon" href="../mesh-llm-logo.svg" type="image/svg+xml">
+  <style>
+    :root {
+      color-scheme: dark;
+      --background: #09090b;
+      --surface: #0c0c0f;
+      --surface-2: #111114;
+      --border: #27272a;
+      --border-soft: #1f1f23;
+      --text: #f4f4f5;
+      --muted: #a1a1aa;
+      --subtle: #71717a;
+      --blue: #3b82f6;
+      --blue-soft: rgba(59, 130, 246, 0.12);
+      --green: #22c55e;
+      --green-soft: rgba(34, 197, 94, 0.12);
+      --amber: #f59e0b;
+      --amber-soft: rgba(245, 158, 11, 0.12);
+      --radius: 8px;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--background);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: inherit; text-decoration: none; }
+    a:hover { color: white; }
+    code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    .shell { width: min(1120px, calc(100% - 32px)); margin: 0 auto; }
+    .nav { position: sticky; top: 0; z-index: 20; border-bottom: 1px solid var(--border-soft); background: rgba(9, 9, 11, 0.88); backdrop-filter: blur(16px); }
+    .nav-inner { height: 64px; display: flex; align-items: center; gap: 24px; }
+    .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 700; }
+    .brand img { width: 118px; height: auto; object-fit: contain; }
+    .nav-links { display: flex; align-items: center; gap: 18px; margin-left: auto; color: var(--muted); font-size: 14px; }
+    .button { display: inline-flex; align-items: center; justify-content: center; min-height: 38px; padding: 0 14px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface-2); color: var(--text); font-size: 14px; font-weight: 500; white-space: nowrap; }
+    .button.primary { border-color: white; background: white; color: #09090b; }
+    .hero { padding: 72px 0 34px; border-bottom: 1px solid var(--border-soft); }
+    h1 { max-width: 760px; margin: 0 0 16px; font-size: clamp(38px, 6vw, 68px); line-height: 1; letter-spacing: 0; }
+    .lead { max-width: 700px; margin: 0; color: var(--muted); font-size: 18px; }
+    .toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) repeat(4, minmax(130px, 160px)); gap: 10px; padding: 24px 0; }
+    .control { min-height: 40px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--muted); padding: 0 12px; display: flex; align-items: center; font-size: 14px; }
+    .catalog { padding: 0 0 72px; }
+    .table-card { overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { padding: 14px 16px; border-bottom: 1px solid var(--border-soft); text-align: left; vertical-align: top; }
+    th { color: var(--subtle); font-size: 12px; font-weight: 600; text-transform: uppercase; }
+    tr:last-child td { border-bottom: 0; }
+    td { color: var(--muted); }
+    td strong { color: var(--text); }
+    .badge-row { display: flex; flex-wrap: wrap; gap: 6px; }
+    .badge { display: inline-flex; align-items: center; min-height: 24px; padding: 0 8px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2); color: var(--muted); font-size: 12px; font-weight: 500; white-space: nowrap; }
+    .badge.green { color: #bbf7d0; border-color: rgba(34, 197, 94, 0.25); background: var(--green-soft); }
+    .badge.blue { color: #bfdbfe; border-color: rgba(59, 130, 246, 0.25); background: var(--blue-soft); }
+    .badge.amber { color: #fde68a; border-color: rgba(245, 158, 11, 0.25); background: var(--amber-soft); }
+    .note { margin-top: 16px; color: var(--subtle); font-size: 13px; }
+    .footer { border-top: 1px solid var(--border-soft); padding: 34px 0; color: var(--subtle); font-size: 13px; }
+    .footer-grid { display: grid; grid-template-columns: minmax(220px, 1.5fr) repeat(4, minmax(120px, 1fr)); gap: 28px; align-items: start; }
+    .footer-brand { display: grid; gap: 12px; max-width: 360px; }
+    .footer-brand img { width: 118px; height: auto; }
+    .footer-brand p, .footer-col a { margin: 0; color: var(--subtle); }
+    .footer-col { display: grid; gap: 8px; }
+    .footer-col h2 { margin: 0 0 4px; color: var(--text); font-size: 13px; line-height: 1.2; }
+    .footer-col a { font-size: 13px; }
+    .footer-bottom { margin-top: 28px; padding-top: 20px; border-top: 1px solid var(--border-soft); color: var(--subtle); }
+    @media (max-width: 900px) {
+      .toolbar { grid-template-columns: 1fr 1fr; }
+      .footer-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .nav-links a:not(.button) { display: none; }
+    }
+    @media (max-width: 640px) {
+      .shell { width: min(100% - 24px, 1120px); }
+      .toolbar { grid-template-columns: 1fr; }
+      .footer-grid { grid-template-columns: 1fr; }
+      th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5) { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <nav class="nav">
+    <div class="shell nav-inner">
+      <a class="brand" href="../">
+        <img src="../mesh-llm-logo.svg" alt="">
+      </a>
+      <div class="nav-links">
+        <a href="./">Catalog</a>
+        <a href="../docs/">Docs</a>
+        <a href="https://public.meshllm.cloud">Public Mesh</a>
+        <a href="https://github.com/Mesh-LLM/mesh-llm">GitHub</a>
+        <a class="button primary" href="../#install">Install</a>
+      </div>
+    </div>
+  </nav>
+
+  <header class="shell hero">
+    <h1>Catalog</h1>
+    <p class="lead">Browse mesh-ready models, layer packages, Hugging Face repositories, hardware guidance, and commands for public or private meshes.</p>
+  </header>
+
+  <main class="shell catalog">
+    <div class="toolbar" aria-label="Catalog filters">
+      <div class="control">Search models...</div>
+      <div class="control">Capability</div>
+      <div class="control">Runtime</div>
+      <div class="control">Hardware</div>
+      <div class="control">Source</div>
+    </div>
+
+    <div class="table-card">
+      <table>
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>Capabilities</th>
+            <th>Runtime</th>
+            <th>Source</th>
+            <th>Status</th>
+            <th>Run</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Qwen3 32B</strong><br><span>Q4_K_M GGUF</span></td>
+            <td>Text, reasoning</td>
+            <td>Multi-machine</td>
+            <td><a href="https://huggingface.co/">Hugging Face</a></td>
+            <td>
+              <div class="badge-row">
+                <span class="badge green">Layer packages available</span>
+                <span class="badge blue">Mesh-ready</span>
+              </div>
+            </td>
+            <td><code>mesh-llm --model Qwen3-32B</code></td>
+          </tr>
+          <tr>
+            <td><strong>Qwen3 8B</strong><br><span>Q4_K_M GGUF</span></td>
+            <td>Text, reasoning</td>
+            <td>Single-machine</td>
+            <td>Mesh catalog</td>
+            <td><span class="badge blue">Mesh-ready</span></td>
+            <td><code>mesh-llm --model Qwen3-8B</code></td>
+          </tr>
+          <tr>
+            <td><strong>Llama 3.1 70B</strong><br><span>GGUF</span></td>
+            <td>Text, tools</td>
+            <td>Multi-machine</td>
+            <td><a href="https://huggingface.co/">Hugging Face</a></td>
+            <td><span class="badge amber">Layer package metadata pending</span></td>
+            <td><code>mesh-llm --model &lt;hf-url&gt;</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="note">This is a static scaffold. The next step is to generate these rows from Mesh catalog metadata and Hugging Face model/layer-package repositories, including contribution and certification status.</p>
+  </main>
+
+  <footer class="footer">
+    <div class="shell">
+      <div class="footer-grid">
+        <div class="footer-brand">
+          <img src="../mesh-llm-logo.svg" alt="Mesh LLM">
+          <p>Run bigger local models by linking the machines you already have.</p>
+        </div>
+        <div class="footer-col">
+          <h2>Product</h2>
+          <a href="./">Catalog</a>
+          <a href="https://public.meshllm.cloud">Public Mesh</a>
+          <a href="../#install">Install</a>
+        </div>
+        <div class="footer-col">
+          <h2>Docs</h2>
+          <a href="../docs/">Documentation</a>
+          <a href="../USAGE.md">Install and usage</a>
+          <a href="../CLI.md">CLI reference</a>
+        </div>
+        <div class="footer-col">
+          <h2>Models</h2>
+          <a href="./">Mesh-ready models</a>
+          <a href="../specs/layer-package-repos.md">Layer packages</a>
+          <a href="../skippy/FAMILY_CERTIFY.md">Family certification</a>
+          <a href="../BENCHMARKS.md">Benchmarks</a>
+        </div>
+        <div class="footer-col">
+          <h2>Project</h2>
+          <a href="https://github.com/Mesh-LLM/mesh-llm">GitHub</a>
+          <a href="https://github.com/Mesh-LLM/mesh-llm/blob/main/ROADMAP.md">Roadmap</a>
+          <a href="https://github.com/Mesh-LLM/mesh-llm/blob/main/LICENSE">License</a>
+        </div>
+      </div>
+      <div class="footer-bottom">Mesh LLM is open source under MIT. Built with Rust, QUIC networking, and llama.cpp.</div>
+    </div>
+  </footer>
+</body>
+</html>

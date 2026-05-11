@@ -37,6 +37,11 @@ pub(super) struct RuntimeResourcePlanInput<'a> {
     pub(super) vram_bytes: u64,
     pub(super) metadata: Option<&'a GgufCompactMeta>,
     pub(super) kv_cache_quant: GgufKvCacheQuant,
+    /// When `true`, the user explicitly set `--cache-type-k` or `--cache-type-v`
+    /// on the CLI.  The planner must not negotiate a different KV quant because
+    /// the downstream load will honour the user's override, not the planner's
+    /// negotiated value — producing a context/memory mismatch.
+    pub(super) kv_quant_user_locked: bool,
     /// Fraction of the model's layers that reside on this node (0.0–1.0).
     /// When `Some`, the KV cache budget is scaled by this fraction because
     /// each pipeline-parallel stage only holds KV state for its own layers.
@@ -52,6 +57,11 @@ pub(super) fn plan_runtime_resources(input: RuntimeResourcePlanInput<'_>) -> Run
                 .unwrap_or_else(|| planned_context_length(input, input.kv_cache_quant)),
             None,
         )
+    } else if input.kv_quant_user_locked {
+        // User explicitly set --cache-type-k/v; do not negotiate a different
+        // quant or the planned context will assume a budget the real load
+        // cannot use.
+        (planned_context_length(input, input.kv_cache_quant), None)
     } else {
         negotiate_context_and_kv_quant(input)
     };
@@ -237,6 +247,7 @@ mod tests {
             vram_bytes: 24_000_000_000,
             metadata: Some(&metadata),
             kv_cache_quant: GgufKvCacheQuant::F16,
+            kv_quant_user_locked: false,
             local_layer_fraction: None,
         });
 
@@ -255,6 +266,7 @@ mod tests {
             vram_bytes: 80_000_000_000,
             metadata: Some(&metadata),
             kv_cache_quant: GgufKvCacheQuant::F16,
+            kv_quant_user_locked: false,
             local_layer_fraction: None,
         });
 
@@ -277,6 +289,7 @@ mod tests {
             vram_bytes: 6_300_000_000,
             metadata: Some(&metadata),
             kv_cache_quant: GgufKvCacheQuant::F16,
+            kv_quant_user_locked: false,
             local_layer_fraction: None,
         });
 
@@ -298,6 +311,7 @@ mod tests {
             vram_bytes: 80_000_000_000,
             metadata: Some(&metadata),
             kv_cache_quant: GgufKvCacheQuant::F16,
+            kv_quant_user_locked: false,
             local_layer_fraction: None,
         });
         let q4_plan = plan_runtime_resources(RuntimeResourcePlanInput {
@@ -307,6 +321,7 @@ mod tests {
             vram_bytes: 80_000_000_000,
             metadata: Some(&metadata),
             kv_cache_quant: GgufKvCacheQuant::Q4_0,
+            kv_quant_user_locked: false,
             local_layer_fraction: None,
         });
 
@@ -326,6 +341,7 @@ mod tests {
             vram_bytes: 24_000_000_000,
             metadata: None,
             kv_cache_quant: GgufKvCacheQuant::F16,
+            kv_quant_user_locked: false,
             local_layer_fraction: None,
         });
 
@@ -349,6 +365,7 @@ mod tests {
             vram_bytes: 80_000_000_000,
             metadata: Some(&metadata),
             kv_cache_quant: GgufKvCacheQuant::F16,
+            kv_quant_user_locked: false,
             local_layer_fraction: None,
         });
 
@@ -382,6 +399,7 @@ mod tests {
             vram_bytes: 206_000_000_000,
             metadata: Some(&metadata),
             kv_cache_quant: GgufKvCacheQuant::Q4_0,
+            kv_quant_user_locked: false,
             local_layer_fraction: None,
         });
 
@@ -393,6 +411,7 @@ mod tests {
             vram_bytes: 206_000_000_000,
             metadata: Some(&metadata),
             kv_cache_quant: GgufKvCacheQuant::Q4_0,
+            kv_quant_user_locked: false,
             local_layer_fraction: Some(local_fraction),
         });
 
@@ -421,14 +440,18 @@ mod tests {
             vram_bytes: 6_300_000_000,
             metadata: Some(&metadata),
             kv_cache_quant: GgufKvCacheQuant::F16,
+            kv_quant_user_locked: false,
             local_layer_fraction: None,
         });
 
-        // With negotiation the planner should try q8_0 / q4_0 and reach 32K.
-        assert!(
-            plan.context_length > 8192,
-            "negotiation should improve context beyond f16-only: got {}",
-            plan.context_length
+        // With negotiation the planner tries q4_0 and reaches 16K (the best
+        // achievable given 1.3GB KV budget — not enough for full 32K native
+        // even at q4_0, but a 2× improvement over the 8K that f16 affords).
+        assert_eq!(
+            plan.context_length,
+            16_384,
+            "negotiation should reach 16K with q4_0, got {}K",
+            plan.context_length / 1024
         );
         assert!(
             plan.negotiated_kv_quant.is_some(),
@@ -446,6 +469,7 @@ mod tests {
             vram_bytes: 80_000_000_000,
             metadata: Some(&metadata),
             kv_cache_quant: GgufKvCacheQuant::F16,
+            kv_quant_user_locked: false,
             local_layer_fraction: None,
         });
 
@@ -453,6 +477,47 @@ mod tests {
         assert_eq!(
             plan.negotiated_kv_quant, None,
             "should not negotiate when f16 already reaches native context"
+        );
+    }
+
+    #[test]
+    fn user_locked_kv_quant_skips_negotiation() {
+        let metadata = gqa_metadata(32_768);
+        // With kv_quant_user_locked=false, the planner negotiates to q4_0 and
+        // reaches 16K (same scenario as snaps_auto_context_down).
+        let unlocked = plan_runtime_resources(RuntimeResourcePlanInput {
+            ctx_size_override: None,
+            parallel_override: Some(1),
+            model_bytes: 5_000_000_000,
+            vram_bytes: 6_300_000_000,
+            metadata: Some(&metadata),
+            kv_cache_quant: GgufKvCacheQuant::F16,
+            kv_quant_user_locked: false,
+            local_layer_fraction: None,
+        });
+        assert!(
+            unlocked.negotiated_kv_quant.is_some(),
+            "unlocked planner should negotiate"
+        );
+
+        // Same scenario but user locked f16 — planner must NOT negotiate.
+        let locked = plan_runtime_resources(RuntimeResourcePlanInput {
+            ctx_size_override: None,
+            parallel_override: Some(1),
+            model_bytes: 5_000_000_000,
+            vram_bytes: 6_300_000_000,
+            metadata: Some(&metadata),
+            kv_cache_quant: GgufKvCacheQuant::F16,
+            kv_quant_user_locked: true,
+            local_layer_fraction: None,
+        });
+        assert_eq!(
+            locked.negotiated_kv_quant, None,
+            "user-locked KV quant must not be overridden by negotiation"
+        );
+        assert!(
+            locked.context_length < unlocked.context_length,
+            "locked f16 should produce smaller context than negotiated q4_0"
         );
     }
 }

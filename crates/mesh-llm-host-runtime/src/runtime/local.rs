@@ -430,11 +430,24 @@ pub(super) async fn start_runtime_local_model(
     // For layer packages, try to read GGUF metadata from the shared metadata
     // file inside the package.  This carries the model's native context length,
     // head counts, and KV dimensions needed for accurate KV budget planning.
-    let compact_meta = if let Some(ref package) = layer_package {
-        scan_layer_package_metadata(package)
-    } else {
-        models::gguf::scan_gguf_compact_meta(spec.model_path)
+    // Runs on a blocking thread because the underlying calls do filesystem I/O
+    // (stat, open, read GGUF headers).
+    let compact_meta = {
+        let package_clone = layer_package.clone();
+        let model_path = spec.model_path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            if let Some(ref package) = package_clone {
+                scan_layer_package_metadata(package)
+            } else {
+                models::gguf::scan_gguf_compact_meta(&model_path)
+            }
+        })
+        .await
+        .ok()
+        .flatten()
     };
+    let kv_quant_user_locked =
+        spec.cache_type_k_override.is_some() || spec.cache_type_v_override.is_some();
     let plan = plan_runtime_resources(RuntimeResourcePlanInput {
         ctx_size_override: spec.ctx_size_override,
         parallel_override: spec.parallel_override,
@@ -442,6 +455,7 @@ pub(super) async fn start_runtime_local_model(
         vram_bytes: my_vram,
         metadata: compact_meta.as_ref(),
         kv_cache_quant,
+        kv_quant_user_locked,
         local_layer_fraction,
     });
 

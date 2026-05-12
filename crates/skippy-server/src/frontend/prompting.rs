@@ -85,8 +85,6 @@ impl StageOpenAiBackend {
         Ok(parsed_tool_calls_from_message_json(&parsed_json, request))
     }
 
-    #[allow(clippy::too_many_arguments)]
-
     pub(super) fn tokenize(&self, prompt: &str) -> OpenAiResult<Vec<i32>> {
         self.tokenize_with_options(prompt, true)
     }
@@ -196,5 +194,15 @@ impl StageOpenAiBackend {
             return self.inject_hook_text_into_session(session_id, &text);
         }
         Ok(None)
+    }
+
+    pub(super) fn generation_hooks_active(
+        &self,
+        hook_request: &Option<ChatCompletionRequest>,
+        hook_runtime: Option<&tokio::runtime::Handle>,
+    ) -> bool {
+        self.hook_policy.is_some()
+            && hook_runtime.is_some()
+            && hook_request.as_ref().is_some_and(chat_mesh_hooks_enabled)
     }
 }

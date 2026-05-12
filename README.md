@@ -63,6 +63,18 @@ curl http://localhost:9337/v1/chat/completions \
   -d '{"model":"GLM-4.7-Flash-Q4_K_M","messages":[{"role":"user","content":"hello"}]}'
 ```
 
+## Supported model families
+
+Mesh LLM's stage runtime tracks llama.cpp family parity with reviewed GGUF representatives per family. The current reviewed support set covers 72 P0/P1 family rows, with 89 certified rows in the full llama.cpp parity inventory:
+
+```text
+Arcee, Baichuan, Bloom, ChatGLM, CodeShell, Cohere2, Deci, DeepSeek, DeepSeek2, DeepSeek3, DeepSeek-OCR, EXAONE, EXAONE4, EXAONE-MoE, Falcon, Falcon-H1, Gemma, Gemma2, Gemma3, Gemma3n, Gemma4, GLM4, GLM-4.7 Flash, GLM4-MoE, GPT2, GPT-NeoX, Granite, Granite-Hybrid, Granite-MoE, Hunyuan-Dense, Hunyuan-MoE, Hunyuan-VL/HunyuanOCR, InternLM2, Jamba, Kimi Linear, LFM2, Llama, Maincoder, Mamba, Mamba2, MiniCPM, MiniCPM3, MiniMax M2.7, Mistral, MPT, OLMo, OLMo2, OLMoE, OpenELM, Phi, Phi2, PhiMoE, Plamo3, PLM, Qwen2, Qwen2-MoE, Qwen2-VL, Qwen3 dense, Qwen3-MoE, Qwen3.5 recurrent, Qwen3Next, Qwen3-VL, Qwen3-VL-MoE, Refact, RWKV6, RWKV7, SmallThinker, SmolLM3, StableLM, StarCoder2, XVerse
+```
+
+Split multimodal serving is certified for Qwen2-VL, Qwen3-VL, Qwen3-VL-MoE, HunyuanOCR/Hunyuan-VL, and DeepSeek-OCR using real GGUF plus projector fixtures. Granite-MoE is layout-parity support from a tiny random GGUF and should be replaced with a real small artifact when one is available. DeepSeek3 and EXAONE-MoE are supported through package-backed stages because the full GGUFs are too large for the cheap local baseline.
+
+See [docs/skippy/FAMILY_STATUS.md](docs/skippy/FAMILY_STATUS.md) for the full artifact, split, wire dtype, cache policy, and exception matrix. See [docs/skippy/LLAMA_PARITY.md](docs/skippy/LLAMA_PARITY.md) for the remaining llama.cpp parity queue.
+
 ## Common workflows
 
 ### 1. Try the public mesh
@@ -91,7 +103,7 @@ just build
 
 Requires: `just`, `cmake`, Rust toolchain, Node.js 24 + npm. NVIDIA GPU builds need `nvcc` (CUDA toolkit). AMD GPU builds need ROCm/HIP. Vulkan GPU builds need the Vulkan development files plus `glslc`. CPU-only and Jetson/Tegra also work. For source builds, `just build` auto-detects CUDA vs ROCm vs Vulkan on Linux, or you can force `backend=rocm` or `backend=vulkan`. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
-Windows source builds are also supported for `cuda`, `rocm`/`hip`, `vulkan`, and `cpu` via `just build`. Metal remains macOS-only. Tagged stable GitHub releases publish macOS bundles plus Linux CPU, Linux ARM64 CPU, Linux CUDA, Linux CUDA Blackwell, Linux ROCm, and Linux Vulkan bundles. Prereleases use the same workflow and can optionally skip the Linux CUDA, CUDA Blackwell, ROCm, and Vulkan bundles. The Linux ARM64 CPU artifact is `mesh-llm-aarch64-unknown-linux-gnu.tar.gz`. In install and release contexts, `arm64` and `aarch64` mean the same 64-bit ARM target, and generic 32-bit ARM is not a published release target. Windows publish jobs are currently commented out in `.github/workflows/release.yml`, but you can still generate the matching local Windows artifacts with `just release-build-windows`, `just release-build-cuda-windows`, `just release-build-cuda-blackwell-windows`, `just release-build-rocm-windows`, `just release-build-vulkan-windows`, and the matching `release-bundle-*-windows` recipes.
+Windows source builds are also supported for `cuda`, `rocm`/`hip`, `vulkan`, and `cpu` via `just build`. Metal remains macOS-only. Tagged stable GitHub releases publish macOS bundles plus Linux CPU, Linux ARM64 CPU, Linux CUDA, Linux CUDA Blackwell, Linux ROCm, Linux Vulkan, Windows CPU, Windows CUDA, Windows ROCm, and Windows Vulkan bundles. Prereleases use the same workflow and can optionally skip the CUDA, CUDA Blackwell, ROCm, and Vulkan bundles. The Linux ARM64 CPU artifact is `mesh-llm-aarch64-unknown-linux-gnu.tar.gz`. In install and release contexts, `arm64` and `aarch64` mean the same 64-bit ARM target, and generic 32-bit ARM is not a published release target.
 
 ## Run
 Once installed, you can run:
@@ -140,7 +152,7 @@ Line-oriented pretty sessions accept these commands after startup is ready:
 - `i` prints the current mesh status snapshot
 - `q` quits cleanly
 
-For the full event taxonomy and field reference, see [crates/mesh-llm/src/cli/output/EVENTS.md](crates/mesh-llm/src/cli/output/EVENTS.md).
+For the full event taxonomy and field reference, see [crates/mesh-llm-host-runtime/src/cli/output/EVENTS.md](crates/mesh-llm-host-runtime/src/cli/output/EVENTS.md).
 
 ## How it works
 
@@ -195,11 +207,19 @@ mesh-llm serve --auto --model GLM-4.7-Flash-Q4_K_M --mesh-name "poker-night" --p
 ```
 Everyone runs the same command. First person creates it, everyone else discovers "poker-night" and joins automatically. Use `--publish` to make your named mesh discoverable on Nostr; without it the mesh is private but still joinable via invite token.
 
+You can also join a named mesh explicitly:
+```bash
+mesh-llm serve --discover "poker-night"    # discover by name, join, and serve
+mesh-llm client --discover "poker-night"   # discover by name, join as client
+```
+
 ### Auto-discover
 ```bash
 mesh-llm serve --auto                      # discover, join, and serve a model
 mesh-llm client --auto                     # join as API-only client (no GPU)
+mesh-llm serve --discover "my-mesh"        # discover a named mesh and join it
 mesh-llm discover                          # browse available meshes
+mesh-llm discover --name "poker-night"     # search for a specific mesh by name
 mesh-llm gpus                              # inspect local GPUs and stable IDs
 ```
 
@@ -277,6 +297,8 @@ Precedence rules:
 - Explicit `--ctx-size` overrides configured `ctx_size` for the selected startup models.
 - Plugin entries still live in the same file.
 
+Telemetry metrics export is available through the built-in `telemetry` plugin. Configure a `[telemetry]` endpoint to export metrics; no collector is hard-coded, and the plugin can be opted out with `[[plugin]] name = "telemetry" enabled = false`. See [docs/plugins/telemetry.md](docs/plugins/telemetry.md).
+
 Pinned startup notes:
 
 - `assignment = "pinned"` requires every configured `[[models]]` entry to include a `gpu_id`.
@@ -352,8 +374,11 @@ The console supports image, audio, and file attachments. Large attachments use r
 
 | Family / model type | Vision | Audio | Notes |
 |---|---|---|---|
-| `Qwen3-VL`, `Qwen3VL` | yes | no | Example: `Qwen3VL-2B-Instruct-Q4_K_M` |
-| `Qwen2-VL`, `Qwen2.5-VL` | yes | no | Vision-capable Qwen VL families |
+| `Qwen3-VL`, `Qwen3VL` | yes | no | Split multimodal certified with `Qwen3VL-2B-Instruct-Q4_K_M` plus `mmproj-Qwen3VL-2B-Instruct-Q8_0` |
+| `Qwen2-VL`, `Qwen2.5-VL` | yes | no | Split multimodal certified with `Qwen2-VL-2B-Instruct-Q4_K_M` plus `mmproj-Qwen2-VL-2B-Instruct-f16` |
+| `Qwen3-VL-MoE`, `Qwen3VLMoE` | yes | no | Split multimodal certified with the Qwen3-VL 30B A3B MXFP4 MoE GGUF plus projector |
+| `HunyuanOCR`, `Hunyuan-VL` | yes | no | Split multimodal certified with `HunyuanOCR-Q8_0` plus `mmproj-HunyuanOCR-Q8_0` |
+| `DeepSeek-OCR`, `deepseek2ocr` | yes | no | Split multimodal certified with `DeepSeek-OCR-Q8_0` plus `mmproj-DeepSeek-OCR-Q8_0` |
 | `LLaVA`, `mllama`, `PaliGemma`, `Idefics`, `Molmo`, `InternVL`, `GLM-4V`, `Ovis`, `Florence` | yes | no | Detected as vision-capable families |
 | `Qwen2-Audio` | no | yes | Audio-capable family |
 | `SeaLLM-Audio` | no | yes | Audio-capable family |
@@ -516,7 +541,7 @@ mesh-llm client --join <token>
 mesh-llm serve --auto --model GLM-4.7-Flash-Q4_K_M --mesh-name "poker-night" --publish
 ```
 
-Everyone runs the same command. The first node creates the mesh, the rest discover and join it automatically. Use `--publish` so your named mesh appears in Nostr discovery; without it you must share the invite token manually.
+Everyone runs the same command. The first node creates the mesh, the rest discover and join it automatically. Others can also join with `mesh-llm serve --discover "poker-night"` or `mesh-llm client --discover "poker-night"`. Use `--publish` so your named mesh appears in Nostr discovery; without it you must share the invite token manually.
 
 ### 5. Serve more than one model
 
@@ -614,6 +639,11 @@ You can also try the hosted demo:
 - [docs/plugins/README.md](docs/plugins/README.md) for the plugin system and blackboard internals
 - [docs/design/VIRTUAL_LLM.md](docs/design/VIRTUAL_LLM.md) for inter-model collaboration design
 - [crates/mesh-llm/README.md](crates/mesh-llm/README.md) for Rust crate structure
+- [crates/mesh-llm-identity/README.md](crates/mesh-llm-identity/README.md) for shared owner identity and envelope crypto
+- [crates/mesh-llm-protocol/README.md](crates/mesh-llm-protocol/README.md) for shared mesh wire protocol types and frame helpers
+- [crates/mesh-llm-routing/README.md](crates/mesh-llm-routing/README.md) for shared routing targets and model placement helpers
+- [crates/mesh-llm-types/README.md](crates/mesh-llm-types/README.md) for shared protocol-facing model and mesh data types
+- [crates/mesh-llm-ui/README.md](crates/mesh-llm-ui/README.md) for web console source, build, and embedded asset ownership
 - [ROADMAP.md](ROADMAP.md) for future work
 
 ## Community

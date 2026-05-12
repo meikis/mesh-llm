@@ -1,6 +1,14 @@
 [workspace]
 members = [
     "crates/mesh-llm",
+    "crates/mesh-llm-gpu-bench",
+    "crates/mesh-llm-host-runtime",
+    "crates/mesh-llm-identity",
+    "crates/mesh-llm-protocol",
+    "crates/mesh-llm-routing",
+    "crates/mesh-llm-system",
+    "crates/mesh-llm-types",
+    "crates/mesh-llm-ui",
     "crates/mesh-llm-plugin",
     "crates/mesh-client",
     "crates/mesh-api",
@@ -10,7 +18,9 @@ members = [
     "crates/model-ref",
     "crates/model-artifact",
     "crates/model-hf",
+    "crates/model-resolver",
     "crates/skippy-protocol",
+    "crates/skippy-coordinator",
     "crates/skippy-topology",
     "crates/skippy-cache",
     "crates/skippy-metrics",
@@ -21,6 +31,7 @@ members = [
     "crates/skippy-server",
     "crates/metrics-server",
     "crates/skippy-model-package",
+    "crates/model-package",
     "crates/skippy-correctness",
     "crates/llama-spec-bench",
     "crates/skippy-bench",
@@ -45,3 +56,12 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+
+# Do not remove this section: direct GGUF debug startup spends most of its time
+# hashing the source model via sha2/sha2-asm before native skippy model open,
+# so keep those crates near release speed in dev builds.
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.sha2-asm]
+opt-level = 3

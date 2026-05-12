@@ -70,7 +70,7 @@ libraries. The only durable llama.cpp patch queue is
 ## Project Structure
 
 - `crates/mesh-llm/src/` — Rust source
-- `crates/mesh-llm/ui/` — React web console (shadcn/ui patterns, see https://ui.shadcn.com/llms.txt)
+- `crates/mesh-llm-ui/` — React web console and embedded asset crate (shadcn/ui patterns, see https://ui.shadcn.com/llms.txt)
 - `docs/` — Project docs, grouped by topic
 - `docs/design/` — Architecture, protocol, and testing docs
 - `docs/moe/` — MoE ranking, placement, and CLI plans
@@ -132,6 +132,14 @@ When to split a file.
 - Split a file when it contains multiple separable responsibilities, when navigation becomes difficult, or when tests naturally cluster by concern.
 - Do not split purely to reduce line count if the code still represents one coherent object or subsystem.
 
+1k LoC refactoring rule.
+
+- When touching a source file that is already over 1,000 lines, first check whether the change adds or exposes a separable responsibility.
+- If it does, split that responsibility into a semantically named module as part of the change, and keep the new file under 1,000 lines.
+- If a full split is too risky for the current task, make the smallest useful extraction and call out the remaining oversized file in the final summary.
+- Add or move tests so the extracted module owns tests for the behavior it now owns.
+- Do not create generic buckets just to reduce line count; split by domain responsibility and keep ownership obvious.
+
 Naming rule.
 
 - File and module names should describe responsibility, not implementation detail.
@@ -183,7 +191,7 @@ When iterating on the plugin protocol, always consider protocol compatibility.
 
 ## UI Notes
 
-For changes in `crates/mesh-llm/ui/`, use components and compose interfaces consistently with shadcn/ui patterns. Prefer extending existing primitives in `ui/src/components/ui/` over ad-hoc markup.
+For changes in `crates/mesh-llm-ui/`, use components and compose interfaces consistently with shadcn/ui patterns. Prefer extending existing primitives in `src/components/ui/` over ad-hoc markup.
 
 ## Testing
 
@@ -193,7 +201,7 @@ Testing matters more than usual in this project because:
 
 - Nodes run on different machines with different hardware and OS versions. Bugs that don't reproduce locally can appear in real deployments.
 - The mesh protocol is a distributed system — gossip, election, and routing interact across nodes. Single-node unit tests don't catch protocol-level regressions.
-- The public mesh at anarchai.org runs continuously. Breaking changes that pass local tests can take down live inference for real users.
+- The public mesh at meshllm.cloud runs continuously. Breaking changes that pass local tests can take down live inference for real users.
 - Multimodal, MoE splitting, and multi-model routing all have complex interaction paths that are hard to reason about statically.
 
 When making changes that touch gossip, routing, proxy, election, or capability advertisement, test against at least two nodes before merging. The deploy checklist above is not optional.

@@ -78,25 +78,26 @@ mesh-llm serve
 
 ### 0c. Terminal dashboard smoke
 
-The pretty dashboard uses raw mode, the alternate screen, and mouse capture when both stdin and stderr are interactive TTYs and `TERM` supports a real terminal. It should fall back to line-oriented pretty output when stdin is not a TTY, stderr is not a TTY, or `TERM` is empty / `dumb`.
+The pretty dashboard uses raw mode and the alternate screen when both stdin and stderr are interactive TTYs and `TERM` supports a real terminal. It should leave native terminal text selection available and fall back to line-oriented pretty output when stdin is not a TTY, stderr is not a TTY, or `TERM` is empty / `dumb`.
 
 Run these manual checks after changes to `runtime/interactive.rs` or `cli/output/mod.rs`:
 
 | Shell | Setup | Expected result |
 |---|---|---|
-| Plain terminal | `mesh-llm serve --model Qwen2.5-3B` | Dashboard renders, resizes cleanly, `h`/`i`/`q` work, and exit restores the prompt. |
+| Plain terminal | `mesh-llm serve --model Qwen2.5-3B` | Dashboard renders, resizes cleanly, `Tab`/`Shift-Tab` focus panels, `Enter` or `z` opens the focused panel full screen, `Esc` or `z` returns to the multi-panel view, terminal text selection works, `h`/`i`/`q` work, and exit restores the prompt. |
 | Piped stdin | `true | mesh-llm serve --model Qwen2.5-3B` | No line reader is spawned; pretty output stays line-oriented. |
 | Unsupported terminal | `TERM=dumb mesh-llm serve --model Qwen2.5-3B` | Dashboard is disabled and pretty output uses fallback lines. |
 | tmux, mouse off | `tmux new 'mesh-llm serve --model Qwen2.5-3B'` | Dashboard renders and exits cleanly; keyboard navigation works. |
-| tmux, mouse on | Inside tmux: `set -g mouse on`, then run mesh-llm | Wheel events page the dashboard instead of disappearing into tmux history. |
+| tmux, mouse on | Inside tmux: `set -g mouse on`, then run mesh-llm | Dashboard renders and exits cleanly; terminal/tmux text selection remains usable. |
 | GNU screen default | `screen mesh-llm serve --model Qwen2.5-3B` | If the alternate screen is unavailable, fallback behavior or clean restoration is acceptable. |
 | GNU screen altscreen | In `~/.screenrc`: `altscreen on`, then run mesh-llm | Dashboard enters/leaves the alternate screen cleanly. |
 
 For terminal restoration QA:
 
 - Resize during startup, after llama-server readiness, and while the dashboard has focus on different panels.
+- Open the mesh events/log panel full screen and verify long log lines wrap within the panel.
 - Detach and reattach tmux/screen while the dashboard is active.
-- Click dashboard panels and use the mouse wheel in terminal, tmux, and screen.
+- Select visible dashboard text with the terminal mouse selection gesture and verify it can be copied.
 - Press `q` and `Ctrl+C`; the cursor should be visible and the shell prompt should not remain in raw mode.
 - A `SIGKILL` (`kill -9`) cannot run in-process cleanup. If a terminal is left corrupted after a hard kill, recover with `reset` or by closing the terminal pane.
 
@@ -258,7 +259,7 @@ curl -X DELETE localhost:3131/api/runtime/models/Llama-3.2-1B-Instruct-Q4_K_M
 ### 11. Console live-state and wakeable capacity
 
 ```bash
-cd crates/mesh-llm/ui/
+cd crates/mesh-llm-ui/
 npm run test:run
 npm run typecheck
 just build
@@ -417,7 +418,7 @@ curl localhost:3131/api/discover # Nostr meshes (current mesh marked by mesh_id)
 
 ## Control-Plane Protocol (Protobuf v1)
 
-The control plane uses QUIC ALPN `mesh-llm/1` with the `meshllm.node.v1` protobuf schema. All five scoped control-plane streams use 4-byte LE framing followed by protobuf bytes.
+The control plane uses QUIC ALPN `mesh-llm/1` with the `meshllm.node.v1` protobuf schema. Scoped control-plane streams use 4-byte LE framing followed by protobuf bytes. Skippy control/artifact streams are advertised through gossip subprotocol features and run through mesh `STREAM_SUBPROTOCOL` (0x0d); activation transport stays on `skippy-stage/1`.
 
 | Stream | Type | Format |
 |--------|------|--------|
@@ -426,6 +427,9 @@ The control plane uses QUIC ALPN `mesh-llm/1` with the `meshllm.node.v1` protobu
 | 0x05 | ROUTE_REQUEST | protobuf `RouteTableRequest` / `RouteTable` |
 | 0x06 | PEER_DOWN | protobuf `PeerDown` |
 | 0x07 | PEER_LEAVING | protobuf `PeerLeaving` |
+| 0x0b | CONFIG_SUBSCRIBE | protobuf `ConfigSubscribe` / `ConfigSnapshotResponse` |
+| 0x0c | CONFIG_PUSH | protobuf `ConfigPush` / `ConfigPushResponse` |
+| 0x0d | STREAM_SUBPROTOCOL | protobuf `MeshSubprotocolOpen`, then subprotocol-owned bytes |
 
 Raw TCP relay streams (0x02 RPC, 0x04 HTTP) are unchanged.
 
@@ -440,6 +444,35 @@ DEBUG mesh: admitted peer <peer_id>
 ```
 
 Absence of JSON-related log lines for streams 0x01/0x03/0x05/0x06/0x07 confirms the protobuf path is active.
+
+### Verifying Skippy peer artifact transfer
+
+For a layer-package split where the coordinator already has the HF package
+cached and a worker does not:
+
+- Current/current mesh: the worker may use mesh `STREAM_SUBPROTOCOL` (0x0d)
+  to open `skippy-stage/1`, then Skippy artifact-transfer stream 0x03, to
+  fetch only its assigned package files before the normal HF fallback path.
+- Rolling-update compatibility: nodes should still accept the legacy
+  `skippy-stage/1` artifact-transfer stream from an already-running pre-update
+  peer, but new outbound artifact transfer should use `STREAM_SUBPROTOCOL`.
+- Current/released mixed mesh: a released coordinator without
+  advertised `skippy-stage/1` `artifact-transfer` support must not be dialed
+  for artifact transfer; the worker must fall back to local/HF package
+  resolution.
+- Default public-mesh safety: with `MESH_LLM_ARTIFACT_TRANSFER` unset, the node
+  must advertise no `artifact-transfer` feature, reject inbound artifact
+  transfer requests, and continue through local/HF fallback resolution.
+- Trusted-owner opt-in: with `MESH_LLM_ARTIFACT_TRANSFER=trusted`, artifact
+  transfer is eligible only for same-owner or explicitly trusted-owner peers.
+- Explicit lab opt-in: with `MESH_LLM_ARTIFACT_TRANSFER=open`, the node may
+  advertise and serve artifact transfer to any peer that is authorized by the
+  active split topology.
+- Privacy check: gossip/status output must not include local package inventory,
+  cache roots, or artifact file lists; only subprotocol feature support is
+  advertised.
+- Integrity check: corrupt or same-sized cached artifacts must be refetched or
+  rejected by SHA-256 verification before stage load.
 
 ## Single-machine testing with ephemeral keys
 

@@ -9,7 +9,7 @@ This file covers local build and development workflows for this repository.
 - `just`
 - `cmake`
 - Rust toolchain (`cargo`)
-- Node.js 24 + npm (for UI development)
+- Node.js 24 + pnpm (for UI development)
 
 **macOS**: Apple Silicon. Metal is used automatically.
 
@@ -27,6 +27,19 @@ Build everything (patched llama.cpp, mesh binary, and UI production build):
 
 ```bash
 just build
+```
+
+`just build` builds the mesh binary in release mode. For day-to-day iteration
+where the final release link is the slow step, use the debug-profile shortcut:
+
+```bash
+just build-dev
+```
+
+You can also keep the normal recipe shape and select the profile explicitly:
+
+```bash
+MESH_LLM_BUILD_PROFILE=dev just build
 ```
 
 On Linux, `just build` auto-detects CUDA vs ROCm vs Vulkan. For NVIDIA, make sure `nvcc` is in your `PATH` first:
@@ -94,6 +107,9 @@ just bundle
 
 ## UI development workflow
 
+The React console and embedded asset crate live in `crates/mesh-llm-ui/`.
+The host binary serves the built assets through the management API.
+
 Use this two-terminal flow for UI development.
 
 Terminal A (run `mesh-llm` yourself):
@@ -157,8 +173,8 @@ For the repo's CI design rules and workflow responsibilities, see [`docs/CI_GUID
 
 | Changed paths                                                                                           | `linux` / `macos` | `linux_cuda` / `linux_rocm` / `linux_vulkan` / `windows` |
 | ------------------------------------------------------------------------------------------------------- | ----------------- | -------------------------------------------------------- |
-| `crates/mesh-llm/src/**`, `Cargo.*`, `Justfile`, `scripts/**`, `crates/mesh-llm/build.rs`, `crates/mesh-llm-plugin/**`, `crates/mesh-llm/tests/**`, `crates/mesh-llm/proto/**` | ✅ runs           | ✅ runs                                                  |
-| `crates/mesh-llm/ui/**`                                                                                        | ✅ runs           | ⏭ skipped                                               |
+| `crates/mesh-llm-host-runtime/**`, `crates/mesh-llm-system/**`, `Cargo.*`, `Justfile`, `scripts/**`, `crates/mesh-llm/build.rs`, `crates/mesh-llm-plugin/**`, `crates/mesh-llm/tests/**`, `crates/mesh-llm-protocol/proto/**` | ✅ runs           | ✅ runs                                                  |
+| `crates/mesh-llm-ui/**`                                                                                        | ✅ runs           | ⏭ skipped                                               |
 | `**/*.md`, `docs/**`, anything else                                                                     | ⏭ skipped        | ⏭ skipped                                               |
 | Manual `workflow_dispatch`                                                                              | ✅ runs           | ✅ runs                                                  |
 
@@ -166,59 +182,33 @@ For the repo's CI design rules and workflow responsibilities, see [`docs/CI_GUID
 
 To confirm builds are skipped on a docs-only change, open a PR and push a commit that touches only a `.md` file (e.g. add a blank line to `README.md`). All build jobs should appear as **Skipped** in the Actions tab — only the `changes` job runs.
 
-To confirm UI-only changes skip the GPU backend jobs, push a commit touching only `crates/mesh-llm/ui/**`. The `linux` and `macos` jobs run; `linux_cuda`, `linux_rocm`, `linux_vulkan`, and `windows` are skipped.
+To confirm UI-only changes skip the GPU backend jobs, push a commit touching only `crates/mesh-llm-ui/**`. The `linux` and `macos` jobs run; `linux_cuda`, `linux_rocm`, `linux_vulkan`, and `windows` are skipped.
 
 ### Adding new paths
 
 If you add a new Rust crate, build script, or test directory, add its path to the `rust` filter in `.github/workflows/ci.yml` under the `changes` job so it correctly triggers the build matrix.
 
-## Benchmark Binaries
+## GPU benchmark execution
 
-Memory bandwidth benchmark source files live in `crates/mesh-llm/benchmarks/`. These are optional — they are **not** compiled by `just build`. Each target platform requires its own toolchain.
-
-### Building
+GPU bandwidth benchmarks are launched through the `mesh-llm` binary itself rather than standalone benchmark executables. The public command remains:
 
 ```bash
-just benchmark-build-apple    # macOS Apple Silicon — requires swiftc (ships with Xcode)
-just benchmark-build-cuda     # NVIDIA GPU — requires CUDA toolkit (nvcc)
-just benchmark-build-hip      # AMD GPU — requires ROCm (hipcc)
-just benchmark-build-intel    # Intel Arc GPU — requires Intel oneAPI (icpx) — UNVALIDATED
+mesh-llm gpus benchmark
 ```
 
-On Windows, use the dedicated recipes:
+Internally, mesh-llm runs a hidden `benchmark` subcommand in a narrow subprocess boundary so native backend hangs and stdout capture stay isolated from the main process.
 
-```powershell
-just benchmark-build-cuda-windows
-just benchmark-build-hip-windows
-just benchmark-build-intel-windows
-```
+Standard builds support benchmark execution only for the backends wired into the normal build flow:
 
-These produce `.exe` binaries next to `mesh-llm.exe`.
+- macOS Apple Silicon: Metal
+- Linux / Windows NVIDIA: CUDA
+- Linux / Windows AMD: HIP / ROCm
 
-> **AMD note:** The AMD benchmark (`crates/mesh-llm/benchmarks/membench-fingerprint.hip`) has not been tested on real AMD hardware. The recipe is provided for reference only.
-
-> **Intel Arc note:** The Intel Arc benchmark (`crates/mesh-llm/benchmarks/membench-fingerprint-intel.cpp`) has not been tested on real Intel Arc hardware. The recipe is provided for reference only.
-
-### Output location
-
-All recipes output to `target/release/`, the same directory as the `mesh-llm` binary. The `detect_bin_dir()` function in `mesh-llm` probes that directory at runtime, so benchmark binaries are discovered automatically.
-
-### Including in release bundles (Apple Silicon)
-
-The `just bundle` recipe automatically includes `membench-fingerprint` if it has been built:
-
-```bash
-just benchmark-build-apple && just bundle
-```
-
-If the binary is not present, `just bundle` prints a note and continues without it — the bundle is still valid.
-
-CUDA, HIP, and Intel binaries are **not** included in the Unix tarball bundle; they must be compiled on the target platform.
-On Windows release packaging, any `membench-fingerprint*.exe` binaries present in `target/release/` are included automatically in the generated `.zip`.
+Intel GPU benchmark execution is not currently supported in standard `just build` flows, so runtime benchmark selection intentionally skips Intel GPUs.
 
 ## Protocol Backward Compatibility
 
-Any change to `crates/mesh-llm/src/protocol/` or `crates/mesh-client/src/protocol/` requires backward-compatibility tests before merging.
+Any change to `crates/mesh-llm-host-runtime/src/protocol/` or `crates/mesh-client/src/protocol/` requires backward-compatibility tests before merging.
 
 Embedded clients (iOS, macOS, Android) are permanently supported. Protocol changes that break embedded client compatibility are breaking changes.
 

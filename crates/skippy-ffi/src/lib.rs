@@ -1,6 +1,6 @@
 pub const ABI_VERSION_MAJOR: u32 = 0;
 pub const ABI_VERSION_MINOR: u32 = 1;
-pub const ABI_VERSION_PATCH: u32 = 22;
+pub const ABI_VERSION_PATCH: u32 = 23;
 
 use std::ffi::{c_char, c_int, c_void};
 
@@ -56,6 +56,21 @@ pub enum ActivationLayout {
     TokenMajor = 1,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum BackendDeviceType {
+    Cpu = 0,
+    Gpu = 1,
+    IGpu = 2,
+    Accel = 3,
+    Meta = 4,
+}
+
+pub const BACKEND_DEVICE_CAP_ASYNC: u64 = 1 << 0;
+pub const BACKEND_DEVICE_CAP_HOST_BUFFER: u64 = 1 << 1;
+pub const BACKEND_DEVICE_CAP_BUFFER_FROM_HOST_PTR: u64 = 1 << 2;
+pub const BACKEND_DEVICE_CAP_EVENTS: u64 = 1 << 3;
+
 #[repr(C)]
 pub struct Error {
     pub status: Status,
@@ -84,6 +99,19 @@ pub struct RuntimeConfig {
     pub include_embeddings: bool,
     pub include_output: bool,
     pub selected_backend_device: *const c_char,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct BackendDevice {
+    pub version: u32,
+    pub name: *const c_char,
+    pub description: *const c_char,
+    pub device_id: *const c_char,
+    pub memory_free: u64,
+    pub memory_total: u64,
+    pub device_type: BackendDeviceType,
+    pub caps: u64,
 }
 
 #[repr(C)]
@@ -126,6 +154,23 @@ pub struct MtmdBitmap {
 #[repr(C)]
 pub struct MtmdInputChunks {
     _private: [u8; 0],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MtmdInputChunkType {
+    Text = 0,
+    Image = 1,
+    Audio = 2,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct MtmdDecoderPos {
+    pub t: u32,
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
 }
 
 #[repr(C)]
@@ -250,6 +295,15 @@ extern "C" {
     pub fn skippy_status_string(status: Status) -> *const c_char;
     pub fn skippy_error_free(error: *mut Error);
 
+    pub fn skippy_backend_device_count(out_count: *mut usize, out_error: *mut *mut Error)
+        -> Status;
+
+    pub fn skippy_backend_device_at(
+        index: usize,
+        out_device: *mut BackendDevice,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
     pub fn skippy_model_open(
         path: *const c_char,
         config: *const RuntimeConfig,
@@ -288,7 +342,19 @@ extern "C" {
 
     pub fn skippy_session_position(session: *const Session) -> i32;
 
+    pub fn skippy_session_native_seq_id(session: *const Session) -> i32;
+
     pub fn skippy_session_batch_size(session: *const Session) -> i32;
+
+    pub fn skippy_session_begin_external_decode(
+        session: *mut Session,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_session_end_external_decode(
+        session: *mut Session,
+        out_error: *mut *mut Error,
+    ) -> Status;
 
     pub fn skippy_session_set_position(
         session: *mut Session,
@@ -384,6 +450,53 @@ extern "C" {
         output_payload: *mut c_void,
         output_payload_capacity: usize,
         out_output_payload_bytes: *mut usize,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_prefill_chunk_frame_sampled(
+        session: *mut Session,
+        token_ids: *const i32,
+        token_count: usize,
+        sampling: *const SamplingConfig,
+        input_desc: *const ActivationDesc,
+        input_payload: *const c_void,
+        output_desc: *mut ActivationDesc,
+        output_payload: *mut c_void,
+        output_payload_capacity: usize,
+        out_output_payload_bytes: *mut usize,
+        out_predicted_token: *mut i32,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_prefill_chunk_frame_with_positions(
+        session: *mut Session,
+        token_ids: *const i32,
+        token_count: usize,
+        positions: *const i32,
+        position_count: usize,
+        input_desc: *const ActivationDesc,
+        input_payload: *const c_void,
+        output_desc: *mut ActivationDesc,
+        output_payload: *mut c_void,
+        output_payload_capacity: usize,
+        out_output_payload_bytes: *mut usize,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_prefill_chunk_frame_sampled_with_positions(
+        session: *mut Session,
+        token_ids: *const i32,
+        token_count: usize,
+        positions: *const i32,
+        position_count: usize,
+        sampling: *const SamplingConfig,
+        input_desc: *const ActivationDesc,
+        input_payload: *const c_void,
+        output_desc: *mut ActivationDesc,
+        output_payload: *mut c_void,
+        output_payload_capacity: usize,
+        out_output_payload_bytes: *mut usize,
+        out_predicted_token: *mut i32,
         out_error: *mut *mut Error,
     ) -> Status;
 
@@ -714,10 +827,39 @@ extern "C" {
 
     pub fn mtmd_helper_get_n_pos(chunks: *const MtmdInputChunks) -> i32;
 
+    pub fn mtmd_input_chunks_size(chunks: *const MtmdInputChunks) -> usize;
+
+    pub fn mtmd_input_chunks_get(chunks: *const MtmdInputChunks, index: usize) -> *const Opaque;
+
+    pub fn mtmd_decode_use_mrope(ctx: *const MtmdContext) -> bool;
+
+    pub fn mtmd_input_chunk_get_type(chunk: *const Opaque) -> MtmdInputChunkType;
+
+    pub fn mtmd_input_chunk_get_n_tokens(chunk: *const Opaque) -> usize;
+
+    pub fn mtmd_input_chunk_get_tokens_image(chunk: *const Opaque) -> *const Opaque;
+
+    pub fn mtmd_helper_image_get_decoder_pos(
+        image: *const Opaque,
+        pos_0: i32,
+        out_pos: *mut MtmdDecoderPos,
+    );
+
     pub fn mtmd_helper_eval_chunks(
         ctx: *mut MtmdContext,
         lctx: *mut Opaque,
         chunks: *const MtmdInputChunks,
+        n_past: i32,
+        seq_id: i32,
+        n_batch: i32,
+        logits_last: bool,
+        new_n_past: *mut i32,
+    ) -> c_int;
+
+    pub fn mtmd_helper_eval_chunk_single(
+        ctx: *mut MtmdContext,
+        lctx: *mut Opaque,
+        chunk: *const Opaque,
         n_past: i32,
         seq_id: i32,
         n_batch: i32,

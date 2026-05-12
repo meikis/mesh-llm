@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Cursor;
 use std::{env, fs, net::SocketAddr};
 
 use serde_json::json;
@@ -10,6 +11,7 @@ const MM_ACTIVATION_WIDTH_ENV: &str = "SKIPPY_MM_ACTIVATION_WIDTH";
 const MM_SPLIT_LAYER_ENV: &str = "SKIPPY_MM_SPLIT_LAYER";
 const MM_CTX_SIZE_ENV: &str = "SKIPPY_MM_CTX_SIZE";
 const MM_MAX_TOKENS_ENV: &str = "SKIPPY_MM_MAX_TOKENS";
+const MM_N_GPU_LAYERS_ENV: &str = "SKIPPY_MM_N_GPU_LAYERS";
 
 struct MultimodalSmokeFixture {
     model_path: PathBuf,
@@ -19,6 +21,7 @@ struct MultimodalSmokeFixture {
     activation_width: i32,
     ctx_size: u32,
     max_tokens: u32,
+    n_gpu_layers: i32,
 }
 
 fn multimodal_smoke_fixture() -> Result<Option<MultimodalSmokeFixture>> {
@@ -69,6 +72,7 @@ fn multimodal_smoke_fixture() -> Result<Option<MultimodalSmokeFixture>> {
         .unwrap_or_else(|| infer_activation_width(&model_path))?;
     let ctx_size = env_u32(MM_CTX_SIZE_ENV)?.unwrap_or(2048);
     let max_tokens = env_u32(MM_MAX_TOKENS_ENV)?.unwrap_or(16);
+    let n_gpu_layers = env_i32(MM_N_GPU_LAYERS_ENV)?.unwrap_or(0);
     Ok(Some(MultimodalSmokeFixture {
         model_path,
         projector_path,
@@ -77,6 +81,7 @@ fn multimodal_smoke_fixture() -> Result<Option<MultimodalSmokeFixture>> {
         activation_width,
         ctx_size,
         max_tokens,
+        n_gpu_layers,
     }))
 }
 
@@ -399,11 +404,11 @@ fn multimodal_stage_config(
         lane_count: 1,
         n_batch: None,
         n_ubatch: None,
-        n_gpu_layers: 999,
+        n_gpu_layers: fixture.n_gpu_layers,
         cache_type_k: "f16".to_string(),
         cache_type_v: "f16".to_string(),
         flash_attn_type: skippy_protocol::FlashAttentionType::Auto,
-        filter_tensors_on_load: false,
+        filter_tensors_on_load: layer_start != 0 || layer_end != fixture.layer_end,
         selected_device: None,
         kv_cache: None,
         load_mode: skippy_protocol::LoadMode::RuntimeSlice,
@@ -435,6 +440,8 @@ fn local_openai_backend(config: StageConfig) -> Result<StageOpenAiBackend> {
         speculative_window: 0,
         adaptive_speculative_window: false,
         generation_limit: Arc::new(Semaphore::new(1)),
+        generation_queue_depth: Arc::new(AtomicUsize::new(0)),
+        generation_queue_limit: 1,
         hook_policy: None,
         kv: None,
     })
@@ -574,10 +581,14 @@ async fn real_multimodal_split_smoke_when_fixture_is_set() -> Result<()> {
             downstream_connect_timeout_secs: 5,
             openai: None,
         });
-    let ready = connect_endpoint_ready(&stage1_addr.to_string(), 10);
+    let ready = connect_endpoint_ready(&stage1_addr.to_string(), 120);
     if let Err(error) = ready {
+        let status = stage1_handle.status();
         stage1_handle.abort();
-        return Err(error.context("wait for stage-1 binary server"));
+        return Err(error.context(format!(
+            "wait for stage-1 binary server; status={:?} last_error={:?}",
+            status.state, status.last_error
+        )));
     }
 
     let telemetry = Telemetry::new(
@@ -611,6 +622,8 @@ async fn real_multimodal_split_smoke_when_fixture_is_set() -> Result<()> {
         speculative_window: 0,
         adaptive_speculative_window: false,
         generation_limit: Arc::new(Semaphore::new(1)),
+        generation_queue_depth: Arc::new(AtomicUsize::new(0)),
+        generation_queue_limit: 1,
         hook_policy: None,
         kv: None,
     };
@@ -679,13 +692,17 @@ fn multimodal_final_prefill_message_requests_downstream_prediction() {
         ..WireSamplingConfig::default()
     };
 
-    let message = multimodal_final_prefill_message(
+    let message = multimodal_prefill_message(
         WireActivationDType::F16,
-        MultimodalFinalPrefillArgs {
+        MultimodalPrefillArgs {
             request_id: 11,
             session_id: 13,
             prompt_token_count: 17,
+            pos_start: 0,
+            token_count: 17,
+            positions: Vec::new(),
             sampling: Some(sampling.clone()),
+            final_chunk: true,
         },
     )
     .unwrap();
@@ -695,6 +712,45 @@ fn multimodal_final_prefill_message_requests_downstream_prediction() {
     assert_eq!(message.token_count, 17);
     assert_eq!(message.state.current_token, LLAMA_TOKEN_NULL);
     assert_eq!(message.sampling, Some(sampling));
+}
+
+#[test]
+fn restore_prefill_decode_message_carries_chat_sampling_metadata() {
+    let metadata = r#"{"grammar":"chat","prompt_tokens":4}"#;
+    let sampling = WireSamplingConfig {
+        flags: 1,
+        seed: 7,
+        ..WireSamplingConfig::default()
+    };
+
+    let message = embedded_restore_prefill_decode_message(
+        WireActivationDType::F16,
+        RestorePrefillDecodeMessageArgs {
+            request_id: 11,
+            session_id: 13,
+            prompt_token_count: 4,
+            pos_start: 3,
+            decode_step: 0,
+            prefix_tokens: &[101, 102, 103],
+            current: 104,
+            sampling: Some(sampling.clone()),
+            chat_sampling_metadata: Some(metadata),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(message.kind, WireMessageKind::TryRestorePrefillDecode);
+    assert_eq!(message.tokens, vec![101, 102, 103, 104]);
+    assert_eq!(message.sampling, Some(sampling.clone()));
+    assert_eq!(message.chat_sampling_metadata.as_deref(), Some(metadata));
+
+    let mut encoded = Vec::new();
+    write_stage_message(&mut encoded, &message, WireActivationDType::F16).unwrap();
+    let decoded = skippy_protocol::binary::read_stage_message(Cursor::new(encoded), 2816).unwrap();
+    assert_eq!(decoded.kind, WireMessageKind::TryRestorePrefillDecode);
+    assert_eq!(decoded.tokens, vec![101, 102, 103, 104]);
+    assert_eq!(decoded.sampling, Some(sampling));
+    assert_eq!(decoded.chat_sampling_metadata.as_deref(), Some(metadata));
 }
 
 #[test]
@@ -1164,6 +1220,41 @@ fn model_matching_is_exact_for_mesh_style_ids() {
 }
 
 #[test]
+fn model_matching_normalizes_default_revision() {
+    // Advertised with @main, requested without (public display form)
+    ensure_requested_model(
+        "unsloth/Qwen3-32B-GGUF@main:UD-Q4_K_XL",
+        "unsloth/Qwen3-32B-GGUF:UD-Q4_K_XL",
+    )
+    .unwrap();
+
+    // Advertised without, requested with @main
+    ensure_requested_model(
+        "unsloth/Qwen3-32B-GGUF:UD-Q4_K_XL",
+        "unsloth/Qwen3-32B-GGUF@main:UD-Q4_K_XL",
+    )
+    .unwrap();
+
+    // Both with @main — exact match still works
+    ensure_requested_model(
+        "unsloth/Qwen3-32B-GGUF@main:UD-Q4_K_XL",
+        "unsloth/Qwen3-32B-GGUF@main:UD-Q4_K_XL",
+    )
+    .unwrap();
+
+    // Bare repo@main without selector
+    ensure_requested_model("org/repo@main", "org/repo").unwrap();
+
+    // Different quants still rejected
+    let error = ensure_requested_model(
+        "unsloth/Qwen3-32B-GGUF@main:UD-Q4_K_XL",
+        "unsloth/Qwen3-32B-GGUF:Q5_K_M",
+    )
+    .unwrap_err();
+    assert_eq!(error.body().error.code.as_deref(), Some("model_not_found"));
+}
+
+#[test]
 fn rejects_requests_that_exceed_context_window() {
     ensure_context_capacity(4, 4, 8).unwrap();
 
@@ -1190,4 +1281,30 @@ fn configured_default_max_tokens_remains_explicit() {
         error.body().error.code.as_deref(),
         Some("context_length_exceeded")
     );
+}
+
+#[test]
+fn strip_default_revision_removes_at_main_before_quant() {
+    assert_eq!(
+        super::strip_default_revision("org/repo@main:Q4"),
+        "org/repo:Q4"
+    );
+}
+
+#[test]
+fn strip_default_revision_removes_at_main_at_end() {
+    assert_eq!(super::strip_default_revision("org/repo@main"), "org/repo");
+}
+
+#[test]
+fn strip_default_revision_preserves_mainland() {
+    assert_eq!(
+        super::strip_default_revision("org/repo@mainland:Q4"),
+        "org/repo@mainland:Q4"
+    );
+}
+
+#[test]
+fn strip_default_revision_preserves_no_revision() {
+    assert_eq!(super::strip_default_revision("org/repo:Q4"), "org/repo:Q4");
 }

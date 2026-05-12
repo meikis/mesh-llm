@@ -22,7 +22,7 @@ fn run() -> DynResult<()> {
             check_release_targets()
         }
         _ => Err(
-            "usage: cargo run -p xtask -- repo-consistency release-targets"
+            "usage:\n  cargo run -p xtask -- repo-consistency release-targets"
                 .to_string()
                 .into(),
         ),
@@ -81,7 +81,7 @@ fn fixture_rows(repo_root: &Path) -> DynResult<Vec<FixtureRow>> {
 fn fixture_path(repo_root: &Path) -> PathBuf {
     repo_root
         .join("crates")
-        .join("mesh-llm")
+        .join("mesh-llm-system")
         .join("tests")
         .join("fixtures")
         .join("release-target-matrix.json")
@@ -503,12 +503,12 @@ fn check_docs_and_workflow_invariants(repo_root: &Path) -> DynResult<()> {
     )?;
     ensure_contains(
         &readme,
-        "Windows publish jobs are currently commented out in `.github/workflows/release.yml`",
+        "Windows CPU, Windows CUDA, Windows ROCm, and Windows Vulkan bundles",
         "README Windows publish note",
     )?;
     ensure_contains(
         &release,
-        "Windows release bundles are not expected from the current GitHub Actions workflow while the publish block stays commented out",
+        "Windows release artifacts use the `x86_64-pc-windows-msvc` target triple",
         "RELEASE Windows publish note",
     )?;
     ensure_contains(
@@ -523,13 +523,23 @@ fn check_docs_and_workflow_invariants(repo_root: &Path) -> DynResult<()> {
     )?;
     ensure_contains(
         &release_workflow,
-        "# build_windows:",
-        "release workflow commented Windows build",
+        "build_windows_cpu:",
+        "release workflow Windows CPU build",
     )?;
     ensure_contains(
         &release_workflow,
-        "# - build_windows  # disabled until llama.cpp CUDA fix",
-        "release workflow commented Windows publish need",
+        "build_windows_gpu:",
+        "release workflow Windows GPU build",
+    )?;
+    ensure_contains(
+        &release_workflow,
+        "- build_windows_cpu",
+        "release workflow Windows CPU publish need",
+    )?;
+    ensure_contains(
+        &release_workflow,
+        "- build_windows_gpu",
+        "release workflow Windows GPU publish need",
     )?;
     ensure_contains(
         &justfile,

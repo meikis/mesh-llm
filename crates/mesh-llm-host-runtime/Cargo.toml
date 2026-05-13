@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 ansi-to-tui = "8"
+moa-gateway = { path = "../moa-gateway" }
 mesh-llm-plugin = { path = "../mesh-llm-plugin" }
 mesh-llm-identity = { path = "../mesh-llm-identity" }
 mesh-llm-protocol = { path = "../mesh-llm-protocol" }

@@ -4089,6 +4089,7 @@ dependencies = [
  "mesh-llm-system",
  "mesh-llm-types",
  "mesh-llm-ui",
+ "moa-gateway",
  "model-artifact",
  "model-package",
  "model-ref",

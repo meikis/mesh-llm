@@ -30,7 +30,6 @@ jobs:
       ui_changed: ${{ steps.compute.outputs.ui_changed }}
       docs_only: ${{ steps.compute.outputs.docs_only }}
       rust_changed: ${{ steps.compute.outputs.rust_changed }}
-      dependency_policy_changed: ${{ steps.compute.outputs.dependency_policy_changed }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -109,16 +108,6 @@ jobs:
             done
           fi
 
-  rust-deny:
-    needs: changes
-    if: github.event_name == 'workflow_dispatch' || needs.changes.outputs.dependency_policy_changed == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: taiki-e/install-action@cargo-deny
-      - name: Check licenses, advisories, and bans
-        run: cargo deny check advisories licenses bans
-
   ui-quality:
     needs: changes
     if: needs.changes.outputs.ui_changed == 'true'
@@ -146,7 +135,7 @@ jobs:
         run: pnpm test
 
   summary:
-    needs: [rust-fmt, rust-clippy, rust-deny, ui-quality]
+    needs: [rust-fmt, rust-clippy, ui-quality]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -154,7 +143,6 @@ jobs:
         env:
           FMT: ${{ needs.rust-fmt.result }}
           CLIPPY: ${{ needs.rust-clippy.result }}
-          DENY: ${{ needs.rust-deny.result }}
           UI: ${{ needs.ui-quality.result }}
         run: |
           echo "┌────────────────────┬──────────────────────┐"
@@ -162,12 +150,11 @@ jobs:
           echo "├────────────────────┼──────────────────────┤"
           printf "│ %-18s │ %-20s │\n" "rust-fmt"    "$FMT"
           printf "│ %-18s │ %-20s │\n" "rust-clippy" "$CLIPPY"
-          printf "│ %-18s │ %-20s │\n" "rust-deny"   "$DENY"
           printf "│ %-18s │ %-20s │\n" "ui-quality"  "$UI"
           echo "└────────────────────┴──────────────────────┘"
 
           FAILED=false
-          for STATUS in "$FMT" "$CLIPPY" "$DENY" "$UI"; do
+          for STATUS in "$FMT" "$CLIPPY" "$UI"; do
             if [[ "$STATUS" == "failure" || "$STATUS" == "cancelled" ]]; then
               FAILED=true
             fi

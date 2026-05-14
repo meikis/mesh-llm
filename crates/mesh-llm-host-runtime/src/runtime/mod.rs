@@ -1,3 +1,4 @@
+mod binding;
 pub(crate) mod config_state;
 mod context_planning;
 mod discovery;
@@ -9,6 +10,7 @@ mod split_planning;
 mod survey;
 pub(crate) mod wakeable;
 
+use self::binding::{bind_runtime_tcp_listener, listener_http_endpoint, listener_http_url};
 use self::discovery::{nostr_rediscovery, start_new_mesh};
 use self::interactive::InitialPromptMode;
 use self::local::{
@@ -2954,43 +2956,6 @@ fn serve_path_builtin_endpoint_ready_events(
     events
 }
 
-fn socket_addr_http_url(addr: std::net::SocketAddr) -> String {
-    format!("http://{addr}")
-}
-
-fn listener_http_url(
-    listener: &tokio::net::TcpListener,
-    fallback_port: u16,
-    label: &str,
-) -> String {
-    listener_http_endpoint(listener, fallback_port, label).0
-}
-
-fn listener_http_endpoint(
-    listener: &tokio::net::TcpListener,
-    fallback_port: u16,
-    label: &str,
-) -> (String, u16) {
-    listener
-        .local_addr()
-        .map(|addr| (socket_addr_http_url(addr), addr.port()))
-        .unwrap_or_else(|err| {
-            tracing::warn!("{label}: failed to read listener address: {err}");
-            (format!("http://localhost:{fallback_port}"), fallback_port)
-        })
-}
-
-async fn bind_runtime_tcp_listener(
-    port: u16,
-    listen_all: bool,
-    label: &str,
-) -> Result<tokio::net::TcpListener> {
-    let addr = if listen_all { "0.0.0.0" } else { "127.0.0.1" };
-    tokio::net::TcpListener::bind(format!("{addr}:{port}"))
-        .await
-        .with_context(|| format!("Failed to bind {label} to port {port}"))
-}
-
 fn startup_default_backend_device(binary_flavor: Option<backend::BinaryFlavor>) -> Option<String> {
     let flavor = binary_flavor.or_else(platform_default_backend_flavor);
     if flavor == Some(backend::BinaryFlavor::Metal) {
@@ -3351,23 +3316,6 @@ fn serve_path_builtin_endpoint_ready_events_cover_api_and_console() {
         &headless_events[0],
         OutputEvent::ApiReady { url } if url == "http://127.0.0.1:9444"
     ));
-}
-
-#[cfg(test)]
-#[tokio::test]
-async fn listener_http_url_uses_bound_ephemeral_addr() {
-    let listener = bind_runtime_tcp_listener(0, false, "test listener")
-        .await
-        .expect("ephemeral listener should bind");
-    let addr = listener
-        .local_addr()
-        .expect("bound listener should expose local address");
-
-    let url = listener_http_url(&listener, 0, "test listener");
-
-    assert_eq!(url, socket_addr_http_url(addr));
-    assert_ne!(url, "http://localhost:0");
-    assert!(!url.ends_with(":0"));
 }
 
 #[cfg(test)]

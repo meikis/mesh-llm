@@ -5,6 +5,57 @@ repo.
 
 The core rule is to keep ordinary pull request CI fast and targeted, while keeping release-grade artifact production and publish gating in the release workflow.
 
+## Two-workflow
+
+The combined CI design splits quality checks from builds.
+
+- `pr-checks.yml` is quality-only. It always runs on PRs and pushes to `main`, and it stays independent from build workflows.
+- `ci.yml` owns builds, integration tests, smokes, SDK tests, and the platform matrix.
+
+## invariants
+
+Smallest possible build unit on PR — only affected crates compile and test.
+Code quality always runs and is separate from builds — `pr-checks.yml` is fully independent of `ci.yml`.
+Documentation-only updates never trigger code builds — `docs_only` short-circuit gates every heavy job.
+
+## Change-matrix
+
+| Change class | Behavior |
+|---|---|
+| `**.md` only | Runs changes summary, sets `docs_only`, and gates every heavy job. |
+| Single leaf crate | Runs affected and reverse-dep quality, plus affected Linux and macOS tests. |
+| UI only | Runs UI quality and the Linux and macOS UI build and test cache path, with no Rust steps. |
+| `Cargo.lock` | Takes the full-workspace path. |
+| `third_party/llama.cpp/**` | Takes the full-workspace ABI path. |
+
+## UI dist cache
+
+Contract for the UI dist cache:
+
+- Writer: Linux on `main` when `ui == true`.
+- Reader: macOS.
+- Miss fallback: `pnpm i` and rebuild the UI dist.
+- Guard: fail if `crates/mesh-llm-ui/dist` is still missing after the restore or rebuild path.
+- Cache key: `${CACHE_NAMESPACE}-ui-dist-<git-hash-object of crates/mesh-llm-ui + .github/cache-version.txt>`.
+- GPU and SDK jobs do not use this cache. They rely on `MESH_LLM_SKIP_UI=1` placeholder semantics instead.
+
+## affected-crates
+
+The affected-crates contract is:
+
+- Input comes from stdin file list or CLI args.
+- Output JSON shape includes `{affected,test_crates,batches,all_rust,ui_changed}`.
+- The script fails open by emitting `all_rust` with the full workspace and exits 0.
+
+## Required status
+
+Branch protection should migrate to these names:
+
+- `pr-checks.yml / summary`
+- `ci.yml / linux`
+- `ci.yml / inference_smoke_tests`
+- Other currently required checks can stay as-is during migration, but they should point at the new workflow names once the split lands.
+
 ## CI design goals
 
 The workflow layout should preserve these invariants:

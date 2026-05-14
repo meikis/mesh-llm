@@ -2030,7 +2030,10 @@ fn load_owner_keypair_for_runtime(path: &Path) -> Result<crate::crypto::OwnerKey
         .with_context(|| format!("Failed to load owner keystore {}", path.display()))
 }
 
-fn owner_runtime_config(cli: &Cli) -> Result<mesh::OwnerRuntimeConfig> {
+fn owner_runtime_config(
+    cli: &Cli,
+    config: &plugin::MeshConfig,
+) -> Result<mesh::OwnerRuntimeConfig> {
     let trust_store_path = default_trust_store_path()?;
     let trust_store = load_trust_store(&trust_store_path)
         .with_context(|| format!("Failed to load trust store {}", trust_store_path.display()))?
@@ -2061,6 +2064,10 @@ fn owner_runtime_config(cli: &Cli) -> Result<mesh::OwnerRuntimeConfig> {
 
     Ok(mesh::OwnerRuntimeConfig {
         keypair,
+        control_bind: cli.control_bind.or(config.owner_control.bind),
+        control_advertise_addr: cli
+            .control_advertise_addr
+            .or(config.owner_control.advertise_addr),
         node_label: cli.node_label.clone(),
         trust_store,
         trust_policy,
@@ -4200,7 +4207,8 @@ async fn join_mesh_for_mcp(cli: &Cli, node: &mesh::Node) -> Result<()> {
 
 pub(crate) async fn run_plugin_mcp(cli: &Cli) -> Result<()> {
     let resolved_plugins = load_resolved_plugins(cli)?;
-    let owner_config = owner_runtime_config(cli)?;
+    let config = plugin::load_config(cli.config.as_deref())?;
+    let owner_config = owner_runtime_config(cli, &config)?;
     let (node, _channels) = mesh::Node::start(
         NodeRole::Client,
         &cli.relay,
@@ -4317,7 +4325,7 @@ async fn run_auto(
     } else {
         NodeRole::Worker
     };
-    let owner_config = owner_runtime_config(&cli)?;
+    let owner_config = owner_runtime_config(&cli, &config)?;
     // Clients report 0 VRAM so they're never assigned a model to serve
     let max_vram = if is_client { Some(0.0) } else { cli.max_vram };
     let (node, channels) = mesh::Node::start(
@@ -4773,6 +4781,7 @@ async fn run_auto(
         .is_some();
 
     let model_name_for_console = model_name.clone();
+    let runtime_owner_key_path = resolve_runtime_owner_key_path(&cli)?;
     let console_state = if console_port.is_some() {
         let model_size_bytes = election::total_model_bytes(&model);
         let runtime_data_collector = node.runtime_data_collector();
@@ -4787,6 +4796,7 @@ async fn run_auto(
             model_name: model_name_for_console.clone(),
             api_port,
             model_size_bytes,
+            owner_key_path: runtime_owner_key_path.clone(),
             plugin_manager: plugin_manager.clone(),
             affinity_router: affinity_router.clone(),
             runtime_data_collector,
@@ -4794,6 +4804,14 @@ async fn run_auto(
         });
         cs.set_primary_backend("skippy".into()).await;
         cs.set_runtime_control(control_tx.clone()).await;
+        let control_endpoint = node.control_endpoint().await;
+        cs.set_control_bootstrap(api::ControlBootstrapPayload {
+            enabled: control_endpoint.is_some(),
+            local_only: true,
+            requires_explicit_remote_endpoint: true,
+            endpoint: control_endpoint,
+        })
+        .await;
         cs.set_nostr_relays(nostr_relays(&cli.nostr_relay)).await;
         cs.set_mesh_discovery_mode(cli.mesh_discovery_mode).await;
         cs.set_nostr_discovery(cli.nostr_discovery).await;
@@ -5334,8 +5352,21 @@ async fn run_auto(
                                 let p = model_path.clone();
                                 tokio::task::spawn_blocking(move || runtime_model_planning_bytes(&p))
                                     .await
-                                    .unwrap_or(Ok(0))
-                                    .unwrap_or(0)
+                                    .unwrap_or_else(|err| {
+                                        Err(anyhow::anyhow!(
+                                            "join runtime model byte planning task: {err}"
+                                        ))
+                                    })
+                                    .unwrap_or_else(|err| {
+                                        let fallback = election::total_model_bytes(&model_path);
+                                        tracing::warn!(
+                                            model = %requested_model,
+                                            error = %err,
+                                            fallback_bytes = fallback,
+                                            "failed to resolve runtime model planning bytes; using filesystem size fallback"
+                                        );
+                                        fallback
+                                    })
                             };
                             let launch_started = Instant::now();
                             let (loaded_name, handle, death_rx) = match start_runtime_local_model(
@@ -5690,6 +5721,7 @@ async fn run_auto(
         handle.abort();
     }
 
+    node.shutdown_control_listener().await;
     plugin_manager.shutdown().await;
     api_proxy_handle.abort();
     let _ = api_proxy_handle.await;
@@ -5943,11 +5975,21 @@ async fn run_passive(
         model_name: label,
         api_port: local_port,
         model_size_bytes: 0,
+        owner_key_path: resolve_runtime_owner_key_path(cli)?,
         plugin_manager: plugin_manager.clone(),
         affinity_router: affinity_router.clone(),
         runtime_data_collector,
         runtime_data_producer,
     });
+    let control_endpoint = node.control_endpoint().await;
+    console_state
+        .set_control_bootstrap(api::ControlBootstrapPayload {
+            enabled: control_endpoint.is_some(),
+            local_only: true,
+            requires_explicit_remote_endpoint: true,
+            endpoint: control_endpoint,
+        })
+        .await;
     console_state
         .set_nostr_relays(nostr_relays(&cli.nostr_relay))
         .await;
@@ -6081,6 +6123,7 @@ async fn run_passive(
                     let _ = emit_event(OutputEvent::ShutdownRequested { signal: "api" });
                     let _ = flush_output().await;
                     emit_shutdown(None).await;
+                    node.shutdown_control_listener().await;
                     plugin_manager.shutdown().await;
                     if let Some(handle) = console_server_handle.take() {
                         handle.abort();
@@ -6094,6 +6137,7 @@ async fn run_passive(
                 let _ = emit_event(OutputEvent::ShutdownRequested { signal });
                 let _ = flush_output().await;
                 emit_shutdown(None).await;
+                node.shutdown_control_listener().await;
                 plugin_manager.shutdown().await;
                 if let Some(handle) = console_server_handle.take() {
                     handle.abort();
@@ -6446,6 +6490,7 @@ mod tests {
             model_name: "test-model".to_string(),
             api_port: 3131,
             model_size_bytes: 0,
+            owner_key_path: None,
             plugin_manager,
             affinity_router: affinity::AffinityRouter::default(),
             runtime_data_collector,

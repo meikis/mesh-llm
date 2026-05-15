@@ -66,6 +66,30 @@ type DashboardContextUsage =
 type RuntimeInstanceRegistry =
     Arc<tokio::sync::Mutex<HashMap<String, BTreeMap<String, Option<u32>>>>>;
 
+/// Resolve the speculative prefill model path.
+///
+/// If an explicit path was given via `--prefill-speculative`, use it.
+/// If `--no-draft` is set, return None.
+/// Otherwise, auto-detect a small same-family GGUF from the local HF cache.
+fn resolve_speculative_prefill_model(
+    explicit: Option<&PathBuf>,
+    no_draft: bool,
+    target_model_ref: &str,
+) -> Option<PathBuf> {
+    if let Some(path) = explicit {
+        return Some(path.clone());
+    }
+    if no_draft {
+        return None;
+    }
+    let found = models::local::find_speculative_prefill_model(target_model_ref)?;
+    tracing::info!(
+        "auto-detected speculative prefill model: {}",
+        found.display()
+    );
+    Some(found)
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct DashboardContextUsageSource {
     port: u16,
@@ -5063,6 +5087,11 @@ async fn run_auto(
     let dashboard_context_usage_for_primary_task = dashboard_context_usage.clone();
     let runtime_instance_registry_for_primary_task = runtime_instance_registry.clone();
     let primary_startup_load_gate = startup_load_gate.clone();
+    let primary_draft_model_path = resolve_speculative_prefill_model(
+        cli.prefill_speculative.as_ref(),
+        cli.no_draft,
+        &primary_model_ref,
+    );
     let primary_task = tokio::spawn(Box::pin(startup_local_model_loop(StartupLocalModelTask {
         node: node2,
         tunnel_mgr: tunnel_mgr2,
@@ -5082,7 +5111,7 @@ async fn run_auto(
         flash_attention: primary_flash_attention,
         parallel_override: primary_parallel_override,
         split: startup_split,
-        draft_model_path: cli.prefill_speculative.clone(),
+        draft_model_path: primary_draft_model_path,
         draft_max: cli.prefill_speculative_max,
         skippy_telemetry: skippy_telemetry.clone(),
         survey_telemetry: survey_telemetry_for_primary,
@@ -5387,7 +5416,11 @@ async fn run_auto(
                                         .unwrap_or(FlashAttentionType::Auto),
                                     parallel_override,
                                     skippy_telemetry: skippy_telemetry_options(&cli),
-                                    draft_model_path: cli.prefill_speculative.clone(),
+                                    draft_model_path: resolve_speculative_prefill_model(
+                                        cli.prefill_speculative.as_ref(),
+                                        cli.no_draft,
+                                        &runtime_model_name,
+                                    ),
                                     draft_max: cli.prefill_speculative_max,
                                 },
                                 &runtime_model_name,

@@ -1017,27 +1017,92 @@ immediately):
 Default is `true` (enabled) when the proxy detects a split target with
 an available draft model.
 
-### CLI flags (related but separate)
-
-The CLI already has hidden flags for **standard** speculative decoding:
+### CLI flags
 
 ```
---draft <path>        Draft model GGUF path
---draft-max <n>       Max draft tokens (default: 8)
---no-draft            Disable automatic draft detection
+--prefill-speculative <path>       Local GGUF for in-process speculative prefill
+--prefill-speculative-max <n>      Max draft tokens (default: 8)
+--no-draft                         Disable automatic draft detection
 ```
 
-These control skippy-server's `DraftRunner` — a rolling-window
-draft→verify loop that speeds up decode on any topology (local or
-distributed). Wiring these flags through is independent and
-complementary work — when spec prefill diverges at K, the tail
-decode from K benefits from standard spec decode.
+`--prefill-speculative` loads a small model in-process via
+`DraftRunner` — it shares the main model's GPU and runs
+`prefill_chunk()` + `decode_step()` directly. Same-tokenizer
+assumption: draft and target must share vocabulary (same model
+family, e.g. Qwen3-0.6B → Qwen3-8B). The GGUF must be
+downloaded locally.
 
-Speculative prefill operates at the **proxy layer**, not inside
-skippy-server's decode loop. The proxy selects a draft model from the
-mesh, gets a complete text response, and injects it into the target's
-request for one-pass verification. No CLI flag needed — the proxy
-engages it automatically when conditions are met.
+Proxy-level speculative prefill (see "Automation strategy" below)
+operates at the **proxy layer**, not inside skippy-server's decode
+loop. The proxy selects a draft model from the mesh, gets a
+complete text response, and injects it via `draft_response` into
+the target's request for one-pass verification. No CLI flag needed
+— the proxy engages it automatically when conditions are met.
+
+Both paths converge in `spec_prefill::verify_draft()`, which
+accepts either `draft_tokens` (token IDs from DraftRunner) or
+`draft_text` (text from proxy-level draft). They compose: when
+spec prefill diverges at K, the tail decode from K benefits from
+standard spec decode.
+
+### Automation strategy
+
+Three tiers of automatic draft model selection, from simplest to
+most powerful:
+
+**Tier 1: Local HF cache scan (in-process DraftRunner)**
+
+On startup, scan `~/.cache/huggingface/` for a small GGUF from the
+same model family as the target. If found, load it as DraftRunner
+automatically. Same-tokenizer constraint applies.
+
+Family matching: extract the family prefix from the target model name
+(e.g. `Qwen3` from `Qwen3-8B`, `Llama-4` from `Llama-4-Scout`).
+Look for the smallest downloaded GGUF with the same prefix under a
+size threshold (e.g. 1 GB). Load it in-process.
+
+This is zero-cost to implement — the HF cache scanner
+(`scan_installed_models()`) and DraftRunner already exist. Just
+connect them at startup.
+
+**Tier 2: Mesh-native draft selection (proxy-level)**
+
+The mesh gossips `available_model_sizes: HashMap<String, u64>` per
+peer. At request time, the proxy picks the fastest available small
+model as a draft source:
+
+1. Same family, smallest, local → best (zero draft network cost)
+2. Same family, smallest, fast peer → good (1 RTT for full draft)
+3. Any small model, local → OK (lower acceptance, zero draft cost)
+4. Any small model, fast peer → OK (1 RTT, lower acceptance)
+
+The proxy calls the draft model via HTTP (local port or QUIC
+tunnel), gets a text response, and injects it as `draft_response`
+in the target request. No tokenizer constraint — the target
+re-tokenizes the text with its own tokenizer.
+
+This is the meshLLM-native approach. It reuses `build_moa_config()`
+patterns from `ingress.rs` (local port vs QUIC peer lookup) and
+the existing `draft_response` request field.
+
+**Tier 3: Adaptive draft selection (learned)**
+
+Track per-model-pair acceptance rates over time. Use observed rates
+to prefer draft models that empirically agree with the target. Demote
+models that consistently diverge early. This is future work but the
+acceptance telemetry is already emitted.
+
+### What conditions trigger automatic spec prefill
+
+1. The target model is served via a **distributed layer split** (the
+   only case where decode latency is dominated by network RTT).
+2. A **fast draft model is available** (tier 1 or tier 2).
+3. The request is **not a tool call** (tool routing depends on
+   generation output, which the draft can't anticipate).
+4. `speculative_prefill` is not explicitly `false` in the request.
+
+When all four conditions hold, the proxy engages spec prefill
+transparently. No user action required.
 
 ### What this is NOT
 

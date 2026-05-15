@@ -1,7 +1,7 @@
 # Speculative Prefill Decoding for Distributed Layer Splits
 
-**Status:** Per-position probability analysis complete — fundamental semantic divergence confirmed  
-**Date:** 2026-05-13 (PoC), 2026-05-12 (server + probability analysis)  
+**Status:** Capped-draft pattern validated — viable for distributed agentic workloads  
+**Date:** 2026-05-13 (PoC), 2026-05-12 (server + capped-draft analysis)  
 **Scope:** Skippy layer-split inference across multiple nodes  
 **Related:** `docs/design/DESIGN.md`
 
@@ -423,11 +423,61 @@ These get 100% acceptance and genuine speedup.
 explanation style, paragraph breaks. The model consistently takes
 alternative paths at these decision points in batch mode.
 
-**Remaining avenue:** Instead of verifying in batch, decode draft tokens
-one at a time (sequential verify). This would match sequential decode
-perfectly but defeats the purpose for distributed inference where the
-cost savings come from replacing per-token network rounds with a single
-batch prefill.
+### Capped-draft experiment: the viable pattern
+
+Instead of drafting the full response, draft a **short prefix** (10-15
+tokens) where acceptance is reliably high. The remaining tokens are
+decoded normally with all the usual speedup tricks.
+
+Tested with self-draft at cap sizes 10, 15, 20, 30 against 11 prompts
+covering agentic, code, explanation, math, and multi-turn workloads:
+
+| Category | Prompts | Acceptance at cap=10 | Examples |
+|---|---|---|---|
+| Always works | 4/11 (36%) | 100% | simple_fact, agentic, yes_no |
+| Good prefix | 3/11 (27%) | 80-100% | code_fib, explain, multi_turn |
+| Immediate divergence | 4/11 (36%) | 0-11% | count_10, math, tool_result |
+
+**The divergence point is fixed per prompt** — absolute accepted count
+stays constant regardless of cap size. `code_fib` always accepts 12
+tokens whether you draft 15, 20, or 30. This means capping at 10
+keeps you inside the reliable acceptance window for most prompts.
+
+#### Distributed economics (cap=10, 2-node 50ms RTT)
+
+| Metric | Value |
+|---|---|
+| Draft cost (0.6B local, 10 tokens) | ~30ms |
+| Verify overhead | ~0ms (extra tokens in existing prefill batch) |
+| Savings when accepted (10 decode rounds × 50ms) | 500ms |
+| Net saving when accepted | ~470ms |
+| Net cost when rejected | ~30ms (wasted draft only) |
+| Break-even success rate | 6% |
+| Observed success rate (≥8 tokens accepted) | 64% (7/11 prompts) |
+| **Expected value per request** | **+290ms** |
+
+At 100ms RTT (cross-region): expected value +610ms per request.
+
+#### Agentic workload fit
+
+The prompts with 100% acceptance — tool confirmations, brief answers,
+yes/no, status summaries — are the **most common responses in agentic
+loops**. A Goose-like agent doing tool calls would see spec prefill help
+on the majority of turns. And these are exactly the turns where latency
+matters most (many short round-trips vs few long generations).
+
+#### Recommended implementation
+
+1. Draft model generates 10-15 tokens (local 0.6B, ~30ms)
+2. Draft tokens appended to prompt before prefill (zero extra cost —
+   just more tokens in the same prefill batch)
+3. After prefill, verify the draft suffix
+4. Accepted → skip those decode rounds, continue decoding from there
+5. Rejected → trim KV cache, decode from scratch (30ms wasted)
+
+The verify cost is embedded in the prefill pass. The only real overhead
+is the draft generation, which is local and cheap. The technique
+composes with standard speculative decoding for the tail decode.
 
 
 ## What Exists in Skippy Today

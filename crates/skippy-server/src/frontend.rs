@@ -279,12 +279,22 @@ pub fn embedded_openai_backend(args: EmbeddedOpenAiArgs) -> Result<EmbeddedOpenA
     if args.config.stage_index != 0 || args.config.layer_start != 0 {
         bail!("embedded OpenAI serving is only supported on stage 0");
     }
-    let draft = open_draft_runner(
+    let draft = match open_draft_runner(
         args.draft_model_path.as_deref(),
         &args.config,
         args.draft_n_gpu_layers,
         args.speculative_window,
-    )?;
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            // Don't fail model loading if the draft model can't be opened —
+            // speculative prefill is best-effort. Log and continue without it.
+            eprintln!(
+                "warn: speculative prefill draft model failed to load, continuing without: {e:#}"
+            );
+            None
+        }
+    };
     let model_id = ModelId::new(
         args.model_id
             .unwrap_or_else(|| args.config.model_id.clone()),

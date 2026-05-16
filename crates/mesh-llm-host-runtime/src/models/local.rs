@@ -1632,8 +1632,10 @@ pub fn find_speculative_prefill_model(target_model_ref: &str) -> Option<PathBuf>
 
     let mut best: Option<(PathBuf, u64)> = None;
     for path in candidates {
-        // Skip non-GGUF or layer package fragments
-        let file_name = path.file_name()?.to_string_lossy();
+        let Some(file_name_os) = path.file_name() else {
+            continue;
+        };
+        let file_name = file_name_os.to_string_lossy();
         if !file_name.ends_with(".gguf") {
             continue;
         }
@@ -1647,16 +1649,18 @@ pub fn find_speculative_prefill_model(target_model_ref: &str) -> Option<PathBuf>
             continue;
         }
 
-        let file_size = std::fs::metadata(&path).ok()?.len();
-        if file_size > SPEC_PREFILL_MAX_BYTES {
+        let Ok(meta) = std::fs::metadata(&path) else {
             continue;
-        }
-        if file_size == 0 {
+        };
+        let file_size = meta.len();
+        if file_size > SPEC_PREFILL_MAX_BYTES || file_size == 0 {
             continue;
         }
 
         // Check family match
-        let candidate_family = extract_model_family(&file_name)?;
+        let Some(candidate_family) = extract_model_family(&file_name) else {
+            continue;
+        };
         if candidate_family != target_family {
             continue;
         }

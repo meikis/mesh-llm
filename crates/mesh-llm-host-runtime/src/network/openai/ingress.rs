@@ -478,6 +478,71 @@ pub(crate) async fn api_proxy(
                             if targets.candidates(name).len() > 1 {
                                 request.ensure_body_json();
                             }
+                            // Use try_route for auto requests so we can
+                            // fall back to other models on server errors.
+                            if !auto_fallback_models.is_empty() {
+                                let result = proxy::try_route_model_request(
+                                    node.clone(),
+                                    &mut tcp_stream,
+                                    &targets,
+                                    name,
+                                    &request,
+                                    required_tokens,
+                                    &affinity,
+                                )
+                                .await;
+                                match result {
+                                    proxy::RouteModelResult::Handled => {
+                                        proxy::release_request_objects(
+                                            &node,
+                                            &request.request_object_request_ids,
+                                        )
+                                        .await;
+                                        return;
+                                    }
+                                    proxy::RouteModelResult::AllTargetsServerError => {
+                                        let mut routed = false;
+                                        for fallback in &auto_fallback_models {
+                                            tracing::info!(
+                                                "auto: model {name} targets failed, trying fallback {fallback}"
+                                            );
+                                            proxy::rewrite_model_field(&mut request, fallback);
+                                            let fb_result = proxy::try_route_model_request(
+                                                node.clone(),
+                                                &mut tcp_stream,
+                                                &targets,
+                                                fallback,
+                                                &request,
+                                                required_tokens,
+                                                &affinity,
+                                            )
+                                            .await;
+                                            match fb_result {
+                                                proxy::RouteModelResult::Handled => {
+                                                    routed = true;
+                                                    break;
+                                                }
+                                                proxy::RouteModelResult::AllTargetsServerError => {
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                        if !routed {
+                                            let _ = proxy::send_503(
+                                                tcp_stream,
+                                                &format!("all models failed for auto request (tried {name} + {} fallbacks)", auto_fallback_models.len()),
+                                            )
+                                            .await;
+                                        }
+                                        proxy::release_request_objects(
+                                            &node,
+                                            &request.request_object_request_ids,
+                                        )
+                                        .await;
+                                        return;
+                                    }
+                                }
+                            }
                             let routed = proxy::route_model_request(
                                 node.clone(),
                                 tcp_stream,

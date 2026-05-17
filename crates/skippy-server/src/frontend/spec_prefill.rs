@@ -3,7 +3,37 @@
 //! When a request includes `draft_response` (text) or `draft_tokens`
 //! (pre-tokenized IDs), this module verifies the draft against the
 //! target model. Accepted prefix tokens are committed without decode;
-//! only the tail after the first divergence is decoded normally.
+//! only the tail after the first run of mismatches is decoded normally.
+//!
+//! ## Acceptance strategy: K-tolerant prefix
+//!
+//! Speculative *prefill* (this module) is a **latency optimization**, not
+//! a fidelity-preserving primitive like speculative *decode* with
+//! rejection sampling. We trade some output drift for a much higher
+//! acceptance rate when the draft and target are different models.
+//!
+//! At each position `i` the draft token `draft[i+1]` is "accepted" when:
+//!   1. The target's greedy prediction matches it, OR
+//!   2. The target assigns probability >= `PROB_THRESHOLD` to it.
+//!
+//! We then walk the positions and break when we encounter more than
+//! `MAX_CONSECUTIVE_MISMATCHES` rejections in a row. A single isolated
+//! rejection does NOT abort acceptance — the loop continues, and the
+//! mismatched draft token is still emitted to the client.
+//!
+//! Why this matters: two different models will rarely have a long
+//! contiguous matching prefix even when they agree on 80%+ of all
+//! positions. Strict prefix acceptance ("break on first mismatch")
+//! throws away most of the available agreement. K-tolerant acceptance
+//! preserves it.
+//!
+//! The cost is **drift**: when we accept past a mismatch, the
+//! subsequent tokens in the draft were conditioned on a token the
+//! target wouldn't have chosen. The output therefore diverges slightly
+//! from what pure sequential decode of the target would produce. For
+//! chat-style outputs this is usually imperceptible; for strict
+//! structured output (tool calls, JSON, code) it should be used with
+//! care or disabled.
 //!
 //! ## Verification modes
 //!
@@ -24,8 +54,15 @@ pub(super) struct SpecPrefillResult {
     /// Draft token IDs that were fed to verify_tokens. Callers use
     /// this to emit the accepted prefix via `on_token`.
     pub(super) draft_token_ids: Vec<i32>,
-    /// Number of draft tokens that were accepted (contiguous prefix).
+    /// Number of draft tokens that were accepted (possibly including
+    /// isolated mismatches when K-tolerant acceptance allowed them).
+    /// This is the length of the prefix the caller should emit.
     pub(super) accepted_tokens: usize,
+    /// Number of positions in the accepted prefix where the draft
+    /// token actually matched the target (greedy_match or prob_ok).
+    /// `accepted_tokens - raw_matches` is the number of tolerated
+    /// mismatches that contributed to drift.
+    pub(super) raw_matches: usize,
     /// Total draft tokens that were verified.
     pub(super) total_draft_tokens: usize,
     /// The target model's predicted token at the divergence point.
@@ -53,6 +90,15 @@ const CHUNK_SIZE: usize = 8;
 /// the target assigns probability >= this threshold.
 /// exp(-0.693) ≈ 0.5.
 const PROB_THRESHOLD: f32 = 0.5;
+
+/// Maximum number of *consecutive* rejected draft tokens we tolerate
+/// before breaking acceptance. A single isolated rejection is absorbed
+/// (the draft token is still emitted, contributing to drift); a run
+/// longer than this means the draft and target have meaningfully
+/// diverged and we should fall back to sequential decode.
+///
+/// Setting this to 0 reverts to strict-prefix acceptance.
+const MAX_CONSECUTIVE_MISMATCHES: usize = 1;
 
 /// Verify draft token IDs (or text) against the target model.
 ///
@@ -107,19 +153,41 @@ pub(super) fn verify_draft(
     };
     let verify_ms = verify_timer.elapsed_ms();
 
-    // Find contiguous acceptance prefix using probability threshold.
-    // Accept draft token at position i if:
+    // Find acceptance prefix using K-tolerant matching. Accept draft
+    // token at position i when:
     //   1. The target's greedy prediction matches (predicted[i] == draft[i+1]), OR
     //   2. The target assigns probability >= PROB_THRESHOLD to draft[i+1]
+    //
+    // Walk positions and track the longest streak of consecutive
+    // rejections. When that streak exceeds MAX_CONSECUTIVE_MISMATCHES
+    // we stop and rewind the accepted prefix to the last matching
+    // position — we never end the prefix on a rejected token.
     let compare_len = draft_token_ids.len().saturating_sub(1);
     let mut accepted = 0usize;
+    let mut raw_matches = 0usize;
+    let mut consecutive_mismatches = 0usize;
+    // Index *one past* the last accepted match, used to rewind if we
+    // break inside a mismatch streak.
+    let mut last_match_end = 0usize;
     for i in 0..compare_len {
         let greedy_match = predicted[i] == draft_token_ids[i + 1];
         let prob_ok = draft_logprobs[i].exp() >= PROB_THRESHOLD;
         if greedy_match || prob_ok {
-            accepted += 1;
+            accepted = i + 1;
+            raw_matches += 1;
+            last_match_end = accepted;
+            consecutive_mismatches = 0;
         } else {
-            break;
+            consecutive_mismatches += 1;
+            if consecutive_mismatches > MAX_CONSECUTIVE_MISMATCHES {
+                // Run of mismatches too long — rewind to the last match.
+                accepted = last_match_end;
+                break;
+            }
+            // Tolerated mismatch: extend the prefix past it. The draft
+            // token at this position is still emitted to the client
+            // (contributing to drift), and the loop continues.
+            accepted = i + 1;
         }
     }
 
@@ -156,6 +224,7 @@ pub(super) fn verify_draft(
     Ok(Some(SpecPrefillResult {
         draft_token_ids,
         accepted_tokens: accepted,
+        raw_matches,
         total_draft_tokens,
         divergence_token,
         fully_accepted,

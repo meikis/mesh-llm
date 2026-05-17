@@ -452,6 +452,14 @@ impl StageOpenAiBackend {
                         json!(result.accepted_tokens),
                     );
                     attrs.insert(
+                        "llama_stage.spec_prefill.raw_matches".to_string(),
+                        json!(result.raw_matches),
+                    );
+                    attrs.insert(
+                        "llama_stage.spec_prefill.tolerated_mismatches".to_string(),
+                        json!(result.accepted_tokens.saturating_sub(result.raw_matches)),
+                    );
+                    attrs.insert(
                         "llama_stage.spec_prefill.fully_accepted".to_string(),
                         json!(result.fully_accepted),
                     );
@@ -480,11 +488,15 @@ impl StageOpenAiBackend {
                         .take(20)
                         .map(|(i, &lp)| format!("[{}]p={:.3}", i, lp.exp()))
                         .collect();
+                    let tolerated = result.accepted_tokens.saturating_sub(result.raw_matches);
                     eprintln!(
-                        "spec_prefill: {}/{} accepted ({:.1}%), verify={:.0}ms, fully_accepted={}, chunk=8, probs={}",
+                        "spec_prefill: {}/{} accepted ({:.1}%) [matches={}, tolerated={}], \
+                         verify={:.0}ms, fully_accepted={}, chunk=8, probs={}",
                         result.accepted_tokens,
                         compare_len,
                         acceptance_rate * 100.0,
+                        result.raw_matches,
+                        tolerated,
                         result.verify_ms,
                         result.fully_accepted,
                         logprob_summary.join(" "),

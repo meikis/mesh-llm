@@ -157,7 +157,9 @@ pub(crate) async fn api_proxy(
                         return;
                     }
 
-                    let (effective_model, classification) = if request.model_name.is_none()
+                    let (effective_model, classification, auto_fallback_models) = if request
+                        .model_name
+                        .is_none()
                         || request.model_name.as_deref() == Some("auto")
                     {
                         request.ensure_body_json();
@@ -203,23 +205,36 @@ pub(crate) async fn api_proxy(
                                 .await;
                                 return;
                             };
-                            let picked = router::pick_model_classified(&cl, &available);
-                            if let Some(name) = picked {
+                            let ranked = router::rank_models_classified(&cl, &available);
+                            if let Some(name) = ranked.first() {
                                 tracing::info!(
-                                    "router: {:?}/{:?} tools={} → {name}",
+                                    "router: {:?}/{:?} tools={} → {name} ({})",
                                     cl.category,
                                     cl.complexity,
-                                    cl.needs_tools
+                                    cl.needs_tools,
+                                    if ranked.len() > 1 {
+                                        format!("+{} fallbacks", ranked.len() - 1)
+                                    } else {
+                                        "no fallbacks".to_string()
+                                    }
                                 );
-                                (Some(name.to_string()), Some(cl))
+                                (
+                                    Some(name.to_string()),
+                                    Some(cl),
+                                    ranked
+                                        .into_iter()
+                                        .skip(1)
+                                        .map(String::from)
+                                        .collect::<Vec<_>>(),
+                                )
                             } else {
-                                (None, Some(cl))
+                                (None, Some(cl), Vec::new())
                             }
                         } else {
-                            (None, None)
+                            (None, None, Vec::new())
                         }
                     } else {
-                        (request.model_name.clone(), None)
+                        (request.model_name.clone(), None, Vec::new())
                     };
                     // Enable mesh hooks for auto-routed requests. When the
                     // smart router picks the model, hooks allow the local
@@ -325,14 +340,15 @@ pub(crate) async fn api_proxy(
                                         .map(election::InferenceTarget::Remote)
                                         .collect(),
                                 );
-                                let routed = proxy::route_model_request(
+                                let _result = proxy::route_model_request(
                                     node.clone(),
-                                    tcp_stream,
+                                    &mut tcp_stream,
                                     &mesh_targets,
                                     name,
                                     &request,
                                     required_tokens,
                                     &affinity,
+                                    false,
                                 )
                                 .await;
                                 proxy::release_request_objects(
@@ -340,7 +356,6 @@ pub(crate) async fn api_proxy(
                                     &request.request_object_request_ids,
                                 )
                                 .await;
-                                debug_assert!(routed);
                                 return;
                             }
                             if let Some(plugin_manager) = plugin_manager.as_ref() {
@@ -399,22 +414,61 @@ pub(crate) async fn api_proxy(
                             if targets.candidates(name).len() > 1 {
                                 request.ensure_body_json();
                             }
-                            let routed = proxy::route_model_request(
+                            let has_fallbacks = !auto_fallback_models.is_empty();
+                            let result = proxy::route_model_request(
                                 node.clone(),
-                                tcp_stream,
+                                &mut tcp_stream,
                                 &targets,
                                 name,
                                 &request,
                                 required_tokens,
                                 &affinity,
+                                has_fallbacks,
                             )
                             .await;
+                            if matches!(result, proxy::RouteModelResult::AllTargetsServerError)
+                                && has_fallbacks
+                            {
+                                // Primary model's targets all returned 5xx —
+                                // try each fallback model in priority order.
+                                let mut routed = false;
+                                for fallback in &auto_fallback_models {
+                                    tracing::info!(
+                                        "auto: model {name} failed, trying fallback {fallback}"
+                                    );
+                                    proxy::rewrite_model_field(&mut request, fallback);
+                                    let fb = proxy::route_model_request(
+                                        node.clone(),
+                                        &mut tcp_stream,
+                                        &targets,
+                                        fallback,
+                                        &request,
+                                        required_tokens,
+                                        &affinity,
+                                        true,
+                                    )
+                                    .await;
+                                    if matches!(fb, proxy::RouteModelResult::Handled) {
+                                        routed = true;
+                                        break;
+                                    }
+                                }
+                                if !routed {
+                                    let _ = proxy::write_503(
+                                        &mut tcp_stream,
+                                        &format!(
+                                            "all models failed for auto request (tried {name} + {} fallbacks)",
+                                            auto_fallback_models.len()
+                                        ),
+                                    )
+                                    .await;
+                                }
+                            }
                             proxy::release_request_objects(
                                 &node,
                                 &request.request_object_request_ids,
                             )
                             .await;
-                            debug_assert!(routed);
                             return;
                         }
                     } else {

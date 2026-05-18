@@ -41,6 +41,121 @@ designed for.
 This is a standalone optimization. It does not depend on MoA or any other
 mesh feature — any fast model can serve as the draft source.
 
+## Current State (May 2026)
+
+Tracking branch: **`micn/prefill-draft`** · PR: **#567** (draft) · CI: green
+
+### What is wired up
+
+- `--prefill-speculative <path-to-draft.gguf>` CLI flag on `mesh-llm`.
+  Opt-in only. Off by default. Zero startup cost and zero per-request
+  overhead when unset.
+- `DraftRunner` loads the draft model at startup, generates a short draft
+  prefix (`SPEC_PREFILL_DRAFT_CAP = 12` tokens) per request, fed through
+  the target's `verify_tokens` in a chunked batch (`CHUNK_SIZE = 8`).
+- K-tolerant prefix acceptance (`MAX_CONSECUTIVE_MISMATCHES = 1`) —
+  absorbs isolated single-token rejections so two different models can
+  share a useful accepted prefix even when they disagree at one spot.
+  Strict-prefix behavior is recoverable by setting the constant to 0.
+- Telemetry: `accepted_tokens`, `raw_matches`, `tolerated_mismatches`,
+  `verify_ms`, `acceptance_rate`, per-position probability dump.
+- PoC binary `crates/spec-prefill-poc/` for isolated experiments.
+
+### What is intentionally NOT wired up
+
+- **No auto-detection.** Earlier commits attempted to scan the HF cache
+  and pick a same-family draft automatically; that path was removed
+  (commit `c6623fdd`) to keep the feature inert when not requested.
+- **No protocol changes.** Nothing gossiped, no new wire format. Mixed-
+  version meshes are unaffected by this branch.
+- **No mesh-native draft selection.** A peer can't yet act as the draft
+  source over the QUIC tunnel. The draft model must be a local GGUF.
+- **No streaming during verify.** The accepted prefix is emitted in one
+  chunk once verify completes; only the post-divergence tail streams
+  token-by-token. This is fine for the target workload (distributed
+  layer-split with high per-token RTT) and out of scope to change.
+
+### Measured single-node performance (Qwen3-0.6B → Qwen3-8B, M4 Max)
+
+| Phase | Cost |
+|---|---|
+| Draft generation (0.6B, 12 tokens) | ~108ms |
+| Verify pass (8B, 12 tokens, chunked) | ~130ms |
+| **Total spec-prefill overhead** | **~240ms** |
+| Sequential decode rate (8B local) | ~50-60 tok/s ≈ ~18ms/token |
+| **Decode saved per accepted token** | **~18ms** |
+
+Mean acceptance across a 10-prompt sweep (chat, math, code, haiku,
+translation, open-ended): **95% accepted, 86% raw matches, ~1.4
+tolerated mismatches per request.** Strict-prefix would have been ~9%
+on the same prompts because of a Qwen3 thinking-template quirk where
+the 8B target emits a second `<think>` immediately after the first.
+
+### Cost/benefit picture
+
+- **Single-node 8B:** roughly break-even (~240ms overhead vs ~180ms
+  decode saved). Modest TTFT win because the accepted prefix lands in
+  one chunk rather than streaming. Not the target use case.
+- **Single-node 32B or larger:** clear net win as per-token decode cost
+  grows. Estimated ~+350ms per request at 32B.
+- **Distributed pipeline parallel (the real target):** clear large win.
+  Decode-time per token at 2 nodes / 50ms RTT is dominated by network
+  hops, not compute. Accepting 10 tokens via one verify pass saves 10
+  round-trips. Design doc's earlier estimate: +290ms expected value per
+  request at 50ms RTT, +610ms at 100ms.
+
+### Concrete next steps
+
+These are the experiments and small wins needed to move this branch
+from "validated PoC" to "ready to merge":
+
+1. **Benchmark against a larger local target** (32B / 30B-A3B). Confirm
+   the cost/benefit math improves as predicted when decode-per-token
+   gets more expensive. One-node-local, no networking — fastest signal.
+
+2. **Benchmark a 2-node skippy pipeline split** with `--prefill-
+   speculative` on and off. This is the deployment the feature was
+   designed for. Use existing Qwen3-8B layer packages already on disk
+   under `~/.cache/huggingface/hub/models--meshllm--Qwen3-8B-Q4_K_M-
+   layers/`. Measure TTFT, total wall-clock, accepted-prefix length
+   distribution.
+
+3. **Tool-call / structured-output drift study.** K-tolerant trades
+   fidelity for latency. Run a sweep with `MAX_CONSECUTIVE_MISMATCHES =
+   0` vs `1` on tool-using prompts (goose-shaped requests) and JSON-
+   schema-constrained outputs. Decide whether to:
+   - gate K per-request (header/query param),
+   - default to 0 when the request includes `tools` or
+     `response_format`,
+   - leave at 1 globally and document operator opt-out.
+
+4. **Wire mesh-native draft selection.** When `--prefill-speculative`
+   is unset but the mesh has a viable small same-family peer, propose
+   using it via the existing QUIC tunnel. Reuses `LocalModelBackend` /
+   `RemoteModelBackend` from the MoA crate. Big lift, real win — makes
+   the feature usable without per-node configuration.
+
+5. **Calibrate `SPEC_PREFILL_DRAFT_CAP`.** Currently hardcoded at 12.
+   The "Capped-draft experiment" notes below suggest 10–15 is a good
+   range; need empirical confirmation under the new K-tolerant regime
+   (which may shift the optimum upward).
+
+6. **`skippy_verify_tokens_frame` validation.** The frame variant in
+   the C ABI is meant for staged (distributed) verification. Needs an
+   integration test confirming logits at the final layer match the
+   single-node `verify_tokens` output. Blocks step 2 if not already
+   correct.
+
+### What this branch is NOT trying to do
+
+- Replace standard speculative decode (still applies to the
+  post-divergence tail).
+- Be fidelity-preserving like rejection-sampled spec decode. The drift
+  trade-off is intentional; see "Revised conclusion: K-tolerant
+  acceptance" below for the full reasoning.
+- Auto-engage by default. Opt-in via flag, will remain so until at
+  least the tool-call drift study (step 3) is complete.
+
 ## Motivation
 
 Standard speculative decoding (as in llama.cpp) works within a single

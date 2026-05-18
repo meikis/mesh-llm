@@ -142,3 +142,5 @@ plus `glslc`.
 Mesh LLM is experimental distributed-systems software. When you report bugs,
 include the command you ran, platform/backend flavor, `/api/status` output if
 available, and whether the node was private, published, or joined with `--auto`.
+
+<!-- ci: macos runner pool test -->

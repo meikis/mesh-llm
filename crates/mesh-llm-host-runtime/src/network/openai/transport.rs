@@ -923,6 +923,27 @@ fn response_first_byte_timeout() -> Duration {
     Duration::from_secs(5 * 60)
 }
 
+/// Non-final remote first-byte timeout: 30 seconds. Used when more retry
+/// targets remain in the routing loop. Lets the loop fail over fast off a
+/// silently-wedged peer (accepts QUIC, never writes a byte) instead of
+/// stalling the whole 5-minute budget on every attempt before reaching a
+/// healthy peer. The full budget is reserved for the LAST attempt, where
+/// patience is the right behavior because there is nowhere else to go.
+fn non_final_remote_first_byte_timeout() -> Duration {
+    Duration::from_secs(30)
+}
+
+/// Pick the first-byte timeout for a remote attempt based on whether more
+/// targets remain. Short timeout on non-final attempts gives fast failover;
+/// the last attempt gets the full prefill budget.
+fn remote_first_byte_timeout_for_attempt(more_attempts_remain: bool) -> Duration {
+    if more_attempts_remain {
+        non_final_remote_first_byte_timeout()
+    } else {
+        response_first_byte_timeout()
+    }
+}
+
 fn saturating_u32(value: usize) -> u32 {
     value.try_into().unwrap_or(u32::MAX)
 }
@@ -1845,6 +1866,20 @@ async fn probe_http_response<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Res
     probe_http_response_with_timeout(reader, response_first_byte_timeout()).await
 }
 
+/// Like `probe_http_response` but selects a shorter first-byte timeout when
+/// more retry targets remain after this attempt, so a silently-wedged remote
+/// peer can be skipped quickly instead of consuming the full 5-minute budget.
+async fn probe_http_response_remote<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    more_attempts_remain: bool,
+) -> Result<ResponseProbe> {
+    probe_http_response_with_timeout(
+        reader,
+        remote_first_byte_timeout_for_attempt(more_attempts_remain),
+    )
+    .await
+}
+
 /// Like `probe_http_response` but with a much longer timeout suitable for
 /// the local OpenAI surface. Prefill on a busy or slow machine can
 /// legitimately take minutes (large prompts, concurrent slot contention,
@@ -2218,7 +2253,10 @@ async fn route_remote_attempt_after_forward(
     retry_context_overflow: bool,
     response_adapter: ResponseAdapter,
 ) -> RouteAttemptResult {
-    match probe_http_response(quic_recv).await {
+    // `retry_context_overflow` also signals "more remote attempts remain" for
+    // this request. Use it to bound the first-byte wait so a wedged peer does
+    // not consume the full 5-minute budget before the loop tries a healthy one.
+    match probe_http_response_remote(quic_recv, retry_context_overflow).await {
         Ok(probe) => {
             relay_attempted_response(
                 tcp_stream,
@@ -5037,6 +5075,57 @@ mod tests {
             "probe_http_response_local should NOT timeout for slow local responses"
         );
         assert_eq!(result.unwrap().status_code, 200);
+    }
+
+    /// Non-final remote attempts must use the short first-byte timeout so a
+    /// silently-wedged peer is skipped fast; the final attempt must keep the
+    /// full prefill budget so a healthy-but-slow peer is not killed early.
+    #[test]
+    fn test_remote_first_byte_timeout_for_attempt_picks_short_when_more_remain() {
+        let short = super::remote_first_byte_timeout_for_attempt(true);
+        let full = super::remote_first_byte_timeout_for_attempt(false);
+
+        assert_eq!(short, super::non_final_remote_first_byte_timeout());
+        assert_eq!(full, super::response_first_byte_timeout());
+        assert!(
+            short < full,
+            "non-final timeout ({short:?}) must be shorter than final timeout ({full:?})"
+        );
+        assert!(
+            short <= std::time::Duration::from_secs(60),
+            "non-final timeout should be tight enough to skip a wedged peer fast, got {short:?}"
+        );
+        assert!(
+            full >= std::time::Duration::from_secs(60),
+            "final timeout must allow legitimate slow prefill, got {full:?}"
+        );
+    }
+
+    /// A wedged remote peer (accepts the stream but never writes a byte) must
+    /// produce a timeout error from `probe_http_response_with_timeout` at the
+    /// configured budget. We use a small explicit budget here to keep the test
+    /// fast; the chosen budget for the real proxy is asserted separately by
+    /// `test_remote_first_byte_timeout_for_attempt_picks_short_when_more_remain`.
+    #[tokio::test]
+    async fn test_probe_http_response_times_out_on_wedged_peer() {
+        let (client, _server) = tokio::io::duplex(4096);
+        // _server is held open but writes nothing: models a wedged peer that
+        // accepted the stream but never sent a response byte.
+
+        let mut reader = client;
+        let started = std::time::Instant::now();
+        let result = super::probe_http_response_with_timeout(
+            &mut reader,
+            std::time::Duration::from_millis(150),
+        )
+        .await;
+
+        let elapsed = started.elapsed();
+        assert!(result.is_err(), "probe should report a timeout error");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "probe should fail near the configured budget, got {elapsed:?}"
+        );
     }
 
     #[tokio::test]

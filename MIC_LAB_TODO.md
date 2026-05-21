@@ -5,9 +5,12 @@ items are done.
 
 ## In flight right now
 
-- [ ] **PR #620 — opinionated MoA no-think.** Flip default to
-  `Some(false)` so workers and reducer don't think unless caller
-  explicitly turns it on. Update tests, sim, PR description.
+- [x] **PR #620 — opinionated MoA no-think.** Flipped default to
+  no-think; escape hatch via reasoning knobs preserved.
+  4 new unit tests, live smoke 3/3 clean, PR title + description
+  updated, branch pushed at `945ab8fa`.
+
+- [ ] **Public-mesh per-model tok/s probe.** Starting now.
 
 ## Queued (in priority order Mic asked them)
 

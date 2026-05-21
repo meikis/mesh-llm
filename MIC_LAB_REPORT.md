@@ -74,6 +74,26 @@ Before studio joined: **0/10 success** (router picked Qwen3-32B which had no wor
 
 After studio joined: **5/5 success**, all routed to MiniMax. Times 3.4-9.0s, but with `<think>` leakage in content because direct "auto" calls bypass MoA's no-think injection. The auto-router heuristic DID respond to peer availability — switched from "always Qwen3-32B" to "always MiniMax". So it has some failover logic, just no tok/s awareness.
 
+### MoA grace logic doesn't handle "diverse fast answers"
+
+After mini also joined the public mesh, MoA degraded:
+
+| Run | mesh time | reason |
+|----:|----------:|---|
+| 1 | 45.5s | waited for slow Qwen3-8B |
+| 2 | 36.0s | same |
+| 3 | 38.2s | same |
+| 4 | **0.7s** | 2 workers happened to textually agree, early-exit fired |
+| 5 | 44.9s | waited for slow Qwen3-8B |
+
+The arbiter early-exit rule is "2 workers textually agree on the answer". With diverse short answers ("Hello", "Yes", "Ready", "Okay"), this rarely fires. The `first_answer_grace` only checks `outputs.len() == 1` so it doesn't help once a second non-matching answer has arrived. **MoA then waits for ALL workers including the slow Qwen3-8B (~40s on the public mesh).**
+
+Fix shape (not implemented yet): broaden grace to "if ≥2 answers and grace window has elapsed and no consensus, pick the highest-confidence one". Small change in `fanout.rs` + `arbiter.rs`. Would fix this exact bimodal behavior.
+
+### Mini on public mesh — mid
+
+Moved mini to public mesh too. Qwen3.5-9B at 16-17 tok/s, FTT ~480ms when working. But **2/5 timeouts** on cold start (first 2 calls 90s timeout). When path warms up, lite inference (20 tokens) consistently 1.0-1.6s. Not bad. Probably suitable for fast lite paths.
+
 ### Implications
 
 * The public mesh's quality is **entirely determined by who's publishing**. With studio on it, MiniMax becomes the de-facto fast/reliable option.

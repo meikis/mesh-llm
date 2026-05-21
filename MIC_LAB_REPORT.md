@@ -243,3 +243,19 @@ The lab will keep running. Connection events overnight:
 
 I'll keep the labs running and check in tomorrow morning if you
 haven't reached me by then.
+
+## MoA grace fix on diverse fast answers — measured
+
+Same 5-run `model=mesh` test, before and after PR #624 (combined with #620 no-think + #621 chunked-streaming):
+
+| Run | before (no diverse-grace) | after (diverse-grace, PR #624) |
+|----:|--------------------------:|-------------------------------:|
+| 1 | 45.5s | **6.0s** |
+| 2 | 36.0s | **4.8s** |
+| 3 | 38.2s | **6.0s** |
+| 4 |  0.7s | **6.0s** |
+| 5 | 44.9s | **6.0s** |
+
+All 5 runs sub-7s. The 6s ceiling is the grace timer firing on the first qualifying answer (default `first_answer_grace = 6s`). Grace fired 4/5 times in the gateway log; the 4.8s run probably had textual consensus fire earlier.
+
+This is the **single biggest user-visible win in the lab so far**: the chat UI on `model=mesh` over the public mesh goes from ~40s p50 to ~6s p50.

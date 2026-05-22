@@ -320,7 +320,7 @@ impl Node {
         let model = self
             .node
             .models()
-            .download(model_ref, DownloadOptions::default())
+            .download(model_ref, DownloadOptions)
             .await
             .map_err(to_napi_error)?;
         Ok(json!({

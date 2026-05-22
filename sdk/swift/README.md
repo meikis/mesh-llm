@@ -2,9 +2,8 @@
 
 Swift Package for connecting to mesh-llm meshes from iOS, Mac Catalyst, and macOS apps.
 
-The canonical SDK contract, release gates, and platform support matrix live in
-[`docs/SDK.md`](../../docs/SDK.md). This package should stay a thin Swift-native
-wrapper over that shared contract.
+The SDK usage guide, native runtime packaging notes, examples, and platform
+support matrix live in [`docs/SDK.md`](../../docs/SDK.md).
 
 ## Installation
 

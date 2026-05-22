@@ -3,9 +3,8 @@
 Kotlin/Android bindings for mesh-llm model management, local serving, and mesh
 inference.
 
-The canonical SDK contract, release gates, and platform support matrix live in
-[`docs/SDK.md`](../../docs/SDK.md). This package should stay a thin
-Kotlin-native wrapper over that shared contract.
+The SDK usage guide, native runtime packaging notes, examples, and platform
+support matrix live in [`docs/SDK.md`](../../docs/SDK.md).
 
 ## GitHub Packages
 

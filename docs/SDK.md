@@ -1,147 +1,315 @@
-# MeshLLM SDK
+# MeshLLM SDK Usage Guide
 
-The MeshLLM SDK is one embedded node contract exposed through Rust, Swift, and
-Kotlin. Language packages should feel native, but they must not invent different
-behavior. A customer should be able to copy an example, run a real model, and
-understand failures without reading host runtime internals.
+MeshLLM exposes the same embedded node concept through Rust, Swift, and Kotlin:
+create a node, join a mesh, manage models, optionally load a local model for
+serving, run inference, then unload and stop.
 
-## Release Gates
+The SDK is split into two parts:
 
-Before an SDK change is review-ready, these gates must be true:
+- **Language SDKs** provide the public API: Rust `mesh-llm-api`, Swift
+  `MeshLLM`, and Kotlin `ai.meshllm`.
+- **Native runtime artifacts** provide local serving for a specific
+  platform/backend, such as macOS Metal or Linux CUDA.
 
-1. **One canonical SDK contract.** Rust, Swift, and Kotlin expose the same node
-   lifecycle, model management, serving, inference, streaming, cancellation,
-   and typed error semantics.
-2. **Real end-to-end example apps.** Examples exercise the real UniFFI/native
-   runtime path and either run local serving or connect to a live fixture mesh.
-   They must not rely on fake controllers or no-op stubs as the final signal.
-3. **SDK lifecycle polish.** The main path is deterministic:
-   create node, start, discover/download/show model, load, infer, unload, stop.
-   Cancellation must cancel the real request and cleanup must release loaded
-   models, runtime directories, ports, callbacks, and native handles.
-4. **First-class errors.** SDK failures cross the FFI boundary as typed errors
-   with actionable messages. String payloads may carry detail, but callers must
-   be able to distinguish invalid identity, discovery, model management,
-   serving, cancellation, and unsupported-platform failures.
-5. **Platform support matrix.** Every package must document what is supported,
-   what is client-only, and what is planned. Unsupported local serving must fail
-   with a typed unsupported error, not a placeholder implementation.
+Client-only mesh inference only needs the language SDK. Local serving also
+needs a matching native runtime artifact or an embedded Rust `ServingController`.
 
-## Canonical Contract
+## Install
 
-The public SDK concept is `Node`: an embedded mesh node with namespaced APIs for
-inference, model management, and local serving.
+### Rust
 
-```text
-Node
-  start()
-  stop()
-  reconnect()
-  status()
-  inference.listModels()
-  inference.chat()/chatStream()/chatFlow()
-  inference.responses()/responsesStream()/responsesFlow()
-  inference.cancel()
-  models.recommended()
-  models.search()
-  models.show()
-  models.installed()
-  models.cacheStatus()
-  models.download()
-  models.delete()
-  models.cleanup()
-  models.pruneDerivedCache()
-  serving.status()
-  serving.servedModels()
-  serving.load()
-  serving.unload()
-  serving.unloadModel()
-  serving.unloadInstance()
-  serving.setDevicePolicy()
+Add the Rust SDK crate:
+
+```toml
+[dependencies]
+mesh-llm-api = "0.66.0"
 ```
 
-Language names should follow the language's module conventions. Swift and
-Kotlin types do not need a `Mesh` prefix because the packages already provide
-that namespace.
+For client-only mesh inference and model catalog/cache APIs, this is enough.
 
-## Lifecycle Contract
+For local serving in a Rust app, the node must be built with a
+`ServingController`. The plain `mesh-llm-api` crate intentionally does not pick
+a Metal, CUDA, ROCm, Vulkan, or CPU runtime for you.
+
+### Swift
+
+Add the repo Swift package from a tagged release:
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/Mesh-LLM/mesh-llm", from: "0.66.0"),
+],
+targets: [
+    .target(
+        name: "YourApp",
+        dependencies: [
+            .product(name: "MeshLLM", package: "mesh-llm"),
+        ]
+    ),
+]
+```
+
+Tagged releases resolve the prebuilt `MeshLLMFFI.xcframework` through SwiftPM.
+For local checkout development, build the XCFramework first:
+
+```bash
+./sdk/swift/scripts/build-xcframework.sh
+```
+
+### Kotlin
+
+The Android/Kotlin package is published to this repository's GitHub Packages
+Maven registry as:
+
+```text
+ai.meshllm:meshllm-android:<version>
+```
+
+Configure the Maven repository:
+
+```kotlin
+repositories {
+    maven {
+        url = uri("https://maven.pkg.github.com/Mesh-LLM/mesh-llm")
+        credentials {
+            username = providers.gradleProperty("gpr.user")
+                .orElse(System.getenv("GITHUB_ACTOR"))
+                .get()
+            password = providers.gradleProperty("gpr.key")
+                .orElse(System.getenv("GITHUB_TOKEN"))
+                .get()
+        }
+    }
+}
+```
+
+Then depend on the SDK:
+
+```kotlin
+dependencies {
+    implementation("ai.meshllm:meshllm-android:0.66.0")
+}
+```
+
+## Node Lifecycle
 
 Client-only use:
 
 ```text
-generate/persist owner keypair
-create Node(inviteToken, ownerKeypair, servingEnabled=false)
+create or load an owner keypair
+create Node with an invite token
 start
-inference.listModels
-inference.chat or inference.responses
+list mesh models
+chat or responses
 stop
 ```
 
 Local serving use:
 
 ```text
-generate/persist owner keypair
-create Node(inviteToken, ownerKeypair, servingEnabled=true)
-models.search or models.show
-models.download unless the model is already installed
+configure a native runtime artifact
+create or load an owner keypair
+create Node with an invite token
+search or show a model
+download the model unless it is already installed
 start
-serving.load(modelRef, devicePolicy)
-inference.listModels until the loaded model is visible
-inference.chat or inference.responses
-serving.unload by instance id when available, otherwise by model id
+load the model through serving
+run inference
+unload the served model or served instance
 stop
 ```
 
-The examples in `sdk/swift/example` and `sdk/kotlin/example` are executable
-versions of this contract. CI smoke jobs should run those examples against a
-real fixture mesh or a real local model.
+## Rust Usage
 
-## Error Contract
+Create a node and join a mesh:
 
-The FFI error enum is part of the SDK contract:
+```rust
+use mesh_llm_api::{InviteToken, MeshNode, OwnerKeypair};
 
-| Error | Meaning |
-|---|---|
-| `InvalidInviteToken` | The invite token is empty, malformed, or cannot be accepted. |
-| `InvalidOwnerKeypair` | The caller supplied an empty or malformed owner identity. |
-| `BuildFailed` | The node could not be constructed from valid inputs. |
-| `JoinFailed` | The node could not join the requested mesh. |
-| `DiscoveryFailed` | Public mesh discovery failed. |
-| `StreamFailed` | Streaming inference setup or delivery failed. |
-| `Cancelled` | A request was cancelled. |
-| `ReconnectFailed` | Reconnect failed after an existing node was created. |
-| `HostUnavailable` | The selected host or endpoint is unavailable. |
-| `ModelManagementFailed` | Search, show, download, install, delete, cleanup, or cache inspection failed. |
-| `ServingFailed` | Serving load, unload, status, or device policy control failed. |
-| `ServingUnsupported` | The current platform/build cannot provide local serving. |
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let owner = OwnerKeypair::generate();
+    let invite = "your-invite-token".parse::<InviteToken>()?;
 
-Swift exposes this as `MeshError`. Kotlin exposes this as `MeshException`.
-Generated UniFFI names may still exist, but wrapper docs and examples should use
-the SDK-level aliases.
+    let node = MeshNode::builder()
+        .identity(owner)
+        .join(invite)
+        .build()?;
 
-## Platform Support Matrix
+    node.start().await?;
 
-| Platform/package | Mesh inference | Model management | Local serving | Backend status |
-|---|---:|---:|---:|---|
-| Rust SDK on macOS | yes | yes | yes | Metal and CPU builds are supported by the native runtime. |
-| Rust SDK on Linux | yes | yes | yes | CPU is supported; CUDA, ROCm/HIP, and Vulkan depend on the selected native runtime build. |
-| Swift macOS | yes | yes | yes | Uses `MeshLLMFFI.xcframework`; local serving is currently validated on host macOS with Metal. |
-| Swift Mac Catalyst | yes | yes | planned | Package builds through the Apple XCFramework path; local serving must be validated per target before it is advertised. |
-| Swift iOS | yes | model catalog/cache APIs only where filesystem policy allows | no | Client/mesh participation only until embedded serving is validated for iOS. |
-| Kotlin JVM macOS | yes | yes | yes | Requires a matching `libmeshllm_ffi.dylib`; CI validates fixture-backed inference. |
-| Kotlin JVM Linux | yes | yes | yes | Requires a matching `libmeshllm_ffi.so`; CPU/CUDA/Vulkan support is selected by the native runtime artifact. |
-| Kotlin Android | yes | yes | planned | AAR packaging builds CPU native libraries; local serving remains platform-gated until Android runtime smoke passes. |
+    let models = node.inference().list_models().await?;
+    println!("models: {models:#?}");
 
-Any row marked `planned` must fail with `ServingUnsupported` for local serving
-until CI proves the real path works.
+    node.stop().await?;
+    Ok(())
+}
+```
+
+Model management APIs are available without local serving:
+
+```rust
+use mesh_llm_api::{DownloadOptions, ModelSearchQuery};
+
+let matches = node.models().search(ModelSearchQuery {
+    query: "Qwen2.5 3B instruct GGUF".to_string(),
+    limit: Some(10),
+}).await?;
+
+let details = node.models().show("Qwen2.5-3B-Instruct-Q4_K_M").await?;
+let downloaded = node.models()
+    .download(&details.model_ref, DownloadOptions::default())
+    .await?;
+```
+
+To serve from Rust, attach a real controller:
+
+```rust
+use mesh_llm_api::{DevicePolicy, LoadModelOptions, MeshNode, UnloadModelOptions};
+use std::sync::Arc;
+
+let controller: Arc<dyn mesh_llm_api::ServingController> = build_controller();
+
+let node = MeshNode::builder()
+    .identity(owner)
+    .join(invite)
+    .serving_controller(controller)
+    .build()?;
+
+let served = node.serving().load(
+    "Qwen2.5-3B-Instruct-Q4_K_M",
+    LoadModelOptions {
+        device_policy: DevicePolicy::Auto,
+    },
+).await?;
+
+node.serving()
+    .unload_instance(
+        served.instance_id.as_deref().unwrap_or(&served.model_id),
+        UnloadModelOptions::default(),
+    )
+    .await?;
+```
+
+If no controller is attached, `serving.load()` returns an unsupported error.
+This is intentional: `mesh-llm-api` is platform-neutral and does not silently
+choose a native backend.
+
+## Swift Usage
+
+Configure a native runtime before local serving:
+
+```swift
+import MeshLLM
+
+let runtime = try NativeRuntime.prepare()
+print("using \(runtime.artifactId) from \(runtime.artifactDirectory.path)")
+```
+
+Create a node and run inference:
+
+```swift
+import MeshLLM
+
+let ownerKeypair = generateOwnerKeypairHex()
+let node = try Node(
+    inviteToken: InviteToken("your-invite-token"),
+    ownerKeypairBytesHex: ownerKeypair
+)
+
+try await node.start()
+
+let models = try await node.inference.listModels()
+let request = ChatRequest(model: models[0].id, messages: [
+    ChatMessage(role: "user", content: "Hello!")
+])
+
+for try await event in node.inference.chatStream(request) {
+    if case .tokenDelta(_, let delta) = event {
+        print(delta, terminator: "")
+    }
+}
+
+try await node.stop()
+```
+
+Load and unload a local model:
+
+```swift
+let served = try await node.serving.load(
+    "Qwen2.5-3B-Instruct-Q4_K_M",
+    options: LoadModelOptions(devicePolicy: .auto)
+)
+
+if let instanceId = served.instanceId {
+    try await node.serving.unloadInstance(
+        instanceId,
+        options: UnloadModelOptions(drainTimeoutMs: 1_000, force: false)
+    )
+} else {
+    try await node.serving.unloadModel(
+        served.modelId,
+        options: UnloadModelOptions(drainTimeoutMs: 1_000, force: false)
+    )
+}
+```
+
+## Kotlin Usage
+
+Configure the native runtime before any generated UniFFI symbol is used:
+
+```kotlin
+import ai.meshllm.NativeRuntime
+
+val runtime = NativeRuntime.configure()
+println("using ${runtime.artifactId} from ${runtime.artifactDir}")
+```
+
+Create a node:
+
+```kotlin
+import ai.meshllm.InviteToken
+import ai.meshllm.Node
+import uniffi.mesh_ffi.generateOwnerKeypairHex
+
+val ownerKeypair = generateOwnerKeypairHex()
+val node = Node(InviteToken("your-invite-token"), ownerKeypair)
+
+node.start()
+val models = node.inference.listModels()
+```
+
+Load, infer, and unload:
+
+```kotlin
+val served = node.serving.load(
+    "Qwen2.5-3B-Instruct-Q4_K_M",
+    LoadModelOptions(DevicePolicy.Auto),
+)
+
+try {
+    val selected = node.inference.listModels().first { it.id == served.modelId }
+    node.inference.chat(
+        ChatRequest(selected.id, listOf(ChatMessage("user", "hello"))),
+    ) { event -> println(event) }
+} finally {
+    val target = served.instanceId?.let { UnloadTarget.Instance(it) }
+        ?: UnloadTarget.Model(served.modelId)
+    node.serving.unload(
+        target,
+        UnloadModelOptions(drainTimeoutMs = 1_000UL, force = false),
+    )
+    node.stop()
+}
+```
 
 ## Native Runtime Artifacts
 
-Swift and Kotlin packages should load MeshLLM through `libmeshllm_ffi`, not
-through a public `libllama` contract. Backend-specific llama.cpp builds are an
-implementation detail of the native SDK runtime artifact.
+Swift and Kotlin load MeshLLM through `libmeshllm_ffi`, not through a public
+`libllama` contract. Backend-specific llama.cpp builds are an implementation
+detail of the native runtime artifact.
 
-Native SDK runtime artifacts use this layout:
+Native runtime artifacts use this layout:
 
 ```text
 meshllm-native-<platform>-<flavor>/
@@ -155,13 +323,13 @@ meshllm-native-<platform>-<flavor>/
 The duplicate `libuniffi_mesh_ffi` file exists because generated UniFFI loaders
 look up the component library name. Both files contain the same native runtime.
 
-The artifact manifest records the SDK version, target triple, backend flavor,
-library checksum, llama.cpp upstream SHA, patched SHA, and patch digest. SDK
-loaders must verify `library_sha256` before loading a downloaded artifact.
+The manifest records the SDK version, target triple, backend flavor, library
+checksum, llama.cpp upstream SHA, patched SHA, and patch digest. SDK loaders
+verify the library checksum before loading the dynamic library.
 
 Baseline artifact names:
 
-| Artifact | Target | Backend |
+| Artifact directory | Target | Backend |
 |---|---|---|
 | `meshllm-native-darwin-aarch64-metal` | `aarch64-apple-darwin` | Metal |
 | `meshllm-native-darwin-aarch64-cpu` | `aarch64-apple-darwin` | CPU |
@@ -198,16 +366,23 @@ Verify produced artifacts:
 scripts/verify-native-sdk-package.sh dist/native-sdk/*.tar.gz
 ```
 
-Generate a crates.io-ready native runtime crate from a verified artifact:
+## Selecting a Runtime From Cargo
+
+Native runtime crates are generated from verified native runtime artifacts:
 
 ```bash
-scripts/package-native-sdk-crate.sh dist/native-sdk/meshllm-native-darwin-aarch64-metal.tar.gz
+scripts/package-native-sdk-crate.sh \
+  dist/native-sdk/meshllm-native-darwin-aarch64-metal.tar.gz
 ```
 
-The generated crate contains the native runtime under `native/`, copies it into
-Cargo's `OUT_DIR/native` during the crate build, and uses
-`links = "meshllm_native_runtime"` so dependent Rust build scripts can discover
-the build-output paths:
+Generated crates contain the native runtime under `native/`, copy it into
+Cargo's `OUT_DIR/native` during the crate build, and use:
+
+```toml
+links = "meshllm_native_runtime"
+```
+
+Cargo exposes these paths to dependent build scripts:
 
 ```text
 DEP_MESHLLM_NATIVE_RUNTIME_ARTIFACT_ID
@@ -218,9 +393,8 @@ DEP_MESHLLM_NATIVE_RUNTIME_LIBRARY
 DEP_MESHLLM_NATIVE_RUNTIME_UNIFFI_LIBRARY
 ```
 
-Rust apps should choose exactly one native runtime crate for the target they are
-building. Use target-specific dependencies so Cargo selects the matching
-platform/backend package:
+Rust applications that want Cargo to select a runtime should depend on exactly
+one runtime crate for each target:
 
 ```toml
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
@@ -230,14 +404,14 @@ meshllm-native-darwin-aarch64-metal = "0.66.0"
 meshllm-native-linux-x86-64-cpu = "0.66.0"
 ```
 
-Because the runtime crates share `links = "meshllm_native_runtime"`, Cargo will
-reject selecting more than one of them for the same build. Apps that need to
-ship multiple backend choices in one installer should package multiple verified
-tarball artifacts explicitly and choose between those packaged directories at
+Because all runtime crates share `links = "meshllm_native_runtime"`, Cargo
+rejects selecting more than one for the same build. Apps that need to ship
+multiple backend choices in one installer should package multiple verified
+tarball artifacts explicitly and choose between those artifact directories at
 runtime.
 
-An app build script can then copy the selected runtime into the final app
-bundle, installer, container image, or package resource directory:
+An app build script can copy the selected artifact into its final bundle,
+installer, container image, or package resource directory:
 
 ```rust
 use std::{env, fs, path::PathBuf};
@@ -247,32 +421,99 @@ fn main() {
         env::var("DEP_MESHLLM_NATIVE_RUNTIME_ARTIFACT_DIR")
             .expect("meshllm native runtime dependency"),
     );
-    let package_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("meshllm-native");
-    fs::create_dir_all(&package_dir).expect("create package native dir");
+    let package_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"))
+        .join("meshllm-native");
+    fs::create_dir_all(&package_dir).expect("create native runtime output dir");
     // Copy artifact_dir recursively into package_dir with the app's packaging helper.
 }
 ```
 
-At runtime, the app loads `libmeshllm_ffi` from the packaged artifact directory
-and verifies the `manifest.json` checksum before opening the dynamic library.
-Swift and Kotlin packaging can consume the same verified tarball layout
-directly when Cargo is not involved.
+At runtime, set one of these environment variables or pass the artifact
+directory directly to the SDK resolver:
 
-Swift and Kotlin expose native runtime resolvers over this same layout:
+```text
+MESHLLM_NATIVE_RUNTIME_ARTIFACT_DIR
+MESHLLM_NATIVE_RUNTIME_DIR
+MESH_SDK_NATIVE_RUNTIME_DIR
+```
 
-- `NativeRuntime.prepare()` in Swift validates the packaged artifact before
-  local serving starts. Swift still links the generated `MeshLLMFFI`
-  XCFramework through SwiftPM.
-- `NativeRuntime.configure()` in Kotlin validates the artifact and sets the
-  UniFFI JNA `libraryOverride` before generated FFI symbols are touched.
+## Examples
 
-Both resolvers accept `MESHLLM_NATIVE_RUNTIME_ARTIFACT_DIR`,
-`MESHLLM_NATIVE_RUNTIME_DIR`, `MESH_SDK_NATIVE_RUNTIME_DIR`, or a direct config
-object from the host app.
+### Swift macOS Example
 
-## Validation
+```bash
+./sdk/swift/scripts/build-xcframework.sh
+scripts/package-native-sdk.sh \
+  --backend metal \
+  --target aarch64-apple-darwin \
+  --out dist/native-sdk
 
-Minimum validation for SDK work:
+MESHLLM_NATIVE_RUNTIME_ARTIFACT_DIR=dist/native-sdk/meshllm-native-darwin-aarch64-metal \
+MESH_SDK_MODEL_REF=Qwen2.5-3B-Instruct-Q4_K_M \
+swift run --package-path sdk/swift/example/MeshExampleApp
+```
+
+Useful environment variables:
+
+| Variable | Meaning |
+|---|---|
+| `MESH_SDK_MODEL_REF` | Catalog, Hugging Face, or local model reference to download/load. |
+| `MESHLLM_NATIVE_RUNTIME_ARTIFACT_DIR` | Verified `meshllm-native-*` artifact directory for local serving. |
+| `MESH_SDK_CACHE_DIR` | Hugging Face cache location. |
+| `MESH_SDK_RUNTIME_DIR` | Runtime scratch directory. |
+| `MESH_SDK_SKIP_DOWNLOAD=1` | Skip download when the model is already installed. |
+| `MESH_SDK_PROMPT` | Prompt text for the local inference request. |
+
+### Kotlin JVM Example
+
+```bash
+scripts/package-native-sdk.sh \
+  --backend metal \
+  --target aarch64-apple-darwin \
+  --out dist/native-sdk
+
+MESHLLM_NATIVE_RUNTIME_ARTIFACT_DIR=dist/native-sdk/meshllm-native-darwin-aarch64-metal \
+MESH_SDK_MODEL_REF=Qwen2.5-3B-Instruct-Q4_K_M \
+./gradlew --no-daemon run -p sdk/kotlin/example/example-jvm
+```
+
+## Errors
+
+Rust APIs return `MeshApiError`. Swift exposes `MeshError`. Kotlin exposes
+`MeshException`.
+
+Common categories:
+
+| Category | Meaning |
+|---|---|
+| Invalid invite token | The token is empty, malformed, or cannot be accepted. |
+| Invalid owner keypair | The owner identity is empty or malformed. |
+| Discovery failed | Public mesh discovery failed. |
+| Model management failed | Search, show, download, install, delete, cleanup, or cache inspection failed. |
+| Serving failed | Serving load, unload, status, or device policy control failed. |
+| Serving unsupported | The current platform/build does not provide local serving. |
+| Stream failed | Streaming inference setup or delivery failed. |
+| Cancelled | A request was cancelled. |
+
+Do not treat unsupported serving as a soft fallback. If a target cannot serve
+locally, surface the typed unsupported error to the caller.
+
+## Platform Support
+
+| Platform/package | Mesh inference | Model management | Local serving |
+|---|---:|---:|---:|
+| Rust SDK on macOS | yes | yes | requires an attached `ServingController` |
+| Rust SDK on Linux | yes | yes | requires an attached `ServingController` |
+| Swift macOS | yes | yes | yes with a matching native runtime artifact |
+| Swift Mac Catalyst | yes | yes | not currently advertised |
+| Swift iOS | yes | limited by app filesystem policy | no |
+| Kotlin JVM macOS | yes | yes | yes with a matching native runtime artifact |
+| Kotlin JVM Linux | yes | yes | yes with a matching native runtime artifact |
+| Kotlin Android | yes | yes | not currently advertised |
+
+## Validation Commands
+
+Run the SDK package checks:
 
 ```bash
 scripts/check-sdk-contract.sh
@@ -282,8 +523,7 @@ swift build --package-path sdk/swift/example/MeshExampleApp
 ./gradlew --no-daemon compileKotlin -p sdk/kotlin/example/example-jvm
 ```
 
-For serving, model management, or inference behavior, also run the live fixture
-smokes through `scripts/ci-sdk-fixture.sh` or the CI smoke wrappers:
+Run serving smoke examples with a real model:
 
 ```bash
 scripts/ci-swift-sdk-smoke.sh <mesh-llm> <bin-dir> <model.gguf>

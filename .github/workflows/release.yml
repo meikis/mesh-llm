@@ -191,6 +191,9 @@ jobs:
             --target "${{ matrix.target }}" \
             --out dist/native-sdk
 
+      - name: Verify native SDK runtime artifact
+        run: scripts/verify-native-sdk-package.sh dist/native-sdk/*.tar.gz
+
       - name: Upload native SDK runtime
         uses: actions/upload-artifact@v6
         with:

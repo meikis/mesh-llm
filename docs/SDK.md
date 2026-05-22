@@ -192,12 +192,19 @@ scripts/package-native-sdk.sh \
   --target x86_64-unknown-linux-gnu
 ```
 
+Verify produced artifacts:
+
+```bash
+scripts/verify-native-sdk-package.sh dist/native-sdk/*.tar.gz
+```
+
 ## Validation
 
 Minimum validation for SDK work:
 
 ```bash
 scripts/check-sdk-contract.sh
+scripts/verify-native-sdk-package.sh dist/native-sdk/*.tar.gz
 cargo test -p mesh-llm-ffi
 swift build --package-path sdk/swift/example/MeshExampleApp
 ./gradlew --no-daemon compileKotlin -p sdk/kotlin/example/example-jvm

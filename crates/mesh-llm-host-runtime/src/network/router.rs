@@ -678,6 +678,10 @@ pub fn pick_model_ladder_classified<'a>(
         big.retain(|c| c.name != pick);
         seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
     }
+    // Match pick_model_classified's small-tier seed offset.
+    if ladder.is_empty() {
+        seed = nanos.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    }
     while ladder.len() < max_len && !small.is_empty() {
         let pick = pick_weighted(&small, seed);
         ladder.push(pick);
@@ -1651,6 +1655,31 @@ mod tests {
         let mut head: Vec<&str> = ladder[..2].to_vec();
         head.sort();
         assert_eq!(head, vec!["big-32B", "big-MiniMax"]);
+    }
+
+    #[test]
+    fn ladder_returns_small_tier_when_big_tier_empty() {
+        // Copilot regression #639: when all candidates are small-tier,
+        // the ladder must still produce them.
+        use crate::models::ModelCapabilities;
+        let caps = ModelCapabilities::default();
+        let available = vec![
+            RoutingCandidate::unscored("a-3B", caps),
+            RoutingCandidate::unscored("b-3B", caps),
+            RoutingCandidate::unscored("c-3B", caps),
+        ];
+        let cl = Classification {
+            category: Category::Chat,
+            complexity: Complexity::Moderate,
+            needs_tools: false,
+            has_media_inputs: false,
+        };
+
+        let ladder = pick_model_ladder_classified(&cl, &available, 4);
+        assert_eq!(ladder.len(), 3);
+        let mut sorted: Vec<&str> = ladder.to_vec();
+        sorted.sort();
+        assert_eq!(sorted, vec!["a-3B", "b-3B", "c-3B"]);
     }
 
     #[test]

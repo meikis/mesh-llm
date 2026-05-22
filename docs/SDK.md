@@ -135,6 +135,63 @@ the SDK-level aliases.
 Any row marked `planned` must fail with `ServingUnsupported` for local serving
 until CI proves the real path works.
 
+## Native Runtime Artifacts
+
+Swift and Kotlin packages should load MeshLLM through `libmeshllm_ffi`, not
+through a public `libllama` contract. Backend-specific llama.cpp builds are an
+implementation detail of the native SDK runtime artifact.
+
+Native SDK runtime artifacts use this layout:
+
+```text
+meshllm-native-<platform>-<flavor>/
+  manifest.json
+  README.md
+  lib/
+    libmeshllm_ffi.{dylib|so}
+    libuniffi_mesh_ffi.{dylib|so}
+```
+
+The duplicate `libuniffi_mesh_ffi` file exists because generated UniFFI loaders
+look up the component library name. Both files contain the same native runtime.
+
+The artifact manifest records the SDK version, target triple, backend flavor,
+library checksum, llama.cpp upstream SHA, patched SHA, and patch digest. SDK
+loaders must verify `library_sha256` before loading a downloaded artifact.
+
+Baseline artifact names:
+
+| Artifact | Target | Backend |
+|---|---|---|
+| `meshllm-native-darwin-aarch64-metal` | `aarch64-apple-darwin` | Metal |
+| `meshllm-native-darwin-aarch64-cpu` | `aarch64-apple-darwin` | CPU |
+| `meshllm-native-linux-x86_64-cpu` | `x86_64-unknown-linux-gnu` | CPU |
+| `meshllm-native-linux-x86_64-cuda` | `x86_64-unknown-linux-gnu` | CUDA |
+| `meshllm-native-linux-x86_64-vulkan` | `x86_64-unknown-linux-gnu` | Vulkan |
+| `meshllm-native-linux-x86_64-rocm` | `x86_64-unknown-linux-gnu` | ROCm/HIP |
+
+CUDA and ROCm artifacts may include hardware-specific suffixes such as
+`cuda-sm80` or `rocm-gfx1100` when `LLAMA_STAGE_CUDA_ARCHITECTURES` or
+`LLAMA_STAGE_AMDGPU_TARGETS` is set.
+
+Build and package one flavor:
+
+```bash
+scripts/package-native-sdk.sh \
+  --build \
+  --backend metal \
+  --target aarch64-apple-darwin \
+  --out dist/native-sdk
+```
+
+Package an already-built `mesh-llm-ffi` library:
+
+```bash
+scripts/package-native-sdk.sh \
+  --backend cpu \
+  --target x86_64-unknown-linux-gnu
+```
+
 ## Validation
 
 Minimum validation for SDK work:

@@ -59,7 +59,7 @@ open class RustBuffer : Structure() {
     companion object {
         internal fun alloc(size: ULong = 0UL) = uniffiRustCall() { status ->
             // Note: need to convert the size to a `Long` value to make this work with JVM.
-            UniffiLib.ffi_mesh_ffi_rustbuffer_alloc(size.toLong(), status)
+            UniffiLib.ffi_meshllm_ffi_rustbuffer_alloc(size.toLong(), status)
         }.also {
             if(it.data == null) {
                throw RuntimeException("RustBuffer.alloc() returned null data pointer (size=${size})")
@@ -75,7 +75,7 @@ open class RustBuffer : Structure() {
         }
 
         internal fun free(buf: RustBuffer.ByValue) = uniffiRustCall() { status ->
-            UniffiLib.ffi_mesh_ffi_rustbuffer_free(buf, status)
+            UniffiLib.ffi_meshllm_ffi_rustbuffer_free(buf, status)
         }
     }
 
@@ -307,7 +307,7 @@ internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallWithError(
         }
     }
 }
-// Initial value and increment amount for handles. 
+// Initial value and increment amount for handles.
 // These ensure that Kotlin-generated handles always have the lowest bit set
 private const val UNIFFI_HANDLEMAP_INITIAL = 1.toLong()
 private const val UNIFFI_HANDLEMAP_DELTA = 2.toLong()
@@ -317,7 +317,7 @@ private const val UNIFFI_HANDLEMAP_DELTA = 2.toLong()
 // This is used pass an opaque 64-bit handle representing a foreign object to the Rust code.
 internal class UniffiHandleMap<T: Any> {
     private val map = ConcurrentHashMap<Long, T>()
-    // Start 
+    // Start
     private val counter = java.util.concurrent.atomic.AtomicLong(UNIFFI_HANDLEMAP_INITIAL)
 
     val size: Int
@@ -658,223 +658,349 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckContractApiVersion(this)
         uniffiCheckApiChecksums(this)
     }
-    external fun uniffi_mesh_ffi_checksum_func_create_client(
+    external fun uniffi_meshllm_ffi_checksum_func_create_auto_node(
     ): Short
-    external fun uniffi_mesh_ffi_checksum_func_generate_owner_keypair_hex(
+    external fun uniffi_meshllm_ffi_checksum_func_create_node(
     ): Short
-    external fun uniffi_mesh_ffi_checksum_method_meshclienthandle_cancel(
+    external fun uniffi_meshllm_ffi_checksum_func_discover_public_meshes(
     ): Short
-    external fun uniffi_mesh_ffi_checksum_method_meshclienthandle_chat(
+    external fun uniffi_meshllm_ffi_checksum_func_generate_owner_keypair_hex(
     ): Short
-    external fun uniffi_mesh_ffi_checksum_method_meshclienthandle_disconnect(
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_cancel(
     ): Short
-    external fun uniffi_mesh_ffi_checksum_method_meshclienthandle_join(
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_chat(
     ): Short
-    external fun uniffi_mesh_ffi_checksum_method_meshclienthandle_list_models(
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_cleanup_models(
     ): Short
-    external fun uniffi_mesh_ffi_checksum_method_meshclienthandle_reconnect(
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_delete_model(
     ): Short
-    external fun uniffi_mesh_ffi_checksum_method_meshclienthandle_responses(
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_download_model(
     ): Short
-    external fun uniffi_mesh_ffi_checksum_method_meshclienthandle_status(
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_inference_list_models(
     ): Short
-    external fun uniffi_mesh_ffi_checksum_method_eventlistener_on_event(
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_installed_models(
     ): Short
-    external fun ffi_mesh_ffi_uniffi_contract_version(
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_load_serving_model(
+    ): Short
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_model_cache_status(
+    ): Short
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_prune_derived_cache(
+    ): Short
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_recommended_models(
+    ): Short
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_reconnect(
+    ): Short
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_responses(
+    ): Short
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_search_models(
+    ): Short
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_served_models(
+    ): Short
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_serving_status(
+    ): Short
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_set_device_policy(
+    ): Short
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_show_model(
+    ): Short
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_start(
+    ): Short
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_status(
+    ): Short
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_stop(
+    ): Short
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_unload_serving_instance(
+    ): Short
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_unload_serving_model(
+    ): Short
+    external fun uniffi_meshllm_ffi_checksum_method_meshnodehandle_unload_serving_model_by_id(
+    ): Short
+    external fun uniffi_meshllm_ffi_checksum_method_eventlistener_on_event(
+    ): Short
+    external fun ffi_meshllm_ffi_uniffi_contract_version(
     ): Int
 
-        
+
 }
 
 internal object UniffiLib {
-    
+
     // The Cleaner for the whole library
     internal val CLEANER: UniffiCleaner by lazy {
         UniffiCleaner.create()
     }
-    
+
 
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "mesh_ffi"))
         uniffiCallbackInterfaceEventListener.register(this)
-        
-    }
-    external fun uniffi_mesh_ffi_fn_clone_meshclienthandle(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Long
-    external fun uniffi_mesh_ffi_fn_free_meshclienthandle(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_mesh_ffi_fn_method_meshclienthandle_cancel(`ptr`: Long,`requestId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_mesh_ffi_fn_method_meshclienthandle_chat(`ptr`: Long,`request`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_mesh_ffi_fn_method_meshclienthandle_disconnect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_mesh_ffi_fn_method_meshclienthandle_join(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_mesh_ffi_fn_method_meshclienthandle_list_models(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_mesh_ffi_fn_method_meshclienthandle_reconnect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun uniffi_mesh_ffi_fn_method_meshclienthandle_responses(`ptr`: Long,`request`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_mesh_ffi_fn_method_meshclienthandle_status(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun uniffi_mesh_ffi_fn_init_callback_vtable_eventlistener(`vtable`: UniffiVTableCallbackInterfaceEventListener,
-    ): Unit
-    external fun uniffi_mesh_ffi_fn_func_create_client(`ownerKeypairBytesHex`: RustBuffer.ByValue,`inviteToken`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Long
-    external fun uniffi_mesh_ffi_fn_func_generate_owner_keypair_hex(uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun ffi_mesh_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun ffi_mesh_ffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun ffi_mesh_ffi_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    external fun ffi_mesh_ffi_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun ffi_mesh_ffi_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_cancel_u8(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_free_u8(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Byte
-    external fun ffi_mesh_ffi_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_cancel_i8(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_free_i8(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Byte
-    external fun ffi_mesh_ffi_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_cancel_u16(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_free_u16(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Short
-    external fun ffi_mesh_ffi_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_cancel_i16(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_free_i16(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Short
-    external fun ffi_mesh_ffi_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_cancel_u32(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_free_u32(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Int
-    external fun ffi_mesh_ffi_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_cancel_i32(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_free_i32(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Int
-    external fun ffi_mesh_ffi_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_cancel_u64(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_free_u64(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Long
-    external fun ffi_mesh_ffi_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_cancel_i64(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_free_i64(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Long
-    external fun ffi_mesh_ffi_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_cancel_f32(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_free_f32(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Float
-    external fun ffi_mesh_ffi_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_cancel_f64(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_free_f64(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Double
-    external fun ffi_mesh_ffi_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_cancel_rust_buffer(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_free_rust_buffer(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    external fun ffi_mesh_ffi_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_cancel_void(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_free_void(`handle`: Long,
-    ): Unit
-    external fun ffi_mesh_ffi_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
 
-        
+    }
+    external fun uniffi_meshllm_ffi_fn_clone_meshnodehandle(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Long
+external fun uniffi_meshllm_ffi_fn_free_meshnodehandle(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_cancel(`ptr`: Long,`requestId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_chat(`ptr`: Long,`request`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_cleanup_models(`ptr`: Long,`policy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_delete_model(`ptr`: Long,`modelRef`: RustBuffer.ByValue,`options`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_download_model(`ptr`: Long,`modelRef`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_inference_list_models(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_installed_models(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_load_serving_model(`ptr`: Long,`modelRef`: RustBuffer.ByValue,`options`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_model_cache_status(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_prune_derived_cache(`ptr`: Long,`policy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_recommended_models(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_reconnect(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_responses(`ptr`: Long,`request`: RustBuffer.ByValue,`listener`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_search_models(`ptr`: Long,`query`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_served_models(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_serving_status(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_set_device_policy(`ptr`: Long,`policy`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_show_model(`ptr`: Long,`modelRef`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_start(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_status(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_stop(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_unload_serving_instance(`ptr`: Long,`instanceId`: RustBuffer.ByValue,`options`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_unload_serving_model(`ptr`: Long,`target`: RustBuffer.ByValue,`options`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+external fun uniffi_meshllm_ffi_fn_method_meshnodehandle_unload_serving_model_by_id(`ptr`: Long,`modelId`: RustBuffer.ByValue,`options`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+external fun uniffi_meshllm_ffi_fn_init_callback_vtable_eventlistener(`vtable`: UniffiVTableCallbackInterfaceEventListener,
+): Unit
+external fun uniffi_meshllm_ffi_fn_func_create_auto_node(`ownerKeypairBytesHex`: RustBuffer.ByValue,`query`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Long
+external fun uniffi_meshllm_ffi_fn_func_create_node(`ownerKeypairBytesHex`: RustBuffer.ByValue,`inviteToken`: RustBuffer.ByValue,`cacheDir`: RustBuffer.ByValue,`runtimeDir`: RustBuffer.ByValue,`servingEnabled`: Byte,uniffi_out_err: UniffiRustCallStatus,
+): Long
+external fun uniffi_meshllm_ffi_fn_func_discover_public_meshes(`query`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_meshllm_ffi_fn_func_generate_owner_keypair_hex(uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun ffi_meshllm_ffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun ffi_meshllm_ffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun ffi_meshllm_ffi_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+external fun ffi_meshllm_ffi_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun ffi_meshllm_ffi_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_cancel_u8(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_free_u8(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Byte
+external fun ffi_meshllm_ffi_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_cancel_i8(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_free_i8(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Byte
+external fun ffi_meshllm_ffi_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_cancel_u16(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_free_u16(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Short
+external fun ffi_meshllm_ffi_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_cancel_i16(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_free_i16(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Short
+external fun ffi_meshllm_ffi_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_cancel_u32(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_free_u32(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Int
+external fun ffi_meshllm_ffi_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_cancel_i32(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_free_i32(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Int
+external fun ffi_meshllm_ffi_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_cancel_u64(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_free_u64(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Long
+external fun ffi_meshllm_ffi_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_cancel_i64(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_free_i64(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Long
+external fun ffi_meshllm_ffi_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_cancel_f32(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_free_f32(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Float
+external fun ffi_meshllm_ffi_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_cancel_f64(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_free_f64(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Double
+external fun ffi_meshllm_ffi_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_cancel_rust_buffer(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_free_rust_buffer(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun ffi_meshllm_ffi_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_cancel_void(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_free_void(`handle`: Long,
+): Unit
+external fun ffi_meshllm_ffi_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+
+
 }
 
 private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
     // Get the bindings contract version from our ComponentInterface
     val bindings_contract_version = 30
     // Get the scaffolding contract version by calling the into the dylib
-    val scaffolding_contract_version = lib.ffi_mesh_ffi_uniffi_contract_version()
+    val scaffolding_contract_version = lib.ffi_meshllm_ffi_uniffi_contract_version()
     if (bindings_contract_version != scaffolding_contract_version) {
         throw RuntimeException("UniFFI contract version mismatch: try cleaning and rebuilding your project")
     }
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
-    if (lib.uniffi_mesh_ffi_checksum_func_create_client() != 22190.toShort()) {
+    if (lib.uniffi_meshllm_ffi_checksum_func_create_auto_node() != 62467.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_mesh_ffi_checksum_func_generate_owner_keypair_hex() != 23190.toShort()) {
+    if (lib.uniffi_meshllm_ffi_checksum_func_create_node() != 53847.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_mesh_ffi_checksum_method_meshclienthandle_cancel() != 54410.toShort()) {
+    if (lib.uniffi_meshllm_ffi_checksum_func_discover_public_meshes() != 8199.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_mesh_ffi_checksum_method_meshclienthandle_chat() != 32610.toShort()) {
+    if (lib.uniffi_meshllm_ffi_checksum_func_generate_owner_keypair_hex() != 15846.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_mesh_ffi_checksum_method_meshclienthandle_disconnect() != 31650.toShort()) {
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_cancel() != 32259.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_mesh_ffi_checksum_method_meshclienthandle_join() != 59965.toShort()) {
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_chat() != 34892.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_mesh_ffi_checksum_method_meshclienthandle_list_models() != 40439.toShort()) {
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_cleanup_models() != 1157.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_mesh_ffi_checksum_method_meshclienthandle_reconnect() != 31942.toShort()) {
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_delete_model() != 2627.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_mesh_ffi_checksum_method_meshclienthandle_responses() != 343.toShort()) {
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_download_model() != 20595.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_mesh_ffi_checksum_method_meshclienthandle_status() != 38366.toShort()) {
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_inference_list_models() != 54117.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_mesh_ffi_checksum_method_eventlistener_on_event() != 25585.toShort()) {
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_installed_models() != 34553.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_load_serving_model() != 31620.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_model_cache_status() != 61505.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_prune_derived_cache() != 24829.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_recommended_models() != 43281.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_reconnect() != 60843.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_responses() != 29255.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_search_models() != 6088.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_served_models() != 28188.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_serving_status() != 49590.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_set_device_policy() != 8567.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_show_model() != 35584.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_start() != 46124.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_status() != 48531.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_stop() != 10537.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_unload_serving_instance() != 1091.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_unload_serving_model() != 45229.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshllm_ffi_checksum_method_meshnodehandle_unload_serving_model_by_id() != 9451.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_meshllm_ffi_checksum_method_eventlistener_on_event() != 53401.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -952,7 +1078,7 @@ inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
         }
     }
 
-/** 
+/**
  * Placeholder object used to signal that we're constructing an interface with a FFI handle.
  *
  * This is the first argument for interface constructors that input a raw handle. It exists is that
@@ -963,7 +1089,7 @@ inline fun <T : Disposable?, R> T.use(block: (T) -> R) =
  * */
 object UniffiWithHandle
 
-/** 
+/**
  * Used to instantiate an interface without an actual pointer, for fakes in tests, mostly.
  *
  * @suppress
@@ -1068,6 +1194,29 @@ private class JavaLangRefCleanable(
 /**
  * @suppress
  */
+public object FfiConverterUInt: FfiConverter<UInt, Int> {
+    override fun lift(value: Int): UInt {
+        return value.toUInt()
+    }
+
+    override fun read(buf: ByteBuffer): UInt {
+        return lift(buf.getInt())
+    }
+
+    override fun lower(value: UInt): Int {
+        return value.toInt()
+    }
+
+    override fun allocationSize(value: UInt) = 4UL
+
+    override fun write(value: UInt, buf: ByteBuffer) {
+        buf.putInt(value.toInt())
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterULong: FfiConverter<ULong, Long> {
     override fun lift(value: Long): ULong {
         return value.toULong()
@@ -1085,6 +1234,29 @@ public object FfiConverterULong: FfiConverter<ULong, Long> {
 
     override fun write(value: ULong, buf: ByteBuffer) {
         buf.putLong(value.toLong())
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterDouble: FfiConverter<Double, Double> {
+    override fun lift(value: Double): Double {
+        return value
+    }
+
+    override fun read(buf: ByteBuffer): Double {
+        return buf.getDouble()
+    }
+
+    override fun lower(value: Double): Double {
+        return value
+    }
+
+    override fun allocationSize(value: Double) = 8UL
+
+    override fun write(value: Double, buf: ByteBuffer) {
+        buf.putDouble(value)
     }
 }
 
@@ -1264,28 +1436,60 @@ public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
 //
 
 
-public interface MeshClientHandleInterface {
-    
+public interface MeshNodeHandleInterface {
+
     fun `cancel`(`requestId`: kotlin.String)
-    
-    fun `chat`(`request`: ChatRequestDto, `listener`: EventListener): kotlin.String
-    
-    fun `disconnect`()
-    
-    fun `join`()
-    
-    fun `listModels`(): List<ModelDto>
-    
+
+    fun `chat`(`request`: ChatRequestNative, `listener`: EventListener): kotlin.String
+
+    fun `cleanupModels`(`policy`: CleanupPolicy): CleanupResult
+
+    fun `deleteModel`(`modelRef`: kotlin.String, `options`: DeleteModelOptions): DeleteModelResult
+
+    fun `downloadModel`(`modelRef`: kotlin.String): DownloadedModel
+
+    fun `inferenceListModels`(): List<ModelNative>
+
+    fun `installedModels`(): List<InstalledModel>
+
+    fun `loadServingModel`(`modelRef`: kotlin.String, `options`: LoadModelOptions): ServedModel
+
+    fun `modelCacheStatus`(): ModelCacheStatus
+
+    fun `pruneDerivedCache`(`policy`: PrunePolicy): PruneResult
+
+    fun `recommendedModels`(): List<ModelSummary>
+
     fun `reconnect`()
-    
-    fun `responses`(`request`: ResponsesRequestDto, `listener`: EventListener): kotlin.String
-    
-    fun `status`(): StatusDto
-    
+
+    fun `responses`(`request`: ResponsesRequestNative, `listener`: EventListener): kotlin.String
+
+    fun `searchModels`(`query`: ModelSearchQuery): List<ModelSummary>
+
+    fun `servedModels`(): List<ServedModel>
+
+    fun `servingStatus`(): ServingStatus
+
+    fun `setDevicePolicy`(`policy`: DevicePolicy)
+
+    fun `showModel`(`modelRef`: kotlin.String): ModelDetails
+
+    fun `start`()
+
+    fun `status`(): ClientStatus
+
+    fun `stop`()
+
+    fun `unloadServingInstance`(`instanceId`: kotlin.String, `options`: UnloadModelOptions)
+
+    fun `unloadServingModel`(`target`: UnloadTarget, `options`: UnloadModelOptions)
+
+    fun `unloadServingModelById`(`modelId`: kotlin.String, `options`: UnloadModelOptions)
+
     companion object
 }
 
-open class MeshClientHandle: Disposable, AutoCloseable, MeshClientHandleInterface
+open class MeshNodeHandle: Disposable, AutoCloseable, MeshNodeHandleInterface
 {
 
     @Suppress("UNUSED_PARAMETER")
@@ -1364,7 +1568,7 @@ open class MeshClientHandle: Disposable, AutoCloseable, MeshClientHandleInterfac
                 return;
             }
             uniffiRustCall { status ->
-                UniffiLib.uniffi_mesh_ffi_fn_free_meshclienthandle(handle, status)
+                UniffiLib.uniffi_meshllm_ffi_fn_free_meshnodehandle(handle, status)
             }
         }
     }
@@ -1377,184 +1581,408 @@ open class MeshClientHandle: Disposable, AutoCloseable, MeshClientHandleInterfac
             throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
         return uniffiRustCall() { status ->
-            UniffiLib.uniffi_mesh_ffi_fn_clone_meshclienthandle(handle, status)
+            UniffiLib.uniffi_meshllm_ffi_fn_clone_meshnodehandle(handle, status)
         }
     }
 
-    override fun `cancel`(`requestId`: kotlin.String)
-        = 
+
+    @Throws(FfiException::class)override fun `cancel`(`requestId`: kotlin.String)
+        =
     callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_mesh_ffi_fn_method_meshclienthandle_cancel(
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_cancel(
         it,
         FfiConverterString.lower(`requestId`),_status)
 }
     }
-    
-    
 
-    override fun `chat`(`request`: ChatRequestDto, `listener`: EventListener): kotlin.String {
+
+
+
+    @Throws(FfiException::class)override fun `chat`(`request`: ChatRequestNative, `listener`: EventListener): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_mesh_ffi_fn_method_meshclienthandle_chat(
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_chat(
         it,
-        FfiConverterTypeChatRequestDto.lower(`request`),FfiConverterTypeEventListener.lower(`listener`),_status)
+        FfiConverterTypeChatRequestNative.lower(`request`),FfiConverterTypeEventListener.lower(`listener`),_status)
 }
     }
     )
     }
-    
 
-    override fun `disconnect`()
-        = 
-    callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_mesh_ffi_fn_method_meshclienthandle_disconnect(
-        it,
-        _status)
-}
-    }
-    
-    
 
-    
-    @Throws(FfiException::class)override fun `join`()
-        = 
+
+    @Throws(FfiException::class)override fun `cleanupModels`(`policy`: CleanupPolicy): CleanupResult {
+            return FfiConverterTypeCleanupResult.lift(
     callWithHandle {
     uniffiRustCallWithError(FfiException) { _status ->
-    UniffiLib.uniffi_mesh_ffi_fn_method_meshclienthandle_join(
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_cleanup_models(
         it,
-        _status)
+        FfiConverterTypeCleanupPolicy.lower(`policy`),_status)
 }
     }
-    
-    
+    )
+    }
 
-    
-    @Throws(FfiException::class)override fun `listModels`(): List<ModelDto> {
-            return FfiConverterSequenceTypeModelDto.lift(
+
+
+    @Throws(FfiException::class)override fun `deleteModel`(`modelRef`: kotlin.String, `options`: DeleteModelOptions): DeleteModelResult {
+            return FfiConverterTypeDeleteModelResult.lift(
     callWithHandle {
     uniffiRustCallWithError(FfiException) { _status ->
-    UniffiLib.uniffi_mesh_ffi_fn_method_meshclienthandle_list_models(
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_delete_model(
+        it,
+        FfiConverterString.lower(`modelRef`),FfiConverterTypeDeleteModelOptions.lower(`options`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `downloadModel`(`modelRef`: kotlin.String): DownloadedModel {
+            return FfiConverterTypeDownloadedModel.lift(
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_download_model(
+        it,
+        FfiConverterString.lower(`modelRef`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `inferenceListModels`(): List<ModelNative> {
+            return FfiConverterSequenceTypeModelNative.lift(
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_inference_list_models(
         it,
         _status)
 }
     }
     )
     }
-    
 
-    
+
+
+    @Throws(FfiException::class)override fun `installedModels`(): List<InstalledModel> {
+            return FfiConverterSequenceTypeInstalledModel.lift(
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_installed_models(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `loadServingModel`(`modelRef`: kotlin.String, `options`: LoadModelOptions): ServedModel {
+            return FfiConverterTypeServedModel.lift(
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_load_serving_model(
+        it,
+        FfiConverterString.lower(`modelRef`),FfiConverterTypeLoadModelOptions.lower(`options`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `modelCacheStatus`(): ModelCacheStatus {
+            return FfiConverterTypeModelCacheStatus.lift(
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_model_cache_status(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `pruneDerivedCache`(`policy`: PrunePolicy): PruneResult {
+            return FfiConverterTypePruneResult.lift(
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_prune_derived_cache(
+        it,
+        FfiConverterTypePrunePolicy.lower(`policy`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `recommendedModels`(): List<ModelSummary> {
+            return FfiConverterSequenceTypeModelSummary.lift(
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_recommended_models(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
     @Throws(FfiException::class)override fun `reconnect`()
-        = 
+        =
     callWithHandle {
     uniffiRustCallWithError(FfiException) { _status ->
-    UniffiLib.uniffi_mesh_ffi_fn_method_meshclienthandle_reconnect(
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_reconnect(
         it,
         _status)
 }
     }
-    
-    
 
-    override fun `responses`(`request`: ResponsesRequestDto, `listener`: EventListener): kotlin.String {
+
+
+
+    @Throws(FfiException::class)override fun `responses`(`request`: ResponsesRequestNative, `listener`: EventListener): kotlin.String {
             return FfiConverterString.lift(
     callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_mesh_ffi_fn_method_meshclienthandle_responses(
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_responses(
         it,
-        FfiConverterTypeResponsesRequestDto.lower(`request`),FfiConverterTypeEventListener.lower(`listener`),_status)
+        FfiConverterTypeResponsesRequestNative.lower(`request`),FfiConverterTypeEventListener.lower(`listener`),_status)
 }
     }
     )
     }
-    
 
-    override fun `status`(): StatusDto {
-            return FfiConverterTypeStatusDto.lift(
+
+
+    @Throws(FfiException::class)override fun `searchModels`(`query`: ModelSearchQuery): List<ModelSummary> {
+            return FfiConverterSequenceTypeModelSummary.lift(
     callWithHandle {
-    uniffiRustCall() { _status ->
-    UniffiLib.uniffi_mesh_ffi_fn_method_meshclienthandle_status(
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_search_models(
+        it,
+        FfiConverterTypeModelSearchQuery.lower(`query`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `servedModels`(): List<ServedModel> {
+            return FfiConverterSequenceTypeServedModel.lift(
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_served_models(
         it,
         _status)
 }
     }
     )
     }
-    
-
-    
-
-    
 
 
-    
-    
+
+    @Throws(FfiException::class)override fun `servingStatus`(): ServingStatus {
+            return FfiConverterTypeServingStatus.lift(
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_serving_status(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `setDevicePolicy`(`policy`: DevicePolicy)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_set_device_policy(
+        it,
+        FfiConverterTypeDevicePolicy.lower(`policy`),_status)
+}
+    }
+
+
+
+
+    @Throws(FfiException::class)override fun `showModel`(`modelRef`: kotlin.String): ModelDetails {
+            return FfiConverterTypeModelDetails.lift(
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_show_model(
+        it,
+        FfiConverterString.lower(`modelRef`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `start`()
+        =
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_start(
+        it,
+        _status)
+}
+    }
+
+
+
+    override fun `status`(): ClientStatus {
+            return FfiConverterTypeClientStatus.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_status(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(FfiException::class)override fun `stop`()
+        =
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_stop(
+        it,
+        _status)
+}
+    }
+
+
+
+
+    @Throws(FfiException::class)override fun `unloadServingInstance`(`instanceId`: kotlin.String, `options`: UnloadModelOptions)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_unload_serving_instance(
+        it,
+        FfiConverterString.lower(`instanceId`),FfiConverterTypeUnloadModelOptions.lower(`options`),_status)
+}
+    }
+
+
+
+
+    @Throws(FfiException::class)override fun `unloadServingModel`(`target`: UnloadTarget, `options`: UnloadModelOptions)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_unload_serving_model(
+        it,
+        FfiConverterTypeUnloadTarget.lower(`target`),FfiConverterTypeUnloadModelOptions.lower(`options`),_status)
+}
+    }
+
+
+
+
+    @Throws(FfiException::class)override fun `unloadServingModelById`(`modelId`: kotlin.String, `options`: UnloadModelOptions)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_method_meshnodehandle_unload_serving_model_by_id(
+        it,
+        FfiConverterString.lower(`modelId`),FfiConverterTypeUnloadModelOptions.lower(`options`),_status)
+}
+    }
+
+
+
+
+
+
+
+
+
+
     /**
      * @suppress
      */
     companion object
-    
+
 }
 
 
 /**
  * @suppress
  */
-public object FfiConverterTypeMeshClientHandle: FfiConverter<MeshClientHandle, Long> {
-    override fun lower(value: MeshClientHandle): Long {
+public object FfiConverterTypeMeshNodeHandle: FfiConverter<MeshNodeHandle, Long> {
+    override fun lower(value: MeshNodeHandle): Long {
         return value.uniffiCloneHandle()
     }
 
-    override fun lift(value: Long): MeshClientHandle {
-        return MeshClientHandle(UniffiWithHandle, value)
+    override fun lift(value: Long): MeshNodeHandle {
+        return MeshNodeHandle(UniffiWithHandle, value)
     }
 
-    override fun read(buf: ByteBuffer): MeshClientHandle {
+    override fun read(buf: ByteBuffer): MeshNodeHandle {
         return lift(buf.getLong())
     }
 
-    override fun allocationSize(value: MeshClientHandle) = 8UL
+    override fun allocationSize(value: MeshNodeHandle) = 8UL
 
-    override fun write(value: MeshClientHandle, buf: ByteBuffer) {
+    override fun write(value: MeshNodeHandle, buf: ByteBuffer) {
         buf.putLong(lower(value))
     }
 }
 
 
 
-data class ChatMessageDto (
+data class ChatMessageNative (
     var `role`: kotlin.String
-    , 
+    ,
     var `content`: kotlin.String
-    
+
 ){
-    
 
-    
 
-    
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeChatMessageDto: FfiConverterRustBuffer<ChatMessageDto> {
-    override fun read(buf: ByteBuffer): ChatMessageDto {
-        return ChatMessageDto(
+public object FfiConverterTypeChatMessageNative: FfiConverterRustBuffer<ChatMessageNative> {
+    override fun read(buf: ByteBuffer): ChatMessageNative {
+        return ChatMessageNative(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
         )
     }
 
-    override fun allocationSize(value: ChatMessageDto) = (
+    override fun allocationSize(value: ChatMessageNative) = (
             FfiConverterString.allocationSize(value.`role`) +
             FfiConverterString.allocationSize(value.`content`)
     )
 
-    override fun write(value: ChatMessageDto, buf: ByteBuffer) {
+    override fun write(value: ChatMessageNative, buf: ByteBuffer) {
             FfiConverterString.write(value.`role`, buf)
             FfiConverterString.write(value.`content`, buf)
     }
@@ -1562,151 +1990,151 @@ public object FfiConverterTypeChatMessageDto: FfiConverterRustBuffer<ChatMessage
 
 
 
-data class ChatRequestDto (
+data class ChatRequestNative (
     var `model`: kotlin.String
-    , 
-    var `messages`: List<ChatMessageDto>
-    
+    ,
+    var `messages`: List<ChatMessageNative>
+
 ){
-    
 
-    
 
-    
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeChatRequestDto: FfiConverterRustBuffer<ChatRequestDto> {
-    override fun read(buf: ByteBuffer): ChatRequestDto {
-        return ChatRequestDto(
+public object FfiConverterTypeChatRequestNative: FfiConverterRustBuffer<ChatRequestNative> {
+    override fun read(buf: ByteBuffer): ChatRequestNative {
+        return ChatRequestNative(
             FfiConverterString.read(buf),
-            FfiConverterSequenceTypeChatMessageDto.read(buf),
+            FfiConverterSequenceTypeChatMessageNative.read(buf),
         )
     }
 
-    override fun allocationSize(value: ChatRequestDto) = (
+    override fun allocationSize(value: ChatRequestNative) = (
             FfiConverterString.allocationSize(value.`model`) +
-            FfiConverterSequenceTypeChatMessageDto.allocationSize(value.`messages`)
+            FfiConverterSequenceTypeChatMessageNative.allocationSize(value.`messages`)
     )
 
-    override fun write(value: ChatRequestDto, buf: ByteBuffer) {
+    override fun write(value: ChatRequestNative, buf: ByteBuffer) {
             FfiConverterString.write(value.`model`, buf)
-            FfiConverterSequenceTypeChatMessageDto.write(value.`messages`, buf)
+            FfiConverterSequenceTypeChatMessageNative.write(value.`messages`, buf)
     }
 }
 
 
 
-data class ModelDto (
-    var `id`: kotlin.String
-    , 
-    var `name`: kotlin.String
-    
+data class CleanupPolicy (
+    var `removeAll`: kotlin.Boolean
+
 ){
-    
 
-    
 
-    
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeModelDto: FfiConverterRustBuffer<ModelDto> {
-    override fun read(buf: ByteBuffer): ModelDto {
-        return ModelDto(
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
+public object FfiConverterTypeCleanupPolicy: FfiConverterRustBuffer<CleanupPolicy> {
+    override fun read(buf: ByteBuffer): CleanupPolicy {
+        return CleanupPolicy(
+            FfiConverterBoolean.read(buf),
         )
     }
 
-    override fun allocationSize(value: ModelDto) = (
-            FfiConverterString.allocationSize(value.`id`) +
-            FfiConverterString.allocationSize(value.`name`)
+    override fun allocationSize(value: CleanupPolicy) = (
+            FfiConverterBoolean.allocationSize(value.`removeAll`)
     )
 
-    override fun write(value: ModelDto, buf: ByteBuffer) {
-            FfiConverterString.write(value.`id`, buf)
-            FfiConverterString.write(value.`name`, buf)
+    override fun write(value: CleanupPolicy, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`removeAll`, buf)
     }
 }
 
 
 
-data class ResponsesRequestDto (
-    var `model`: kotlin.String
-    , 
-    var `input`: kotlin.String
-    
+data class CleanupResult (
+    var `deletedPaths`: List<kotlin.String>
+    ,
+    var `reclaimedBytes`: kotlin.ULong
+    ,
+    var `skippedPaths`: List<kotlin.String>
+
 ){
-    
 
-    
 
-    
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeResponsesRequestDto: FfiConverterRustBuffer<ResponsesRequestDto> {
-    override fun read(buf: ByteBuffer): ResponsesRequestDto {
-        return ResponsesRequestDto(
-            FfiConverterString.read(buf),
-            FfiConverterString.read(buf),
+public object FfiConverterTypeCleanupResult: FfiConverterRustBuffer<CleanupResult> {
+    override fun read(buf: ByteBuffer): CleanupResult {
+        return CleanupResult(
+            FfiConverterSequenceString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterSequenceString.read(buf),
         )
     }
 
-    override fun allocationSize(value: ResponsesRequestDto) = (
-            FfiConverterString.allocationSize(value.`model`) +
-            FfiConverterString.allocationSize(value.`input`)
+    override fun allocationSize(value: CleanupResult) = (
+            FfiConverterSequenceString.allocationSize(value.`deletedPaths`) +
+            FfiConverterULong.allocationSize(value.`reclaimedBytes`) +
+            FfiConverterSequenceString.allocationSize(value.`skippedPaths`)
     )
 
-    override fun write(value: ResponsesRequestDto, buf: ByteBuffer) {
-            FfiConverterString.write(value.`model`, buf)
-            FfiConverterString.write(value.`input`, buf)
+    override fun write(value: CleanupResult, buf: ByteBuffer) {
+            FfiConverterSequenceString.write(value.`deletedPaths`, buf)
+            FfiConverterULong.write(value.`reclaimedBytes`, buf)
+            FfiConverterSequenceString.write(value.`skippedPaths`, buf)
     }
 }
 
 
 
-data class StatusDto (
+data class ClientStatus (
     var `connected`: kotlin.Boolean
-    , 
+    ,
     var `peerCount`: kotlin.ULong
-    
+
 ){
-    
 
-    
 
-    
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeStatusDto: FfiConverterRustBuffer<StatusDto> {
-    override fun read(buf: ByteBuffer): StatusDto {
-        return StatusDto(
+public object FfiConverterTypeClientStatus: FfiConverterRustBuffer<ClientStatus> {
+    override fun read(buf: ByteBuffer): ClientStatus {
+        return ClientStatus(
             FfiConverterBoolean.read(buf),
             FfiConverterULong.read(buf),
         )
     }
 
-    override fun allocationSize(value: StatusDto) = (
+    override fun allocationSize(value: ClientStatus) = (
             FfiConverterBoolean.allocationSize(value.`connected`) +
             FfiConverterULong.allocationSize(value.`peerCount`)
     )
 
-    override fun write(value: StatusDto, buf: ByteBuffer) {
+    override fun write(value: ClientStatus, buf: ByteBuffer) {
             FfiConverterBoolean.write(value.`connected`, buf)
             FfiConverterULong.write(value.`peerCount`, buf)
     }
@@ -1714,72 +2142,13 @@ public object FfiConverterTypeStatusDto: FfiConverterRustBuffer<StatusDto> {
 
 
 
-sealed class EventDto {
-    
-    object Connecting : EventDto()
-    
-    
-    data class Joined(
-        val `nodeId`: kotlin.String) : EventDto()
-        
-    {
-        
+data class DeleteModelOptions (
+    var `force`: kotlin.Boolean
 
-        companion object
-    }
-    
-    data class ModelsUpdated(
-        val `models`: List<uniffi.mesh_ffi.ModelDto>) : EventDto()
-        
-    {
-        
+){
 
-        companion object
-    }
-    
-    data class TokenDelta(
-        val `requestId`: kotlin.String, 
-        val `delta`: kotlin.String) : EventDto()
-        
-    {
-        
 
-        companion object
-    }
-    
-    data class Completed(
-        val `requestId`: kotlin.String) : EventDto()
-        
-    {
-        
 
-        companion object
-    }
-    
-    data class Failed(
-        val `requestId`: kotlin.String, 
-        val `error`: kotlin.String) : EventDto()
-        
-    {
-        
-
-        companion object
-    }
-    
-    data class Disconnected(
-        val `reason`: kotlin.String) : EventDto()
-        
-    {
-        
-
-        companion object
-    }
-    
-
-    
-
-    
-    
 
 
     companion object
@@ -1788,56 +2157,1067 @@ sealed class EventDto {
 /**
  * @suppress
  */
-public object FfiConverterTypeEventDto : FfiConverterRustBuffer<EventDto>{
-    override fun read(buf: ByteBuffer): EventDto {
+public object FfiConverterTypeDeleteModelOptions: FfiConverterRustBuffer<DeleteModelOptions> {
+    override fun read(buf: ByteBuffer): DeleteModelOptions {
+        return DeleteModelOptions(
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DeleteModelOptions) = (
+            FfiConverterBoolean.allocationSize(value.`force`)
+    )
+
+    override fun write(value: DeleteModelOptions, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`force`, buf)
+    }
+}
+
+
+
+data class DeleteModelResult (
+    var `deletedPaths`: List<kotlin.String>
+    ,
+    var `reclaimedBytes`: kotlin.ULong
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDeleteModelResult: FfiConverterRustBuffer<DeleteModelResult> {
+    override fun read(buf: ByteBuffer): DeleteModelResult {
+        return DeleteModelResult(
+            FfiConverterSequenceString.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DeleteModelResult) = (
+            FfiConverterSequenceString.allocationSize(value.`deletedPaths`) +
+            FfiConverterULong.allocationSize(value.`reclaimedBytes`)
+    )
+
+    override fun write(value: DeleteModelResult, buf: ByteBuffer) {
+            FfiConverterSequenceString.write(value.`deletedPaths`, buf)
+            FfiConverterULong.write(value.`reclaimedBytes`, buf)
+    }
+}
+
+
+
+data class DownloadedModel (
+    var `modelRef`: kotlin.String
+    ,
+    var `paths`: List<kotlin.String>
+    ,
+    var `primaryPath`: kotlin.String?
+    ,
+    var `details`: ModelDetails?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDownloadedModel: FfiConverterRustBuffer<DownloadedModel> {
+    override fun read(buf: ByteBuffer): DownloadedModel {
+        return DownloadedModel(
+            FfiConverterString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeModelDetails.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: DownloadedModel) = (
+            FfiConverterString.allocationSize(value.`modelRef`) +
+            FfiConverterSequenceString.allocationSize(value.`paths`) +
+            FfiConverterOptionalString.allocationSize(value.`primaryPath`) +
+            FfiConverterOptionalTypeModelDetails.allocationSize(value.`details`)
+    )
+
+    override fun write(value: DownloadedModel, buf: ByteBuffer) {
+            FfiConverterString.write(value.`modelRef`, buf)
+            FfiConverterSequenceString.write(value.`paths`, buf)
+            FfiConverterOptionalString.write(value.`primaryPath`, buf)
+            FfiConverterOptionalTypeModelDetails.write(value.`details`, buf)
+    }
+}
+
+
+
+data class InstalledModel (
+    var `modelRef`: kotlin.String
+    ,
+    var `path`: kotlin.String
+    ,
+    var `sizeBytes`: kotlin.ULong?
+    ,
+    var `capabilities`: ModelCapabilities
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeInstalledModel: FfiConverterRustBuffer<InstalledModel> {
+    override fun read(buf: ByteBuffer): InstalledModel {
+        return InstalledModel(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterTypeModelCapabilities.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: InstalledModel) = (
+            FfiConverterString.allocationSize(value.`modelRef`) +
+            FfiConverterString.allocationSize(value.`path`) +
+            FfiConverterOptionalULong.allocationSize(value.`sizeBytes`) +
+            FfiConverterTypeModelCapabilities.allocationSize(value.`capabilities`)
+    )
+
+    override fun write(value: InstalledModel, buf: ByteBuffer) {
+            FfiConverterString.write(value.`modelRef`, buf)
+            FfiConverterString.write(value.`path`, buf)
+            FfiConverterOptionalULong.write(value.`sizeBytes`, buf)
+            FfiConverterTypeModelCapabilities.write(value.`capabilities`, buf)
+    }
+}
+
+
+
+data class LoadModelOptions (
+    var `devicePolicy`: DevicePolicy
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeLoadModelOptions: FfiConverterRustBuffer<LoadModelOptions> {
+    override fun read(buf: ByteBuffer): LoadModelOptions {
+        return LoadModelOptions(
+            FfiConverterTypeDevicePolicy.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: LoadModelOptions) = (
+            FfiConverterTypeDevicePolicy.allocationSize(value.`devicePolicy`)
+    )
+
+    override fun write(value: LoadModelOptions, buf: ByteBuffer) {
+            FfiConverterTypeDevicePolicy.write(value.`devicePolicy`, buf)
+    }
+}
+
+
+
+data class ModelCacheStatus (
+    var `cacheDir`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeModelCacheStatus: FfiConverterRustBuffer<ModelCacheStatus> {
+    override fun read(buf: ByteBuffer): ModelCacheStatus {
+        return ModelCacheStatus(
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ModelCacheStatus) = (
+            FfiConverterOptionalString.allocationSize(value.`cacheDir`)
+    )
+
+    override fun write(value: ModelCacheStatus, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`cacheDir`, buf)
+    }
+}
+
+
+
+data class ModelCapabilities (
+    var `multimodal`: kotlin.Boolean
+    ,
+    var `vision`: CapabilityLevel
+    ,
+    var `audio`: CapabilityLevel
+    ,
+    var `reasoning`: CapabilityLevel
+    ,
+    var `toolUse`: CapabilityLevel
+    ,
+    var `moe`: kotlin.Boolean
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeModelCapabilities: FfiConverterRustBuffer<ModelCapabilities> {
+    override fun read(buf: ByteBuffer): ModelCapabilities {
+        return ModelCapabilities(
+            FfiConverterBoolean.read(buf),
+            FfiConverterTypeCapabilityLevel.read(buf),
+            FfiConverterTypeCapabilityLevel.read(buf),
+            FfiConverterTypeCapabilityLevel.read(buf),
+            FfiConverterTypeCapabilityLevel.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ModelCapabilities) = (
+            FfiConverterBoolean.allocationSize(value.`multimodal`) +
+            FfiConverterTypeCapabilityLevel.allocationSize(value.`vision`) +
+            FfiConverterTypeCapabilityLevel.allocationSize(value.`audio`) +
+            FfiConverterTypeCapabilityLevel.allocationSize(value.`reasoning`) +
+            FfiConverterTypeCapabilityLevel.allocationSize(value.`toolUse`) +
+            FfiConverterBoolean.allocationSize(value.`moe`)
+    )
+
+    override fun write(value: ModelCapabilities, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`multimodal`, buf)
+            FfiConverterTypeCapabilityLevel.write(value.`vision`, buf)
+            FfiConverterTypeCapabilityLevel.write(value.`audio`, buf)
+            FfiConverterTypeCapabilityLevel.write(value.`reasoning`, buf)
+            FfiConverterTypeCapabilityLevel.write(value.`toolUse`, buf)
+            FfiConverterBoolean.write(value.`moe`, buf)
+    }
+}
+
+
+
+data class ModelDetails (
+    var `id`: kotlin.String
+    ,
+    var `name`: kotlin.String
+    ,
+    var `source`: ModelSource
+    ,
+    var `kind`: ModelKind
+    ,
+    var `modelRef`: kotlin.String
+    ,
+    var `downloadRef`: kotlin.String
+    ,
+    var `path`: kotlin.String?
+    ,
+    var `sizeBytes`: kotlin.ULong?
+    ,
+    var `sizeLabel`: kotlin.String?
+    ,
+    var `description`: kotlin.String?
+    ,
+    var `draft`: kotlin.String?
+    ,
+    var `installed`: kotlin.Boolean
+    ,
+    var `capabilities`: ModelCapabilities
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeModelDetails: FfiConverterRustBuffer<ModelDetails> {
+    override fun read(buf: ByteBuffer): ModelDetails {
+        return ModelDetails(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterTypeModelSource.read(buf),
+            FfiConverterTypeModelKind.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterTypeModelCapabilities.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ModelDetails) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterTypeModelSource.allocationSize(value.`source`) +
+            FfiConverterTypeModelKind.allocationSize(value.`kind`) +
+            FfiConverterString.allocationSize(value.`modelRef`) +
+            FfiConverterString.allocationSize(value.`downloadRef`) +
+            FfiConverterOptionalString.allocationSize(value.`path`) +
+            FfiConverterOptionalULong.allocationSize(value.`sizeBytes`) +
+            FfiConverterOptionalString.allocationSize(value.`sizeLabel`) +
+            FfiConverterOptionalString.allocationSize(value.`description`) +
+            FfiConverterOptionalString.allocationSize(value.`draft`) +
+            FfiConverterBoolean.allocationSize(value.`installed`) +
+            FfiConverterTypeModelCapabilities.allocationSize(value.`capabilities`)
+    )
+
+    override fun write(value: ModelDetails, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterTypeModelSource.write(value.`source`, buf)
+            FfiConverterTypeModelKind.write(value.`kind`, buf)
+            FfiConverterString.write(value.`modelRef`, buf)
+            FfiConverterString.write(value.`downloadRef`, buf)
+            FfiConverterOptionalString.write(value.`path`, buf)
+            FfiConverterOptionalULong.write(value.`sizeBytes`, buf)
+            FfiConverterOptionalString.write(value.`sizeLabel`, buf)
+            FfiConverterOptionalString.write(value.`description`, buf)
+            FfiConverterOptionalString.write(value.`draft`, buf)
+            FfiConverterBoolean.write(value.`installed`, buf)
+            FfiConverterTypeModelCapabilities.write(value.`capabilities`, buf)
+    }
+}
+
+
+
+data class ModelNative (
+    var `id`: kotlin.String
+    ,
+    var `name`: kotlin.String
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeModelNative: FfiConverterRustBuffer<ModelNative> {
+    override fun read(buf: ByteBuffer): ModelNative {
+        return ModelNative(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ModelNative) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`name`)
+    )
+
+    override fun write(value: ModelNative, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`name`, buf)
+    }
+}
+
+
+
+data class ModelSearchQuery (
+    var `query`: kotlin.String
+    ,
+    var `limit`: kotlin.ULong?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeModelSearchQuery: FfiConverterRustBuffer<ModelSearchQuery> {
+    override fun read(buf: ByteBuffer): ModelSearchQuery {
+        return ModelSearchQuery(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ModelSearchQuery) = (
+            FfiConverterString.allocationSize(value.`query`) +
+            FfiConverterOptionalULong.allocationSize(value.`limit`)
+    )
+
+    override fun write(value: ModelSearchQuery, buf: ByteBuffer) {
+            FfiConverterString.write(value.`query`, buf)
+            FfiConverterOptionalULong.write(value.`limit`, buf)
+    }
+}
+
+
+
+data class ModelSummary (
+    var `id`: kotlin.String
+    ,
+    var `name`: kotlin.String
+    ,
+    var `sizeLabel`: kotlin.String?
+    ,
+    var `description`: kotlin.String?
+    ,
+    var `capabilities`: ModelCapabilities
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeModelSummary: FfiConverterRustBuffer<ModelSummary> {
+    override fun read(buf: ByteBuffer): ModelSummary {
+        return ModelSummary(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterTypeModelCapabilities.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ModelSummary) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterOptionalString.allocationSize(value.`sizeLabel`) +
+            FfiConverterOptionalString.allocationSize(value.`description`) +
+            FfiConverterTypeModelCapabilities.allocationSize(value.`capabilities`)
+    )
+
+    override fun write(value: ModelSummary, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterOptionalString.write(value.`sizeLabel`, buf)
+            FfiConverterOptionalString.write(value.`description`, buf)
+            FfiConverterTypeModelCapabilities.write(value.`capabilities`, buf)
+    }
+}
+
+
+
+data class PrunePolicy (
+    var `removeAll`: kotlin.Boolean
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePrunePolicy: FfiConverterRustBuffer<PrunePolicy> {
+    override fun read(buf: ByteBuffer): PrunePolicy {
+        return PrunePolicy(
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PrunePolicy) = (
+            FfiConverterBoolean.allocationSize(value.`removeAll`)
+    )
+
+    override fun write(value: PrunePolicy, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`removeAll`, buf)
+    }
+}
+
+
+
+data class PruneResult (
+    var `deletedPaths`: List<kotlin.String>
+    ,
+    var `reclaimedBytes`: kotlin.ULong
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePruneResult: FfiConverterRustBuffer<PruneResult> {
+    override fun read(buf: ByteBuffer): PruneResult {
+        return PruneResult(
+            FfiConverterSequenceString.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PruneResult) = (
+            FfiConverterSequenceString.allocationSize(value.`deletedPaths`) +
+            FfiConverterULong.allocationSize(value.`reclaimedBytes`)
+    )
+
+    override fun write(value: PruneResult, buf: ByteBuffer) {
+            FfiConverterSequenceString.write(value.`deletedPaths`, buf)
+            FfiConverterULong.write(value.`reclaimedBytes`, buf)
+    }
+}
+
+
+
+data class PublicMesh (
+    var `inviteToken`: kotlin.String
+    ,
+    var `serving`: List<kotlin.String>
+    ,
+    var `wanted`: List<kotlin.String>
+    ,
+    var `onDisk`: List<kotlin.String>
+    ,
+    var `totalVramBytes`: kotlin.ULong
+    ,
+    var `nodeCount`: kotlin.ULong
+    ,
+    var `clientCount`: kotlin.ULong
+    ,
+    var `maxClients`: kotlin.ULong
+    ,
+    var `name`: kotlin.String?
+    ,
+    var `region`: kotlin.String?
+    ,
+    var `meshId`: kotlin.String?
+    ,
+    var `publisherNpub`: kotlin.String
+    ,
+    var `publishedAt`: kotlin.ULong
+    ,
+    var `expiresAt`: kotlin.ULong?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePublicMesh: FfiConverterRustBuffer<PublicMesh> {
+    override fun read(buf: ByteBuffer): PublicMesh {
+        return PublicMesh(
+            FfiConverterString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PublicMesh) = (
+            FfiConverterString.allocationSize(value.`inviteToken`) +
+            FfiConverterSequenceString.allocationSize(value.`serving`) +
+            FfiConverterSequenceString.allocationSize(value.`wanted`) +
+            FfiConverterSequenceString.allocationSize(value.`onDisk`) +
+            FfiConverterULong.allocationSize(value.`totalVramBytes`) +
+            FfiConverterULong.allocationSize(value.`nodeCount`) +
+            FfiConverterULong.allocationSize(value.`clientCount`) +
+            FfiConverterULong.allocationSize(value.`maxClients`) +
+            FfiConverterOptionalString.allocationSize(value.`name`) +
+            FfiConverterOptionalString.allocationSize(value.`region`) +
+            FfiConverterOptionalString.allocationSize(value.`meshId`) +
+            FfiConverterString.allocationSize(value.`publisherNpub`) +
+            FfiConverterULong.allocationSize(value.`publishedAt`) +
+            FfiConverterOptionalULong.allocationSize(value.`expiresAt`)
+    )
+
+    override fun write(value: PublicMesh, buf: ByteBuffer) {
+            FfiConverterString.write(value.`inviteToken`, buf)
+            FfiConverterSequenceString.write(value.`serving`, buf)
+            FfiConverterSequenceString.write(value.`wanted`, buf)
+            FfiConverterSequenceString.write(value.`onDisk`, buf)
+            FfiConverterULong.write(value.`totalVramBytes`, buf)
+            FfiConverterULong.write(value.`nodeCount`, buf)
+            FfiConverterULong.write(value.`clientCount`, buf)
+            FfiConverterULong.write(value.`maxClients`, buf)
+            FfiConverterOptionalString.write(value.`name`, buf)
+            FfiConverterOptionalString.write(value.`region`, buf)
+            FfiConverterOptionalString.write(value.`meshId`, buf)
+            FfiConverterString.write(value.`publisherNpub`, buf)
+            FfiConverterULong.write(value.`publishedAt`, buf)
+            FfiConverterOptionalULong.write(value.`expiresAt`, buf)
+    }
+}
+
+
+
+data class PublicMeshQuery (
+    var `model`: kotlin.String?
+    ,
+    var `minVramGb`: kotlin.Double?
+    ,
+    var `region`: kotlin.String?
+    ,
+    var `targetName`: kotlin.String?
+    ,
+    var `relays`: List<kotlin.String>
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePublicMeshQuery: FfiConverterRustBuffer<PublicMeshQuery> {
+    override fun read(buf: ByteBuffer): PublicMeshQuery {
+        return PublicMeshQuery(
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalDouble.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterSequenceString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PublicMeshQuery) = (
+            FfiConverterOptionalString.allocationSize(value.`model`) +
+            FfiConverterOptionalDouble.allocationSize(value.`minVramGb`) +
+            FfiConverterOptionalString.allocationSize(value.`region`) +
+            FfiConverterOptionalString.allocationSize(value.`targetName`) +
+            FfiConverterSequenceString.allocationSize(value.`relays`)
+    )
+
+    override fun write(value: PublicMeshQuery, buf: ByteBuffer) {
+            FfiConverterOptionalString.write(value.`model`, buf)
+            FfiConverterOptionalDouble.write(value.`minVramGb`, buf)
+            FfiConverterOptionalString.write(value.`region`, buf)
+            FfiConverterOptionalString.write(value.`targetName`, buf)
+            FfiConverterSequenceString.write(value.`relays`, buf)
+    }
+}
+
+
+
+data class ResponsesRequestNative (
+    var `model`: kotlin.String
+    ,
+    var `input`: kotlin.String
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeResponsesRequestNative: FfiConverterRustBuffer<ResponsesRequestNative> {
+    override fun read(buf: ByteBuffer): ResponsesRequestNative {
+        return ResponsesRequestNative(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ResponsesRequestNative) = (
+            FfiConverterString.allocationSize(value.`model`) +
+            FfiConverterString.allocationSize(value.`input`)
+    )
+
+    override fun write(value: ResponsesRequestNative, buf: ByteBuffer) {
+            FfiConverterString.write(value.`model`, buf)
+            FfiConverterString.write(value.`input`, buf)
+    }
+}
+
+
+
+data class ServedModel (
+    var `modelRef`: kotlin.String
+    ,
+    var `modelId`: kotlin.String
+    ,
+    var `instanceId`: kotlin.String?
+    ,
+    var `state`: ServingModelState
+    ,
+    var `backend`: kotlin.String?
+    ,
+    var `capabilities`: ModelCapabilities
+    ,
+    var `contextLength`: kotlin.UInt?
+    ,
+    var `error`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeServedModel: FfiConverterRustBuffer<ServedModel> {
+    override fun read(buf: ByteBuffer): ServedModel {
+        return ServedModel(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterTypeServingModelState.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterTypeModelCapabilities.read(buf),
+            FfiConverterOptionalUInt.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ServedModel) = (
+            FfiConverterString.allocationSize(value.`modelRef`) +
+            FfiConverterString.allocationSize(value.`modelId`) +
+            FfiConverterOptionalString.allocationSize(value.`instanceId`) +
+            FfiConverterTypeServingModelState.allocationSize(value.`state`) +
+            FfiConverterOptionalString.allocationSize(value.`backend`) +
+            FfiConverterTypeModelCapabilities.allocationSize(value.`capabilities`) +
+            FfiConverterOptionalUInt.allocationSize(value.`contextLength`) +
+            FfiConverterOptionalString.allocationSize(value.`error`)
+    )
+
+    override fun write(value: ServedModel, buf: ByteBuffer) {
+            FfiConverterString.write(value.`modelRef`, buf)
+            FfiConverterString.write(value.`modelId`, buf)
+            FfiConverterOptionalString.write(value.`instanceId`, buf)
+            FfiConverterTypeServingModelState.write(value.`state`, buf)
+            FfiConverterOptionalString.write(value.`backend`, buf)
+            FfiConverterTypeModelCapabilities.write(value.`capabilities`, buf)
+            FfiConverterOptionalUInt.write(value.`contextLength`, buf)
+            FfiConverterOptionalString.write(value.`error`, buf)
+    }
+}
+
+
+
+data class ServingStatus (
+    var `enabled`: kotlin.Boolean
+    ,
+    var `models`: List<ServedModel>
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeServingStatus: FfiConverterRustBuffer<ServingStatus> {
+    override fun read(buf: ByteBuffer): ServingStatus {
+        return ServingStatus(
+            FfiConverterBoolean.read(buf),
+            FfiConverterSequenceTypeServedModel.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ServingStatus) = (
+            FfiConverterBoolean.allocationSize(value.`enabled`) +
+            FfiConverterSequenceTypeServedModel.allocationSize(value.`models`)
+    )
+
+    override fun write(value: ServingStatus, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`enabled`, buf)
+            FfiConverterSequenceTypeServedModel.write(value.`models`, buf)
+    }
+}
+
+
+
+data class UnloadModelOptions (
+    var `drainTimeoutMs`: kotlin.ULong
+    ,
+    var `force`: kotlin.Boolean
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUnloadModelOptions: FfiConverterRustBuffer<UnloadModelOptions> {
+    override fun read(buf: ByteBuffer): UnloadModelOptions {
+        return UnloadModelOptions(
+            FfiConverterULong.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: UnloadModelOptions) = (
+            FfiConverterULong.allocationSize(value.`drainTimeoutMs`) +
+            FfiConverterBoolean.allocationSize(value.`force`)
+    )
+
+    override fun write(value: UnloadModelOptions, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`drainTimeoutMs`, buf)
+            FfiConverterBoolean.write(value.`force`, buf)
+    }
+}
+
+
+
+
+enum class CapabilityLevel {
+
+    NONE,
+    LIKELY,
+    SUPPORTED;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCapabilityLevel: FfiConverterRustBuffer<CapabilityLevel> {
+    override fun read(buf: ByteBuffer) = try {
+        CapabilityLevel.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: CapabilityLevel) = 4UL
+
+    override fun write(value: CapabilityLevel, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+sealed class ClientEvent {
+
+    object Connecting : ClientEvent()
+
+
+    data class Joined(
+        val `nodeId`: kotlin.String) : ClientEvent()
+
+    {
+
+
+        companion object
+    }
+
+    data class ModelsUpdated(
+        val `models`: List<uniffi.mesh_ffi.ModelNative>) : ClientEvent()
+
+    {
+
+
+        companion object
+    }
+
+    data class TokenDelta(
+        val `requestId`: kotlin.String,
+        val `delta`: kotlin.String) : ClientEvent()
+
+    {
+
+
+        companion object
+    }
+
+    data class Completed(
+        val `requestId`: kotlin.String) : ClientEvent()
+
+    {
+
+
+        companion object
+    }
+
+    data class Failed(
+        val `requestId`: kotlin.String,
+        val `error`: kotlin.String) : ClientEvent()
+
+    {
+
+
+        companion object
+    }
+
+    data class Disconnected(
+        val `reason`: kotlin.String) : ClientEvent()
+
+    {
+
+
+        companion object
+    }
+
+
+
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeClientEvent : FfiConverterRustBuffer<ClientEvent>{
+    override fun read(buf: ByteBuffer): ClientEvent {
         return when(buf.getInt()) {
-            1 -> EventDto.Connecting
-            2 -> EventDto.Joined(
+            1 -> ClientEvent.Connecting
+            2 -> ClientEvent.Joined(
                 FfiConverterString.read(buf),
                 )
-            3 -> EventDto.ModelsUpdated(
-                FfiConverterSequenceTypeModelDto.read(buf),
+            3 -> ClientEvent.ModelsUpdated(
+                FfiConverterSequenceTypeModelNative.read(buf),
                 )
-            4 -> EventDto.TokenDelta(
-                FfiConverterString.read(buf),
-                FfiConverterString.read(buf),
-                )
-            5 -> EventDto.Completed(
-                FfiConverterString.read(buf),
-                )
-            6 -> EventDto.Failed(
+            4 -> ClientEvent.TokenDelta(
                 FfiConverterString.read(buf),
                 FfiConverterString.read(buf),
                 )
-            7 -> EventDto.Disconnected(
+            5 -> ClientEvent.Completed(
+                FfiConverterString.read(buf),
+                )
+            6 -> ClientEvent.Failed(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                )
+            7 -> ClientEvent.Disconnected(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
     }
 
-    override fun allocationSize(value: EventDto) = when(value) {
-        is EventDto.Connecting -> {
+    override fun allocationSize(value: ClientEvent) = when(value) {
+        is ClientEvent.Connecting -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
             )
         }
-        is EventDto.Joined -> {
+        is ClientEvent.Joined -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`nodeId`)
             )
         }
-        is EventDto.ModelsUpdated -> {
+        is ClientEvent.ModelsUpdated -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
-                + FfiConverterSequenceTypeModelDto.allocationSize(value.`models`)
+                + FfiConverterSequenceTypeModelNative.allocationSize(value.`models`)
             )
         }
-        is EventDto.TokenDelta -> {
+        is ClientEvent.TokenDelta -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
@@ -1845,14 +3225,14 @@ public object FfiConverterTypeEventDto : FfiConverterRustBuffer<EventDto>{
                 + FfiConverterString.allocationSize(value.`delta`)
             )
         }
-        is EventDto.Completed -> {
+        is ClientEvent.Completed -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`requestId`)
             )
         }
-        is EventDto.Failed -> {
+        is ClientEvent.Failed -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
@@ -1860,7 +3240,7 @@ public object FfiConverterTypeEventDto : FfiConverterRustBuffer<EventDto>{
                 + FfiConverterString.allocationSize(value.`error`)
             )
         }
-        is EventDto.Disconnected -> {
+        is ClientEvent.Disconnected -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
@@ -1869,42 +3249,129 @@ public object FfiConverterTypeEventDto : FfiConverterRustBuffer<EventDto>{
         }
     }
 
-    override fun write(value: EventDto, buf: ByteBuffer) {
+    override fun write(value: ClientEvent, buf: ByteBuffer) {
         when(value) {
-            is EventDto.Connecting -> {
+            is ClientEvent.Connecting -> {
                 buf.putInt(1)
                 Unit
             }
-            is EventDto.Joined -> {
+            is ClientEvent.Joined -> {
                 buf.putInt(2)
                 FfiConverterString.write(value.`nodeId`, buf)
                 Unit
             }
-            is EventDto.ModelsUpdated -> {
+            is ClientEvent.ModelsUpdated -> {
                 buf.putInt(3)
-                FfiConverterSequenceTypeModelDto.write(value.`models`, buf)
+                FfiConverterSequenceTypeModelNative.write(value.`models`, buf)
                 Unit
             }
-            is EventDto.TokenDelta -> {
+            is ClientEvent.TokenDelta -> {
                 buf.putInt(4)
                 FfiConverterString.write(value.`requestId`, buf)
                 FfiConverterString.write(value.`delta`, buf)
                 Unit
             }
-            is EventDto.Completed -> {
+            is ClientEvent.Completed -> {
                 buf.putInt(5)
                 FfiConverterString.write(value.`requestId`, buf)
                 Unit
             }
-            is EventDto.Failed -> {
+            is ClientEvent.Failed -> {
                 buf.putInt(6)
                 FfiConverterString.write(value.`requestId`, buf)
                 FfiConverterString.write(value.`error`, buf)
                 Unit
             }
-            is EventDto.Disconnected -> {
+            is ClientEvent.Disconnected -> {
                 buf.putInt(7)
                 FfiConverterString.write(value.`reason`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+sealed class DevicePolicy {
+
+    object Auto : DevicePolicy()
+
+
+    object Cpu : DevicePolicy()
+
+
+    data class Gpu(
+        val `deviceIds`: List<kotlin.String>) : DevicePolicy()
+
+    {
+
+
+        companion object
+    }
+
+
+
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDevicePolicy : FfiConverterRustBuffer<DevicePolicy>{
+    override fun read(buf: ByteBuffer): DevicePolicy {
+        return when(buf.getInt()) {
+            1 -> DevicePolicy.Auto
+            2 -> DevicePolicy.Cpu
+            3 -> DevicePolicy.Gpu(
+                FfiConverterSequenceString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: DevicePolicy) = when(value) {
+        is DevicePolicy.Auto -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is DevicePolicy.Cpu -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is DevicePolicy.Gpu -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterSequenceString.allocationSize(value.`deviceIds`)
+            )
+        }
+    }
+
+    override fun write(value: DevicePolicy, buf: ByteBuffer) {
+        when(value) {
+            is DevicePolicy.Auto -> {
+                buf.putInt(1)
+                Unit
+            }
+            is DevicePolicy.Cpu -> {
+                buf.putInt(2)
+                Unit
+            }
+            is DevicePolicy.Gpu -> {
+                buf.putInt(3)
+                FfiConverterSequenceString.write(value.`deviceIds`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -1918,25 +3385,31 @@ public object FfiConverterTypeEventDto : FfiConverterRustBuffer<EventDto>{
 
 
 sealed class FfiException(message: String): kotlin.Exception(message) {
-        
+
         class InvalidInviteToken(message: String) : FfiException(message)
-        
+
         class InvalidOwnerKeypair(message: String) : FfiException(message)
-        
+
         class BuildFailed(message: String) : FfiException(message)
-        
+
         class JoinFailed(message: String) : FfiException(message)
-        
+
         class DiscoveryFailed(message: String) : FfiException(message)
-        
+
         class StreamFailed(message: String) : FfiException(message)
-        
+
         class Cancelled(message: String) : FfiException(message)
-        
+
         class ReconnectFailed(message: String) : FfiException(message)
-        
+
         class HostUnavailable(message: String) : FfiException(message)
-        
+
+        class ModelManagementFailed(message: String) : FfiException(message)
+
+        class ServingFailed(message: String) : FfiException(message)
+
+        class ServingUnsupported(message: String) : FfiException(message)
+
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<FfiException> {
         override fun lift(error_buf: RustBuffer.ByValue): FfiException = FfiConverterTypeFfiError.lift(error_buf)
@@ -1948,7 +3421,7 @@ sealed class FfiException(message: String): kotlin.Exception(message) {
  */
 public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
     override fun read(buf: ByteBuffer): FfiException {
-        
+
             return when(buf.getInt()) {
             1 -> FfiException.InvalidInviteToken(FfiConverterString.read(buf))
             2 -> FfiException.InvalidOwnerKeypair(FfiConverterString.read(buf))
@@ -1959,9 +3432,12 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
             7 -> FfiException.Cancelled(FfiConverterString.read(buf))
             8 -> FfiException.ReconnectFailed(FfiConverterString.read(buf))
             9 -> FfiException.HostUnavailable(FfiConverterString.read(buf))
+            10 -> FfiException.ModelManagementFailed(FfiConverterString.read(buf))
+            11 -> FfiException.ServingFailed(FfiConverterString.read(buf))
+            12 -> FfiException.ServingUnsupported(FfiConverterString.read(buf))
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
-        
+
     }
 
     override fun allocationSize(value: FfiException): ULong {
@@ -2006,6 +3482,18 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
                 buf.putInt(9)
                 Unit
             }
+            is FfiException.ModelManagementFailed -> {
+                buf.putInt(10)
+                Unit
+            }
+            is FfiException.ServingFailed -> {
+                buf.putInt(11)
+                Unit
+            }
+            is FfiException.ServingUnsupported -> {
+                buf.putInt(12)
+                Unit
+            }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 
@@ -2014,11 +3502,294 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
 
 
 
+enum class ModelKind {
+
+    GGUF,
+    SAFETENSORS,
+    LAYER_PACKAGE,
+    UNKNOWN;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeModelKind: FfiConverterRustBuffer<ModelKind> {
+    override fun read(buf: ByteBuffer) = try {
+        ModelKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: ModelKind) = 4UL
+
+    override fun write(value: ModelKind, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
+enum class ModelSource {
+
+    CATALOG,
+    HUGGING_FACE,
+    LOCAL;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeModelSource: FfiConverterRustBuffer<ModelSource> {
+    override fun read(buf: ByteBuffer) = try {
+        ModelSource.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: ModelSource) = 4UL
+
+    override fun write(value: ModelSource, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+sealed class ServingModelState {
+
+    object Loading : ServingModelState()
+
+
+    object Ready : ServingModelState()
+
+
+    object Failed : ServingModelState()
+
+
+    object Unloading : ServingModelState()
+
+
+    object Stopped : ServingModelState()
+
+
+    data class Unknown(
+        val `value`: kotlin.String) : ServingModelState()
+
+    {
+
+
+        companion object
+    }
+
+
+
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeServingModelState : FfiConverterRustBuffer<ServingModelState>{
+    override fun read(buf: ByteBuffer): ServingModelState {
+        return when(buf.getInt()) {
+            1 -> ServingModelState.Loading
+            2 -> ServingModelState.Ready
+            3 -> ServingModelState.Failed
+            4 -> ServingModelState.Unloading
+            5 -> ServingModelState.Stopped
+            6 -> ServingModelState.Unknown(
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: ServingModelState) = when(value) {
+        is ServingModelState.Loading -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is ServingModelState.Ready -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is ServingModelState.Failed -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is ServingModelState.Unloading -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is ServingModelState.Stopped -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is ServingModelState.Unknown -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`value`)
+            )
+        }
+    }
+
+    override fun write(value: ServingModelState, buf: ByteBuffer) {
+        when(value) {
+            is ServingModelState.Loading -> {
+                buf.putInt(1)
+                Unit
+            }
+            is ServingModelState.Ready -> {
+                buf.putInt(2)
+                Unit
+            }
+            is ServingModelState.Failed -> {
+                buf.putInt(3)
+                Unit
+            }
+            is ServingModelState.Unloading -> {
+                buf.putInt(4)
+                Unit
+            }
+            is ServingModelState.Stopped -> {
+                buf.putInt(5)
+                Unit
+            }
+            is ServingModelState.Unknown -> {
+                buf.putInt(6)
+                FfiConverterString.write(value.`value`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+sealed class UnloadTarget {
+
+    data class Model(
+        val `modelId`: kotlin.String) : UnloadTarget()
+
+    {
+
+
+        companion object
+    }
+
+    data class Instance(
+        val `instanceId`: kotlin.String) : UnloadTarget()
+
+    {
+
+
+        companion object
+    }
+
+
+
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUnloadTarget : FfiConverterRustBuffer<UnloadTarget>{
+    override fun read(buf: ByteBuffer): UnloadTarget {
+        return when(buf.getInt()) {
+            1 -> UnloadTarget.Model(
+                FfiConverterString.read(buf),
+                )
+            2 -> UnloadTarget.Instance(
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: UnloadTarget) = when(value) {
+        is UnloadTarget.Model -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`modelId`)
+            )
+        }
+        is UnloadTarget.Instance -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`instanceId`)
+            )
+        }
+    }
+
+    override fun write(value: UnloadTarget, buf: ByteBuffer) {
+        when(value) {
+            is UnloadTarget.Model -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`modelId`, buf)
+                Unit
+            }
+            is UnloadTarget.Instance -> {
+                buf.putInt(2)
+                FfiConverterString.write(value.`instanceId`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+}
+
+
+
+
+
+
 
 public interface EventListener {
-    
-    fun `onEvent`(`event`: EventDto)
-    
+
+    fun `onEvent`(`event`: ClientEvent)
+
     companion object
 }
 
@@ -2031,7 +3802,7 @@ internal object uniffiCallbackInterfaceEventListener {
             val uniffiObj = FfiConverterTypeEventListener.handleMap.get(uniffiHandle)
             val makeCall = { ->
                 uniffiObj.`onEvent`(
-                    FfiConverterTypeEventDto.lift(`event`),
+                    FfiConverterTypeClientEvent.lift(`event`),
                 )
             }
             val writeReturn = { _: Unit -> Unit }
@@ -2060,7 +3831,7 @@ internal object uniffiCallbackInterfaceEventListener {
     // Registers the foreign callback with the Rust side.
     // This method is generated for each callback interface.
     internal fun register(lib: UniffiLib) {
-        lib.uniffi_mesh_ffi_fn_init_callback_vtable_eventlistener(vtable)
+        lib.uniffi_meshllm_ffi_fn_init_callback_vtable_eventlistener(vtable)
     }
 }
 
@@ -2077,24 +3848,28 @@ public object FfiConverterTypeEventListener: FfiConverterCallbackInterface<Event
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeChatMessageDto: FfiConverterRustBuffer<List<ChatMessageDto>> {
-    override fun read(buf: ByteBuffer): List<ChatMessageDto> {
-        val len = buf.getInt()
-        return List<ChatMessageDto>(len) {
-            FfiConverterTypeChatMessageDto.read(buf)
+public object FfiConverterOptionalUInt: FfiConverterRustBuffer<kotlin.UInt?> {
+    override fun read(buf: ByteBuffer): kotlin.UInt? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterUInt.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.UInt?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterUInt.allocationSize(value)
         }
     }
 
-    override fun allocationSize(value: List<ChatMessageDto>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeChatMessageDto.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<ChatMessageDto>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypeChatMessageDto.write(it, buf)
+    override fun write(value: kotlin.UInt?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterUInt.write(value, buf)
         }
     }
 }
@@ -2105,46 +3880,364 @@ public object FfiConverterSequenceTypeChatMessageDto: FfiConverterRustBuffer<Lis
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeModelDto: FfiConverterRustBuffer<List<ModelDto>> {
-    override fun read(buf: ByteBuffer): List<ModelDto> {
-        val len = buf.getInt()
-        return List<ModelDto>(len) {
-            FfiConverterTypeModelDto.read(buf)
+public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
+    override fun read(buf: ByteBuffer): kotlin.ULong? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterULong.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.ULong?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterULong.allocationSize(value)
         }
     }
 
-    override fun allocationSize(value: List<ModelDto>): ULong {
+    override fun write(value: kotlin.ULong?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterULong.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalDouble: FfiConverterRustBuffer<kotlin.Double?> {
+    override fun read(buf: ByteBuffer): kotlin.Double? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterDouble.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.Double?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterDouble.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.Double?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterDouble.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
+    override fun read(buf: ByteBuffer): kotlin.String? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterString.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.String?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterString.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.String?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterString.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeModelDetails: FfiConverterRustBuffer<ModelDetails?> {
+    override fun read(buf: ByteBuffer): ModelDetails? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeModelDetails.read(buf)
+    }
+
+    override fun allocationSize(value: ModelDetails?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeModelDetails.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ModelDetails?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeModelDetails.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
+    override fun read(buf: ByteBuffer): List<kotlin.String> {
+        val len = buf.getInt()
+        return List<kotlin.String>(len) {
+            FfiConverterString.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<kotlin.String>): ULong {
         val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeModelDto.allocationSize(it) }.sum()
+        val sizeForItems = value.map { FfiConverterString.allocationSize(it) }.sum()
         return sizeForLength + sizeForItems
     }
 
-    override fun write(value: List<ModelDto>, buf: ByteBuffer) {
+    override fun write(value: List<kotlin.String>, buf: ByteBuffer) {
         buf.putInt(value.size)
         value.iterator().forEach {
-            FfiConverterTypeModelDto.write(it, buf)
+            FfiConverterString.write(it, buf)
         }
     }
 }
-    @Throws(FfiException::class) fun `createClient`(`ownerKeypairBytesHex`: kotlin.String, `inviteToken`: kotlin.String): MeshClientHandle {
-            return FfiConverterTypeMeshClientHandle.lift(
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeChatMessageNative: FfiConverterRustBuffer<List<ChatMessageNative>> {
+    override fun read(buf: ByteBuffer): List<ChatMessageNative> {
+        val len = buf.getInt()
+        return List<ChatMessageNative>(len) {
+            FfiConverterTypeChatMessageNative.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<ChatMessageNative>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeChatMessageNative.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<ChatMessageNative>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeChatMessageNative.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeInstalledModel: FfiConverterRustBuffer<List<InstalledModel>> {
+    override fun read(buf: ByteBuffer): List<InstalledModel> {
+        val len = buf.getInt()
+        return List<InstalledModel>(len) {
+            FfiConverterTypeInstalledModel.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<InstalledModel>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeInstalledModel.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<InstalledModel>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeInstalledModel.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeModelNative: FfiConverterRustBuffer<List<ModelNative>> {
+    override fun read(buf: ByteBuffer): List<ModelNative> {
+        val len = buf.getInt()
+        return List<ModelNative>(len) {
+            FfiConverterTypeModelNative.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<ModelNative>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeModelNative.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<ModelNative>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeModelNative.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeModelSummary: FfiConverterRustBuffer<List<ModelSummary>> {
+    override fun read(buf: ByteBuffer): List<ModelSummary> {
+        val len = buf.getInt()
+        return List<ModelSummary>(len) {
+            FfiConverterTypeModelSummary.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<ModelSummary>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeModelSummary.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<ModelSummary>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeModelSummary.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypePublicMesh: FfiConverterRustBuffer<List<PublicMesh>> {
+    override fun read(buf: ByteBuffer): List<PublicMesh> {
+        val len = buf.getInt()
+        return List<PublicMesh>(len) {
+            FfiConverterTypePublicMesh.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<PublicMesh>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypePublicMesh.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<PublicMesh>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypePublicMesh.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeServedModel: FfiConverterRustBuffer<List<ServedModel>> {
+    override fun read(buf: ByteBuffer): List<ServedModel> {
+        val len = buf.getInt()
+        return List<ServedModel>(len) {
+            FfiConverterTypeServedModel.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<ServedModel>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeServedModel.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<ServedModel>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeServedModel.write(it, buf)
+        }
+    }
+}
+    @Throws(FfiException::class) fun `createAutoNode`(`ownerKeypairBytesHex`: kotlin.String, `query`: PublicMeshQuery): MeshNodeHandle {
+            return FfiConverterTypeMeshNodeHandle.lift(
     uniffiRustCallWithError(FfiException) { _status ->
-    UniffiLib.uniffi_mesh_ffi_fn_func_create_client(
-    
-        FfiConverterString.lower(`ownerKeypairBytesHex`),FfiConverterString.lower(`inviteToken`),_status)
+    UniffiLib.uniffi_meshllm_ffi_fn_func_create_auto_node(
+
+        FfiConverterString.lower(`ownerKeypairBytesHex`),FfiConverterTypePublicMeshQuery.lower(`query`),_status)
 }
     )
     }
-    
+
+
+    @Throws(FfiException::class) fun `createNode`(`ownerKeypairBytesHex`: kotlin.String, `inviteToken`: kotlin.String, `cacheDir`: kotlin.String?, `runtimeDir`: kotlin.String?, `servingEnabled`: kotlin.Boolean): MeshNodeHandle {
+            return FfiConverterTypeMeshNodeHandle.lift(
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_func_create_node(
+
+        FfiConverterString.lower(`ownerKeypairBytesHex`),FfiConverterString.lower(`inviteToken`),FfiConverterOptionalString.lower(`cacheDir`),FfiConverterOptionalString.lower(`runtimeDir`),FfiConverterBoolean.lower(`servingEnabled`),_status)
+}
+    )
+    }
+
+
+    @Throws(FfiException::class) fun `discoverPublicMeshes`(`query`: PublicMeshQuery): List<PublicMesh> {
+            return FfiConverterSequenceTypePublicMesh.lift(
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.uniffi_meshllm_ffi_fn_func_discover_public_meshes(
+
+        FfiConverterTypePublicMeshQuery.lower(`query`),_status)
+}
+    )
+    }
+
  fun `generateOwnerKeypairHex`(): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCall() { _status ->
-    UniffiLib.uniffi_mesh_ffi_fn_func_generate_owner_keypair_hex(
-    
+    UniffiLib.uniffi_meshllm_ffi_fn_func_generate_owner_keypair_hex(
+
         _status)
 }
     )
     }
-    
+
 
 

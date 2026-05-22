@@ -3577,31 +3577,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mesh-api"
-version = "0.65.1"
-dependencies = [
- "hex",
- "mesh-llm-client",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
-name = "mesh-api-ffi"
-version = "0.1.0"
-dependencies = [
- "mesh-api",
- "mesh-host-core",
- "pollster",
- "thiserror 2.0.18",
- "uniffi",
-]
-
-[[package]]
-name = "mesh-host-core"
-version = "0.1.0"
-
-[[package]]
 name = "mesh-llm"
 version = "0.65.1"
 dependencies = [
@@ -3613,6 +3588,18 @@ dependencies = [
  "serde_json",
  "serial_test",
  "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "mesh-llm-api"
+version = "0.65.1"
+dependencies = [
+ "anyhow",
+ "hex",
+ "mesh-llm-client",
+ "mesh-llm-node",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
@@ -3644,6 +3631,17 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "mesh-llm-ffi"
+version = "0.1.0"
+dependencies = [
+ "mesh-llm-api",
+ "mesh-llm-node",
+ "pollster",
+ "thiserror 2.0.18",
+ "uniffi",
 ]
 
 [[package]]
@@ -3683,8 +3681,10 @@ dependencies = [
  "iroh",
  "keyring",
  "libc",
+ "mesh-llm-api",
  "mesh-llm-client",
  "mesh-llm-identity",
+ "mesh-llm-node",
  "mesh-llm-plugin",
  "mesh-llm-protocol",
  "mesh-llm-routing",
@@ -3745,6 +3745,20 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "mesh-llm-node"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "mesh-llm-types",
+ "model-artifact",
+ "model-hf",
+ "model-ref",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

@@ -1,15 +1,15 @@
-use mesh_ffi::{create_client, ChatMessageDto, ChatRequestDto, EventDto, EventListener};
+use meshllm_ffi::{create_node, ChatMessageNative, ChatRequestNative, ClientEvent, EventListener};
 use std::env;
 use std::sync::mpsc::{self, Sender};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 struct ChannelListener {
-    sender: Mutex<Sender<EventDto>>,
+    sender: Mutex<Sender<ClientEvent>>,
 }
 
 impl EventListener for ChannelListener {
-    fn on_event(&self, event: EventDto) {
+    fn on_event(&self, event: ClientEvent) {
         let _ = self.sender.lock().unwrap().send(event);
     }
 }
@@ -25,9 +25,10 @@ fn ffi_client_runs_against_live_mesh() {
     let owner_keypair_hex = env::var("MESH_SDK_OWNER_KEYPAIR_HEX")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| mesh_api::OwnerKeypair::generate().to_hex());
-    let handle = create_client(owner_keypair_hex, invite_token).expect("create_client");
-    handle.join().expect("join");
+        .unwrap_or_else(|| mesh_llm_api::OwnerKeypair::generate().to_hex());
+    let handle =
+        create_node(owner_keypair_hex, invite_token, None, None, false).expect("create_node");
+    handle.start().expect("start");
 
     let status = handle.status();
     assert!(status.connected, "client should be connected after join");
@@ -48,18 +49,20 @@ fn ffi_client_runs_against_live_mesh() {
     };
 
     let (tx, rx) = mpsc::channel();
-    let request_id = handle.chat(
-        ChatRequestDto {
-            model: model_id,
-            messages: vec![ChatMessageDto {
-                role: "user".to_string(),
-                content: "Say hello in exactly three words.".to_string(),
-            }],
-        },
-        Box::new(ChannelListener {
-            sender: Mutex::new(tx),
-        }),
-    );
+    let request_id = handle
+        .chat(
+            ChatRequestNative {
+                model: model_id,
+                messages: vec![ChatMessageNative {
+                    role: "user".to_string(),
+                    content: "Say hello in exactly three words.".to_string(),
+                }],
+            },
+            Box::new(ChannelListener {
+                sender: Mutex::new(tx),
+            }),
+        )
+        .expect("chat");
 
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut saw_token = false;
@@ -67,19 +70,19 @@ fn ffi_client_runs_against_live_mesh() {
 
     while Instant::now() < deadline {
         match rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(EventDto::TokenDelta {
+            Ok(ClientEvent::TokenDelta {
                 request_id: event_request_id,
                 ..
             }) if event_request_id == request_id => {
                 saw_token = true;
             }
-            Ok(EventDto::Completed {
+            Ok(ClientEvent::Completed {
                 request_id: event_request_id,
             }) if event_request_id == request_id => {
                 completed = true;
                 break;
             }
-            Ok(EventDto::Failed {
+            Ok(ClientEvent::Failed {
                 request_id: event_request_id,
                 error,
             }) if event_request_id == request_id => {
@@ -94,7 +97,7 @@ fn ffi_client_runs_against_live_mesh() {
     assert!(saw_token, "expected at least one token delta event");
     assert!(completed, "expected completed event before timeout");
 
-    handle.disconnect();
+    handle.stop().expect("stop");
 
     let disconnect_deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < disconnect_deadline {
@@ -107,10 +110,10 @@ fn ffi_client_runs_against_live_mesh() {
     panic!("client remained connected after disconnect");
 }
 
-fn wait_for_models(handle: &mesh_ffi::MeshClientHandle) -> Vec<mesh_ffi::ModelDto> {
+fn wait_for_models(handle: &meshllm_ffi::MeshNodeHandle) -> Vec<meshllm_ffi::ModelNative> {
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
-        let models = handle.list_models().expect("list_models");
+        let models = handle.inference_list_models().expect("list_models");
         if !models.is_empty() {
             return models;
         }

@@ -14,6 +14,10 @@ repositories {
     mavenCentral()
 }
 
+kotlin {
+    jvmToolchain(21)
+}
+
 dependencies {
     implementation(kotlin("stdlib"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
@@ -65,14 +69,14 @@ fun resolveAndroidNdkHome(): String {
 
 // Task to build native libraries for all Android ABIs
 val buildNativeLibs by tasks.registering {
-    description = "Build mesh-api-ffi shared libraries for all Android ABIs"
+    description = "Build mesh-llm-ffi shared libraries for all Android ABIs"
     group = "build"
 
     val repoRoot = rootProject.projectDir.parentFile.parentFile
     val buildTargets = listOf(
-        Triple("arm64-v8a", "aarch64-linux-android", "libmesh_ffi.so"),
-        Triple("armeabi-v7a", "armv7-linux-androideabi", "libmesh_ffi.so"),
-        Triple("x86_64", "x86_64-linux-android", "libmesh_ffi.so"),
+        Triple("arm64-v8a", "aarch64-linux-android", "libmeshllm_ffi.so"),
+        Triple("armeabi-v7a", "armv7-linux-androideabi", "libmeshllm_ffi.so"),
+        Triple("x86_64", "x86_64-linux-android", "libmeshllm_ffi.so"),
     )
 
     doLast {
@@ -95,28 +99,28 @@ val buildNativeLibs by tasks.registering {
                     "-t", abi,
                     "build",
                     "--release",
-                    "-p", "mesh-api-ffi",
+                    "-p", "mesh-llm-ffi",
                     "--no-default-features"
                 )
             }
 
             copy {
-                from(repoRoot.resolve("target/$target/release/libmesh_ffi.so"))
+                from(repoRoot.resolve("target/$target/release/libmeshllm_ffi.so"))
                 into(projectDir.resolve("src/main/jniLibs/$abi"))
             }
         }
     }
 
     outputs.files(
-        "${projectDir}/src/main/jniLibs/arm64-v8a/libmesh_ffi.so",
-        "${projectDir}/src/main/jniLibs/armeabi-v7a/libmesh_ffi.so",
-        "${projectDir}/src/main/jniLibs/x86_64/libmesh_ffi.so"
+        "${projectDir}/src/main/jniLibs/arm64-v8a/libmeshllm_ffi.so",
+        "${projectDir}/src/main/jniLibs/armeabi-v7a/libmeshllm_ffi.so",
+        "${projectDir}/src/main/jniLibs/x86_64/libmeshllm_ffi.so"
     )
 }
 
 // Assemble a distributable AAR artifact (ZIP format) containing:
 //   classes.jar              — compiled Kotlin classes
-//   jni/<abi>/libmesh_ffi.so — native shared libraries
+//   jni/<abi>/libmeshllm_ffi.so — native shared libraries
 //   consumer-proguard-rules.pro
 //   AndroidManifest.xml      — minimal manifest required by AAR spec
 val assembleAar by tasks.registering(Zip::class) {

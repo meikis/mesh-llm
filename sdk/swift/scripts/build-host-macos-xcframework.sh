@@ -12,8 +12,8 @@ GENERATED_SWIFT="$SWIFT_DIR/Sources/MeshLLM/Generated/mesh_ffi.swift"
 echo "Building host macOS $FRAMEWORK_NAME XCFramework..."
 echo "Repo root: $REPO_ROOT"
 
-if ! cargo metadata --no-deps --format-version 1 2>/dev/null | grep -q '"name":"mesh-api-ffi"'; then
-  echo "ERROR: mesh-api-ffi crate not found. Ensure the workspace is configured."
+if ! cargo metadata --no-deps --format-version 1 2>/dev/null | grep -q '"name":"mesh-llm-ffi"'; then
+  echo "ERROR: mesh-llm-ffi crate not found. Ensure the workspace is configured."
   exit 1
 fi
 
@@ -43,9 +43,9 @@ RUSTUP_RUSTC="$(rustup run stable which rustc)"
 echo "Using rustc: $RUSTUP_RUSTC"
 echo "Building for $RUST_TARGET..."
 RUSTC="$RUSTUP_RUSTC" \
-  cargo build --release -p mesh-api-ffi --target "$RUST_TARGET" --no-default-features
+  cargo build --release -p mesh-llm-ffi --target "$RUST_TARGET" --no-default-features --features host
 
-LIB_PATH="$TARGET_DIR/$RUST_TARGET/release/libmesh_ffi.a"
+LIB_PATH="$TARGET_DIR/$RUST_TARGET/release/libmeshllm_ffi.a"
 
 echo "Syncing UniFFI API checksums into generated Swift bindings..."
 python3 - "$LIB_PATH" "$GENERATED_SWIFT" <<'PY'
@@ -65,7 +65,7 @@ disassembly = subprocess.run(
 ).stdout
 
 pattern = re.compile(
-    r"_uniffi_mesh_ffi_(checksum_[A-Za-z0-9_]+):\n[0-9a-f]+\s+mov\s+w0, #0x([0-9a-f]+)\n[0-9a-f]+\s+ret",
+    r"_uniffi_meshllm_ffi_(checksum_[A-Za-z0-9_]+):\n[0-9a-f]+\s+mov\s+w0, #0x([0-9a-f]+)\n[0-9a-f]+\s+ret",
     re.MULTILINE,
 )
 checksums = {name: int(value, 16) for name, value in pattern.findall(disassembly)}

@@ -32,26 +32,37 @@ For development from a local checkout, build the native artifact first:
 That generates `sdk/swift/Generated/MeshLLMFFI.xcframework`, which the root
 Swift package picks up automatically for the real UniFFI-backed implementation.
 
-If you only want to run the pure Swift fallback without the XCFramework, set:
+Normal SDK builds require the UniFFI-backed XCFramework. The pure Swift fallback
+is only for wrapper unit tests, and must be opted into explicitly:
 
 ```bash
 MESH_SWIFT_FORCE_STUB=1 swift test
 ```
+
+Do not use stub mode for examples or application integration. It does not talk
+to the native SDK.
 
 ## Usage
 
 ```swift
 import MeshLLM
 
-let client = MeshClient(inviteToken: InviteToken("your-invite-token"))
-try await client.join()
+let ownerKeypair = generateOwnerKeypairHex()
+let node = try Node(
+    inviteToken: InviteToken("your-invite-token"),
+    ownerKeypairBytesHex: ownerKeypair
+)
 
-let models = try await client.listModels()
+let recommended = try await node.models.recommended()
+let serving = try await node.serving.status()
+try await node.start()
+
+let models = try await node.inference.listModels()
 let request = ChatRequest(model: models[0].id, messages: [
     ChatMessage(role: "user", content: "Hello!")
 ])
 
-for try await event in client.chatStream(request) {
+for try await event in node.inference.chatStream(request) {
     switch event {
     case .tokenDelta(_, let delta):
         print(delta, terminator: "")
@@ -62,6 +73,29 @@ for try await event in client.chatStream(request) {
     }
 }
 ```
+
+## Local Mac Inference Example
+
+The Swift example uses the real UniFFI-backed SDK path for loading a model and
+running inference from the current Mac:
+
+```bash
+./sdk/swift/scripts/build-host-macos-xcframework.sh
+MESH_SDK_MODEL_REF=Qwen2.5-3B-Instruct-Q4_K_M \
+swift run --package-path sdk/swift/example/MeshExampleApp
+```
+
+Useful environment overrides:
+
+- `MESH_SDK_MODEL_REF` — catalog, Hugging Face, or local model reference to download/load.
+- `MESH_SDK_CACHE_DIR` — Hugging Face cache location.
+- `MESH_SDK_RUNTIME_DIR` — runtime scratch directory.
+- `MESH_SDK_SKIP_DOWNLOAD=1` — skip `node.models.download` when the model is already installed.
+- `MESH_SDK_PROMPT` — prompt text for the local inference request.
+
+The host-enabled XCFramework is required for this path. The FFI node must also
+be built with an attached in-process host runtime controller; without that
+controller, `node.serving.load(...)` reports serving as unsupported.
 
 ## App Store Export Compliance
 
@@ -107,7 +141,7 @@ NotificationCenter.default.addObserver(
     queue: .main
 ) { _ in
     Task {
-        try? await client.reconnect()
+        try? await node.reconnect()
     }
 }
 ```

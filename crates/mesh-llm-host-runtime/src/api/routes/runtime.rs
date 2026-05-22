@@ -1,8 +1,9 @@
 use super::super::{
     http::{respond_error, respond_json, respond_runtime_error},
     status::decode_runtime_model_path,
-    MeshApi, RuntimeControlRequest,
+    MeshApi,
 };
+use mesh_llm_node::serving::{DevicePolicy, LoadModelRequest, UnloadOptions, UnloadTarget};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -165,10 +166,6 @@ async fn handle_load_model(
     state: &MeshApi,
     body: &str,
 ) -> anyhow::Result<()> {
-    let Some(control_tx) = state.inner.lock().await.runtime_control.clone() else {
-        return respond_error(stream, 503, "Runtime control unavailable").await;
-    };
-
     let parsed: Result<serde_json::Value, _> = serde_json::from_str(body);
     match parsed {
         Ok(val) => {
@@ -176,29 +173,13 @@ async fn handle_load_model(
             if spec.is_empty() {
                 respond_error(stream, 400, "Missing 'model' field").await?;
             } else {
-                let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-                let _ = control_tx.send(RuntimeControlRequest::Load {
-                    spec,
-                    resp: resp_tx,
-                });
-                match resp_rx.await {
-                    Ok(Ok(loaded)) => {
-                        respond_json(
-                            stream,
-                            201,
-                            &serde_json::json!({
-                                "loaded": loaded.model,
-                                "instance_id": loaded.instance_id,
-                            }),
-                        )
-                        .await?;
-                    }
-                    Ok(Err(e)) => {
-                        respond_runtime_error(stream, &e.to_string()).await?;
-                    }
-                    Err(_) => {
-                        respond_error(stream, 503, "Runtime control unavailable").await?;
-                    }
+                let request = LoadModelRequest {
+                    model_ref: spec,
+                    device_policy: DevicePolicy::Auto,
+                };
+                match state.load_serving_model(request).await {
+                    Ok(loaded) => respond_json(stream, 201, &loaded).await?,
+                    Err(e) => respond_runtime_error(stream, &e.to_string()).await?,
                 }
             }
         }
@@ -214,35 +195,22 @@ async fn handle_unload_model(
     state: &MeshApi,
     path: &str,
 ) -> anyhow::Result<()> {
-    let Some(control_tx) = state.inner.lock().await.runtime_control.clone() else {
-        return respond_error(stream, 503, "Runtime control unavailable").await;
-    };
     let Some(model_name) = decode_runtime_model_path(path, "/api/runtime/models/") else {
         return respond_error(stream, 400, "Missing model path").await;
     };
 
-    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-    let _ = control_tx.send(RuntimeControlRequest::Unload {
-        target: model_name.clone(),
-        resp: resp_tx,
-    });
-    match resp_rx.await {
-        Ok(Ok(dropped)) => {
-            respond_json(
-                stream,
-                200,
-                &serde_json::json!({
-                    "dropped": dropped.model,
-                    "instance_id": dropped.instance_id,
-                }),
-            )
-            .await?;
+    match state
+        .unload_serving_model(
+            UnloadTarget::Model(model_name.clone()),
+            UnloadOptions::default(),
+        )
+        .await
+    {
+        Ok(()) => {
+            respond_json(stream, 200, &serde_json::json!({ "dropped": model_name })).await?;
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             respond_runtime_error(stream, &e.to_string()).await?;
-        }
-        Err(_) => {
-            respond_error(stream, 503, "Runtime control unavailable").await?;
         }
     }
     Ok(())
@@ -253,35 +221,27 @@ async fn handle_unload_instance(
     state: &MeshApi,
     path: &str,
 ) -> anyhow::Result<()> {
-    let Some(control_tx) = state.inner.lock().await.runtime_control.clone() else {
-        return respond_error(stream, 503, "Runtime control unavailable").await;
-    };
     let Some(instance_id) = decode_runtime_model_path(path, "/api/runtime/instances/") else {
         return respond_error(stream, 400, "Missing runtime instance path").await;
     };
 
-    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-    let _ = control_tx.send(RuntimeControlRequest::Unload {
-        target: instance_id.clone(),
-        resp: resp_tx,
-    });
-    match resp_rx.await {
-        Ok(Ok(dropped)) => {
+    match state
+        .unload_serving_model(
+            UnloadTarget::Instance(instance_id.clone()),
+            UnloadOptions::default(),
+        )
+        .await
+    {
+        Ok(()) => {
             respond_json(
                 stream,
                 200,
-                &serde_json::json!({
-                    "dropped": dropped.model,
-                    "instance_id": dropped.instance_id,
-                }),
+                &serde_json::json!({ "instance_id": instance_id }),
             )
             .await?;
         }
-        Ok(Err(e)) => {
+        Err(e) => {
             respond_runtime_error(stream, &e.to_string()).await?;
-        }
-        Err(_) => {
-            respond_error(stream, 503, "Runtime control unavailable").await?;
         }
     }
     Ok(())

@@ -12,8 +12,8 @@ GENERATED_SWIFT="$SWIFT_DIR/Sources/MeshLLM/Generated/mesh_ffi.swift"
 echo "Building $FRAMEWORK_NAME XCFramework..."
 echo "Repo root: $REPO_ROOT"
 
-if ! cargo metadata --no-deps --format-version 1 2>/dev/null | grep -q '"name":"mesh-api-ffi"'; then
-  echo "ERROR: mesh-api-ffi crate not found. Ensure the workspace is configured."
+if ! cargo metadata --no-deps --format-version 1 2>/dev/null | grep -q '"name":"mesh-llm-ffi"'; then
+  echo "ERROR: mesh-llm-ffi crate not found. Ensure the workspace is configured."
   exit 1
 fi
 
@@ -40,34 +40,34 @@ echo "Using rustc: $RUSTUP_RUSTC"
 
 echo "Building for aarch64-apple-ios..."
 RUSTC="$RUSTUP_RUSTC" \
-  cargo build --release -p mesh-api-ffi --target aarch64-apple-ios --no-default-features
+  cargo build --release -p mesh-llm-ffi --target aarch64-apple-ios --no-default-features --features host
 
 echo "Building for aarch64-apple-ios-sim..."
 RUSTC="$RUSTUP_RUSTC" \
-  cargo build --release -p mesh-api-ffi --target aarch64-apple-ios-sim --no-default-features
+  cargo build --release -p mesh-llm-ffi --target aarch64-apple-ios-sim --no-default-features --features host
 
 echo "Building for x86_64-apple-ios..."
 RUSTC="$RUSTUP_RUSTC" \
-  cargo build --release -p mesh-api-ffi --target x86_64-apple-ios --no-default-features
+  cargo build --release -p mesh-llm-ffi --target x86_64-apple-ios --no-default-features --features host
 
 echo "Building for aarch64-apple-ios-macabi (Mac Catalyst)..."
 RUSTC="$RUSTUP_RUSTC" \
-  cargo build --release -p mesh-api-ffi --target aarch64-apple-ios-macabi --no-default-features
+  cargo build --release -p mesh-llm-ffi --target aarch64-apple-ios-macabi --no-default-features --features host
 
 echo "Building for x86_64-apple-ios-macabi (Mac Catalyst)..."
 RUSTC="$RUSTUP_RUSTC" \
-  cargo build --release -p mesh-api-ffi --target x86_64-apple-ios-macabi --no-default-features
+  cargo build --release -p mesh-llm-ffi --target x86_64-apple-ios-macabi --no-default-features --features host
 
 echo "Building for aarch64-apple-darwin (macOS)..."
 RUSTC="$RUSTUP_RUSTC" \
-  cargo build --release -p mesh-api-ffi --target aarch64-apple-darwin --no-default-features
+  cargo build --release -p mesh-llm-ffi --target aarch64-apple-darwin --no-default-features --features host
 
 echo "Building for x86_64-apple-darwin (macOS)..."
 RUSTC="$RUSTUP_RUSTC" \
-  cargo build --release -p mesh-api-ffi --target x86_64-apple-darwin --no-default-features
+  cargo build --release -p mesh-llm-ffi --target x86_64-apple-darwin --no-default-features --features host
 
 echo "Syncing UniFFI API checksums into generated Swift bindings..."
-python3 - "$TARGET_DIR/aarch64-apple-darwin/release/libmesh_ffi.a" "$GENERATED_SWIFT" <<'PY'
+python3 - "$TARGET_DIR/aarch64-apple-darwin/release/libmeshllm_ffi.a" "$GENERATED_SWIFT" <<'PY'
 import pathlib
 import re
 import subprocess
@@ -84,7 +84,7 @@ disassembly = subprocess.run(
 ).stdout
 
 pattern = re.compile(
-    r"_uniffi_mesh_ffi_(checksum_[A-Za-z0-9_]+):\n[0-9a-f]+\s+mov\s+w0, #0x([0-9a-f]+)\n[0-9a-f]+\s+ret",
+    r"_uniffi_meshllm_ffi_(checksum_[A-Za-z0-9_]+):\n[0-9a-f]+\s+mov\s+w0, #0x([0-9a-f]+)\n[0-9a-f]+\s+ret",
     re.MULTILINE,
 )
 checksums = {name: int(value, 16) for name, value in pattern.findall(disassembly)}
@@ -105,23 +105,23 @@ PY
 echo "Creating fat library for iOS simulator..."
 mkdir -p "$TARGET_DIR/ios-sim-fat"
 lipo -create \
-  "$TARGET_DIR/aarch64-apple-ios-sim/release/libmesh_ffi.a" \
-  "$TARGET_DIR/x86_64-apple-ios/release/libmesh_ffi.a" \
-  -output "$TARGET_DIR/ios-sim-fat/libmesh_ffi.a"
+  "$TARGET_DIR/aarch64-apple-ios-sim/release/libmeshllm_ffi.a" \
+  "$TARGET_DIR/x86_64-apple-ios/release/libmeshllm_ffi.a" \
+  -output "$TARGET_DIR/ios-sim-fat/libmeshllm_ffi.a"
 
 echo "Creating fat library for macOS..."
 mkdir -p "$TARGET_DIR/macos-fat"
 lipo -create \
-  "$TARGET_DIR/aarch64-apple-darwin/release/libmesh_ffi.a" \
-  "$TARGET_DIR/x86_64-apple-darwin/release/libmesh_ffi.a" \
-  -output "$TARGET_DIR/macos-fat/libmesh_ffi.a"
+  "$TARGET_DIR/aarch64-apple-darwin/release/libmeshllm_ffi.a" \
+  "$TARGET_DIR/x86_64-apple-darwin/release/libmeshllm_ffi.a" \
+  -output "$TARGET_DIR/macos-fat/libmeshllm_ffi.a"
 
 echo "Creating fat library for Mac Catalyst..."
 mkdir -p "$TARGET_DIR/ios-macabi-fat"
 lipo -create \
-  "$TARGET_DIR/aarch64-apple-ios-macabi/release/libmesh_ffi.a" \
-  "$TARGET_DIR/x86_64-apple-ios-macabi/release/libmesh_ffi.a" \
-  -output "$TARGET_DIR/ios-macabi-fat/libmesh_ffi.a"
+  "$TARGET_DIR/aarch64-apple-ios-macabi/release/libmeshllm_ffi.a" \
+  "$TARGET_DIR/x86_64-apple-ios-macabi/release/libmeshllm_ffi.a" \
+  -output "$TARGET_DIR/ios-macabi-fat/libmeshllm_ffi.a"
 
 create_framework() {
   local ARCH="$1"
@@ -168,10 +168,10 @@ PLIST
 }
 
 echo "Assembling framework bundles..."
-create_framework "ios"     "$TARGET_DIR/aarch64-apple-ios/release/libmesh_ffi.a"
-create_framework "ios-sim" "$TARGET_DIR/ios-sim-fat/libmesh_ffi.a"
-create_framework "ios-macabi" "$TARGET_DIR/ios-macabi-fat/libmesh_ffi.a"
-create_framework "macos"   "$TARGET_DIR/macos-fat/libmesh_ffi.a"
+create_framework "ios"     "$TARGET_DIR/aarch64-apple-ios/release/libmeshllm_ffi.a"
+create_framework "ios-sim" "$TARGET_DIR/ios-sim-fat/libmeshllm_ffi.a"
+create_framework "ios-macabi" "$TARGET_DIR/ios-macabi-fat/libmeshllm_ffi.a"
+create_framework "macos"   "$TARGET_DIR/macos-fat/libmeshllm_ffi.a"
 
 echo "Creating XCFramework..."
 rm -rf "$XCFRAMEWORK_DIR/$FRAMEWORK_NAME.xcframework"

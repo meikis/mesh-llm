@@ -566,6 +566,7 @@ pub(crate) fn build_runtime_status_payload(
             backend: process.backend,
             status: process.status,
             port: Some(process.port),
+            context_length: process.context_length,
         })
         .collect();
 
@@ -579,6 +580,7 @@ pub(crate) fn build_runtime_status_payload(
                 backend: primary_backend.unwrap_or_else(|| "unknown".into()),
                 status: "starting".into(),
                 port: llama_port,
+                context_length: None,
             },
         );
     }

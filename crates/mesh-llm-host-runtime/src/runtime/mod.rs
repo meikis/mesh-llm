@@ -43,6 +43,7 @@ use crate::plugin;
 use crate::system::{autoupdate, backend, benchmark, hardware};
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser};
+use mesh_llm_node::serving::{UnloadOptions, UnloadTarget};
 use skippy_protocol::FlashAttentionType;
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
@@ -864,36 +865,64 @@ fn runtime_unload_candidates(
 }
 
 fn resolve_runtime_unload_target(
-    target: &str,
+    target: &UnloadTarget,
     candidates: Vec<RuntimeUnloadCandidate>,
-) -> Result<RuntimeUnloadCandidate> {
-    let mut instance_matches = candidates
-        .iter()
-        .filter(|candidate| candidate.instance_id == target);
-    if let Some(candidate) = instance_matches.next() {
-        return Ok(candidate.clone());
+) -> Option<RuntimeUnloadCandidate> {
+    match target {
+        UnloadTarget::Instance(instance_id) => candidates
+            .into_iter()
+            .find(|candidate| candidate.instance_id == *instance_id),
+        UnloadTarget::Model(model_name) => candidates
+            .into_iter()
+            .find(|candidate| candidate.model_name == *model_name),
     }
+}
 
-    let model_matches: Vec<_> = candidates
-        .into_iter()
-        .filter(|candidate| candidate.model_name == target)
-        .collect();
-    match model_matches.len() {
-        0 => Err(anyhow::anyhow!(
-            "model or runtime instance '{target}' is not loaded"
-        )),
-        1 => Ok(model_matches.into_iter().next().expect("one model match")),
-        _ => {
-            let ids = model_matches
+fn loaded_runtime_model_response(
+    model_ref: &str,
+    runtime_model_name: &str,
+    runtime_models: &HashMap<String, RuntimeModelHandleEntry>,
+    managed_models: &HashMap<String, ManagedModelController>,
+) -> Option<api::RuntimeLoadResponse> {
+    runtime_models
+        .iter()
+        .find(|(_, entry)| entry.model_name == runtime_model_name)
+        .map(|(instance_id, entry)| api::RuntimeLoadResponse {
+            model_ref: model_ref.to_string(),
+            model: entry.model_name.clone(),
+            instance_id: instance_id.clone(),
+            backend: Some(entry.handle.backend.clone()),
+            context_length: Some(entry.handle.context_length),
+        })
+        .or_else(|| {
+            managed_models
                 .iter()
-                .map(|candidate| candidate.instance_id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            Err(anyhow::anyhow!(
-                "model '{target}' has multiple loaded instances ({ids}); unload by runtime instance id"
-            ))
-        }
+                .find(|(_, controller)| controller.model_name == runtime_model_name)
+                .map(|(instance_id, controller)| api::RuntimeLoadResponse {
+                    model_ref: model_ref.to_string(),
+                    model: controller.model_name.clone(),
+                    instance_id: instance_id.clone(),
+                    backend: Some("managed".to_string()),
+                    context_length: None,
+                })
+        })
+}
+
+async fn drain_runtime_requests(node: &mesh::Node, options: &UnloadOptions) -> Result<()> {
+    if options.force || node.inflight_requests() == 0 {
+        return Ok(());
     }
+    let mut rx = node.inflight_change_rx();
+    let drain = async {
+        while node.inflight_requests() > 0 {
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+    };
+    tokio::time::timeout(options.drain_timeout, drain)
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out waiting for active requests to drain"))
 }
 
 async fn refresh_dashboard_context_usage(
@@ -5112,12 +5141,14 @@ async fn run_auto(
                                 .await
                                 .map(|model| models::remote_catalog_model_ref(&model))
                                 .unwrap_or_else(|| models::model_ref_for_path(&model_path));
-                            let already_loaded = managed_models.contains_key(&runtime_model_name)
-                                || runtime_models.contains_key(&runtime_model_name);
-                            anyhow::ensure!(
-                                !already_loaded,
-                                "model '{runtime_model_name}' is already loaded"
-                            );
+                            if let Some(loaded) = loaded_runtime_model_response(
+                                &spec,
+                                &runtime_model_name,
+                                &runtime_models,
+                                &managed_models,
+                            ) {
+                                return Ok(loaded);
+                            }
 
                             // Look up per-model overrides from TOML config by matching the
                             // spec string against [[models]].model entries. Metadata-based
@@ -5254,6 +5285,8 @@ async fn run_auto(
                                 Some(&instance_id),
                                 &handle,
                             );
+                            let loaded_backend = handle.backend.clone();
+                            let loaded_context_length = handle.context_length;
                             runtime_survey_models
                                 .insert(instance_id.clone(), survey_loaded_model);
                             runtime_models.insert(
@@ -5264,19 +5297,29 @@ async fn run_auto(
                                 },
                             );
                             Ok(api::RuntimeLoadResponse {
+                                model_ref: requested_model,
                                 model: loaded_name,
                                 instance_id,
+                                backend: Some(loaded_backend),
+                                context_length: Some(loaded_context_length),
                             })
                         }
                         .await;
                         let _ = resp.send(result);
                     }
-                    api::RuntimeControlRequest::Unload { target, resp } => {
+                    api::RuntimeControlRequest::Unload { target, options, resp } => {
                         let result = async {
-                            let unload = resolve_runtime_unload_target(
+                            let Some(unload) = resolve_runtime_unload_target(
                                 &target,
                                 runtime_unload_candidates(&runtime_models, &managed_models),
-                            )?;
+                            ) else {
+                                return Ok(api::RuntimeUnloadResponse {
+                                    model: target.as_runtime_target().to_string(),
+                                    instance_id: target.as_runtime_target().to_string(),
+                                    unloaded: false,
+                                });
+                            };
+                            drain_runtime_requests(&node, &options).await?;
                             match unload.owner {
                                 RuntimeUnloadOwner::Runtime => {
                                     let Some(entry) = runtime_models.remove(&unload.instance_id)
@@ -5355,6 +5398,7 @@ async fn run_auto(
                                     Ok(api::RuntimeUnloadResponse {
                                         model,
                                         instance_id: unload.instance_id,
+                                        unloaded: true,
                                     })
                                 }
                                 RuntimeUnloadOwner::Managed => {
@@ -5388,6 +5432,7 @@ async fn run_auto(
                                     Ok(api::RuntimeUnloadResponse {
                                         model,
                                         instance_id: unload.instance_id,
+                                        unloaded: true,
                                     })
                                 }
                             }
@@ -6241,9 +6286,9 @@ mod tests {
     }
 
     #[test]
-    fn runtime_unload_target_requires_instance_id_for_duplicate_models() {
-        let err = resolve_runtime_unload_target(
-            "Qwen",
+    fn runtime_unload_target_model_is_idempotent_and_picks_first_match() {
+        let target = resolve_runtime_unload_target(
+            &UnloadTarget::Model("Qwen".to_string()),
             vec![
                 RuntimeUnloadCandidate {
                     owner: RuntimeUnloadOwner::Runtime,
@@ -6257,15 +6302,30 @@ mod tests {
                 },
             ],
         )
-        .expect_err("duplicate model-name unload should be ambiguous");
+        .expect("model unload should pick one matching instance");
 
-        assert!(err.to_string().contains("multiple loaded instances"));
+        assert_eq!(target.instance_id, "runtime-1");
+        assert_eq!(target.owner, RuntimeUnloadOwner::Runtime);
+    }
+
+    #[test]
+    fn runtime_unload_target_missing_is_idempotent() {
+        let target = resolve_runtime_unload_target(
+            &UnloadTarget::Model("missing".to_string()),
+            vec![RuntimeUnloadCandidate {
+                owner: RuntimeUnloadOwner::Runtime,
+                instance_id: "runtime-1".to_string(),
+                model_name: "Qwen".to_string(),
+            }],
+        );
+
+        assert_eq!(target, None);
     }
 
     #[test]
     fn runtime_unload_target_resolves_exact_instance_before_model_name() {
         let target = resolve_runtime_unload_target(
-            "runtime-2",
+            &UnloadTarget::Instance("runtime-2".to_string()),
             vec![
                 RuntimeUnloadCandidate {
                     owner: RuntimeUnloadOwner::Runtime,

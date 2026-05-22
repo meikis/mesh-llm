@@ -41,3 +41,19 @@ To build the Android artifact locally:
 ```
 
 This writes the AAR to `sdk/kotlin/build/outputs/aar/meshllm-android.aar`.
+
+## Usage
+
+```kotlin
+import ai.meshllm.InviteToken
+import ai.meshllm.Node
+import uniffi.mesh_ffi.generateOwnerKeypairHex
+
+val ownerKeypair = generateOwnerKeypairHex()
+val node = Node(InviteToken("your-invite-token"), ownerKeypair)
+
+val recommended = node.models.recommended()
+val serving = node.serving.status()
+
+node.start()
+```

@@ -5,6 +5,7 @@ use crate::mesh;
 use crate::network::affinity;
 use crate::network::openai::transport as proxy;
 use crate::network::router;
+use mesh_llm_node::serving::{UnloadOptions, UnloadTarget};
 
 /// Model-aware API proxy. Parses the "model" field from POST request bodies
 /// and routes to the correct host. Falls back to the first available target
@@ -86,10 +87,7 @@ pub(crate) async fn api_proxy(
                                 Ok(Ok(loaded)) => {
                                     let _ = proxy::send_json_ok(
                                         tcp_stream,
-                                        &serde_json::json!({
-                                            "loaded": loaded.model,
-                                            "instance_id": loaded.instance_id,
-                                        }),
+                                        &serde_json::json!({ "loaded": loaded }),
                                     )
                                     .await;
                                 }
@@ -124,7 +122,8 @@ pub(crate) async fn api_proxy(
                         if let Some(ref name) = request.model_name {
                             let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
                             let _ = control_tx.send(api::RuntimeControlRequest::Unload {
-                                target: name.clone(),
+                                target: UnloadTarget::Model(name.clone()),
+                                options: UnloadOptions::default(),
                                 resp: resp_tx,
                             });
                             match resp_rx.await {
@@ -134,6 +133,7 @@ pub(crate) async fn api_proxy(
                                         &serde_json::json!({
                                             "dropped": dropped.model,
                                             "instance_id": dropped.instance_id,
+                                            "unloaded": dropped.unloaded,
                                         }),
                                     )
                                     .await;

@@ -3,32 +3,33 @@ package ai.meshllm.example
 import ai.meshllm.ChatMessage
 import ai.meshllm.ChatRequest
 import ai.meshllm.Event
-import ai.meshllm.MeshClient
+import ai.meshllm.InviteToken
+import ai.meshllm.Node
 import com.sun.jna.NativeLibrary
 import kotlinx.coroutines.runBlocking
-import uniffi.mesh_ffi.createClient
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 fun main(args: Array<String>) = runBlocking {
-    val inviteToken = args.firstOrNull { !it.startsWith("--") }
-    if (inviteToken == null) {
+    val inviteToken = args.firstOrNull { !it.startsWith("--") } ?: run {
         System.err.println("Usage: ExampleMain <invite_token>")
-        System.err.println("Set jna.library.path to the directory containing libmesh_ffi.")
-        System.exit(1)
+        System.err.println("Set jna.library.path to the directory containing libmeshllm_ffi.")
+        return@runBlocking
     }
 
-    NativeLibrary.getInstance("mesh_ffi")
+    NativeLibrary.getInstance("meshllm_ffi")
     // Generate an ephemeral owner keypair for the example. In a real app this
-    // must be persisted across launches — see mesh-api-ffi::create_client docs.
+    // must be persisted across launches.
     val ownerKeypairHex = uniffi.mesh_ffi.generateOwnerKeypairHex()
-    val handle = createClient(ownerKeypairHex, inviteToken!!)
-    val client = MeshClient(handle)
+    val node = Node(InviteToken(inviteToken), ownerKeypairHex)
+    val recommended = node.models.recommended()
+    val serving = node.serving.status()
+    println("[node] recommended_models=${recommended.size} serving_enabled=${serving.enabled}")
 
-    client.join()
+    node.start()
     println("[connected]")
 
-    val models = waitForModels(client)
+    val models = waitForModels(node)
     println("[models] N=${models.size}")
     check(models.isNotEmpty()) { "mesh reported no models" }
 
@@ -45,7 +46,7 @@ fun main(args: Array<String>) = runBlocking {
     var failed: String? = null
     val chatStartMs = System.currentTimeMillis()
 
-    client.chat(chatRequest) { event ->
+    node.inference.chat(chatRequest) { event ->
         when (event) {
             is Event.TokenDelta -> {
                 if (!firstTokenEmitted) {
@@ -72,14 +73,14 @@ fun main(args: Array<String>) = runBlocking {
     check(completed) { "chat never completed" }
     println("[chat] done")
 
-    client.disconnect()
+    node.stop()
     println("[disconnect] ok")
 }
 
-private fun waitForModels(client: MeshClient): List<ai.meshllm.Model> {
+private fun waitForModels(node: Node): List<ai.meshllm.Model> {
     val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
     while (System.nanoTime() < deadline) {
-        val models = runBlocking { client.listModels() }
+        val models = runBlocking { node.inference.listModels() }
         if (models.isNotEmpty()) {
             return models
         }

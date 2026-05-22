@@ -9,7 +9,7 @@ let ffiXCFrameworkPath = "\(repoRoot)/\(ffiXCFrameworkRelativePath)"
 let remoteFFIXCFrameworkURL = "https://github.com/Mesh-LLM/mesh-llm/releases/download/__MESH_SWIFT_RELEASE_TAG__/MeshLLMFFI.xcframework.zip"
 let remoteFFIXCFrameworkChecksum = "__MESH_SWIFT_RELEASE_CHECKSUM__"
 let forceStubFFI = ProcessInfo.processInfo.environment["MESH_SWIFT_FORCE_STUB"] == "1"
-let hasLocalFFIXCFramework = FileManager.default.fileExists(atPath: ffiXCFrameworkPath)
+let hasLocalFFIXCFramework = !forceStubFFI && FileManager.default.fileExists(atPath: ffiXCFrameworkPath)
 let hasRemoteFFIXCFramework = !forceStubFFI
     && !remoteFFIXCFrameworkURL.contains("__MESH_SWIFT_RELEASE_TAG__")
     && !remoteFFIXCFrameworkChecksum.contains("__MESH_SWIFT_RELEASE_CHECKSUM__")
@@ -37,6 +37,7 @@ if hasLocalFFIXCFramework {
 }
 
 let hasFFIBinaryTarget = hasLocalFFIXCFramework || hasRemoteFFIXCFramework
+let swiftSettings: [SwiftSetting] = forceStubFFI ? [.define("MESH_SWIFT_STUB")] : []
 
 let package = Package(
     name: "MeshLLM",
@@ -56,6 +57,7 @@ let package = Package(
             dependencies: meshLLMDependencies,
             path: "sdk/swift/Sources/MeshLLM",
             exclude: hasFFIBinaryTarget ? [] : ["Generated"],
+            swiftSettings: swiftSettings,
             linkerSettings: [
                 .linkedFramework("SystemConfiguration"),
             ]

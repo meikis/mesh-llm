@@ -2,6 +2,10 @@ use super::*;
 use crate::api::status::decode_runtime_model_path;
 use crate::plugin;
 use crate::plugins::{blackboard, blobstore};
+use mesh_llm_api::{LoadModelOptions, MeshNode, OwnerKeypair, UnloadModelOptions};
+use mesh_llm_node::serving::{
+    LoadModelRequest, ServingController, ServingModelState, UnloadModelRequest, UnloadTarget,
+};
 use mesh_llm_plugin::MeshVisibility;
 use rmcp::model::ErrorCode;
 use serde_json::json;
@@ -785,6 +789,173 @@ async fn build_test_mesh_api_with_api_port(api_port: u16) -> MeshApi {
 
 async fn build_test_mesh_api() -> MeshApi {
     build_test_mesh_api_with_api_port(3131).await
+}
+
+#[tokio::test]
+async fn mesh_api_serving_controller_uses_runtime_control_channel() {
+    let state = build_test_mesh_api().await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    state.set_runtime_control(tx).await;
+
+    let worker = tokio::spawn(async move {
+        match rx.recv().await.expect("load request") {
+            RuntimeControlRequest::Load { spec, resp } => {
+                assert_eq!(spec, "org/model:Q4_K_M");
+                resp.send(Ok(RuntimeLoadResponse {
+                    model_ref: spec.clone(),
+                    model: spec,
+                    instance_id: "runtime-1".to_string(),
+                    backend: Some("test".to_string()),
+                    context_length: Some(2048),
+                }))
+                .expect("send load response");
+            }
+            RuntimeControlRequest::Unload { .. } | RuntimeControlRequest::Shutdown => {
+                panic!("expected load request")
+            }
+        }
+
+        match rx.recv().await.expect("unload request") {
+            RuntimeControlRequest::Unload { target, resp, .. } => {
+                assert_eq!(target, UnloadTarget::Instance("runtime-1".to_string()));
+                resp.send(Ok(RuntimeUnloadResponse {
+                    model: "org/model:Q4_K_M".to_string(),
+                    instance_id: "runtime-1".to_string(),
+                    unloaded: true,
+                }))
+                .expect("send unload response");
+            }
+            RuntimeControlRequest::Load { .. } | RuntimeControlRequest::Shutdown => {
+                panic!("expected unload request")
+            }
+        }
+    });
+
+    let loaded = ServingController::load(
+        &state,
+        LoadModelRequest {
+            model_ref: "org/model:Q4_K_M".to_string(),
+            ..LoadModelRequest::default()
+        },
+    )
+    .await
+    .expect("load through serving controller");
+    assert_eq!(loaded.model_id, "org/model:Q4_K_M");
+    assert_eq!(loaded.model_ref, "org/model:Q4_K_M");
+    assert_eq!(loaded.instance_id.as_deref(), Some("runtime-1"));
+    assert_eq!(loaded.state, ServingModelState::Ready);
+
+    ServingController::unload(
+        &state,
+        UnloadModelRequest {
+            target: UnloadTarget::Instance("runtime-1".to_string()),
+            ..UnloadModelRequest::default()
+        },
+    )
+    .await
+    .expect("unload through serving controller");
+    worker.await.expect("runtime-control worker");
+}
+
+#[tokio::test]
+async fn mesh_node_serving_uses_host_runtime_controller() {
+    let state = build_test_mesh_api().await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    state.set_runtime_control(tx).await;
+
+    let worker = tokio::spawn(async move {
+        match rx.recv().await.expect("load request") {
+            RuntimeControlRequest::Load { spec, resp } => {
+                assert_eq!(spec, "org/sdk-model:Q4_K_M");
+                resp.send(Ok(RuntimeLoadResponse {
+                    model_ref: spec.clone(),
+                    model: spec,
+                    instance_id: "sdk-runtime-1".to_string(),
+                    backend: Some("test".to_string()),
+                    context_length: Some(2048),
+                }))
+                .expect("send load response");
+            }
+            RuntimeControlRequest::Unload { .. } | RuntimeControlRequest::Shutdown => {
+                panic!("expected load request")
+            }
+        }
+
+        match rx.recv().await.expect("unload request") {
+            RuntimeControlRequest::Unload { target, resp, .. } => {
+                assert_eq!(target, UnloadTarget::Instance("sdk-runtime-1".to_string()));
+                resp.send(Ok(RuntimeUnloadResponse {
+                    model: "org/sdk-model:Q4_K_M".to_string(),
+                    instance_id: "sdk-runtime-1".to_string(),
+                    unloaded: true,
+                }))
+                .expect("send unload response");
+            }
+            RuntimeControlRequest::Load { .. } | RuntimeControlRequest::Shutdown => {
+                panic!("expected unload request")
+            }
+        }
+    });
+
+    let invite_token = state
+        .node()
+        .await
+        .invite_token()
+        .parse()
+        .expect("test invite token");
+    let node = state
+        .configure_sdk_node_builder(
+            MeshNode::builder()
+                .identity(OwnerKeypair::generate())
+                .join(invite_token),
+        )
+        .build()
+        .expect("SDK node with host runtime serving controller");
+
+    let loaded = node
+        .serving()
+        .load("org/sdk-model:Q4_K_M", LoadModelOptions::default())
+        .await
+        .expect("SDK serving load through host runtime controller");
+    assert_eq!(loaded.model_id, "org/sdk-model:Q4_K_M");
+    assert_eq!(loaded.instance_id.as_deref(), Some("sdk-runtime-1"));
+
+    node.serving()
+        .unload_instance("sdk-runtime-1", UnloadModelOptions::default())
+        .await
+        .expect("SDK serving unload through host runtime controller");
+    worker.await.expect("runtime-control worker");
+}
+
+#[tokio::test]
+async fn mesh_api_serving_controller_reports_runtime_status_models() {
+    let state = build_test_mesh_api().await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    state.set_runtime_control(tx).await;
+    state
+        .upsert_local_process(RuntimeProcessPayload {
+            name: "loaded-model".to_string(),
+            instance_id: Some("runtime-2".to_string()),
+            backend: "mesh-runtime".to_string(),
+            status: "ready".to_string(),
+            port: 40101,
+            pid: 42,
+            slots: 1,
+            context_length: Some(4096),
+        })
+        .await;
+
+    let status = ServingController::status(&state)
+        .await
+        .expect("serving status");
+    assert!(status.enabled);
+    assert_eq!(status.models.len(), 1);
+    assert_eq!(status.models[0].model_id, "loaded-model");
+    assert_eq!(status.models[0].model_ref, "loaded-model");
+    assert_eq!(status.models[0].instance_id.as_deref(), Some("runtime-2"));
+    assert_eq!(status.models[0].state, ServingModelState::Ready);
+    assert_eq!(status.models[0].backend.as_deref(), Some("mesh-runtime"));
+    assert_eq!(status.models[0].context_length, Some(4096));
 }
 
 async fn build_test_mesh_api_with_plugin_manager(

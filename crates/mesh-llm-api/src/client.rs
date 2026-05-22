@@ -11,6 +11,22 @@ pub const MAX_RECONNECT_ATTEMPTS: u32 = mesh_client::client::builder::MAX_RECONN
 pub enum MeshApiError {
     #[error(transparent)]
     Client(#[from] ClientError),
+    #[error("public mesh discovery failed: {message}")]
+    Discovery { message: String },
+    #[error("no public mesh matched the requested criteria")]
+    NoPublicMeshFound,
+    #[error("invalid invite token: {message}")]
+    InvalidInviteToken { message: String },
+    #[error("invalid Mesh SDK configuration: {message}")]
+    InvalidConfig { message: &'static str },
+    #[error("model management failed: {message}")]
+    ModelManagement { message: String },
+    #[error("serving failed: {error}")]
+    Serving {
+        error: mesh_llm_node::serving::ServingError,
+    },
+    #[error("{feature} is not implemented in the Mesh SDK yet")]
+    Unsupported { feature: &'static str },
 }
 
 #[derive(Clone, Debug)]
@@ -31,7 +47,7 @@ impl ClientBuilder {
             config: ClientConfig {
                 owner_keypair,
                 invite_token,
-                user_agent: format!("mesh-api/{}", env!("CARGO_PKG_VERSION")),
+                user_agent: format!("mesh-llm-api/{}", env!("CARGO_PKG_VERSION")),
                 connect_timeout: Duration::from_secs(30),
             },
         }
@@ -115,6 +131,15 @@ impl MeshClient {
     pub async fn reconnect(&mut self) -> Result<(), MeshApiError> {
         self.inner.reconnect().await?;
         Ok(())
+    }
+
+    pub fn add_event_listener(&self, listener: Arc<dyn EventListener>) -> String {
+        self.inner
+            .add_event_listener(Arc::new(EventListenerAdapter { inner: listener }))
+    }
+
+    pub fn remove_event_listener(&self, listener_id: &str) {
+        self.inner.remove_event_listener(listener_id);
     }
 }
 

@@ -91,9 +91,7 @@ impl ClientBuilder {
             config: self.config,
             connected: false,
             cancel_flags: Arc::new(Mutex::new(HashMap::new())),
-            listeners: Arc::new(Mutex::new(
-                Vec::<Arc<dyn crate::events::EventListener>>::new(),
-            )),
+            listeners: Arc::new(Mutex::new(HashMap::new())),
             reconnect_attempts: 0,
             user_disconnected: false,
         })
@@ -105,7 +103,7 @@ pub struct MeshClient {
     pub(crate) config: ClientConfig,
     pub(crate) connected: bool,
     pub(crate) cancel_flags: CancelFlagMap,
-    pub listeners: Arc<Mutex<Vec<Arc<dyn crate::events::EventListener>>>>,
+    pub listeners: Arc<Mutex<HashMap<String, Arc<dyn crate::events::EventListener>>>>,
     pub reconnect_attempts: u32,
     pub user_disconnected: bool,
 }
@@ -323,8 +321,28 @@ impl MeshClient {
         self.join().await
     }
 
+    pub fn add_event_listener(&self, listener: Arc<dyn crate::events::EventListener>) -> String {
+        let listener_id = uuid::Uuid::new_v4().to_string();
+        self.listeners
+            .lock()
+            .unwrap()
+            .insert(listener_id.clone(), listener);
+        listener_id
+    }
+
+    pub fn remove_event_listener(&self, listener_id: &str) {
+        self.listeners.lock().unwrap().remove(listener_id);
+    }
+
     fn emit_event(&self, event: crate::events::Event) {
-        for listener in self.listeners.lock().unwrap().iter() {
+        let listeners = self
+            .listeners
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for listener in listeners {
             listener.on_event(event.clone());
         }
     }

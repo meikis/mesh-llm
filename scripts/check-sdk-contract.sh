@@ -7,6 +7,8 @@ DOC="$ROOT/docs/SDK.md"
 SWIFT_NODE="$ROOT/sdk/swift/Sources/MeshLLM/Node.swift"
 SWIFT_STREAM="$ROOT/sdk/swift/Sources/MeshLLM/EventStream.swift"
 KOTLIN_NODE="$ROOT/sdk/kotlin/src/main/kotlin/ai/meshllm/Node.kt"
+NODE_SDK="$ROOT/sdk/node/index.js"
+NODE_TYPES="$ROOT/sdk/node/index.d.ts"
 
 missing=0
 
@@ -33,6 +35,7 @@ required_doc_terms=(
     "download the model"
     "load the model through serving"
     "Serving unsupported"
+    "Node.js"
 )
 
 for term in "${required_doc_terms[@]}"; do
@@ -103,6 +106,38 @@ kotlin_patterns=(
 
 for pattern in "${kotlin_patterns[@]}"; do
     require "$KOTLIN_NODE" "$pattern" "kotlin: $pattern"
+done
+
+node_patterns=(
+    "class Node"
+    "static create(options)"
+    "listModels()"
+    "chat(request"
+    "responses(request"
+    "recommended()"
+    "search(query)"
+    "show(modelRef)"
+    "installed()"
+    "download(modelRef)"
+    "load(modelRef"
+    "unload(target"
+    "unloadModel(modelId"
+    "unloadInstance(instanceId"
+)
+
+for pattern in "${node_patterns[@]}"; do
+    require "$NODE_SDK" "$pattern" "node: $pattern"
+done
+
+node_type_patterns=(
+    "export declare class Node"
+    "type NativeRuntimeArtifact"
+    "servingEnabled?: boolean"
+    "load(modelRef: string"
+)
+
+for pattern in "${node_type_patterns[@]}"; do
+    require "$NODE_TYPES" "$pattern" "node types: $pattern"
 done
 
 if [[ "$missing" != "0" ]]; then

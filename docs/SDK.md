@@ -7,7 +7,7 @@ serving, run inference, then unload and stop.
 The SDK is split into two parts:
 
 - **Language SDKs** provide the public API: Rust `mesh-llm-api`, Swift
-  `MeshLLM`, and Kotlin `ai.meshllm`.
+  `MeshLLM`, Kotlin `ai.meshllm`, and Node.js `@meshllm/sdk`.
 - **Native runtime artifacts** provide local serving for a specific
   platform/backend, such as macOS Metal or Linux CUDA.
 
@@ -81,6 +81,25 @@ repositories {
         }
     }
 }
+```
+
+### Node.js
+
+Install the Node package in a Node.js or Electron app:
+
+```json
+{
+  "dependencies": {
+    "@meshllm/sdk": "0.66.0"
+  }
+}
+```
+
+When building from this repository, build the native N-API addon first:
+
+```bash
+cd sdk/node
+npm run build:native
 ```
 
 Then depend on the SDK:
@@ -303,6 +322,49 @@ try {
 }
 ```
 
+## Node.js Usage
+
+Create a node:
+
+```js
+const { Node, generateOwnerKeypairHex } = require('@meshllm/sdk')
+
+const node = Node.create({
+  ownerKeypairHex: generateOwnerKeypairHex(),
+  inviteToken: 'your-invite-token'
+})
+
+await node.start()
+const models = await node.inference.listModels()
+await node.stop()
+```
+
+Use local serving by enabling serving and packaging a matching native runtime
+artifact:
+
+```js
+const node = Node.create({
+  ownerKeypairHex,
+  inviteToken,
+  servingEnabled: true,
+  cacheDir: process.env.MESH_SDK_CACHE_DIR,
+  runtimeDir: process.env.MESH_SDK_RUNTIME_DIR
+})
+
+await node.start()
+await node.models.download('Qwen2.5-3B-Instruct-Q4_K_M')
+const served = await node.serving.load('Qwen2.5-3B-Instruct-Q4_K_M', {
+  devicePolicy: 'auto'
+})
+const result = await node.inference.chat({
+  model: served.modelId,
+  messages: [{ role: 'user', content: 'hello' }]
+})
+console.log(result.content)
+await node.serving.unloadModel(served.modelId)
+await node.stop()
+```
+
 ## Native Runtime Artifacts
 
 Swift and Kotlin load MeshLLM through `libmeshllm_ffi`, not through a public
@@ -333,6 +395,10 @@ Baseline artifact names:
 | `meshllm-native-linux-x86_64-cuda` | `x86_64-unknown-linux-gnu` | CUDA |
 | `meshllm-native-linux-x86_64-vulkan` | `x86_64-unknown-linux-gnu` | Vulkan |
 | `meshllm-native-linux-x86_64-rocm` | `x86_64-unknown-linux-gnu` | ROCm/HIP |
+| `meshllm-native-windows-x86_64-cpu` | `x86_64-pc-windows-msvc` | CPU |
+| `meshllm-native-windows-x86_64-cuda` | `x86_64-pc-windows-msvc` | CUDA |
+| `meshllm-native-windows-x86_64-vulkan` | `x86_64-pc-windows-msvc` | Vulkan |
+| `meshllm-native-windows-x86_64-rocm` | `x86_64-pc-windows-msvc` | ROCm/HIP |
 
 CUDA and ROCm artifacts may include hardware-specific suffixes such as
 `cuda-sm80` or `rocm-gfx1100` when `LLAMA_STAGE_CUDA_ARCHITECTURES` or
@@ -472,6 +538,18 @@ MESH_SDK_MODEL_REF=Qwen2.5-3B-Instruct-Q4_K_M \
 ./gradlew --no-daemon run -p sdk/kotlin/example/example-jvm
 ```
 
+### Node.js Example
+
+```bash
+cd sdk/node
+npm run build:native
+cd ../..
+
+MESHLLM_NATIVE_RUNTIME_ARTIFACT_DIR=dist/native-sdk/meshllm-native-linux-x86_64-cuda \
+MESH_SDK_MODEL_REF=Qwen2.5-3B-Instruct-Q4_K_M \
+node sdk/node/example/local-inference.js
+```
+
 ## Errors
 
 Rust APIs return `MeshApiError`. Swift exposes `MeshError`. Kotlin exposes
@@ -505,6 +583,9 @@ locally, surface the typed unsupported error to the caller.
 | Kotlin JVM macOS | yes | yes | yes with a matching native runtime artifact |
 | Kotlin JVM Linux | yes | yes | yes with a matching native runtime artifact |
 | Kotlin Android | yes | yes | not currently advertised |
+| Node.js macOS | yes | yes | yes with a matching native runtime artifact |
+| Node.js Linux | yes | yes | yes with a matching native runtime artifact |
+| Node.js Windows | yes | yes | yes with a matching native runtime artifact |
 
 ## Validation Commands
 
@@ -516,6 +597,7 @@ scripts/verify-native-sdk-package.sh dist/native-sdk/*.tar.gz
 cargo test -p mesh-llm-ffi
 swift build --package-path sdk/swift/example/MeshExampleApp
 ./gradlew --no-daemon compileKotlin -p sdk/kotlin/example/example-jvm
+node --test sdk/node/test/*.test.js
 ```
 
 Run serving smoke examples with a real model:

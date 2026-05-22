@@ -25,6 +25,7 @@ WORKSPACE_MEMBERS=(
   "mesh-llm-api"
   "mesh-llm-node"
   "mesh-llm-ffi"
+  "mesh-llm-nodejs"
   "mesh-llm-test-harness"
   "model-ref"
   "model-artifact"
@@ -137,6 +138,7 @@ weights = {
     "mesh-llm-ui": 2,
     "mesh-llm-plugin": 2,
     "mesh-llm-node": 2,
+    "mesh-llm-nodejs": 2,
     "skippy-protocol": 2,
     "skippy-topology": 2,
     "skippy-cache": 2,

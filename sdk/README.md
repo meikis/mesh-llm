@@ -7,6 +7,7 @@ Current SDKs:
 
 - `swift/` for Apple platforms
 - `kotlin/` for Android and JVM consumers
+- `node/` for Node.js and Electron consumers
 
 These SDK packages should stay thin. Shared node behavior belongs in the Rust
 SDK crates:
@@ -17,16 +18,17 @@ SDK crates:
 - `crates/mesh-llm-node/` for embeddable model management and serving
   orchestration. Serving SDK calls should bind to in-process node
   controllers, not the local REST management API.
-- `crates/mesh-llm-ffi/` for the UniFFI/native bridge used by language SDKs
+- `crates/mesh-llm-ffi/` for the UniFFI/native bridge used by Swift and Kotlin
+- `crates/mesh-llm-nodejs/` for the N-API native bridge used by Node.js
 
 The SDK's long-term public surface is `MeshNode`: one embedded node that can
 consume inference from the mesh, manage local models, serve local models, or
 combine those roles. See `docs/design/EMBEDDED_CLIENT_ADR.md` for the current
 SDK direction.
 
-The customer-facing SDK release gates live in `docs/SDK.md`. SDK changes should
-keep Rust, Swift, and Kotlin aligned to that canonical contract: real examples,
-polished lifecycle, typed errors, and an honest platform support matrix.
+The customer-facing SDK usage guide lives in `docs/SDK.md`. SDK changes should
+keep Rust, Swift, Kotlin, and Node aligned around real examples, polished
+lifecycle, typed errors, and an honest platform support matrix.
 
 Generated UniFFI bindings and Apple binary artifacts are build outputs, not
 source. Do not check in `sdk/*/Generated`, generated `uniffi/mesh_ffi` Kotlin

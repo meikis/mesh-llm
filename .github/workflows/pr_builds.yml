@@ -74,6 +74,7 @@ jobs:
             sdk:
               - 'crates/mesh-llm-api/**'
               - 'crates/mesh-llm-ffi/**'
+              - 'crates/mesh-llm-nodejs/**'
               - 'crates/mesh-client/**'
               - 'crates/mesh-llm-identity/**'
               - 'crates/mesh-llm-protocol/**'
@@ -95,6 +96,7 @@ jobs:
               - 'Cargo.lock'
               - '.github/workflows/pr_docker.yml'
             windows_cpu:
+              - 'crates/mesh-llm-nodejs/**'
               - 'crates/skippy-ffi/**'
               - 'scripts/build-windows.ps1'
               - 'third_party/llama.cpp/**'
@@ -277,7 +279,7 @@ jobs:
           fi
 
       - name: SDK and API crate tests
-        if: ${{ matrix.backend == 'cpu' && env.RUN_LINUX_CPU == 'true' && (needs.changes.outputs.all_rust == 'true' || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-llm-client') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-llm-api') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-llm-ffi')) }}
+        if: ${{ matrix.backend == 'cpu' && env.RUN_LINUX_CPU == 'true' && (needs.changes.outputs.all_rust == 'true' || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-llm-client') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-llm-api') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-llm-ffi') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-llm-nodejs')) }}
         env:
           AFFECTED: ${{ needs.changes.outputs.affected_crates }}
           ALL_RUST: ${{ needs.changes.outputs.all_rust }}
@@ -287,7 +289,7 @@ jobs:
             [ "$ALL_RUST" = "true" ] || jq -e --arg crate "$crate" 'index($crate) != null' <<<"$AFFECTED" >/dev/null
           }
 
-          for c in mesh-llm-client mesh-llm-api mesh-llm-ffi; do
+          for c in mesh-llm-client mesh-llm-api mesh-llm-ffi mesh-llm-nodejs; do
             if should_test "$c"; then
               cargo test -p "$c"
             else
@@ -900,6 +902,14 @@ jobs:
         if: ${{ matrix.backend == 'cpu' && env.RUN_WINDOWS_CPU_FULL != 'true' }}
         shell: pwsh
         run: cargo check --locked -p mesh-llm --bin mesh-llm
+      - name: Check Node SDK addon on Windows
+        if: ${{ matrix.backend == 'cpu' }}
+        shell: pwsh
+        run: cargo check --locked -p mesh-llm-nodejs
+      - name: Build Node SDK addon on Windows
+        if: ${{ matrix.backend == 'cpu' && env.RUN_WINDOWS_CPU_FULL == 'true' }}
+        shell: pwsh
+        run: cargo build --release --locked -p mesh-llm-nodejs
       - name: Build Windows GPU backend
         if: ${{ env.RUN_WINDOWS_GPU == 'true' && steps.llama_cache.outputs.cache-hit != 'true' }}
         shell: pwsh

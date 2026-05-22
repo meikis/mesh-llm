@@ -23,6 +23,7 @@ WORKSPACE_MEMBERS=(
   "mesh-llm-api"
   "mesh-llm-node"
   "mesh-llm-ffi"
+  "mesh-llm-nodejs"
   "mesh-llm-test-harness"
   "model-ref"
   "model-artifact"

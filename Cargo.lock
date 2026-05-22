@@ -2455,6 +2455,32 @@ dependencies = [
 
 [[package]]
 name = "hf-hub"
+version = "1.0.0-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f89305dc8fe34e165eaf0eb12b6e294e12381d9df9a431bcc52a5809bab4319"
+dependencies = [
+ "base64",
+ "bon",
+ "bytes",
+ "futures",
+ "globset",
+ "hf-xet",
+ "hyper",
+ "pathdiff",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-retry",
+ "tokio-util",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "hf-hub"
 version = "1.0.0"
 source = "git+https://github.com/huggingface/hf-hub.git?rev=4cd6d8acd3192021381ff85210be9192b394e0eb#4cd6d8acd3192021381ff85210be9192b394e0eb"
 dependencies = [
@@ -3715,7 +3741,7 @@ dependencies = [
  "dirs",
  "ed25519-dalek",
  "hex",
- "hf-hub",
+ "hf-hub 1.0.0",
  "httparse",
  "iroh",
  "keyring",
@@ -3790,7 +3816,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-llm-node"
-version = "0.1.0"
+version = "0.66.0"
 dependencies = [
  "anyhow",
  "mesh-llm-types",
@@ -3975,7 +4001,7 @@ version = "0.66.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "hf-hub",
+ "hf-hub 1.0.0-rc.1",
  "model-artifact",
  "model-ref",
  "serde",
@@ -3991,7 +4017,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
- "hf-hub",
+ "hf-hub 1.0.0",
  "model-hf",
  "model-ref",
  "reqwest 0.12.28",

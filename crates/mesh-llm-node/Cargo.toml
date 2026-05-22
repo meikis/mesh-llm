@@ -1,8 +1,11 @@
 [package]
 name = "mesh-llm-node"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Embeddable Mesh LLM node primitives for model management and serving"
+repository = "https://github.com/Mesh-LLM/mesh-llm"
+homepage = "https://github.com/Mesh-LLM/mesh-llm"
 
 [features]
 default = []
@@ -10,10 +13,10 @@ host = []
 
 [dependencies]
 anyhow.workspace = true
-mesh-llm-types = { path = "../mesh-llm-types" }
-model-artifact = { path = "../model-artifact" }
-model-hf = { path = "../model-hf" }
-model-ref = { path = "../model-ref" }
+mesh-llm-types = { path = "../mesh-llm-types", version = "0.66.0" }
+model-artifact = { path = "../model-artifact", version = "0.66.0" }
+model-hf = { path = "../model-hf", version = "0.66.0" }
+model-ref = { path = "../model-ref", version = "0.66.0" }
 serde.workspace = true
 serde_json.workspace = true
 

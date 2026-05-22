@@ -16,7 +16,7 @@ host-io = ["mesh-client/host-io"]
 [dependencies]
 anyhow.workspace = true
 mesh-client = { package = "mesh-llm-client", version = "0.66.0", path = "../mesh-client" }
-mesh-llm-node = { path = "../mesh-llm-node" }
+mesh-llm-node = { path = "../mesh-llm-node", version = "0.66.0" }
 hex = "0.4"
 thiserror = "2"
 tokio = { version = "1", features = ["sync"] }

@@ -258,6 +258,18 @@ and verifies the `manifest.json` checksum before opening the dynamic library.
 Swift and Kotlin packaging can consume the same verified tarball layout
 directly when Cargo is not involved.
 
+Swift and Kotlin expose native runtime resolvers over this same layout:
+
+- `NativeRuntime.prepare()` in Swift validates the packaged artifact before
+  local serving starts. Swift still links the generated `MeshLLMFFI`
+  XCFramework through SwiftPM.
+- `NativeRuntime.configure()` in Kotlin validates the artifact and sets the
+  UniFFI JNA `libraryOverride` before generated FFI symbols are touched.
+
+Both resolvers accept `MESHLLM_NATIVE_RUNTIME_ARTIFACT_DIR`,
+`MESHLLM_NATIVE_RUNTIME_DIR`, `MESH_SDK_NATIVE_RUNTIME_DIR`, or a direct config
+object from the host app.
+
 ## Validation
 
 Minimum validation for SDK work:

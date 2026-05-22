@@ -51,11 +51,24 @@ include per-ABI llama.cpp static runtime archives.
 
 ## Usage
 
+JVM apps must configure the native runtime before any generated UniFFI symbol is
+used. Point `MESHLLM_NATIVE_RUNTIME_ARTIFACT_DIR` at a verified
+`meshllm-native-*` artifact, or pass the artifact directory explicitly:
+
+```kotlin
+import ai.meshllm.NativeRuntime
+
+val runtime = NativeRuntime.configure()
+println("loaded ${runtime.artifactId} from ${runtime.artifactDir}")
+```
+
 ```kotlin
 import ai.meshllm.InviteToken
+import ai.meshllm.NativeRuntime
 import ai.meshllm.Node
 import uniffi.mesh_ffi.generateOwnerKeypairHex
 
+NativeRuntime.configure()
 val ownerKeypair = generateOwnerKeypairHex()
 val node = Node(InviteToken("your-invite-token"), ownerKeypair)
 
@@ -101,3 +114,19 @@ serving is not available for the current target or native artifact.
 Targets without validated local serving must throw
 `MeshException.ServingUnsupported` instead of silently degrading to a fake
 implementation.
+
+## Local JVM Example
+
+Build or download a native runtime artifact, then run the JVM example with that
+artifact directory:
+
+```bash
+scripts/package-native-sdk.sh \
+  --backend metal \
+  --target aarch64-apple-darwin \
+  --out dist/native-sdk
+
+MESHLLM_NATIVE_RUNTIME_ARTIFACT_DIR=dist/native-sdk/meshllm-native-darwin-aarch64-metal \
+MESH_SDK_MODEL_REF=Qwen2.5-3B-Instruct-Q4_K_M \
+./gradlew --no-daemon run -p sdk/kotlin/example/example-jvm
+```

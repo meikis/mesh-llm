@@ -25,6 +25,16 @@ let skipDownload = ProcessInfo.processInfo.environment["MESH_SDK_SKIP_DOWNLOAD"]
 let prompt = ProcessInfo.processInfo.environment["MESH_SDK_PROMPT"]
     ?? "Say hello from this Mac in exactly seven words."
 
+if localModelRef != nil {
+    do {
+        let runtime = try NativeRuntime.prepare()
+        print("[runtime] artifact=\(runtime.artifactId) library=\(runtime.library.path)")
+    } catch {
+        FileHandle.standardError.write(Data("[error] \(error)\n".utf8))
+        exit(1)
+    }
+}
+
 // Generate an ephemeral owner keypair for the example. In a real app this
 // must be persisted across launches.
 let ownerKeypairHex = generateOwnerKeypairHex()

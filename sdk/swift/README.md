@@ -42,6 +42,17 @@ runtime it exposes.
 
 ## Usage
 
+Apps that package a native runtime artifact can validate it before starting
+local serving. The resolver accepts `MESHLLM_NATIVE_RUNTIME_ARTIFACT_DIR`,
+`MESHLLM_NATIVE_RUNTIME_DIR`, `MESH_SDK_NATIVE_RUNTIME_DIR`, or an explicit URL:
+
+```swift
+import MeshLLM
+
+let runtime = try NativeRuntime.prepare()
+print("using \(runtime.artifactId) from \(runtime.artifactDirectory.path)")
+```
+
 ```swift
 import MeshLLM
 
@@ -104,6 +115,12 @@ from the repo:
 
 ```bash
 ./sdk/swift/scripts/build-xcframework.sh
+scripts/package-native-sdk.sh \
+  --backend metal \
+  --target aarch64-apple-darwin \
+  --out dist/native-sdk
+
+MESHLLM_NATIVE_RUNTIME_ARTIFACT_DIR=dist/native-sdk/meshllm-native-darwin-aarch64-metal \
 MESH_SDK_MODEL_REF=Qwen2.5-3B-Instruct-Q4_K_M \
 swift run --package-path sdk/swift/example/MeshExampleApp
 ```
@@ -111,6 +128,7 @@ swift run --package-path sdk/swift/example/MeshExampleApp
 Useful environment overrides:
 
 - `MESH_SDK_MODEL_REF` — catalog, Hugging Face, or local model reference to download/load.
+- `MESHLLM_NATIVE_RUNTIME_ARTIFACT_DIR` — verified `meshllm-native-*` artifact directory for packaged local serving.
 - `MESH_SDK_CACHE_DIR` — Hugging Face cache location.
 - `MESH_SDK_RUNTIME_DIR` — runtime scratch directory.
 - `MESH_SDK_SKIP_DOWNLOAD=1` — skip `node.models.download` when the model is already installed.

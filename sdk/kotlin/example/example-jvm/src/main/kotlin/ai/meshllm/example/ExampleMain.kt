@@ -5,9 +5,9 @@ import ai.meshllm.ChatRequest
 import ai.meshllm.Event
 import ai.meshllm.InviteToken
 import ai.meshllm.LoadModelOptions
+import ai.meshllm.NativeRuntime
 import ai.meshllm.Node
 import ai.meshllm.UnloadModelOptions
-import com.sun.jna.NativeLibrary
 import kotlinx.coroutines.runBlocking
 import uniffi.mesh_ffi.DevicePolicy
 import uniffi.mesh_ffi.UnloadTarget
@@ -19,11 +19,12 @@ fun main(args: Array<String>) = runBlocking {
     val inviteToken = args.firstOrNull { !it.startsWith("--") } ?: modelRef?.let { "local-kotlin-example" } ?: run {
         System.err.println("Usage: ExampleMain <invite_token>")
         System.err.println("Or set MESH_SDK_MODEL_REF to run local serving.")
-        System.err.println("Set jna.library.path to the directory containing libmeshllm_ffi.")
+        System.err.println("Set MESHLLM_NATIVE_RUNTIME_ARTIFACT_DIR to a verified meshllm-native-* artifact.")
         return@runBlocking
     }
 
-    NativeLibrary.getInstance("meshllm_ffi")
+    val runtime = NativeRuntime.configure()
+    println("[runtime] artifact=${runtime.artifactId} library=${runtime.library}")
     // Generate an ephemeral owner keypair for the example. In a real app this
     // must be persisted across launches.
     val ownerKeypairHex = uniffi.mesh_ffi.generateOwnerKeypairHex()

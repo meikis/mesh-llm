@@ -219,6 +219,24 @@ jobs:
             exit 1
           fi
 
+      - name: Ensure ABI cache directory
+        run: mkdir -p "$LLAMA_STAGE_BUILD_DIR"
+
+      - name: Cache patched llama.cpp ABI build
+        id: llama_cache
+        uses: actions/cache@v5
+        with:
+          path: .deps/llama.cpp/build-stage-abi-static
+          key: ${{ env.CACHE_NAMESPACE }}-${{ runner.os }}-skippy-abi-cpu-${{ hashFiles('scripts/build-llama.sh', 'third_party/llama.cpp/upstream.txt', 'third_party/llama.cpp/patches/**', 'Justfile', '.github/cache-version.txt') }}
+
+      - name: Prepare patched llama.cpp ABI checkout
+        if: steps.llama_cache.outputs.cache-hit != 'true'
+        run: scripts/prepare-llama.sh pinned
+
+      - name: Build patched llama.cpp ABI libraries
+        if: steps.llama_cache.outputs.cache-hit != 'true'
+        run: scripts/build-llama.sh
+
       - name: SDK and API crate tests
         if: ${{ needs.changes.outputs.all_rust == 'true' || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-llm-client') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-llm-api') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-llm-ffi') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-llm-nodejs') }}
         env:
@@ -237,24 +255,6 @@ jobs:
               echo "Skipping $c; not affected"
             fi
           done
-
-      - name: Ensure ABI cache directory
-        run: mkdir -p "$LLAMA_STAGE_BUILD_DIR"
-
-      - name: Cache patched llama.cpp ABI build
-        id: llama_cache
-        uses: actions/cache@v5
-        with:
-          path: .deps/llama.cpp/build-stage-abi-static
-          key: ${{ env.CACHE_NAMESPACE }}-${{ runner.os }}-skippy-abi-cpu-${{ hashFiles('scripts/build-llama.sh', 'third_party/llama.cpp/upstream.txt', 'third_party/llama.cpp/patches/**', 'Justfile', '.github/cache-version.txt') }}
-
-      - name: Prepare patched llama.cpp ABI checkout
-        if: steps.llama_cache.outputs.cache-hit != 'true'
-        run: scripts/prepare-llama.sh pinned
-
-      - name: Build patched llama.cpp ABI libraries
-        if: steps.llama_cache.outputs.cache-hit != 'true'
-        run: scripts/build-llama.sh
 
       - name: Skippy crate tests
         if: ${{ needs.changes.outputs.all_rust == 'true' || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'skippy-protocol') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'skippy-server') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'openai-frontend') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'skippy-runtime') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'skippy-topology') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'skippy-model-package') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'skippy-prompt') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'metrics-server') }}

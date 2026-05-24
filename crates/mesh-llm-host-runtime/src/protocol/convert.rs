@@ -2,6 +2,7 @@
 use crate::mesh::RouteEntry;
 use crate::mesh::{ModelDemand, NodeRole, PeerAnnouncement, RoutingTable};
 use crate::protocol::NODE_PROTOCOL_GENERATION;
+use anyhow::{Context, Result};
 use iroh::{EndpointAddr, EndpointId};
 use std::collections::{HashMap, HashSet};
 
@@ -866,15 +867,52 @@ pub(crate) fn mesh_config_to_proto(
         gpu: Some(crate::proto::node::NodeGpuConfig { assignment }),
         models,
         plugins,
+        config_toml: toml::to_string(config).ok(),
     }
 }
 
 pub(crate) fn proto_config_to_mesh(
     snapshot: &crate::proto::node::NodeConfigSnapshot,
 ) -> crate::plugin::MeshConfig {
+    if let Ok(Some(parsed)) = full_config_toml_to_mesh(snapshot) {
+        return parsed;
+    }
+
+    legacy_proto_config_to_mesh(snapshot)
+}
+
+pub(crate) fn proto_config_to_mesh_strict(
+    snapshot: &crate::proto::node::NodeConfigSnapshot,
+) -> Result<crate::plugin::MeshConfig> {
+    if let Some(parsed) = full_config_toml_to_mesh(snapshot)? {
+        return Ok(parsed);
+    }
+
+    Ok(legacy_proto_config_to_mesh(snapshot))
+}
+
+fn full_config_toml_to_mesh(
+    snapshot: &crate::proto::node::NodeConfigSnapshot,
+) -> Result<Option<crate::plugin::MeshConfig>> {
+    let Some(config_toml) = snapshot.config_toml.as_deref() else {
+        return Ok(None);
+    };
+
+    let mut parsed = toml::from_str::<crate::plugin::MeshConfig>(config_toml)
+        .context("invalid full config_toml payload")?;
+    if parsed.version.is_none() {
+        parsed.version = Some(snapshot.version);
+    }
+    Ok(Some(parsed))
+}
+
+fn legacy_proto_config_to_mesh(
+    snapshot: &crate::proto::node::NodeConfigSnapshot,
+) -> crate::plugin::MeshConfig {
     use crate::plugin::{
         GpuAssignment, GpuConfig, MeshConfig, ModelConfigEntry, PluginConfigEntry,
     };
+
     fn declared_ref_or_none(
         configured: Option<&crate::proto::node::ConfiguredModelRef>,
     ) -> Option<String> {
@@ -906,6 +944,7 @@ pub(crate) fn proto_config_to_mesh(
             batch: None,
             ubatch: None,
             flash_attention: None,
+            ..Default::default()
         })
         .collect();
     let plugins = snapshot
@@ -927,6 +966,7 @@ pub(crate) fn proto_config_to_mesh(
         },
         owner_control: Default::default(),
         telemetry: Default::default(),
+        defaults: None,
         models,
         plugins,
     }

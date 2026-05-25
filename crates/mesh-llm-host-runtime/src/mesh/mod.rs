@@ -435,16 +435,20 @@ fn effective_relay_urls(relay_urls: &[String]) -> Vec<String> {
 fn relay_map_from_urls(
     urls: &[String],
     auths: &std::collections::HashMap<String, String>,
-) -> iroh::RelayMap {
+) -> Result<iroh::RelayMap> {
     let configs = urls.iter().map(|url| {
-        let parsed = url.parse().expect("invalid relay URL");
+        let parsed = url
+            .parse()
+            .with_context(|| format!("invalid relay URL `{url}`"))?;
         let cfg = iroh::RelayConfig::new(parsed, None);
-        match auths.get(url) {
+        Ok(match auths.get(url) {
             Some(token) => cfg.with_auth_token(token.clone()),
             None => cfg,
-        }
+        })
     });
-    iroh::RelayMap::from_iter(configs)
+    Ok(iroh::RelayMap::from_iter(
+        configs.collect::<Result<Vec<_>>>()?,
+    ))
 }
 
 #[cfg(test)]
@@ -460,7 +464,7 @@ mod relay_map_tests {
     #[test]
     fn builds_map_without_auth_when_empty() {
         let urls = vec!["https://r1.example/".to_string()];
-        let map = relay_map_from_urls(&urls, &HashMap::new());
+        let map = relay_map_from_urls(&urls, &HashMap::new()).expect("relay map");
         let cfgs = configs(&map);
         assert_eq!(cfgs.len(), 1);
         assert!(
@@ -474,7 +478,7 @@ mod relay_map_tests {
         let urls = vec!["https://gated.example/".to_string()];
         let mut auths = HashMap::new();
         auths.insert("https://gated.example/".to_string(), "nip98-bearer".into());
-        let map = relay_map_from_urls(&urls, &auths);
+        let map = relay_map_from_urls(&urls, &auths).expect("relay map");
         let cfgs = configs(&map);
         assert_eq!(cfgs.len(), 1);
         assert_eq!(cfgs[0].auth_token.as_deref(), Some("nip98-bearer"));
@@ -490,7 +494,7 @@ mod relay_map_tests {
         let mut auths = HashMap::new();
         auths.insert("https://gated.example/".to_string(), "bearer-xyz".into());
 
-        let map = relay_map_from_urls(&urls, &auths);
+        let map = relay_map_from_urls(&urls, &auths).expect("relay map");
         let by_url: HashMap<String, Option<String>> = configs(&map)
             .into_iter()
             .map(|cfg| (cfg.url.to_string(), cfg.auth_token.clone()))
@@ -516,6 +520,22 @@ mod relay_map_tests {
             public.1.is_none(),
             "public relay must register without a token, got {:?}",
             public.1
+        );
+    }
+
+    #[test]
+    fn invalid_relay_url_does_not_panic() {
+        let urls = vec!["not a relay url".to_string()];
+
+        let result = std::panic::catch_unwind(|| relay_map_from_urls(&urls, &HashMap::new()));
+
+        assert!(
+            result.is_ok(),
+            "invalid relay URLs should be returned as errors"
+        );
+        assert!(
+            result.expect("relay URL parsing should not panic").is_err(),
+            "invalid relay URLs should return an error"
         );
     }
 }
@@ -577,10 +597,9 @@ mod gated_relay_e2e_tests {
     ) -> Endpoint {
         Endpoint::builder(presets::Minimal)
             .secret_key(SecretKey::generate())
-            .relay_mode(RelayMode::Custom(relay_map_from_urls(
-                relay_urls,
-                relay_auths,
-            )))
+            .relay_mode(RelayMode::Custom(
+                relay_map_from_urls(relay_urls, relay_auths).expect("relay map"),
+            ))
             .ca_roots_config(CaRootsConfig::insecure_skip_verify())
             .bind()
             .await
@@ -1783,7 +1802,7 @@ async fn bind_mesh_endpoint(
     builder = builder.relay_mode(iroh::endpoint::RelayMode::Custom(relay_map_from_urls(
         &urls,
         relay_auths,
-    )));
+    )?));
 
     if let Some(addr) = quic_bind_addr(quic_bind) {
         tracing::info!("Binding QUIC to {addr}");
@@ -1919,18 +1938,18 @@ fn configure_control_relay(
     mut builder: iroh::endpoint::Builder,
     relay_urls: Option<&[String]>,
     relay_auths: &std::collections::HashMap<String, String>,
-) -> iroh::endpoint::Builder {
+) -> Result<iroh::endpoint::Builder> {
     if let Some(relay_urls) = relay_urls {
         let urls = effective_relay_urls(relay_urls);
         tracing::info!("Owner-control relay: {:?}", urls);
         builder = builder.relay_mode(iroh::endpoint::RelayMode::Custom(relay_map_from_urls(
             &urls,
             relay_auths,
-        )));
+        )?));
     } else {
         builder = builder.relay_mode(iroh::endpoint::RelayMode::Disabled);
     }
-    builder
+    Ok(builder)
 }
 
 fn default_plugin_event_source(endpoint_id: EndpointId, source_peer_id: &mut String) {
@@ -3251,6 +3270,15 @@ impl Node {
         }
     }
 
+    pub async fn shutdown(&self) {
+        self.accepting
+            .1
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.accepting.0.notify_waiters();
+        self.shutdown_control_listener().await;
+        self.endpoint.close().await;
+    }
+
     pub async fn start(
         role: NodeRole,
         relay: RelayConfig<'_>,
@@ -3533,6 +3561,11 @@ impl Node {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn endpoint_is_closed_for_tests(&self) -> bool {
+        self.endpoint.is_closed()
+    }
+
     async fn maybe_start_control_listener(
         &self,
         secret_key: SecretKey,
@@ -3549,7 +3582,7 @@ impl Node {
             .secret_key(secret_key)
             .alpns(vec![ALPN_CONTROL_V1.to_vec()])
             .bind_addr(bind_addr.unwrap_or_else(default_control_bind_addr))?;
-        builder = configure_control_relay(builder, relay_urls, relay_auths);
+        builder = configure_control_relay(builder, relay_urls, relay_auths)?;
         let endpoint = builder.bind().await?;
         if relay_urls.is_some() {
             wait_for_endpoint_online(
@@ -3702,7 +3735,7 @@ impl Node {
         }
     }
 
-    /// Enable accepting inbound connections. Call before join() or when ready to participate.
+    /// Enable accepting inbound connections once ready to participate in the mesh.
     /// Until this is called, the accept loop blocks waiting.
     pub fn start_accepting(&self) {
         self.accepting

@@ -14,7 +14,9 @@ use iroh::test_utils::run_relay_server_with_access;
 use iroh::{RelayConfig as IrohRelayConfig, RelayMap, SecretKey, Watcher};
 use iroh_relay::server::{Access, AccessConfig};
 use iroh_relay::tls::CaRootsConfig;
-use mesh_llm_api_server::{InviteToken, MeshNode, MeshRole, OwnerKeypair};
+use mesh_llm_api_server::{InviteToken, MeshNode, MeshQuicBind, MeshRole, OwnerKeypair};
+use mesh_llm_host_runtime::host_node::{start_host_node, HostNodeSpec, MeshNodeRole};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
 
 /// Spawn an in-process iroh-relay that only admits `expected_token`.
@@ -34,30 +36,58 @@ async fn spawn_gated_relay(expected_token: &'static str) -> (String, iroh_relay:
     (relay_url.to_string(), server)
 }
 
-/// Produce a parseable invite token (encoded EndpointAddr) from a
-/// throwaway endpoint. The SDK's `MeshNode::start()` calls
-/// `host_node.join(invite)`; the join path needs a parseable token even
-/// if no peer is reachable behind it.
-async fn neutral_invite_token() -> String {
-    use base64::Engine;
-    let ep = Endpoint::builder(presets::Minimal)
-        .secret_key(SecretKey::generate())
-        .relay_mode(RelayMode::Custom(RelayMap::empty()))
-        .ca_roots_config(CaRootsConfig::insecure_skip_verify())
-        .bind()
-        .await
-        .expect("dummy endpoint");
-    let addr = ep.addr();
-    drop(ep);
-    let json = serde_json::to_vec(&addr).expect("serialize endpoint addr");
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+async fn anchor_invite_token() -> (String, mesh_llm_host_runtime::host_node::HostNode) {
+    let anchor = start_host_node(HostNodeSpec {
+        role: MeshNodeRole::Client,
+        max_vram_gb: Some(0.0),
+        enumerate_host: false,
+        ..HostNodeSpec::default()
+    })
+    .await
+    .expect("anchor host node should start");
+    anchor.start_accepting();
+    (anchor.invite_token(), anchor)
+}
+
+fn free_local_udp_port() -> u16 {
+    let socket =
+        UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("allocate local UDP port");
+    socket.local_addr().expect("read local UDP port").port()
+}
+
+async fn probe_quic_port_released(port: u16) {
+    let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let mut last_error = String::new();
+
+    for _ in 0..20 {
+        match Endpoint::builder(presets::Minimal)
+            .secret_key(SecretKey::generate())
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr(bind_addr)
+            .expect("configure probe bind address")
+            .bind()
+            .await
+        {
+            Ok(endpoint) => {
+                endpoint.close().await;
+                return;
+            }
+            Err(err) => {
+                last_error = format!("{err:#}");
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+    }
+
+    panic!("host-node cleanup should release UDP port {port}: {last_error}");
 }
 
 #[tokio::test]
 async fn mesh_node_builder_threads_relay_auth_to_real_iroh_endpoint() {
     const TOKEN: &str = "secret-bearer-token";
     let (gated_url, _server) = spawn_gated_relay(TOKEN).await;
-    let invite_token: InviteToken = neutral_invite_token().await.parse().expect("parse invite");
+    let (invite, anchor) = anchor_invite_token().await;
+    let invite_token: InviteToken = invite.parse().expect("parse invite");
 
     let node = MeshNode::builder()
         .identity(OwnerKeypair::generate())
@@ -85,6 +115,40 @@ async fn mesh_node_builder_threads_relay_auth_to_real_iroh_endpoint() {
     assert!(!invite.is_empty(), "invite token must not be empty");
 
     node.stop().await.expect("stop");
+    anchor.shutdown().await;
+}
+
+#[tokio::test]
+async fn mesh_node_start_fails_when_host_runtime_join_token_is_invalid() {
+    let quic_port = free_local_udp_port();
+    let invite_token: InviteToken = "mesh-test:not-base64".parse().expect("parse invite");
+
+    let node = MeshNode::builder()
+        .identity(OwnerKeypair::generate())
+        .join(invite_token)
+        .role(MeshRole::Client)
+        .quic_bind(MeshQuicBind {
+            ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            port: Some(quic_port),
+        })
+        .max_vram_gb(0.0)
+        .build()
+        .expect("builder");
+
+    let start = tokio::time::timeout(Duration::from_secs(10), node.start())
+        .await
+        .expect("MeshNode.start() should resolve within 10s");
+
+    assert!(
+        start.is_err(),
+        "host-runtime start must attempt the configured join token"
+    );
+
+    assert!(
+        node.invite_token().await.is_none(),
+        "failed host-runtime starts must not store a node"
+    );
+    probe_quic_port_released(quic_port).await;
 }
 
 #[tokio::test]

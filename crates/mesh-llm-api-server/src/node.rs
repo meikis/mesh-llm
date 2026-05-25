@@ -447,6 +447,12 @@ impl MeshNode {
                     .map_err(|err| MeshApiError::Serving {
                         message: format!("host node start failed: {err}"),
                     })?;
+            if let Err(err) = node.join(self.inner.config.invite_token.as_str()).await {
+                node.shutdown().await;
+                return Err(MeshApiError::Serving {
+                    message: format!("host node join failed: {err}"),
+                });
+            }
             node.start_accepting();
             *self.inner.host_node.lock().await = Some(node);
             // Also flip the legacy HTTP-shim client's connected flag so

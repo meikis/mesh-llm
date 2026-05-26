@@ -223,6 +223,74 @@ If no controller is attached, `serving.load()` returns an unsupported error.
 This is intentional: `mesh-llm-api-server` is platform-neutral and does not silently
 choose a native backend.
 
+### Run the full mesh-llm runtime from Rust (`host-runtime` feature)
+
+`MeshNode::builder()` is the fine-grained surface: assemble a node piece
+by piece (identity, invite, serving controller, OpenAI port, ...) and
+drive it yourself.
+
+When you instead want to run **exactly what `mesh-llm serve` /
+`mesh-llm client` does** — same code path, same defaults, same
+behaviour — use `run_serve(spec)`. This is the in-process equivalent of
+spawning the binary: auto-discovery, election, tunnel manager, OpenAI
+HTTP proxy, management console, local model serving (when configured),
+plugin host, all driven by the same `runtime::run_with_args` entry
+point the binary calls.
+
+Enable the `host-runtime` feature on `mesh-llm-api-server`. This pulls
+in `mesh-llm-host-runtime` and its transitive deps (skippy, llama.cpp
+link path, ...); it is off by default to keep the SDK lean for
+client-only consumers.
+
+```toml
+[dependencies]
+mesh-llm-api-server = { version = "0.66.0", features = ["host-runtime"] }
+```
+
+```rust
+use mesh_llm_api_server::{run_serve, MeshServeSpec};
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut relay_auths = HashMap::new();
+    relay_auths.insert(
+        "https://gated.example/".to_string(),
+        "<nip98-bearer-or-static-token>".to_string(),
+    );
+
+    run_serve(MeshServeSpec {
+        // Same flags `mesh-llm serve` / `mesh-llm client` accept.
+        client: true,                       // false (default) = serve role
+        auto: true,                         // == --auto
+        relays: vec!["https://gated.example/".into()],
+        relay_auths,                        // == --relay-auth URL=TOKEN
+        port: Some(9337),                   // OpenAI HTTP proxy port
+        console_port: Some(3131),           // management API / web console
+        headless: true,                     // skip embedded web UI
+        max_vram_gb: Some(0.0),             // client-only, no VRAM advert
+        ..MeshServeSpec::default()
+    })
+    .await?;
+
+    Ok(())
+}
+```
+
+The future blocks until the runtime exits (signal, internal shutdown,
+or fatal error). The runtime is not currently `Send`-clean; if you
+need to drive concurrent work alongside it, run on a
+`tokio::task::LocalSet` rather than `tokio::spawn`.
+
+Full `MeshServeSpec` covers every meaningful `mesh-llm` flag:
+`client`, `auto`, `publish`, `mesh_name`, `region`, `display_name`,
+`join`, `discover`, `models`, `ggufs`, `mmproj`, `port`,
+`console_port`, `headless`, `blackboard`, `relays`, `relay_auths`,
+`nostr_relays`, `bind_port`, `bind_ip`, `listen_all`, `max_vram_gb`,
+`no_enumerate_host`, `config`, `owner_key`, `owner_required`,
+`node_label`, `trust_owners`, `debug`, plus an `extra_args` escape
+hatch for flags not yet typed.
+
 ## Swift Usage
 
 Configure a native runtime before local serving:

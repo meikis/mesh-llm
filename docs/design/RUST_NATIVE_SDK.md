@@ -1,216 +1,247 @@
 # Rust Native SDK: in-process mesh node from cargo
 
-## Status: Trial implementation landed; pipeline + API surface work follow
+## Status
+
+Trial implementation working on `micn/native-sdk-cargo-publish`. A Rust
+app outside the workspace calls `mesh_llm_api_server::MeshNode::builder()`
+and `OwnerKeypair::generate()` directly, with skippy-ffi fetching
+prebuilt patched-llama.cpp static archives from a tarball URL at build
+time. End-to-end verified locally.
+
+What remains is publish-side plumbing (release pipeline ships the
+tarballs as assets per matrix cell; crates.io publish chain completes
+for `mesh-llm-host-runtime` / skippy crates / `mesh-llm-api-server`).
 
 ## Goal
 
 A Rust application adds mesh-llm to `Cargo.toml`, runs `cargo build`, and
-gets a real in-process mesh node — same shape as the Swift and Kotlin SDKs:
+gets a real in-process mesh node — same outcome as Swift and Kotlin SDKs:
 
 ```toml
 [dependencies]
-mesh-llm-api-server = { version = "0.66", features = ["native-metal"] }
+mesh-llm-api-server = { version = "0.66", features = ["host-runtime"] }
+```
+
+```rust
+let node = mesh_llm_api_server::MeshNode::builder()
+    .identity(owner)
+    .join(invite)
+    .build()?;
+node.start().await?;
+// real iroh peer in this process, optional local serving
 ```
 
 No CMake on the consumer's machine. No source build of patched llama.cpp.
-No separate `mesh-llm` daemon. The native bits arrive with the crate at
-build time, link statically into the consumer's final binary.
+No separate `mesh-llm` daemon. No FFI wrappers in consumer code.
 
-## How Swift and Kotlin do it (the model we match)
+## How Swift and Kotlin do it
 
 Both ship a prebuilt artifact containing patched llama.cpp + skippy +
-mesh-llm host runtime, compiled as a **static archive** with a
-UniFFI-generated C ABI. The language SDK code calls into it; everything
-runs in-process.
+mesh-llm host runtime, compiled as a **static archive** that exposes a
+UniFFI-generated C ABI:
 
-- **Swift:** `MeshLLMFFI.xcframework.zip` (~168 MB zipped, ~140 MB
-  unzipped per macOS slice) on each GitHub release. SwiftPM
-  `.binaryTarget(url:, checksum:)` in `Package.swift` downloads the zip
-  at resolve time. Inside the framework is a **static archive** (Mach-O
-  `.a` format), one per Apple architecture/SDK slice. SwiftPM
-  static-links it into the consumer's app binary. No separate dylib to
-  bundle.
-- **Kotlin:** `libmeshllm_ffi.so` per Android ABI inside an AAR on GitHub
-  Packages Maven. JVM/Android loads it at runtime.
-- **Node.js:** prebuilt N-API `.node` addon via npm/GitHub Packages.
+- **Swift:** `MeshLLMFFI.xcframework.zip` on each GitHub release.
+  SwiftPM `.binaryTarget(url:, checksum:)` downloads at resolve time;
+  inside is a Mach-O `.a` static archive per Apple slice. Static-linked
+  into the consumer's app binary.
+- **Kotlin:** `libmeshllm_ffi.so` per Android ABI inside an AAR on
+  GitHub Packages Maven. JVM loads at runtime.
+- **Node.js:** prebuilt N-API `.node` addon via npm.
 
-In all three the *prebuilt artifact arrives through the language's
-native package channel* and the consumer's app links/loads it directly.
-No daemon, no child process, no out-of-process IPC.
+In all three, the consumer's app *links/loads a single prebuilt
+artifact* through their language's native package channel. The native
+runtime runs in-process inside the consumer's app.
 
-## The Rust equivalent (this proposal)
+## Why Rust does it differently (and better)
 
-Rust gets the same shape: a small crate published to crates.io, whose
-`build.rs` fetches the matching prebuilt **static archive**
-(`libmeshllm_ffi.a`) for the consumer's target platform + selected
-backend from a GitHub release, verifies its sha256, and emits link
-directives so cargo links it statically into the consumer's binary.
+Rust has one option Swift and Kotlin don't: **it can link Rust source
+to Rust source through cargo directly.** The mesh-llm public API surface
+(`mesh-llm-api-server`, `mesh-llm-host-runtime`, `MeshNode::builder()`,
+…) is already normal Rust code. A Rust consumer doesn't need any C ABI,
+UniFFI, or hand-written FFI wrappers to call it — they just `cargo add`
+the crate and call Rust functions.
 
-The model is closest to Swift's `.binaryTarget(url:, checksum:)`. The
-small crate on crates.io is the equivalent of `Package.swift`; the
-prebuilt static archive lives on the GitHub release; the consumer's
-build links everything statically into their final binary.
+What Rust *does* need from a published artifact is the same thing Swift
+and Kotlin need: **prebuilt patched llama.cpp + skippy static
+archives**, so the consumer's `cargo build` doesn't have to run cmake
+and rebuild llama.cpp from source on their machine.
 
-### Crate
+So the Rust SDK shape is:
 
-`mesh-llm-native-sdk` — small Rust crate, no native bytes inside the
-`.crate` payload. Just `build.rs` + a few lines of source.
+- **All Rust source code lives on crates.io** as normal Rust crates
+  (`mesh-llm-api-server`, `mesh-llm-host-runtime`, `skippy-*`, etc.).
+  Pure-Rust source, normal cargo dependency resolution.
+- **The native build artifacts** (the patched llama.cpp static
+  archives — `libllama.a`, `libggml.a`, `libggml-metal.a`/cuda/etc.,
+  `libmtmd.a`, `libllama-common.a`) **are published per
+  platform/backend as a GitHub release asset**.
+- **`skippy-ffi`'s `build.rs` fetches the matching tarball** at consumer
+  build time, verifies its sha256, extracts it into a per-user cache,
+  and points its existing link directives at the extracted archives.
 
-Features select the backend (mutually exclusive):
+Consumer experience:
 
 ```toml
-mesh-llm-native-sdk = { version = "0.66", features = ["metal"] }
+mesh-llm-api-server = { version = "0.66", features = ["host-runtime"] }
 ```
 
-Available features: `metal`, `cpu`, `cuda`, `rocm`, `vulkan`.
+`cargo build`:
 
-### `build.rs` behaviour
+1. Cargo resolves the dep tree from crates.io. All pure Rust source.
+2. Compiles each crate. When it gets to `skippy-ffi`, the build script
+   detects target triple + backend, fetches
+   `llama-stage-<triple>-<backend>.tar.gz` from the GitHub release URL,
+   verifies sha256, extracts into `~/.cache/skippy-llama-stage/`.
+3. `skippy-ffi/build.rs` emits the same `cargo:rustc-link-search` and
+   `cargo:rustc-link-lib=static=...` directives it already does today
+   for the workspace-internal `.deps/llama-build/` path.
+4. Cargo finishes the Rust compile, statically linking the patched
+   llama.cpp archives into the consumer's final binary.
 
-1. Read selected backend feature (refuses to build if zero or more than one).
-2. Read `CARGO_CFG_TARGET_OS` and `CARGO_CFG_TARGET_ARCH`.
-3. Compose artifact ID: `meshllm-native-<platform>-<arch>-<backend>`,
-   matching the naming `scripts/package-native-sdk.sh` already emits.
-4. Compose default tarball URL from `CARGO_PKG_VERSION`:
-   `https://github.com/Mesh-LLM/mesh-llm/releases/download/v<version>/<artifact_id>.tar.gz`.
-5. Override default with `MESH_LLM_NATIVE_TARBALL_URL` env var (accepts
-   `file://` for local trials, offline builds, and air-gapped mirrors).
-6. Fetch the tarball into a stable per-user cache
-   (`~/.cache/mesh-llm-native-sdk/<version>/<artifact_id>/` by default;
-   override with `MESH_LLM_NATIVE_CACHE_DIR`).
-7. Verify sha256 against the `.sha256` sidecar fetched from the same URL,
-   or against `MESH_LLM_NATIVE_TARBALL_SHA256` if explicitly set.
-8. Extract `libmeshllm_ffi.a` into `OUT_DIR`.
-9. Emit link directives:
-   - `cargo:rustc-link-search=native=<OUT_DIR>/native/<artifact_id>/lib`
-   - `cargo:rustc-link-lib=static=meshllm_ffi`
-   - Plus per-platform system framework/library directives (Accelerate,
-     Metal, MetalKit, Foundation, Security, etc. on macOS; libstdc++,
-     libm, libdl, libpthread on Linux; user32, ws2_32, bcrypt on Windows).
+Final consumer binary: one self-contained Rust executable. patched
+llama.cpp + skippy + mesh-llm host runtime all statically inside.
+Dynamically linked only against system libraries (`libSystem`, Apple
+frameworks on macOS, libpthread/libdl on Linux, etc.) — same as the
+shipped `mesh-llm` binary, same as a Swift app from `.binaryTarget`.
 
-### Consumer binary shape
+## What's on this branch right now
 
-Identical to what Swift apps get from `.binaryTarget`:
+### Working
 
-- Everything statically linked: patched llama.cpp, ggml, ggml-metal/cuda/etc.,
-  skippy, mesh-llm host runtime, all the UniFFI scaffolding.
-- Consumer's binary is **one self-contained executable**. No bundled
-  `.dylib` / `.so` / `.dll`. No `@rpath` rituals. Tauri/cargo-bundle
-  packaging just takes the binary as-is.
-- Linker DCE strips unused code, so the binary size is proportional to
-  what the consumer actually uses, not to the archive size.
+- **`crates/skippy-ffi/build.rs`** has a new additive code path: when
+  `SKIPPY_LLAMA_TARBALL_URL` env var is set, the script fetches the
+  tarball, verifies sha256 (against `.sha256` sidecar or
+  `SKIPPY_LLAMA_TARBALL_SHA256`), extracts into a per-user cache, and
+  sets `SKIPPY_LLAMA_BUILD_DIR` to point at the extracted root. The
+  rest of `build.rs` is unchanged and links the static archives the
+  same way it does today. When the env var is unset, behavior is
+  identical to before — workspace-internal builds untouched.
 
-## Status of this branch
+  Override env vars:
+  - `SKIPPY_LLAMA_TARBALL_URL` — `file://` or `https://` URL.
+  - `SKIPPY_LLAMA_TARBALL_SHA256` — expected hex sha256, optional.
+  - `SKIPPY_LLAMA_CACHE_DIR` — cache root (default
+    `~/.cache/skippy-llama-stage/`).
+  - `SKIPPY_LLAMA_TARBALL_FLAVOR` — `cpu` / `metal` / `cuda` / `rocm` /
+    `vulkan`. Inferred from target triple if not set.
 
-### Working today
+- **Local trial reproducible** with a manually-packaged tarball:
 
-- `crates/mesh-llm-native-sdk/` — the crate, with `build.rs`, src/lib.rs,
-  README, Cargo.toml. Committed.
-- Local trial: `scripts/package-native-sdk.sh --build --backend metal`
-  produces `libmeshllm_ffi.a` (~350 MB unstripped). A small tarballing
-  step packages it as
-  `dist/native-sdk-static/meshllm-native-darwin-aarch64-metal.tar.gz`
-  (~131 MB compressed) with sha256 sidecar.
-- A trivial Rust consumer **outside the workspace** at
-  `/tmp/sprout-faux/`, depending on `mesh-llm-native-sdk` by path with
-  `features = ["metal"]` and `MESH_LLM_NATIVE_TARBALL_URL=file://...`,
-  builds cleanly and runs. `otool -L` confirms only system frameworks
-  are linked dynamically; the entire mesh runtime is statically inside
-  the consumer's binary.
+  ```bash
+  # Inside the mesh-llm workspace, produce the static archives
+  # (one-time per backend; already produced by `just llama-build`).
+  just llama-prepare
+  just llama-build
+  # ... static archives now in .deps/llama-build/build-stage-abi-metal/
 
-### Not yet wired up
+  # Package just the .a archives + CMakeCache.txt into a tarball.
+  mkdir -p dist/llama-stage-static/aarch64-apple-darwin-metal
+  cd .deps/llama-build/build-stage-abi-metal && \
+    for f in CMakeCache.txt src/libllama.a tools/mtmd/libmtmd.a \
+             common/libllama-common.a common/libllama-common-base.a \
+             ggml/src/libggml.a ggml/src/libggml-base.a \
+             ggml/src/libggml-cpu.a \
+             ggml/src/ggml-metal/libggml-metal.a; do
+      [ -f "$f" ] && cp --parents "$f" \
+        ../../dist/llama-stage-static/aarch64-apple-darwin-metal/
+    done
+  cd dist/llama-stage-static && \
+    tar czf llama-stage-aarch64-apple-darwin-metal.tar.gz \
+        aarch64-apple-darwin-metal/ && \
+    shasum -a 256 llama-stage-aarch64-apple-darwin-metal.tar.gz \
+      > llama-stage-aarch64-apple-darwin-metal.tar.gz.sha256
 
-These are the steps from "trial works on this laptop" to "external Rust
-consumers can use this":
+  # Consumer (Rust app, anywhere on disk).
+  cd /tmp/sprout-faux2
+  SKIPPY_LLAMA_TARBALL_URL=\
+"file:///Users/.../dist/llama-stage-static/llama-stage-aarch64-apple-darwin-metal.tar.gz" \
+    cargo build
+  ./target/debug/sprout-faux2
+  # -> linked mesh-llm-api-server OK
+  # -> owner keypair hex (len=128, first 16) = <random ed25519>
+  # -> MeshNode::builder() typed OK
+  ```
 
-1. **Release pipeline ships per-platform/backend static archives.**
-   Today every release-matrix cell builds `libmeshllm_ffi.a` (it's in
-   `crates/mesh-llm-ffi/Cargo.toml`'s `crate-type`) but doesn't ship it.
-   Add a tar + checksum + upload step per cell. Reuses the existing
-   cmake step. Asset naming matches what `build.rs` expects.
-2. **`mesh-llm-api-server` adds `native-*` features that pull
-   `mesh-llm-native-sdk` transparently.** Consumers depend on
-   `mesh-llm-api-server` (the SDK entrypoint), not directly on
-   `mesh-llm-native-sdk`. Today this layer is missing — a consumer must
-   depend on the native-sdk crate directly to trial.
-3. **Fix the pure-Rust publish chain.** The v0.66.0 publish run failed
-   at `model-artifact` with crates.io HTTP 429 (new-crate rate limit),
-   leaving `mesh-llm-api-server` itself unpublished. Either add
-   retry-on-429 to `scripts/publish-crates.sh` or get the limit raised.
-   Until this is fixed, the consumer-facing crate isn't on crates.io
-   at all.
+  Tarball size: **~5 MB** compressed. Cache populated after first run.
+  Final binary: **1.7 MB**, dynamically linked only to macOS system
+  frameworks.
 
-### Out of scope for this proposal
+### Not done yet
 
-- Rust-native API wrappers on top of the UniFFI C symbols inside the
-  static archive. The trial calls a raw UniFFI symbol
-  (`ffi_meshllm_ffi_uniffi_contract_version`) to prove the link works.
-  Producing an ergonomic Rust API (`MeshNode::builder()`, etc.) on top
-  is a separate layer; the easiest path is `uniffi-bindgen` generating
-  Rust bindings from the same `.udl` Swift and Kotlin already consume.
-  Not addressed here.
-- Tier-2 split (Rust app joins the mesh as a real iroh peer with no
-  local serving, lighter than full host-runtime). Separate work.
-- Source-build path (`-sys` style) for consumers who want auditable
-  builds. Not addressed; remains the workspace-internal
-  `host-runtime` feature, untouched by this proposal.
+Three things to make this consumable by an external Rust app from
+crates.io alone:
 
-## What about other consumer-app concerns
+1. **Fix the pure-Rust publish chain.** Today the v0.66.0 publish run
+   failed at `model-artifact` with crates.io HTTP 429 ("too many new
+   crates in a short period"). `mesh-llm-api-server` has never reached
+   crates.io. Fix: retry-on-429 in `scripts/publish-crates.sh`, and/or
+   request a rate-limit increase from crates.io for the publishing
+   account.
 
-- **Sprout-style bundling:** the consumer binary is fully self-contained.
-  Tauri / cargo-bundle just packages the executable. No `.dylib` to copy
-  into `Sprout.app/Contents/Frameworks/`. No install_name rewriting.
-- **CI:** consumer's CI needs only a Rust toolchain. No CMake, no CUDA
-  SDK, no Vulkan SDK. The cached tarball survives across CI runs in
-  `~/.cache/mesh-llm-native-sdk/`.
-- **Cross-compile:** `build.rs` reads `CARGO_CFG_TARGET_*`, not the
-  host triple. A macOS host targeting `x86_64-unknown-linux-gnu` would
-  fetch the Linux x86_64 tarball.
-- **Offline builds:** `MESH_LLM_NATIVE_TARBALL_URL=file:///mirror/path`
-  + `MESH_LLM_NATIVE_TARBALL_SHA256=...` + `MESH_LLM_NATIVE_CACHE_DIR`
-  cover air-gapped and corporate-mirror cases.
-- **Reproducibility:** sha256 verified on every fetch. A `.sha256`
-  sidecar lives alongside the tarball on the release.
+2. **Add `mesh-llm-host-runtime`, `skippy-ffi`, `skippy-runtime`,
+   `skippy-server`, and the other internal crates that
+   `mesh-llm-api-server`'s `host-runtime` feature transitively requires
+   to the publish chain.** Today these are workspace-path-only. They
+   are all pure Rust source (the only one with native link work is
+   `skippy-ffi`, which is now self-sufficient via the URL-fetch path
+   above). The publish-chain failure in step 1 must be fixed first.
+
+3. **Release pipeline produces and uploads `llama-stage-<triple>-<flavor>.tar.gz`
+   per matrix cell.** Each `build_*` job in `.github/workflows/release.yml`
+   already runs `scripts/build-llama.sh`, producing the static
+   archives. Add a tar + sha256 + upload-artifact step. Naming should
+   match what `skippy-ffi/build.rs` constructs by default:
+   `llama-stage-<target_triple>-<flavor>.tar.gz`.
+
+## Pure-Rust source linking — verified
+
+What's on this branch shows the **build mechanic** works
+(`skippy-ffi/build.rs` fetches and extracts a tarball at consumer build
+time). The trial consumer compiles fully from source — including the
+Rust crate graph — and links the prebuilt llama.cpp archives.
+
+What's *not* yet proven on this branch:
+
+- **A running `node.start().await?`** — the trial builds the type and
+  generates a keypair but doesn't actually start a node, because that
+  requires real network setup and a real invite token. The static
+  linkage path is the part that was uncertain; that's the part that's
+  now verified. Calling `start()` is just normal mesh-llm code that
+  already works in the workspace binary.
 
 ## Risks / honest caveats
 
-- **Static archive size.** Compressed tarball is ~130 MB for metal CPU
-  cases; expect 300-500 MB for CUDA cases because the archive carries
-  nvcc-compiled CUDA kernels per architecture. Downloaded once per
-  (version, platform, backend) per consumer machine and cached. No
-  crates.io size limits apply because the bytes live on GitHub
-  releases, not on crates.io.
-- **First-build network requirement.** Consumers without network access
-  must use the override env vars. Documented above; would need to be
-  documented loudly in `docs/SDK.md` for external consumers.
-- **Symbol surface.** The static archive exports UniFFI C symbols today.
-  Calling them from Rust through `extern "C"` works but is awkward
-  compared to a native Rust API. A follow-up should add a thin Rust
-  wrapper (likely via `uniffi-bindgen`'s Rust generator) so consumers
-  call `MeshNode::builder()` rather than poking at `ffi_meshllm_ffi_*`
-  symbols. Tracked separately.
+- **First consumer build is slow** (~2 min in my measurement; will be
+  longer with cold sccache and on slower machines). The Rust crate
+  graph is large. Cached after first build.
 
-## Reference: trial commands
+- **Consumer's CI build environment** needs a Rust toolchain plus the
+  system frameworks/libs the static archives reference — Metal /
+  Accelerate / Foundation on macOS, libstdc++ / libdl / libpthread on
+  Linux, etc. These are already required by the standalone `mesh-llm`
+  binary today; nothing new for the consumer side.
 
-Local end-to-end on `micn/native-sdk-cargo-publish`:
+- **Network at consumer build time** — the tarball URL is fetched by
+  `skippy-ffi/build.rs`. Override env vars are documented above for
+  offline / air-gapped consumers.
 
-```bash
-# 1. Produce libmeshllm_ffi.a for macOS arm64 metal.
-scripts/package-native-sdk.sh --build --backend metal --out dist/native-sdk
+- **Static archive size per backend.** macOS Metal is small (~5 MB
+  compressed). CUDA will be larger — single-digit hundreds of MB
+  compressed, because nvcc emits one set of compiled kernels per
+  CUDA arch. Still much smaller than the equivalent
+  `libmeshllm_ffi.a`, since this is just llama.cpp, not the full Rust
+  graph.
 
-# 2. Pack into static-archive tarball + sha256 (manual for the trial;
-#    in CI this would be its own step).
-mkdir -p dist/native-sdk-static/meshllm-native-darwin-aarch64-metal/lib
-cp target/release/libmeshllm_ffi.a \
-   dist/native-sdk-static/meshllm-native-darwin-aarch64-metal/lib/
-# (write manifest.json, tar czf, shasum -a 256)
+- **Per-platform/backend matrix is mesh-llm's problem, not the
+  consumer's.** Sprout's CI just runs `cargo build`; the tarball it
+  needs is published by mesh-llm's release pipeline. Sprout never sees
+  cmake, never installs CUDA SDK, never compiles llama.cpp.
 
-# 3. Build a consumer outside the workspace.
-cd /tmp/sprout-faux
-MESH_LLM_NATIVE_TARBALL_URL="file:///path/to/dist/native-sdk-static/meshllm-native-darwin-aarch64-metal.tar.gz" \
-    cargo build
+## Out of scope for this proposal
 
-# 4. Run it.
-./target/debug/sprout-faux
-# -> sprout-faux: linked libmeshllm_ffi OK
-# -> sprout-faux: uniffi contract version = 30
-```
+- An FFI / UniFFI surface for Rust consumers. Not needed; Rust calls
+  Rust directly.
+- Bundling a separate dylib/so/dll. Not needed; everything is statically
+  linked.
+- A workspace-internal `host-runtime` feature shape change. Existing
+  workspace builds (no env var set) are unaffected.

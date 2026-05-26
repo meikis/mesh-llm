@@ -123,6 +123,11 @@ jobs:
           just --shell bash --shell-arg -c ${{ matrix.build_recipe }}
           just --shell bash --shell-arg -c ${{ matrix.bundle_recipe }} "$RELEASE_TAG" dist
 
+      - name: Package llama-stage tarball
+        env:
+          LLAMA_STAGE_BACKEND: ${{ matrix.backend }}
+        run: scripts/package-llama-stage.sh --out dist
+
       - name: Upload release bundle
         uses: actions/upload-artifact@v6
         with:
@@ -275,6 +280,10 @@ jobs:
         run: |
           just --shell bash --shell-arg -c release-build-arm64
           just --shell bash --shell-arg -c release-bundle-arm64 "$RELEASE_TAG" dist
+      - name: Package llama-stage tarball
+        env:
+          LLAMA_STAGE_BACKEND: cpu
+        run: scripts/package-llama-stage.sh --out dist
       - uses: actions/upload-artifact@v6
         with:
           name: release-linux-arm64
@@ -322,6 +331,12 @@ jobs:
         run: |
           just --shell bash --shell-arg -c release-build-cuda
           just --shell bash --shell-arg -c release-bundle-cuda "$RELEASE_TAG" dist
+      - name: Package llama-stage tarball
+        env:
+          LLAMA_STAGE_BACKEND: cuda
+        run: |
+          BUILD_DIR="$(LLAMA_STAGE_BACKEND=cuda scripts/build-llama.sh --print-build-dir)"
+          scripts/package-llama-stage.sh --build-dir "$BUILD_DIR" --out dist
       - uses: actions/upload-artifact@v6
         with:
           name: release-linux-cuda
@@ -369,6 +384,14 @@ jobs:
         run: |
           just --shell bash --shell-arg -c release-build-cuda-blackwell
           just --shell bash --shell-arg -c release-bundle-cuda-blackwell "$RELEASE_TAG" dist
+      - name: Package llama-stage tarball
+        env:
+          LLAMA_STAGE_BACKEND: cuda
+          CUDA_ARCH: '75;80;86;87;89;90;100;120'
+          MESH_LLAMA_STAGE_TARGET: x86_64-unknown-linux-gnu
+        run: |
+          BUILD_DIR="$(LLAMA_STAGE_BACKEND=cuda CUDA_ARCH="$CUDA_ARCH" scripts/build-llama.sh --print-build-dir)"
+          scripts/package-llama-stage.sh --build-dir "$BUILD_DIR" --backend cuda-blackwell --out dist
       - uses: actions/upload-artifact@v6
         with:
           name: release-linux-cuda-blackwell
@@ -416,6 +439,12 @@ jobs:
         run: |
           just --shell bash --shell-arg -c release-build-rocm
           just --shell bash --shell-arg -c release-bundle-rocm "$RELEASE_TAG" dist
+      - name: Package llama-stage tarball
+        env:
+          LLAMA_STAGE_BACKEND: rocm
+        run: |
+          BUILD_DIR="$(LLAMA_STAGE_BACKEND=rocm scripts/build-llama.sh --print-build-dir)"
+          scripts/package-llama-stage.sh --build-dir "$BUILD_DIR" --out dist
       - uses: actions/upload-artifact@v6
         with:
           name: release-linux-rocm
@@ -451,6 +480,10 @@ jobs:
         run: |
           just --shell bash --shell-arg -c release-build-vulkan
           just --shell bash --shell-arg -c release-bundle-vulkan "$RELEASE_TAG" dist
+      - name: Package llama-stage tarball
+        env:
+          LLAMA_STAGE_BACKEND: vulkan
+        run: scripts/package-llama-stage.sh --out dist
       - uses: actions/upload-artifact@v6
         with:
           name: release-linux-vulkan

@@ -197,11 +197,27 @@ crates.io alone:
    pipeline's pre-publish `cargo build` is the actual gate).
 
 3. **Release pipeline produces and uploads `llama-stage-<triple>-<flavor>.tar.gz`
-   per matrix cell.** Each `build_*` job in `.github/workflows/release.yml`
-   already runs `scripts/build-llama.sh`, producing the static
-   archives. Add a tar + sha256 + upload-artifact step. Naming should
-   match what `skippy-ffi/build.rs` constructs by default:
-   `llama-stage-<target_triple>-<flavor>.tar.gz`.
+   per matrix cell.** **Done on this branch for Linux + macOS** (the
+   matrix cells most relevant for sprout-shape consumers). Each
+   relevant `build_*` job in `.github/workflows/release.yml` now runs
+   `scripts/package-llama-stage.sh` after the existing
+   `scripts/build-llama.sh` step. The script packages the patched
+   llama.cpp static archives from `.deps/llama-build/build-stage-abi-<backend>/`
+   into a release-asset-shaped tarball plus sha256 sidecar. Naming
+   matches `skippy-ffi/build.rs`'s default URL construction
+   (`llama-stage-<target_triple>-<flavor>.tar.gz`).
+
+   Wired into: `build` (macOS metal, Linux x86_64 CPU), `build_linux_arm64`,
+   `build_linux_cuda`, `build_linux_cuda_blackwell` (uses
+   `--backend cuda-blackwell` so the asset name is distinct from
+   regular CUDA), `build_linux_rocm`, `build_linux_vulkan`.
+
+   Not wired: Windows. The package script is bash; Windows release
+   jobs run PowerShell. Adding Windows requires either a `.ps1`
+   equivalent of the package script or invoking bash from PowerShell.
+   Tractable but skipped here to keep scope manageable; Windows Rust
+   consumers can still consume the SDK by overriding
+   `SKIPPY_LLAMA_TARBALL_URL` until this is closed.
 
 ## Pure-Rust source linking — verified
 

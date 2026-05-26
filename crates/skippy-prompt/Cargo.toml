@@ -9,10 +9,10 @@ anyhow.workspace = true
 blake3.workspace = true
 clap.workspace = true
 ctrlc = "3.5"
-skippy-protocol = { path = "../skippy-protocol" }
-skippy-runtime = { path = "../skippy-runtime" }
-skippy-topology = { path = "../skippy-topology" }
-openai-frontend = { path = "../openai-frontend" }
-mesh-client = { package = "mesh-llm-client", path = "../mesh-client" }
+skippy-protocol = { version = "0.66.0", path = "../skippy-protocol" }
+skippy-runtime = { version = "0.66.0", path = "../skippy-runtime" }
+skippy-topology = { version = "0.66.0", path = "../skippy-topology" }
+openai-frontend = { version = "0.66.0", path = "../openai-frontend" }
+mesh-client = { package = "mesh-llm-client", version = "0.66.0", path = "../mesh-client" }
 rustyline = "18"
 serde_json.workspace = true

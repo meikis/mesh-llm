@@ -11,4 +11,4 @@ path = "src/lib.rs"
 [dependencies]
 anyhow.workspace = true
 blake3.workspace = true
-skippy-protocol = { path = "../skippy-protocol" }
+skippy-protocol = { version = "0.66.0", path = "../skippy-protocol" }

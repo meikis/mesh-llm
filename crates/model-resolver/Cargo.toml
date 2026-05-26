@@ -6,8 +6,8 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-model-ref = { path = "../model-ref" }
-model-artifact = { path = "../model-artifact" }
+model-ref = { version = "0.66.0", path = "../model-ref" }
+model-artifact = { version = "0.66.0", path = "../model-artifact" }
 serde.workspace = true
 serde_json.workspace = true
 

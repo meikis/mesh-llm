@@ -7,11 +7,11 @@ version.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-skippy-ffi = { path = "../skippy-ffi" }
-skippy-runtime = { path = "../skippy-runtime" }
-model-artifact = { path = "../model-artifact" }
-model-hf = { path = "../model-hf" }
-model-ref = { path = "../model-ref" }
+skippy-ffi = { version = "0.66.0", path = "../skippy-ffi" }
+skippy-runtime = { version = "0.66.0", path = "../skippy-runtime" }
+model-artifact = { version = "0.66.0", path = "../model-artifact" }
+model-hf = { version = "0.66.0", path = "../model-hf" }
+model-ref = { version = "0.66.0", path = "../model-ref" }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"

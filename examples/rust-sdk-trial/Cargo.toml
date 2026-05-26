@@ -1,0 +1,27 @@
+# Example consumer of the mesh-llm Rust SDK.
+#
+# Lives outside the workspace deliberately (note the [workspace] table
+# below) so it depends on mesh-llm crates the way an external app would.
+# Path deps point relative to the mesh-llm checkout you find yourself in.
+#
+# Once mesh-llm-api-server and its transitive deps reach crates.io
+# (issue #691 + the publish-chain expansion described in
+# docs/design/RUST_NATIVE_SDK.md), these path deps become:
+#
+#   mesh-llm-api-server   = { version = "0.66", features = ["host-runtime"] }
+#
+# and the example builds against the registry like any other Rust app.
+
+[workspace]
+
+[package]
+name = "rust-sdk-trial"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+mesh-llm-host-runtime = { path = "../../crates/mesh-llm-host-runtime", default-features = false }
+mesh-llm-api-server = { path = "../../crates/mesh-llm-api-server" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+anyhow = "1"

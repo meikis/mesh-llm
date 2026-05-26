@@ -31,3 +31,5 @@ sdk/swift/Sources/MeshLLM/Generated/*
 sdk/swift/Generated/FFI/
 sdk/swift/Generated/MeshLLMFFI.xcframework/
 .impeccable.md
+examples/rust-sdk-trial/Cargo.lock
+examples/rust-sdk-trial/target/

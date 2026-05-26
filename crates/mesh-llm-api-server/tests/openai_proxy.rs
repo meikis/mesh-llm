@@ -7,7 +7,7 @@
 #![cfg(feature = "host-runtime")]
 
 use mesh_llm_api_server::{InviteToken, MeshNode, MeshRole, OwnerKeypair};
-use mesh_llm_host_runtime::host_node::{start_host_node, HostNodeSpec, MeshNodeRole};
+use mesh_llm_host_runtime::host_node::{HostNodeSpec, MeshNodeRole, start_host_node};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;

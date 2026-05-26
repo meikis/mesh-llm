@@ -56,7 +56,7 @@ pub use mesh_llm_node::serving::ServingController;
 /// For finer-grained control — composing pieces without running the
 /// whole orchestration — see [`MeshNodeBuilder`] instead.
 #[cfg(feature = "host-runtime")]
-pub use mesh_llm_host_runtime::host_node::{run_serve, MeshServeSpec};
+pub use mesh_llm_host_runtime::host_node::{MeshServeSpec, run_serve};
 pub use node::{
     CapabilityLevel, CleanupPolicy, CleanupResult, DeleteModelOptions, DeleteModelResult,
     DevicePolicy, DownloadId, DownloadOptions, DownloadedModel, InstalledModel, LoadModelOptions,

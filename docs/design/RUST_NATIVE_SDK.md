@@ -1,6 +1,6 @@
 # Rust Native SDK: in-process mesh node from cargo
 
-## Status: Design proposal
+## Status: Trial implementation landed; pipeline + API surface work follow
 
 ## Goal
 
@@ -9,312 +9,208 @@ gets a real in-process mesh node — same shape as the Swift and Kotlin SDKs:
 
 ```toml
 [dependencies]
-mesh-llm-api-server = "0.66"
-```
-
-```rust
-let node = MeshNode::builder()
-    .identity(owner)
-    .join(invite)
-    .build()?;
-node.start().await?;
-// real iroh peer in this process, optional local serving
+mesh-llm-api-server = { version = "0.66", features = ["native-metal"] }
 ```
 
 No CMake on the consumer's machine. No source build of patched llama.cpp.
-No separate `mesh-llm` daemon. The native bits arrive with the crate, the
-same way Swift and Kotlin consumers get them today.
+No separate `mesh-llm` daemon. The native bits arrive with the crate at
+build time, link statically into the consumer's final binary.
 
-## How Swift and Kotlin do it (the model we're matching)
+## How Swift and Kotlin do it (the model we match)
 
-Both ship a prebuilt native library — `libmeshllm_ffi` — that contains
-patched llama.cpp linked statically and exposes a UniFFI-generated C ABI.
-The language SDK calls into it. The consumer of the SDK runs a real mesh
-node *in their own process*.
+Both ship a prebuilt artifact containing patched llama.cpp + skippy +
+mesh-llm host runtime, compiled as a **static archive** with a
+UniFFI-generated C ABI. The language SDK code calls into it; everything
+runs in-process.
 
-- **Swift:** `MeshLLMFFI.xcframework.zip` (~168 MB zipped) on each GitHub
-  release. SwiftPM `.binaryTarget(url:, checksum:)` in `Package.swift`
-  downloads and links it. Swift `Node` class wraps the FFI, exposes
-  `init(servingEnabled: true)`, `.serving.load`, `.serving.unload`.
-- **Kotlin:** the same native lib shipped as an AAR via Maven (GitHub
-  Packages). Loaded by the JVM. Kotlin `Node` class wraps the same FFI.
-- **Node.js:** the same native lib shipped as a prebuilt N-API `.node`
-  addon. Node `Node` class wraps the same FFI.
+- **Swift:** `MeshLLMFFI.xcframework.zip` (~168 MB zipped, ~140 MB
+  unzipped per macOS slice) on each GitHub release. SwiftPM
+  `.binaryTarget(url:, checksum:)` in `Package.swift` downloads the zip
+  at resolve time. Inside the framework is a **static archive** (Mach-O
+  `.a` format), one per Apple architecture/SDK slice. SwiftPM
+  static-links it into the consumer's app binary. No separate dylib to
+  bundle.
+- **Kotlin:** `libmeshllm_ffi.so` per Android ABI inside an AAR on GitHub
+  Packages Maven. JVM/Android loads it at runtime.
+- **Node.js:** prebuilt N-API `.node` addon via npm/GitHub Packages.
 
-All three SDKs:
-1. Pull a published prebuilt artifact through their language's native
-   package channel.
-2. Link/load it at consumer build/install time.
-3. Expose a `Node` API that runs a full in-process mesh node, with
-   local serving, through that prebuilt lib.
+In all three the *prebuilt artifact arrives through the language's
+native package channel* and the consumer's app links/loads it directly.
+No daemon, no child process, no out-of-process IPC.
 
-**There is no separate daemon, no child process, no out-of-process IPC.**
-The native runtime lives inside the consumer's own binary.
+## The Rust equivalent (this proposal)
 
-## What Rust gets today
+Rust gets the same shape: a small crate published to crates.io, whose
+`build.rs` fetches the matching prebuilt **static archive**
+(`libmeshllm_ffi.a`) for the consumer's target platform + selected
+backend from a GitHub release, verifies its sha256, and emits link
+directives so cargo links it statically into the consumer's binary.
 
-Looking at `main`:
+The model is closest to Swift's `.binaryTarget(url:, checksum:)`. The
+small crate on crates.io is the equivalent of `Package.swift`; the
+prebuilt static archive lives on the GitHub release; the consumer's
+build links everything statically into their final binary.
 
-- 11 pure-Rust crates listed in `scripts/publish-crates.sh`, no native
-  code. `mesh-llm-api-server` is the SDK entrypoint — currently feature-
-  less, no `build.rs`, no link path to anything native.
-- The publish chain reaches crates.io but breaks on a new-crate-name rate
-  limit (HTTP 429) part-way through, so even the pure-Rust SDK entrypoint
-  has never landed on crates.io yet.
-- The release pipeline already produces `libmeshllm_ffi.{dylib,so,dll}`
-  via `scripts/package-native-sdk.sh` (`build_native_sdk_runtime` matrix
-  job, currently only `macos-aarch64-metal` and `linux-x86_64-cpu`).
-- The release pipeline already wraps that into a cargo crate via
-  `scripts/package-native-sdk-crate.sh` — output is a real `.crate` file
-  with `links = "meshllm_native_runtime"` and `build.rs` exporting
-  `DEP_MESHLLM_NATIVE_RUNTIME_*` paths.
-- That `.crate` file is uploaded as a **GitHub release asset, not
-  published to crates.io.** No `cargo publish` step exists for it.
+### Crate
 
-So we already build the right kind of artifact (a published cargo crate
-carrying prebuilt `libmeshllm_ffi`). We just don't push it to crates.io
-and `mesh-llm-api-server` doesn't depend on it.
+`mesh-llm-native-sdk` — small Rust crate, no native bytes inside the
+`.crate` payload. Just `build.rs` + a few lines of source.
 
-That's the gap. Closing it is this plan.
-
-## Plan
-
-A Rust consumer wants the symmetric Swift/Kotlin experience. The cargo-native
-way to deliver "a published prebuilt native lib that gets pulled at build
-time" is **a published cargo crate carrying the prebuilt lib**, with the SDK
-crate depending on it through a target/feature selector.
-
-### Crate layout
-
-The same conceptual split Swift uses (`MeshLLMFFI.xcframework` separate
-from `MeshLLM` Swift code) maps cleanly to two cargo crates:
-
-- `mesh-llm-native-sdk-<os>-<arch>-<backend>` — wrapper crate, one per
-  platform/backend cell. Carries the prebuilt `libmeshllm_ffi.{dylib,so,dll}`
-  inside the crate, `links = "meshllm_native_runtime"`, `build.rs` extracts
-  and emits link directives. Already produced by
-  `package-native-sdk-crate.sh`.
-- `mesh-llm-api-server` — the SDK entrypoint. Depends on the matching
-  wrapper crate via target-conditional dependency. Already published
-  (or will be once the publish chain is fixed).
-
-The naming and layout already exist — they just don't reach crates.io.
-
-### Backend selection
-
-Backend is selected at compile time via cargo features on
-`mesh-llm-api-server`, mirroring how `install.sh` picks a flavor:
+Features select the backend (mutually exclusive):
 
 ```toml
-mesh-llm-api-server = { version = "0.66", features = ["native-metal"] }
-# or "native-cpu", "native-cuda", "native-rocm", "native-vulkan"
+mesh-llm-native-sdk = { version = "0.66", features = ["metal"] }
 ```
 
-Each feature pulls in exactly one matching wrapper crate, gated by
-`cfg(target_os, target_arch)`. Mutually exclusive — exactly one
-`native-*` feature may be enabled.
+Available features: `metal`, `cpu`, `cuda`, `rocm`, `vulkan`.
 
-### Phased execution
+### `build.rs` behaviour
 
-#### Phase 1 — Unbreak the publish chain
+1. Read selected backend feature (refuses to build if zero or more than one).
+2. Read `CARGO_CFG_TARGET_OS` and `CARGO_CFG_TARGET_ARCH`.
+3. Compose artifact ID: `meshllm-native-<platform>-<arch>-<backend>`,
+   matching the naming `scripts/package-native-sdk.sh` already emits.
+4. Compose default tarball URL from `CARGO_PKG_VERSION`:
+   `https://github.com/Mesh-LLM/mesh-llm/releases/download/v<version>/<artifact_id>.tar.gz`.
+5. Override default with `MESH_LLM_NATIVE_TARBALL_URL` env var (accepts
+   `file://` for local trials, offline builds, and air-gapped mirrors).
+6. Fetch the tarball into a stable per-user cache
+   (`~/.cache/mesh-llm-native-sdk/<version>/<artifact_id>/` by default;
+   override with `MESH_LLM_NATIVE_CACHE_DIR`).
+7. Verify sha256 against the `.sha256` sidecar fetched from the same URL,
+   or against `MESH_LLM_NATIVE_TARBALL_SHA256` if explicitly set.
+8. Extract `libmeshllm_ffi.a` into `OUT_DIR`.
+9. Emit link directives:
+   - `cargo:rustc-link-search=native=<OUT_DIR>/native/<artifact_id>/lib`
+   - `cargo:rustc-link-lib=static=meshllm_ffi`
+   - Plus per-platform system framework/library directives (Accelerate,
+     Metal, MetalKit, Foundation, Security, etc. on macOS; libstdc++,
+     libm, libdl, libpthread on Linux; user32, ws2_32, bcrypt on Windows).
 
-Without this, nothing else on the plan can land on crates.io.
+### Consumer binary shape
 
-The v0.66.0 release publish failed at `model-artifact` with a crates.io
-HTTP 429 "too many new crates in a short period." The publish script
-publishes serially with a 30s sleep between crates; that wasn't enough
-once the chain hit consecutive never-before-published crate names.
+Identical to what Swift apps get from `.binaryTarget`:
 
-Two fixes, either is enough:
+- Everything statically linked: patched llama.cpp, ggml, ggml-metal/cuda/etc.,
+  skippy, mesh-llm host runtime, all the UniFFI scaffolding.
+- Consumer's binary is **one self-contained executable**. No bundled
+  `.dylib` / `.so` / `.dll`. No `@rpath` rituals. Tauri/cargo-bundle
+  packaging just takes the binary as-is.
+- Linker DCE strips unused code, so the binary size is proportional to
+  what the consumer actually uses, not to the archive size.
 
-1. Add retry-with-exponential-backoff to `scripts/publish-crates.sh`
-   when `cargo publish` exits with a 429. Cheap and self-contained.
-2. Request a new-crate-publish rate limit increase from the crates.io
-   team for the publishing account. Standard request, takes days.
+## Status of this branch
 
-Recommend doing both — script change lands fast, registry-side limit
-prevents recurrence as we add more crates.
+### Working today
 
-Deliverable: a release run completes the publish chain. `mesh-llm-api-server`
-lands on crates.io for the first time.
+- `crates/mesh-llm-native-sdk/` — the crate, with `build.rs`, src/lib.rs,
+  README, Cargo.toml. Committed.
+- Local trial: `scripts/package-native-sdk.sh --build --backend metal`
+  produces `libmeshllm_ffi.a` (~350 MB unstripped). A small tarballing
+  step packages it as
+  `dist/native-sdk-static/meshllm-native-darwin-aarch64-metal.tar.gz`
+  (~131 MB compressed) with sha256 sidecar.
+- A trivial Rust consumer **outside the workspace** at
+  `/tmp/sprout-faux/`, depending on `mesh-llm-native-sdk` by path with
+  `features = ["metal"]` and `MESH_LLM_NATIVE_TARBALL_URL=file://...`,
+  builds cleanly and runs. `otool -L` confirms only system frameworks
+  are linked dynamically; the entire mesh runtime is statically inside
+  the consumer's binary.
 
-#### Phase 2 — Expand the native artifact matrix to match the release matrix
+### Not yet wired up
 
-Today `build_native_sdk_runtime` builds `libmeshllm_ffi` for only two
-cells (`macos-aarch64-metal`, `linux-x86_64-cpu`). The standalone-binary
-release matrix is much wider — Linux CPU/CUDA/CUDA-Blackwell/ROCm/Vulkan/ARM,
-Windows CPU/Vulkan/CUDA/ROCm, macOS arm64.
+These are the steps from "trial works on this laptop" to "external Rust
+consumers can use this":
 
-For Rust consumers to have parity with the binary matrix, the native SDK
-matrix must grow. Two ways to do this:
+1. **Release pipeline ships per-platform/backend static archives.**
+   Today every release-matrix cell builds `libmeshllm_ffi.a` (it's in
+   `crates/mesh-llm-ffi/Cargo.toml`'s `crate-type`) but doesn't ship it.
+   Add a tar + checksum + upload step per cell. Reuses the existing
+   cmake step. Asset naming matches what `build.rs` expects.
+2. **`mesh-llm-api-server` adds `native-*` features that pull
+   `mesh-llm-native-sdk` transparently.** Consumers depend on
+   `mesh-llm-api-server` (the SDK entrypoint), not directly on
+   `mesh-llm-native-sdk`. Today this layer is missing — a consumer must
+   depend on the native-sdk crate directly to trial.
+3. **Fix the pure-Rust publish chain.** The v0.66.0 publish run failed
+   at `model-artifact` with crates.io HTTP 429 (new-crate rate limit),
+   leaving `mesh-llm-api-server` itself unpublished. Either add
+   retry-on-429 to `scripts/publish-crates.sh` or get the limit raised.
+   Until this is fixed, the consumer-facing crate isn't on crates.io
+   at all.
 
-1. **Fold `libmeshllm_ffi` production into the existing per-cell
-   `build` matrix job.** The cmake build of patched llama.cpp dominates
-   each cell. Adding a second `cargo build -p mesh-llm-ffi
-   --no-default-features --features host,embedded-runtime` after the
-   existing `cargo build -p mesh-llm` reuses the cmake outputs and most
-   of cargo's incremental dep cache. Net cost per cell: single-digit
-   minutes. Removes the duplicated `build_native_sdk_runtime` matrix job
-   entirely — overall saves CMake compute.
-2. Keep `build_native_sdk_runtime` as a separate matrix job but expand
-   it to all cells. Simpler diff but does redundant cmake work.
+### Out of scope for this proposal
 
-Recommend option 1.
+- Rust-native API wrappers on top of the UniFFI C symbols inside the
+  static archive. The trial calls a raw UniFFI symbol
+  (`ffi_meshllm_ffi_uniffi_contract_version`) to prove the link works.
+  Producing an ergonomic Rust API (`MeshNode::builder()`, etc.) on top
+  is a separate layer; the easiest path is `uniffi-bindgen` generating
+  Rust bindings from the same `.udl` Swift and Kotlin already consume.
+  Not addressed here.
+- Tier-2 split (Rust app joins the mesh as a real iroh peer with no
+  local serving, lighter than full host-runtime). Separate work.
+- Source-build path (`-sys` style) for consumers who want auditable
+  builds. Not addressed; remains the workspace-internal
+  `host-runtime` feature, untouched by this proposal.
 
-Deliverable: every release produces `libmeshllm_ffi` for every supported
-(platform, backend) cell.
+## What about other consumer-app concerns
 
-#### Phase 3 — Publish the wrapper crates to crates.io
+- **Sprout-style bundling:** the consumer binary is fully self-contained.
+  Tauri / cargo-bundle just packages the executable. No `.dylib` to copy
+  into `Sprout.app/Contents/Frameworks/`. No install_name rewriting.
+- **CI:** consumer's CI needs only a Rust toolchain. No CMake, no CUDA
+  SDK, no Vulkan SDK. The cached tarball survives across CI runs in
+  `~/.cache/mesh-llm-native-sdk/`.
+- **Cross-compile:** `build.rs` reads `CARGO_CFG_TARGET_*`, not the
+  host triple. A macOS host targeting `x86_64-unknown-linux-gnu` would
+  fetch the Linux x86_64 tarball.
+- **Offline builds:** `MESH_LLM_NATIVE_TARBALL_URL=file:///mirror/path`
+  + `MESH_LLM_NATIVE_TARBALL_SHA256=...` + `MESH_LLM_NATIVE_CACHE_DIR`
+  cover air-gapped and corporate-mirror cases.
+- **Reproducibility:** sha256 verified on every fetch. A `.sha256`
+  sidecar lives alongside the tarball on the release.
 
-`scripts/package-native-sdk-crate.sh` already produces real
-crates.io-ready `.crate` files. Currently they upload as GitHub release
-assets only. To reach crates.io:
+## Risks / honest caveats
 
-1. Reserve crate names on crates.io. One-time `cargo publish` of an
-   empty `0.0.0` stub per name, claiming ownership.
-2. Request a per-crate publish-size limit increase from crates.io.
-   Default is 10 MiB; the smallest backend (`metal`) is ~140 MB
-   unstripped, ~80–100 MB stripped, ~60 MB compressed in the `.crate`.
-   CUDA is larger. Without this, the crates simply won't accept upload.
-   Standard request, takes days; **start it as soon as Phase 2 begins
-   producing the artifacts at all cells**.
-3. Extend `scripts/publish-crates.sh` to publish each wrapper crate
-   after the existing chain. Gate on real-release only (no dry-run can
-   verify wrappers that depend on prebuilt artifacts).
-4. Wire the release workflow's `publish_crates` job to feed the
-   wrapper-crate `.crate` files in from the build matrix's
-   upload-artifact step.
+- **Static archive size.** Compressed tarball is ~130 MB for metal CPU
+  cases; expect 300-500 MB for CUDA cases because the archive carries
+  nvcc-compiled CUDA kernels per architecture. Downloaded once per
+  (version, platform, backend) per consumer machine and cached. No
+  crates.io size limits apply because the bytes live on GitHub
+  releases, not on crates.io.
+- **First-build network requirement.** Consumers without network access
+  must use the override env vars. Documented above; would need to be
+  documented loudly in `docs/SDK.md` for external consumers.
+- **Symbol surface.** The static archive exports UniFFI C symbols today.
+  Calling them from Rust through `extern "C"` works but is awkward
+  compared to a native Rust API. A follow-up should add a thin Rust
+  wrapper (likely via `uniffi-bindgen`'s Rust generator) so consumers
+  call `MeshNode::builder()` rather than poking at `ffi_meshllm_ffi_*`
+  symbols. Tracked separately.
 
-Deliverable: every (os, arch, backend) wrapper crate is on crates.io at
-each release version. A consumer can `cargo add
-mesh-llm-native-sdk-macos-aarch64-metal` directly and see it resolve.
+## Reference: trial commands
 
-#### Phase 4 — Wire `mesh-llm-api-server` to consume them
+Local end-to-end on `micn/native-sdk-cargo-publish`:
 
-This is the consumer-facing change.
+```bash
+# 1. Produce libmeshllm_ffi.a for macOS arm64 metal.
+scripts/package-native-sdk.sh --build --backend metal --out dist/native-sdk
 
-1. Add `native-cpu`, `native-metal`, `native-cuda`, `native-rocm`,
-   `native-vulkan` features on `mesh-llm-api-server`.
-2. Each feature pulls the matching wrapper crate as a target-conditional
-   optional dependency:
+# 2. Pack into static-archive tarball + sha256 (manual for the trial;
+#    in CI this would be its own step).
+mkdir -p dist/native-sdk-static/meshllm-native-darwin-aarch64-metal/lib
+cp target/release/libmeshllm_ffi.a \
+   dist/native-sdk-static/meshllm-native-darwin-aarch64-metal/lib/
+# (write manifest.json, tar czf, shasum -a 256)
 
-   ```toml
-   [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-   mesh-llm-native-sdk-macos-aarch64-metal = { version = "0.66", optional = true }
+# 3. Build a consumer outside the workspace.
+cd /tmp/sprout-faux
+MESH_LLM_NATIVE_TARBALL_URL="file:///path/to/dist/native-sdk-static/meshllm-native-darwin-aarch64-metal.tar.gz" \
+    cargo build
 
-   [features]
-   native-metal = ["dep:mesh-llm-native-sdk-macos-aarch64-metal"]
-   # ...
-   ```
-
-3. Add `mesh-llm-api-server/build.rs` that reads
-   `DEP_MESHLLM_NATIVE_RUNTIME_LIB_DIR` and
-   `DEP_MESHLLM_NATIVE_RUNTIME_LIBRARY` from the wrapper crate and emits
-   `cargo:rustc-link-search` + `cargo:rustc-link-lib=dylib=meshllm_ffi`.
-4. Implement the Rust glue that calls into the UniFFI C ABI exposed by
-   the prebuilt `libmeshllm_ffi`. This is the same C ABI Swift, Kotlin,
-   and Node already consume — we ship one set of FFI bindings and reuse.
-5. Surface the existing `MeshNode::builder()` / `MeshClient` API through
-   the prebuilt path, identical to what consumers see today on the
-   workspace `host-runtime` development path.
-6. Add a `compile_error!` guard preventing multiple `native-*` features.
-7. Document in `docs/SDK.md`: pick exactly one `native-*` feature for
-   your target platform. Mirror the Swift "one line in Package.swift"
-   ergonomics.
-8. Add `examples/cargo-consumer-native/` outside the workspace —
-   resolves `mesh-llm-api-server` from crates.io, exercises
-   `MeshNode::builder().build()?.start()`, asserts the in-process node
-   actually joins a mesh.
-9. CI: build the example on each supported platform after each release
-   publish.
-
-Deliverable: a Rust app does
-
-```toml
-mesh-llm-api-server = { version = "0.66", features = ["native-metal"] }
+# 4. Run it.
+./target/debug/sprout-faux
+# -> sprout-faux: linked libmeshllm_ffi OK
+# -> sprout-faux: uniffi contract version = 30
 ```
-
-…and gets the same in-process mesh node Swift/Kotlin consumers get today.
-
-## Risks and what we're explicitly accepting
-
-- **Wrapper-crate size on crates.io.** Each backend wrapper is tens to
-  hundreds of MiB. crates.io will need a size limit increase per crate.
-  This is the same conversation Swift and Kotlin sidestep because their
-  registries (SwiftPM via `.binaryTarget` URLs, Maven) have no equivalent
-  size limit. It's the one real friction point Rust introduces; it is
-  tractable, not blocking.
-- **Network at `build.rs` time?** No. The wrapper crates carry the
-  prebuilt bytes *inside the crate payload*, not via download in
-  `build.rs`. A consumer's `cargo build` works offline once cargo has
-  cached the wrapper crate, same as any other crate. This was an option
-  earlier in the design discussion; we are not taking it. Cargo-native
-  means cargo-native: the bits are in the crate.
-- **Per-release maintenance.** Adding new backends or platforms now
-  means adding a new wrapper crate to the publish chain. We accept that;
-  it mirrors what every other language SDK already does (each platform's
-  prebuilt is its own thing).
-
-## Out of scope
-
-- Out-of-process consumption (launching the standalone `mesh-llm`
-  binary from a Rust app and talking HTTP). That's already trivially
-  possible — sprout or anyone else can install `mesh-llm` via
-  `install.sh` and use `mesh-llm-api-client` against the local HTTP
-  port. We don't need a plan for it; if someone wants that, they can do
-  it today.
-- Source-build from crates.io (the `-sys` idiom — publish
-  `mesh-llm-host-runtime`, `skippy-ffi`, etc., and build llama.cpp on
-  consumer machines). Not the model Swift/Kotlin use; not the model
-  we're matching.
-- Distro-packager-friendly source-only builds. Not the model
-  Swift/Kotlin offer; not the model we're matching.
-
-## Today's state, for reference
-
-What's actually on crates.io (verified by searching the registry):
-
-```
-mesh-llm-client      0.65.1   (older release; chain hit 429 on 0.66.0)
-mesh-llm-identity    0.66.0
-mesh-llm-protocol    0.66.0
-mesh-llm-routing     0.66.0
-mesh-llm-types       0.66.0
-model-ref            0.66.0
-mesh-api             0.65.1   (stale; legacy name)
-```
-
-What's in `scripts/publish-crates.sh` but missing from crates.io:
-
-```
-model-artifact, model-hf, mesh-llm-client@0.66.0,
-mesh-llm-api-client, mesh-llm-node, mesh-llm-api-server
-```
-
-These are the crates the v0.66.0 publish run never reached, due to the
-HTTP 429 on `model-artifact`. They have no published version. Phase 1
-fixes this.
-
-What's on GitHub releases (v0.66.0):
-
-```
-mesh-llm-{aarch64-apple-darwin,
-          aarch64-unknown-linux-gnu,
-          x86_64-unknown-linux-gnu,
-          x86_64-unknown-linux-gnu-vulkan,
-          x86_64-unknown-linux-gnu-rocm,
-          x86_64-unknown-linux-gnu-cuda,
-          x86_64-unknown-linux-gnu-cuda-blackwell,
-          x86_64-pc-windows-msvc,
-          x86_64-pc-windows-msvc-vulkan,
-          x86_64-pc-windows-msvc-rocm,
-          x86_64-pc-windows-msvc-cuda}.tar.gz / .zip
-```
-
-Each contains exactly one file: the standalone `mesh-llm` executable.
-Nothing for cargo consumption. The xcframework that v0.65.x shipped
-(`MeshLLMFFI.xcframework.zip`, ~168 MB) regressed on v0.66.x — likely
-related to the v0.66.0 workflow shape predating PR #634, which
-restructured SDK artifact production. Phase 2 should produce a parallel
-artifact for Rust (`libmeshllm_ffi` per cell) alongside restoring the
-Swift one.

@@ -176,15 +176,25 @@ crates.io alone:
    crates in a short period"). `mesh-llm-api-server` has never reached
    crates.io. Fix: retry-on-429 in `scripts/publish-crates.sh`, and/or
    request a rate-limit increase from crates.io for the publishing
-   account.
+   account. Tracked in issue #691. **This grew more important on this
+   branch** because the publish list now adds 18 new crate names —
+   ~3× the new-crate-name volume of v0.66.0 — which would amplify the
+   429 issue without a fix.
 
 2. **Add `mesh-llm-host-runtime`, `skippy-ffi`, `skippy-runtime`,
    `skippy-server`, and the other internal crates that
    `mesh-llm-api-server`'s `host-runtime` feature transitively requires
-   to the publish chain.** Today these are workspace-path-only. They
-   are all pure Rust source (the only one with native link work is
-   `skippy-ffi`, which is now self-sufficient via the URL-fetch path
-   above). The publish-chain failure in step 1 must be fixed first.
+   to the publish chain.** **Done on this branch.** The 18 new crates
+   are added to `scripts/publish-crates.sh` in topological order. All
+   path-deps across the workspace now carry both `path = "..."` and
+   `version = "..."` so they resolve from crates.io for external
+   consumers. A `cargo publish --dry-run` walks the entire chain
+   cleanly: 15 crates fully verify, the rest correctly skip with a
+   "depends on X@0.66.0 not yet on crates.io" message that goes away
+   once each predecessor lands. `skippy-ffi` and other native-linking
+   crates use `--no-verify` because the packaged tarball's `build.rs`
+   can't find `.deps/llama-build` from `target/package/` (the release
+   pipeline's pre-publish `cargo build` is the actual gate).
 
 3. **Release pipeline produces and uploads `llama-stage-<triple>-<flavor>.tar.gz`
    per matrix cell.** Each `build_*` job in `.github/workflows/release.yml`

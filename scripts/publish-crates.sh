@@ -99,41 +99,67 @@ crate_version_published() {
     [[ "$status" == "200" ]]
 }
 
+# Resolve a crate name to its `crates/<dir>/Cargo.toml` path. The dir
+# name often equals the crate name but not always (e.g. mesh-client/
+# hosts the `mesh-llm-client` crate).
+crate_manifest_path() {
+    local crate="$1"
+    local direct="crates/${crate}/Cargo.toml"
+    if [[ -f "$direct" ]]; then
+        printf '%s\n' "$direct"
+        return 0
+    fi
+    grep -l -E "^\s*name\s*=\s*\"${crate}\"\s*$" crates/*/Cargo.toml 2>/dev/null | head -n 1
+}
+
+# List the workspace-internal registry deps of $1 (one crate name per
+# line). Driven directly off the crate's own Cargo.toml so it stays in
+# sync as deps change. Reads `[dependencies]` and `[build-dependencies]`
+# entries that carry both a `path = "../<dir>"` and a workspace-internal
+# crate name on the same line.
 unpublished_registry_deps() {
-    case "$1" in
-        model-artifact)
-            printf '%s\n' model-ref
-            ;;
-        model-hf)
-            printf '%s\n' \
-                model-artifact \
-                model-ref
-            ;;
-        mesh-llm-client)
-            printf '%s\n' \
-                model-artifact \
-                mesh-llm-identity \
-                mesh-llm-protocol \
-                mesh-llm-routing \
-                mesh-llm-types
-            ;;
-        mesh-llm-api-client)
-            printf '%s\n' \
-                mesh-llm-client
-            ;;
-        mesh-llm-node)
-            printf '%s\n' \
-                mesh-llm-types \
-                model-artifact \
-                model-hf \
-                model-ref
-            ;;
-        mesh-llm-api-server)
-            printf '%s\n' \
-                mesh-llm-api-client \
-                mesh-llm-node
-            ;;
-    esac
+    local crate="$1"
+    local cargo
+    cargo="$(crate_manifest_path "$crate")"
+    if [[ -z "$cargo" || ! -f "$cargo" ]]; then
+        return 0
+    fi
+    python3 - "$cargo" <<'PY'
+import re
+import sys
+import pathlib
+
+cargo = pathlib.Path(sys.argv[1])
+text = cargo.read_text()
+section = None
+in_deps = False
+pkg_re = re.compile(r'package\s*=\s*"([^"]+)"')
+path_re = re.compile(r'path\s*=\s*"\.\./([^"]+)"')
+dep_line_re = re.compile(r'^\s*([a-zA-Z0-9_-]+)\s*=\s*\{(.*)\}\s*$')
+section_re = re.compile(r'^\[([^\]]+)\]')
+for line in text.splitlines():
+    s = line.rstrip()
+    m = section_re.match(s)
+    if m:
+        section = m.group(1)
+        in_deps = (
+            section in ("dependencies", "build-dependencies")
+            or (section.startswith("target.") and ".dependencies" in section)
+        )
+        continue
+    if not in_deps:
+        continue
+    dm = dep_line_re.match(s)
+    if not dm:
+        continue
+    body = dm.group(2)
+    pm = path_re.search(body)
+    if not pm:
+        continue
+    pkg_m = pkg_re.search(body)
+    name = pkg_m.group(1) if pkg_m else dm.group(1)
+    print(name)
+PY
 }
 
 should_skip_initial_dry_run() {
@@ -150,18 +176,51 @@ should_skip_initial_dry_run() {
 }
 
 publish_crates=(
-    model-ref
+    mesh-llm-gpu-bench
+    mesh-llm-guardrails
     mesh-llm-identity
+    mesh-llm-plugin
     mesh-llm-protocol
     mesh-llm-routing
     mesh-llm-types
+    mesh-llm-ui
+    model-ref
+    skippy-coordinator
+    skippy-ffi
+    skippy-metrics
+    skippy-protocol
+    skippy-topology
+    mesh-mixture-of-agents
     model-artifact
-    model-hf
+    openai-frontend
+    skippy-cache
+    skippy-runtime
     mesh-llm-client
+    mesh-llm-system
+    model-hf
+    model-resolver
+    skippy-server
     mesh-llm-api-client
     mesh-llm-node
+    model-package
     mesh-llm-api-server
+    mesh-llm-host-runtime
 )
+
+# Crates whose `cargo publish` verify step builds native code that
+# needs the patched llama.cpp static archives. We skip the verify step
+# for these because the packaged tarball's build.rs can't find
+# .deps/llama-build from inside target/package/. The release pipeline
+# guards against actual build breakage by running
+# `cargo build -p mesh-llm-ffi` etc. before this script ever runs.
+crate_needs_no_verify() {
+    case "$1" in
+        skippy-ffi|skippy-runtime|skippy-server|skippy-cache|skippy-coordinator|skippy-topology|skippy-protocol|skippy-metrics|mesh-llm-system|mesh-llm-host-runtime|mesh-llm-node|model-package|model-resolver)
+            return 0
+            ;;
+    esac
+    return 1
+}
 
 for index in "${!publish_crates[@]}"; do
     crate="${publish_crates[$index]}"
@@ -175,6 +234,9 @@ for index in "${!publish_crates[@]}"; do
     fi
     if [[ "$allow_dirty" -eq 1 ]]; then
         args+=(--allow-dirty)
+    fi
+    if crate_needs_no_verify "$crate"; then
+        args+=(--no-verify)
     fi
 
     echo "cargo ${args[*]}"

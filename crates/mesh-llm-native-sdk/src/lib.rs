@@ -1,14 +1,14 @@
 //! Prebuilt native mesh-llm runtime.
 //!
 //! This crate's job is to *fetch and link* the matching `libmeshllm_ffi`
-//! prebuilt shared library for the consumer's target platform and selected
-//! backend. The actual download + link work happens in `build.rs`; the Rust
-//! API surface lives elsewhere (currently `mesh-llm-ffi`'s UniFFI-generated
-//! bindings; in the future, possibly a Rust-native wrapper layered on top).
+//! prebuilt static archive for the consumer's target platform and selected
+//! backend. The archive contains patched llama.cpp, skippy, the mesh-llm
+//! host runtime, and UniFFI-generated C ABI symbols. We expose a small
+//! Rust API on top of those symbols.
 //!
-//! Consumers should not depend on this crate directly. Instead, depend on
-//! `mesh-llm-api-server` with the appropriate `native-*` feature, which
-//! pulls this crate in transparently.
+//! This is the same archive shape Swift consumes via `.binaryTarget`. The
+//! difference is the consumer-side wrapper: Swift gets generated Swift
+//! bindings; Rust gets the wrappers in this module.
 
 // Force the linker to keep `libmeshllm_ffi` linked into the consumer's
 // final binary. `build.rs` emits `cargo:rustc-link-search=...` so the
@@ -19,21 +19,9 @@
 // platform — same shape as Swift's xcframework, which also ships a
 // static archive that gets linked into the consumer app.
 #[link(name = "meshllm_ffi", kind = "static")]
-unsafe extern "C" {
-    // We don't reference any FFI symbols here; the attribute alone is
-    // enough to keep the link directive alive in the consumer.
-}
+unsafe extern "C" {}
 
-/// Bring a tiny FFI symbol into scope so the consumer can sanity-check
-/// that linking actually worked end-to-end. Useful for tests and the
-/// faux-consumer trial.
-///
-/// Returns the UniFFI contract version baked into the linked
-/// `libmeshllm_ffi`. Stable, no-arg, no allocation; safe to call from any
-/// thread at any time.
-pub fn uniffi_contract_version() -> u32 {
-    unsafe extern "C" {
-        fn ffi_meshllm_ffi_uniffi_contract_version() -> u32;
-    }
-    unsafe { ffi_meshllm_ffi_uniffi_contract_version() }
-}
+mod ffi;
+
+pub use ffi::generate_owner_keypair_hex;
+pub use ffi::uniffi_contract_version;

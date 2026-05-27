@@ -196,6 +196,10 @@ mod tests {
         assert!(EMBEDDED_SCRIPT.contains(r#"MOUNTED_SOURCE_PATH="/source/${SOURCE_FILE}""#));
         assert!(EMBEDDED_SCRIPT.contains(r#"WRITE_PACKAGE_INPUT="$MOUNTED_SOURCE_PATH""#));
         assert!(EMBEDDED_SCRIPT.contains(r#"--source-file "$SOURCE_FILE""#));
+        assert!(EMBEDDED_SCRIPT.contains(r#"WRITE_PACKAGE_SPEC_ARGS=()"#));
+        assert!(EMBEDDED_SCRIPT.contains(r#"--spec-draft-model "$SPEC_DRAFT_MODEL""#));
+        assert!(EMBEDDED_SCRIPT.contains(r#"--spec-strategy "${SPEC_STRATEGY:-draft}""#));
+        assert!(EMBEDDED_SCRIPT.contains(r#"--spec-initial-window "${SPEC_INITIAL_WINDOW:-16}""#));
         assert!(EMBEDDED_SCRIPT.contains(r#"time "$SLICER" write-package "$WRITE_PACKAGE_INPUT""#));
         assert!(!EMBEDDED_SCRIPT.contains(r#"time $SLICER write-package "$SOURCE_PATH""#));
     }

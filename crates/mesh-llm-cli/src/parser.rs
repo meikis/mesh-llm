@@ -859,6 +859,26 @@ pub enum Command {
         #[arg(long)]
         model_id: Option<String>,
 
+        /// Draft model ref to declare for package default speculative decoding.
+        #[arg(long = "spec-draft-model")]
+        spec_draft_model: Option<String>,
+
+        /// Package speculative strategy name.
+        #[arg(long = "spec-strategy", default_value = "draft")]
+        spec_strategy: String,
+
+        /// Initial adaptive speculative decode window for the package strategy.
+        #[arg(long = "spec-initial-window", default_value_t = 16)]
+        spec_initial_window: u32,
+
+        /// Minimum adaptive speculative decode window for the package strategy.
+        #[arg(long = "spec-min-window", default_value_t = 2)]
+        spec_min_window: u32,
+
+        /// Maximum adaptive speculative decode window for the package strategy.
+        #[arg(long = "spec-max-window", default_value_t = 16)]
+        spec_max_window: u32,
+
         /// HF Job hardware flavor. Use auto for the default CPU splitter baseline.
         #[arg(long, default_value = "auto")]
         flavor: String,

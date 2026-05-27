@@ -351,7 +351,8 @@ lifecycle_health_interval_ms    = 5000      # health-check interval (ms)
 
 # --- Speculative decoding ------------------------------------------------
 [defaults.speculative]
-mode                       = "auto"          # auto off draft ngram lookahead
+mode                       = "auto"          # auto disabled draft ngram
+package_strategy           = "default"       # package manifest default or named strategy
 draft_selection_policy     = "auto"          # auto manual heuristic
 pairing_fault              = "warn_disable"  # warn_disable fail_open fail_closed
 draft_max_tokens           = 16

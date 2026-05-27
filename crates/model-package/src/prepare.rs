@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use futures::StreamExt;
 use hf_hub::HFClient;
 use hf_hub::repository::RepoTreeEntry;
@@ -19,6 +19,11 @@ pub struct PrepareParams {
     pub quant: Option<String>,
     pub target: Option<String>,
     pub model_id: Option<String>,
+    pub spec_draft_model: Option<String>,
+    pub spec_strategy: String,
+    pub spec_initial_window: u32,
+    pub spec_min_window: u32,
+    pub spec_max_window: u32,
     pub flavor: String,
     pub timeout_seconds: u64,
     pub mesh_llm_ref: String,
@@ -117,6 +122,8 @@ pub async fn resolve(
     params: PrepareParams,
     permissions: &PermissionCheck,
 ) -> Result<PrepareJob> {
+    validate_speculative_params(&params)?;
+
     let quant = params
         .quant
         .as_deref()
@@ -193,6 +200,16 @@ pub async fn resolve(
     environment.insert("MODEL_ID".into(), model_id.clone());
     environment.insert("SOURCE_REVISION".into(), "main".into());
     environment.insert("MESH_LLM_REF".into(), params.mesh_llm_ref.clone());
+    if let Some(spec_draft_model) = params.spec_draft_model.as_deref() {
+        environment.insert("SPEC_DRAFT_MODEL".into(), spec_draft_model.to_string());
+        environment.insert("SPEC_STRATEGY".into(), params.spec_strategy.clone());
+        environment.insert(
+            "SPEC_INITIAL_WINDOW".into(),
+            params.spec_initial_window.to_string(),
+        );
+        environment.insert("SPEC_MIN_WINDOW".into(), params.spec_min_window.to_string());
+        environment.insert("SPEC_MAX_WINDOW".into(), params.spec_max_window.to_string());
+    }
     environment.insert(
         "CATALOG_CREATE_PR".into(),
         if permissions.catalog_create_pr {
@@ -246,6 +263,41 @@ pub async fn resolve(
         job_plan,
         spec,
     })
+}
+
+fn validate_speculative_params(params: &PrepareParams) -> Result<()> {
+    let Some(draft_model) = params.spec_draft_model.as_deref() else {
+        return Ok(());
+    };
+    ensure!(
+        !draft_model.trim().is_empty(),
+        "--spec-draft-model must not be empty when set"
+    );
+    ensure!(
+        !params.spec_strategy.trim().is_empty(),
+        "--spec-strategy must not be empty"
+    );
+    ensure!(
+        params.spec_min_window > 0,
+        "--spec-min-window must be greater than zero"
+    );
+    ensure!(
+        params.spec_initial_window > 0,
+        "--spec-initial-window must be greater than zero"
+    );
+    ensure!(
+        params.spec_max_window > 0,
+        "--spec-max-window must be greater than zero"
+    );
+    ensure!(
+        params.spec_min_window <= params.spec_initial_window,
+        "--spec-min-window must not exceed --spec-initial-window"
+    );
+    ensure!(
+        params.spec_initial_window <= params.spec_max_window,
+        "--spec-initial-window must not exceed --spec-max-window"
+    );
+    Ok(())
 }
 
 /// Format a byte count as a human-readable size.
@@ -312,5 +364,78 @@ mod tests {
             .map(|quant| quant.name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["Q4_K_M", "Q8_0"]);
+    }
+
+    #[test]
+    fn speculative_env_is_present_only_when_draft_model_is_set() {
+        let params = PrepareParams {
+            source_repo: "unsloth/Llama-3.3-70B-Instruct-GGUF".to_string(),
+            quant: Some("Q3_K_M".to_string()),
+            target: None,
+            model_id: None,
+            spec_draft_model: Some("unsloth/Llama-3.2-1B-Instruct-GGUF:Q4_K_M".to_string()),
+            spec_strategy: "llama32-1b-q4".to_string(),
+            spec_initial_window: 16,
+            spec_min_window: 2,
+            spec_max_window: 16,
+            flavor: "auto".to_string(),
+            timeout_seconds: 3600,
+            mesh_llm_ref: "main".to_string(),
+            hf_token: None,
+        };
+
+        let mut environment = HashMap::new();
+        if let Some(spec_draft_model) = params.spec_draft_model.as_deref() {
+            environment.insert("SPEC_DRAFT_MODEL".to_string(), spec_draft_model.to_string());
+            environment.insert("SPEC_STRATEGY".to_string(), params.spec_strategy.clone());
+            environment.insert(
+                "SPEC_INITIAL_WINDOW".to_string(),
+                params.spec_initial_window.to_string(),
+            );
+            environment.insert(
+                "SPEC_MIN_WINDOW".to_string(),
+                params.spec_min_window.to_string(),
+            );
+            environment.insert(
+                "SPEC_MAX_WINDOW".to_string(),
+                params.spec_max_window.to_string(),
+            );
+        }
+
+        assert_eq!(
+            environment.get("SPEC_DRAFT_MODEL").map(String::as_str),
+            Some("unsloth/Llama-3.2-1B-Instruct-GGUF:Q4_K_M")
+        );
+        assert_eq!(
+            environment.get("SPEC_STRATEGY").map(String::as_str),
+            Some("llama32-1b-q4")
+        );
+        assert_eq!(
+            environment.get("SPEC_INITIAL_WINDOW").map(String::as_str),
+            Some("16")
+        );
+        validate_speculative_params(&params).unwrap();
+    }
+
+    #[test]
+    fn speculative_window_validation_rejects_inverted_range() {
+        let params = PrepareParams {
+            source_repo: "unsloth/Llama-3.3-70B-Instruct-GGUF".to_string(),
+            quant: Some("Q3_K_M".to_string()),
+            target: None,
+            model_id: None,
+            spec_draft_model: Some("unsloth/Llama-3.2-1B-Instruct-GGUF:Q4_K_M".to_string()),
+            spec_strategy: "draft".to_string(),
+            spec_initial_window: 1,
+            spec_min_window: 2,
+            spec_max_window: 16,
+            flavor: "auto".to_string(),
+            timeout_seconds: 3600,
+            mesh_llm_ref: "main".to_string(),
+            hf_token: None,
+        };
+
+        let err = validate_speculative_params(&params).unwrap_err();
+        assert!(err.to_string().contains("--spec-min-window"));
     }
 }

@@ -275,12 +275,73 @@ multimodal model:
 Consumers MUST NOT infer projector identity from sibling files or filename
 stems. If a package needs a projector, the manifest must declare it explicitly.
 
+### Generation Capabilities
+
+`generation` is optional and defaults to no package-declared generation
+extensions. It describes capabilities and safe runtime policy defaults. It MUST
+NOT contain benchmark results. Benchmark evidence belongs in experiment
+artifacts, release notes, or documentation, not in `model-package.json`.
+
+For speculative decoding, the recommended shape is:
+
+```json
+{
+  "generation": {
+    "speculative_decoding": {
+      "default": "llama32-1b-q4",
+      "strategies": {
+        "llama32-1b-q4": {
+          "type": "draft-model",
+          "draft_model": "unsloth/Llama-3.2-1B-Instruct-GGUF:Q4_K_M@<revision>",
+          "window_policy": {
+            "default": "adaptive",
+            "initial_window": 16,
+            "min_window": 2,
+            "max_window": 16
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+The selected strategy's presence means the package declares support for that
+strategy. There is no separate `compatible` boolean. `draft_model` is a normal
+model resolver ref, including a pinned revision when the package publisher wants
+reproducible downloads. Runtimes should resolve and cache the draft model using
+the same model download path as ordinary model artifacts.
+
+Runtime policy should still be able to disable speculation for user choice,
+unsupported hardware/topology, missing draft artifacts, or internal safety
+guards. Those controls are runtime behavior and should not be encoded as
+manifest fallback thresholds.
+
+Serving configuration should use the existing `[defaults.speculative]` and
+`[models.speculative]` control surface. In `mode = "auto"`, package-declared
+defaults may be used when available and resolvable. In `mode = "disabled"`,
+package-declared speculation is not used. `package_strategy = "default"` uses
+the manifest default, and any other value selects a named package strategy.
+There is no separate `required` mode.
+
 ## Publishing Rules
 
 Package creation SHOULD use:
 
 ```bash
 skippy-model-package write-package org/repo:distribution --out-dir model-package/
+```
+
+Packages with a known-good draft pair SHOULD declare it at write time:
+
+```bash
+skippy-model-package write-package org/repo:distribution \
+  --spec-draft-model unsloth/Llama-3.2-1B-Instruct-GGUF:Q4_K_M \
+  --spec-strategy llama32-1b-q4 \
+  --spec-initial-window 16 \
+  --spec-min-window 2 \
+  --spec-max-window 16 \
+  --out-dir model-package/
 ```
 
 Multimodal packages SHOULD declare projector artifacts at write time:

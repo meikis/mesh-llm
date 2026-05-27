@@ -234,7 +234,7 @@ impl ResolvedSkippyConfig {
             } else {
                 0
             },
-            adaptive_speculative_window: false,
+            adaptive_speculative_window: mode == "draft" && self.speculative.adaptive_window,
             draft_n_gpu_layers: if mode == "draft" {
                 self.speculative.draft_n_gpu_layers
             } else {

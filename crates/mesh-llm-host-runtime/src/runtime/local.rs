@@ -1205,7 +1205,7 @@ async fn load_split_runtime_generation_inner(
     spec: &SplitGenerationLoadSpec<'_>,
     cleanup_on_error: &mut bool,
 ) -> Result<SplitRuntimeGenerationHandle> {
-    let settings = split_generation_load_settings(spec)?;
+    let settings = split_generation_load_settings(spec).await?;
     anyhow::ensure!(
         settings.stage0.node_id == spec.node.id(),
         "split topology stage 0 moved to {}; local coordinator is {}",
@@ -1512,7 +1512,7 @@ fn split_runtime_stage_upstream(
     })
 }
 
-fn split_generation_load_settings<'a>(
+async fn split_generation_load_settings<'a>(
     spec: &'a SplitGenerationLoadSpec<'_>,
 ) -> Result<SplitGenerationLoadSettings<'a>> {
     let stage0 = spec
@@ -1554,6 +1554,7 @@ fn split_generation_load_settings<'a>(
     if let Some(gpu) = spec.pinned_gpu {
         resolved.hardware.device = Some(gpu.backend_device.clone());
     }
+    apply_package_speculative_defaults(&mut resolved, spec.package).await?;
     let embedded_openai = resolved.to_embedded_openai_args(activation_width, true)?;
     let runtime_options = resolved.to_embedded_runtime_options(
         &spec.skippy_telemetry,
@@ -1574,6 +1575,97 @@ fn split_generation_load_settings<'a>(
         activation_width,
         activation_wire_dtype: resolved.skippy.activation_wire_dtype,
     })
+}
+
+async fn apply_package_speculative_defaults(
+    resolved: &mut skippy::ResolvedSkippyConfig,
+    package: &skippy::SkippyPackageIdentity,
+) -> Result<()> {
+    if resolved.speculative.explicit || resolved.speculative.mode == "draft" {
+        return Ok(());
+    }
+    let Some(config) = package.speculative_decoding.as_ref() else {
+        return Ok(());
+    };
+    let Some(strategy_name) = selected_package_speculative_strategy(config, resolved) else {
+        return Ok(());
+    };
+    let Some(strategy) = config.strategies.get(&strategy_name) else {
+        anyhow::bail!(
+            "speculative decoding strategy '{strategy_name}' is not declared by package {}",
+            package.package_ref
+        );
+    };
+    if strategy.strategy_type != "draft-model" {
+        tracing::warn!(
+            package_ref = package.package_ref,
+            strategy = strategy_name,
+            strategy_type = strategy.strategy_type,
+            "package speculative strategy is not supported by the embedded Skippy runtime"
+        );
+        return Ok(());
+    }
+    let draft_ref = strategy
+        .draft_model
+        .as_deref()
+        .context("draft-model speculative strategy is missing draft_model")?;
+    let draft_path = match models::download_model_ref_with_progress_details(draft_ref, true).await {
+        Ok((path, _)) => path,
+        Err(error) => {
+            tracing::warn!(
+                package_ref = package.package_ref,
+                strategy = strategy_name,
+                draft_ref,
+                error = %error,
+                "package draft model could not be resolved; starting without speculative decoding"
+            );
+            return Ok(());
+        }
+    };
+    let window = speculative_strategy_window(strategy)?;
+    let adaptive = strategy
+        .window_policy
+        .as_ref()
+        .and_then(|policy| policy.default.as_deref())
+        == Some("adaptive");
+    resolved.speculative.mode = "draft".to_string();
+    resolved.speculative.draft_model_path = Some(draft_path.clone());
+    resolved.speculative.draft_max_tokens = window;
+    resolved.speculative.adaptive_window = adaptive;
+    resolved.speculative.draft_n_gpu_layers = None;
+    tracing::info!(
+        package_ref = package.package_ref,
+        strategy = strategy_name,
+        draft_ref,
+        draft_path = %draft_path.display(),
+        window,
+        adaptive,
+        "enabled package-declared draft speculative decoding"
+    );
+    Ok(())
+}
+
+fn selected_package_speculative_strategy(
+    config: &skippy_runtime::package::SpeculativeDecodingConfig,
+    resolved: &skippy::ResolvedSkippyConfig,
+) -> Option<String> {
+    match resolved.speculative.package_strategy.as_deref() {
+        Some("default") | None => config.default.clone(),
+        Some(strategy) => Some(strategy.to_string()),
+    }
+}
+
+fn speculative_strategy_window(
+    strategy: &skippy_runtime::package::SpeculativeStrategyConfig,
+) -> Result<u32> {
+    let Some(policy) = strategy.window_policy.as_ref() else {
+        return Ok(0);
+    };
+    Ok(policy
+        .initial_window
+        .or(policy.fixed_default_window)
+        .or(policy.max_window)
+        .unwrap_or(0))
 }
 
 fn split_generation_load_mode(package: &skippy::SkippyPackageIdentity) -> LoadMode {
@@ -3629,7 +3721,7 @@ async fn start_runtime_layer_package_model(
 )> {
     let context_length = plan.context_length;
     let fallback_projector_path = mmproj_path_for_model(&model_name).filter(|path| path.exists());
-    let resolved = resolve_runtime_skippy_config(
+    let mut resolved = resolve_runtime_skippy_config(
         &spec,
         &model_name,
         package.source_model_bytes,
@@ -3637,6 +3729,7 @@ async fn start_runtime_layer_package_model(
         plan.slots,
         fallback_projector_path,
     )?;
+    apply_package_speculative_defaults(&mut resolved, &package).await?;
     tracing::info!(
         model = model_name,
         "KV cache: {} K + {} V, {}K context",
@@ -3809,7 +3902,32 @@ mod tests {
             layer_count,
             activation_width: 2048,
             tensor_count: 100,
+            speculative_decoding: None,
         }
+    }
+
+    fn draft_spec_strategy() -> skippy_runtime::package::SpeculativeStrategyConfig {
+        skippy_runtime::package::SpeculativeStrategyConfig {
+            strategy_type: "draft-model".to_string(),
+            draft_model: Some("unsloth/Llama-3.2-1B-Instruct-GGUF:Q4_K_M@abc123".to_string()),
+            model_family: None,
+            window_policy: Some(skippy_runtime::package::SpeculativeWindowPolicyConfig {
+                default: Some("adaptive".to_string()),
+                fixed_default_window: None,
+                initial_window: Some(16),
+                min_window: Some(2),
+                max_window: Some(16),
+                adaptive: None,
+            }),
+            identity: None,
+        }
+    }
+
+    #[test]
+    fn package_speculative_window_uses_adaptive_initial_window() {
+        let strategy = draft_spec_strategy();
+
+        assert_eq!(speculative_strategy_window(&strategy).unwrap(), 16);
     }
 
     fn stage_load_request(load_mode: LoadMode) -> skippy::StageLoadRequest {
@@ -4177,8 +4295,9 @@ stop = ["END"]
             skippy_telemetry: skippy::SkippyTelemetryOptions::off(),
             survey_telemetry: survey::SurveyTelemetry::disabled(),
         };
-        let settings =
-            split_generation_load_settings(&spec).expect("split settings should resolve");
+        let settings = split_generation_load_settings(&spec)
+            .await
+            .expect("split settings should resolve");
 
         assert_eq!(settings.load_mode, LoadMode::LayerPackage);
         assert_eq!(settings.activation_width, 2048);

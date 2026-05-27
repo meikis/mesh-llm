@@ -75,6 +75,16 @@ enum Command {
         source_revision: Option<String>,
         #[arg(long)]
         source_file: Option<String>,
+        #[arg(long = "spec-draft-model")]
+        spec_draft_model: Option<String>,
+        #[arg(long = "spec-strategy", default_value = "draft")]
+        spec_strategy: String,
+        #[arg(long = "spec-initial-window", default_value_t = 16)]
+        spec_initial_window: u32,
+        #[arg(long = "spec-min-window", default_value_t = 2)]
+        spec_min_window: u32,
+        #[arg(long = "spec-max-window", default_value_t = 16)]
+        spec_max_window: u32,
     },
     Validate {
         full: PathBuf,
@@ -180,12 +190,75 @@ struct PackageManifest {
     layer_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     activation_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation: Option<PackageGeneration>,
     shared: PackageShared,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     projectors: Vec<PackageProjector>,
     layers: Vec<PackageLayer>,
     skippy_abi_version: String,
     created_at_unix_secs: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PackageGeneration {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    speculative_decoding: Option<PackageSpeculativeDecoding>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PackageSpeculativeDecoding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default: Option<String>,
+    #[serde(default)]
+    strategies: BTreeMap<String, PackageSpeculativeStrategy>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PackageSpeculativeStrategy {
+    #[serde(rename = "type")]
+    strategy_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    draft_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    window_policy: Option<PackageSpeculativeWindowPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    identity: Option<PackageSpeculativeIdentity>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PackageSpeculativeWindowPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fixed_default_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    initial_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    min_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adaptive: Option<PackageSpeculativeAdaptiveWindow>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PackageSpeculativeAdaptiveWindow {
+    supported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    initial_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    min_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_window: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PackageSpeculativeIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_model_sha256: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -314,6 +387,15 @@ struct ExplicitSourceIdentity {
 }
 
 #[derive(Debug)]
+struct PackageSpeculativeOptions {
+    draft_model: Option<String>,
+    strategy: String,
+    initial_window: u32,
+    min_window: u32,
+    max_window: u32,
+}
+
+#[derive(Debug)]
 struct PackageInput {
     model_path: PathBuf,
     model_id: String,
@@ -372,6 +454,11 @@ fn main() -> Result<()> {
             source_repo,
             source_revision,
             source_file,
+            spec_draft_model,
+            spec_strategy,
+            spec_initial_window,
+            spec_min_window,
+            spec_max_window,
         } => write_package(
             model,
             out_dir,
@@ -384,6 +471,13 @@ fn main() -> Result<()> {
                 source_repo,
                 source_revision,
                 source_file,
+            },
+            PackageSpeculativeOptions {
+                draft_model: spec_draft_model,
+                strategy: spec_strategy,
+                initial_window: spec_initial_window,
+                min_window: spec_min_window,
+                max_window: spec_max_window,
             },
         ),
         Command::Validate { full, slices } => validate(full, slices),
@@ -475,12 +569,73 @@ fn write_stages(model: PathBuf, stages: usize, out_dir: PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn package_generation(options: PackageSpeculativeOptions) -> Result<Option<PackageGeneration>> {
+    let Some(draft_model) = options.draft_model else {
+        return Ok(None);
+    };
+    ensure!(
+        !draft_model.trim().is_empty(),
+        "--spec-draft-model must not be empty when set"
+    );
+    ensure!(
+        !options.strategy.trim().is_empty(),
+        "--spec-strategy must not be empty"
+    );
+    ensure!(
+        options.min_window > 0,
+        "--spec-min-window must be greater than zero"
+    );
+    ensure!(
+        options.initial_window > 0,
+        "--spec-initial-window must be greater than zero"
+    );
+    ensure!(
+        options.max_window > 0,
+        "--spec-max-window must be greater than zero"
+    );
+    ensure!(
+        options.min_window <= options.initial_window,
+        "--spec-min-window must not exceed --spec-initial-window"
+    );
+    ensure!(
+        options.initial_window <= options.max_window,
+        "--spec-initial-window must not exceed --spec-max-window"
+    );
+
+    let mut strategies = BTreeMap::new();
+    strategies.insert(
+        options.strategy.clone(),
+        PackageSpeculativeStrategy {
+            strategy_type: "draft-model".to_string(),
+            draft_model: Some(draft_model),
+            model_family: None,
+            window_policy: Some(PackageSpeculativeWindowPolicy {
+                default: Some("adaptive".to_string()),
+                fixed_default_window: None,
+                initial_window: Some(options.initial_window),
+                min_window: Some(options.min_window),
+                max_window: Some(options.max_window),
+                adaptive: None,
+            }),
+            identity: None,
+        },
+    );
+
+    Ok(Some(PackageGeneration {
+        speculative_decoding: Some(PackageSpeculativeDecoding {
+            default: Some(options.strategy),
+            strategies,
+        }),
+    }))
+}
+
 fn write_package(
     model: String,
     out_dir: PathBuf,
     projectors: Vec<PathBuf>,
     artifact_hook: ArtifactHook,
     explicit: ExplicitSourceIdentity,
+    speculative: PackageSpeculativeOptions,
 ) -> Result<()> {
     let input = resolve_package_input(model, explicit)?;
     fs::create_dir_all(&out_dir)
@@ -594,6 +749,7 @@ fn write_package(
         format: "layer-package".to_string(),
         layer_count,
         activation_width: Some(activation_width),
+        generation: package_generation(speculative)?,
         shared: PackageShared {
             metadata,
             embeddings,
@@ -1824,8 +1980,9 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExplicitSourceIdentity, activation_width, local_artifact_files, model_distribution_id,
-        resolve_gguf_shard_paths, resolve_local_package_input,
+        ExplicitSourceIdentity, PackageSpeculativeOptions, activation_width, local_artifact_files,
+        model_distribution_id, package_generation, resolve_gguf_shard_paths,
+        resolve_local_package_input,
     };
     use std::path::{Path, PathBuf};
 
@@ -1849,6 +2006,33 @@ mod tests {
                 .unwrap_err();
 
         assert!(error.to_string().contains("requires --model-id"));
+    }
+
+    #[test]
+    fn package_generation_emits_default_draft_strategy() {
+        let generation = package_generation(PackageSpeculativeOptions {
+            draft_model: Some("unsloth/Llama-3.2-1B-Instruct-GGUF:Q4_K_M@abc123".to_string()),
+            strategy: "llama32-1b-q4".to_string(),
+            initial_window: 16,
+            min_window: 2,
+            max_window: 16,
+        })
+        .unwrap()
+        .unwrap();
+
+        let speculative = generation.speculative_decoding.unwrap();
+        assert_eq!(speculative.default.as_deref(), Some("llama32-1b-q4"));
+        let strategy = speculative.strategies.get("llama32-1b-q4").unwrap();
+        assert_eq!(strategy.strategy_type, "draft-model");
+        assert_eq!(
+            strategy.draft_model.as_deref(),
+            Some("unsloth/Llama-3.2-1B-Instruct-GGUF:Q4_K_M@abc123")
+        );
+        let policy = strategy.window_policy.as_ref().unwrap();
+        assert_eq!(policy.default.as_deref(), Some("adaptive"));
+        assert_eq!(policy.initial_window, Some(16));
+        assert_eq!(policy.min_window, Some(2));
+        assert_eq!(policy.max_window, Some(16));
     }
 
     #[test]

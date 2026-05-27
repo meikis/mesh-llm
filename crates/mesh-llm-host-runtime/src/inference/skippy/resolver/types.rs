@@ -88,9 +88,11 @@ pub(crate) struct ResolvedSkippyExecutionConfig {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ResolvedSpeculativeConfig {
     pub(crate) mode: String,
+    pub(crate) package_strategy: Option<String>,
     pub(crate) draft_model_path: Option<PathBuf>,
     pub(crate) pairing_fault: String,
     pub(crate) draft_max_tokens: u32,
+    pub(crate) adaptive_window: bool,
     pub(crate) explicit: bool,
     pub(crate) draft_n_gpu_layers: Option<i32>,
 }

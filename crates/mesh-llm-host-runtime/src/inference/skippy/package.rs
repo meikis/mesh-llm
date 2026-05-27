@@ -7,6 +7,7 @@ use std::{
 use anyhow::{Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use skippy_runtime::package::SpeculativeDecodingConfig;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkippyPackageIdentity {
@@ -19,6 +20,7 @@ pub struct SkippyPackageIdentity {
     pub layer_count: u32,
     pub activation_width: u32,
     pub tensor_count: u64,
+    pub speculative_decoding: Option<SpeculativeDecodingConfig>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -109,6 +111,7 @@ pub fn synthetic_direct_gguf_package(
         layer_count: compact.layer_count,
         activation_width: compact.embedding_size,
         tensor_count,
+        speculative_decoding: None,
     })
 }
 
@@ -328,6 +331,7 @@ pub fn identity_from_layer_package(package_ref: &str) -> Result<SkippyPackageIde
         layer_count: info.layer_count,
         activation_width,
         tensor_count: info.layers.iter().map(|l| l.tensor_count as u64).sum(),
+        speculative_decoding: info.speculative_decoding,
     })
 }
 

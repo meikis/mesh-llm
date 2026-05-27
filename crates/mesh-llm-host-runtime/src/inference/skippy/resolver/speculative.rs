@@ -95,6 +95,10 @@ pub(super) fn resolve_speculative_config(
     }
 
     let mut mode = mode;
+    let package_strategy = pick_owned(
+        model_config.and_then(|config| config.package_strategy.clone()),
+        global_config.and_then(|config| config.package_strategy.clone()),
+    );
     let mut draft_model_path = pick_owned(
         model_config.and_then(|config| config.draft_model_path.clone()),
         global_config.and_then(|config| config.draft_model_path.clone()),
@@ -147,9 +151,11 @@ pub(super) fn resolve_speculative_config(
     }
     Ok(ResolvedSpeculativeConfig {
         mode,
+        package_strategy,
         draft_model_path,
         pairing_fault,
         draft_max_tokens,
+        adaptive_window: false,
         explicit,
         draft_n_gpu_layers,
     })

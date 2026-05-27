@@ -6,6 +6,8 @@ set -euo pipefail
 #
 # Environment variables (set by mesh-llm model-package job spec):
 #   SOURCE_REPO, SOURCE_FILE, SOURCE_QUANT, TARGET_REPO, MODEL_ID, SOURCE_REVISION
+#   SPEC_DRAFT_MODEL, SPEC_STRATEGY, SPEC_INITIAL_WINDOW, SPEC_MIN_WINDOW,
+#   SPEC_MAX_WINDOW — optional package-declared draft-model speculation
 #   MESH_LLM_REF — git ref to build from (default: main)
 #   CATALOG_CREATE_PR — "true" to open a PR for catalog updates (non-org members)
 #   HF_TOKEN — injected as a secret by HF Jobs
@@ -32,6 +34,9 @@ echo "║  Quant:  ${SOURCE_QUANT}"
 echo "║  Target: ${TARGET_REPO}"
 echo "║  Model:  ${MODEL_ID}"
 echo "║  Build:  mesh-llm @ ${MESH_LLM_REF}"
+if [ -n "${SPEC_DRAFT_MODEL:-}" ]; then
+    echo "║  Draft:  ${SPEC_DRAFT_MODEL}"
+fi
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -287,6 +292,16 @@ else
     WRITE_PACKAGE_IDENTITY_ARGS=()
     echo "  Source mount: not available; falling back to Hugging Face cache download"
 fi
+WRITE_PACKAGE_SPEC_ARGS=()
+if [ -n "${SPEC_DRAFT_MODEL:-}" ]; then
+    WRITE_PACKAGE_SPEC_ARGS=(
+        --spec-draft-model "$SPEC_DRAFT_MODEL"
+        --spec-strategy "${SPEC_STRATEGY:-draft}"
+        --spec-initial-window "${SPEC_INITIAL_WINDOW:-16}"
+        --spec-min-window "${SPEC_MIN_WINDOW:-2}"
+        --spec-max-window "${SPEC_MAX_WINDOW:-16}"
+    )
+fi
 echo "  Hugging Face cache: $HF_HUB_CACHE"
 echo "  Package workspace: $PACKAGE_DIR"
 echo "  Temporary workspace: $TMPDIR"
@@ -309,7 +324,8 @@ set +e
 time "$SLICER" write-package "$WRITE_PACKAGE_INPUT" \
     --out-dir "$PACKAGE_DIR" \
     --after-artifact-command "$ARTIFACT_UPLOAD_HOOK" \
-    "${WRITE_PACKAGE_IDENTITY_ARGS[@]}"
+    "${WRITE_PACKAGE_IDENTITY_ARGS[@]}" \
+    "${WRITE_PACKAGE_SPEC_ARGS[@]}"
 WRITE_PACKAGE_STATUS=$?
 set -e
 stop_heartbeat

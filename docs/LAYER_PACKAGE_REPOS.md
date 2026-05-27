@@ -75,6 +75,14 @@ Important options:
 
 - `--target <repo>`: destination Hugging Face package repo.
 - `--model-id <id>`: OpenAI-facing package model id.
+- `--spec-draft-model <ref>`: declare a package default draft model for
+  speculative decoding, using a normal model ref such as
+  `unsloth/Llama-3.2-1B-Instruct-GGUF:Q4_K_M`.
+- `--spec-strategy <name>`: name for that package-declared strategy, defaulting
+  to `draft`.
+- `--spec-initial-window <n>`, `--spec-min-window <n>`,
+  `--spec-max-window <n>`: adaptive speculative window defaults recorded in
+  `model-package.json`.
 - `--timeout <duration>`: HF Jobs timeout, defaulting to `1h` unless raised by
   size-based estimates.
 - `--dry-run`: print the resolved package plan and maximum cost without side effects.

@@ -55,6 +55,63 @@ pub struct LayerPackageInfo {
     pub activation_width: Option<u32>,
     pub projectors: Vec<PackageProjectorInfo>,
     pub layers: Vec<LayerPackageLayerInfo>,
+    pub generation: Option<serde_json::Value>,
+    pub speculative_decoding: Option<SpeculativeDecodingConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SpeculativeDecodingConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    #[serde(default)]
+    pub strategies: BTreeMap<String, SpeculativeStrategyConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SpeculativeStrategyConfig {
+    #[serde(rename = "type")]
+    pub strategy_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_policy: Option<SpeculativeWindowPolicyConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<SpeculativeIdentityConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SpeculativeWindowPolicyConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_default_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive: Option<SpeculativeAdaptiveWindowConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SpeculativeAdaptiveWindowConfig {
+    pub supported: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_window: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SpeculativeIdentityConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_model_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +196,8 @@ struct PackageManifest {
     layer_count: u32,
     #[serde(default)]
     activation_width: Option<u32>,
+    #[serde(default)]
+    generation: Option<serde_json::Value>,
     shared: PackageShared,
     #[serde(default)]
     projectors: Vec<PackageProjector>,
@@ -442,6 +501,12 @@ pub fn inspect_layer_package(package_ref: &str) -> Result<LayerPackageInfo> {
         Some(width) => Some(width),
         None => infer_activation_width_from_layers(&package_dir, &manifest.layers)?,
     };
+    let generation = manifest.generation;
+    let speculative_decoding = generation
+        .as_ref()
+        .and_then(|value| value.get("speculative_decoding"))
+        .map(parse_speculative_decoding)
+        .transpose()?;
 
     Ok(LayerPackageInfo {
         package_dir,
@@ -476,7 +541,108 @@ pub fn inspect_layer_package(package_ref: &str) -> Result<LayerPackageInfo> {
                 artifact_bytes: layer.artifact_bytes,
             })
             .collect(),
+        generation,
+        speculative_decoding,
     })
+}
+
+fn parse_speculative_decoding(value: &serde_json::Value) -> Result<SpeculativeDecodingConfig> {
+    let config: SpeculativeDecodingConfig = serde_json::from_value(value.clone())?;
+    validate_speculative_decoding(&config)?;
+    Ok(config)
+}
+
+fn validate_speculative_decoding(config: &SpeculativeDecodingConfig) -> Result<()> {
+    if let Some(default) = config.default.as_deref()
+        && !config.strategies.contains_key(default)
+    {
+        bail!("speculative_decoding.default references missing strategy '{default}'");
+    }
+    for (name, strategy) in &config.strategies {
+        if name.trim().is_empty() {
+            bail!("speculative strategy names must not be empty");
+        }
+        match strategy.strategy_type.as_str() {
+            "draft-model" => {
+                let Some(draft_model) = strategy.draft_model.as_deref() else {
+                    bail!("draft-model speculative strategy '{name}' must declare draft_model");
+                };
+                if draft_model.trim().is_empty() {
+                    bail!(
+                        "draft-model speculative strategy '{name}' draft_model must not be empty"
+                    );
+                }
+            }
+            "ngram" => {}
+            unknown => bail!("unsupported speculative strategy type '{unknown}'"),
+        }
+        validate_window_policy(name, strategy.window_policy.as_ref())?;
+    }
+    Ok(())
+}
+
+fn validate_window_policy(
+    name: &str,
+    policy: Option<&SpeculativeWindowPolicyConfig>,
+) -> Result<()> {
+    let Some(policy) = policy else {
+        return Ok(());
+    };
+    if let Some(window) = policy.fixed_default_window
+        && window == 0
+    {
+        bail!("speculative strategy '{name}' fixed_default_window must be greater than zero");
+    }
+    if let Some(window) = policy.initial_window
+        && window == 0
+    {
+        bail!("speculative strategy '{name}' initial_window must be greater than zero");
+    }
+    if let Some(window) = policy.min_window
+        && window == 0
+    {
+        bail!("speculative strategy '{name}' min_window must be greater than zero");
+    }
+    if let Some(window) = policy.max_window
+        && window == 0
+    {
+        bail!("speculative strategy '{name}' max_window must be greater than zero");
+    }
+    if let (Some(min), Some(max)) = (policy.min_window, policy.max_window)
+        && min > max
+    {
+        bail!("speculative strategy '{name}' min_window must not exceed max_window");
+    }
+    if let (Some(initial), Some(min)) = (policy.initial_window, policy.min_window)
+        && initial < min
+    {
+        bail!("speculative strategy '{name}' initial_window must not be less than min_window");
+    }
+    if let (Some(initial), Some(max)) = (policy.initial_window, policy.max_window)
+        && initial > max
+    {
+        bail!("speculative strategy '{name}' initial_window must not exceed max_window");
+    }
+    if let Some(adaptive) = &policy.adaptive {
+        if let Some(window) = adaptive.min_window
+            && window == 0
+        {
+            bail!("speculative strategy '{name}' adaptive.min_window must be greater than zero");
+        }
+        if let Some(window) = adaptive.initial_window
+            && window == 0
+        {
+            bail!(
+                "speculative strategy '{name}' adaptive.initial_window must be greater than zero"
+            );
+        }
+        if let Some(window) = adaptive.max_window
+            && window == 0
+        {
+            bail!("speculative strategy '{name}' adaptive.max_window must be greater than zero");
+        }
+    }
+    Ok(())
 }
 
 fn infer_activation_width_from_layers(
@@ -1147,6 +1313,23 @@ mod tests {
             "format": "layer-package",
             "layer_count": 1,
             "activation_width": 4096,
+            "generation": {
+                "speculative_decoding": {
+                    "default": "draft",
+                    "strategies": {
+                        "draft": {
+                            "type": "draft-model",
+                            "draft_model": "unsloth/Llama-3.2-1B-Instruct-GGUF:Q4_K_M@abcdef",
+                            "window_policy": {
+                                "default": "adaptive",
+                                "initial_window": 16,
+                                "min_window": 2,
+                                "max_window": 16
+                            }
+                        }
+                    }
+                }
+            },
             "shared": {
                 "metadata": {
                     "path": "metadata.gguf",
@@ -1386,6 +1569,20 @@ mod tests {
         assert_eq!(info.model_id, "model-a");
         assert_eq!(info.layer_count, 1);
         assert_eq!(info.activation_width, Some(4096));
+        assert_eq!(
+            info.generation
+                .as_ref()
+                .and_then(|generation| generation.pointer("/speculative_decoding/default"))
+                .and_then(serde_json::Value::as_str),
+            Some("draft")
+        );
+        let speculative = info.speculative_decoding.as_ref().unwrap();
+        let draft = speculative.strategies.get("draft").unwrap();
+        assert_eq!(draft.strategy_type, "draft-model");
+        assert_eq!(
+            draft.draft_model.as_deref(),
+            Some("unsloth/Llama-3.2-1B-Instruct-GGUF:Q4_K_M@abcdef")
+        );
         assert_eq!(info.source_model_bytes, Some(123));
         assert_eq!(info.projectors.len(), 1);
         assert_eq!(info.projectors[0].kind, "mmproj");

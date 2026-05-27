@@ -28,6 +28,7 @@ fn fake_package_identity(layer_count: u32) -> SkippyPackageIdentity {
         layer_count,
         activation_width: 4096,
         tensor_count: 100,
+        speculative_decoding: None,
     }
 }
 

@@ -74,6 +74,18 @@ them into `projectors/`, fingerprints them, records them as `kind: "mmproj"` in
 checksums and sizes. Package-backed serving uses the first declared projector
 when no explicit `projector_path` is supplied by the caller.
 
+Packages can also declare a default draft-model speculative decoding strategy:
+
+```bash
+skippy-model-package write-package org/repo:Q3_K_M \
+  --out-dir model-package/ \
+  --spec-draft-model unsloth/Llama-3.2-1B-Instruct-GGUF:Q4_K_M \
+  --spec-strategy llama32-1b-q4 \
+  --spec-initial-window 16 \
+  --spec-min-window 2 \
+  --spec-max-window 16
+```
+
 Local paths are only accepted for package creation when the caller supplies
 explicit provenance:
 

@@ -23,6 +23,7 @@ WORKSPACE_MEMBERS=(
   "mesh-llm-ui"
   "mesh-llm-plugin"
   "mesh-llm-plugin-blackboard"
+  "mesh-llm-plugin-manager"
   "mesh-llm-client"
   "mesh-llm-api-client"
   "mesh-llm-api-server"
@@ -141,6 +142,7 @@ weights = {
     "mesh-llm-types": 2,
     "mesh-llm-ui": 2,
     "mesh-llm-plugin": 2,
+    "mesh-llm-plugin-manager": 1,
     "mesh-llm-node": 2,
     "mesh-llm-nodejs": 2,
     "skippy-protocol": 2,

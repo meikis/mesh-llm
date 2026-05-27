@@ -3909,6 +3909,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mesh-llm-plugin-manager"
+version = "0.66.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "mesh-llm-protocol"
 version = "0.66.0"
 dependencies = [

@@ -4,6 +4,7 @@ use super::{
 };
 use anyhow::{Context, Result, bail};
 use mesh_llm_plugin::MeshVisibility;
+use mesh_llm_plugin_manager::{InstalledPluginMetadata, PluginStore, default_store_root};
 use serde::{Deserialize, Serialize};
 use skippy_protocol::FlashAttentionType;
 use std::collections::BTreeMap;
@@ -1890,7 +1891,7 @@ pub(crate) fn telemetry_plugin_enabled(config: &MeshConfig) -> bool {
 
 pub fn resolve_plugins(config: &MeshConfig, _host_mode: PluginHostMode) -> Result<ResolvedPlugins> {
     let mut externals = Vec::new();
-    let inactive = Vec::new();
+    let mut inactive = Vec::new();
     let mut names = BTreeMap::<String, ()>::new();
     let mut blackboard_enabled = true;
     let mut blobstore_enabled = true;
@@ -1969,11 +1970,17 @@ pub fn resolve_plugins(config: &MeshConfig, _host_mode: PluginHostMode) -> Resul
         });
     }
 
+    let installed_blackboard = append_installed_plugins(&mut externals, &mut inactive, &mut names);
+    if installed_blackboard {
+        blackboard_enabled = false;
+    }
+
     if blackboard_enabled {
         externals.insert(0, blackboard_plugin_spec()?);
     }
     if telemetry_enabled {
-        let insert_at = usize::from(blackboard_enabled).min(externals.len());
+        let insert_at =
+            usize::from(blackboard_enabled || installed_blackboard).min(externals.len());
         externals.insert(insert_at, telemetry_plugin_spec()?);
     }
     if openai_endpoint_enabled {
@@ -1992,6 +1999,117 @@ pub fn resolve_plugins(config: &MeshConfig, _host_mode: PluginHostMode) -> Resul
         externals,
         inactive,
     })
+}
+
+fn append_installed_plugins(
+    externals: &mut Vec<ExternalPluginSpec>,
+    inactive: &mut Vec<PluginSummary>,
+    names: &mut BTreeMap<String, ()>,
+) -> bool {
+    let Ok(root) = default_store_root() else {
+        return false;
+    };
+    let store = PluginStore::new(root);
+    let installed = match store.list() {
+        Ok(installed) => installed,
+        Err(error) => {
+            inactive.push(installed_store_error_summary(error));
+            return false;
+        }
+    };
+
+    let mut installed_blackboard = false;
+    for metadata in installed {
+        if names.contains_key(&metadata.name) {
+            continue;
+        }
+        names.insert(metadata.name.clone(), ());
+        if !metadata.enabled {
+            inactive.push(disabled_installed_plugin_summary(&metadata));
+            continue;
+        }
+        let command = installed_plugin_command(&metadata);
+        if !command.exists() {
+            inactive.push(missing_installed_plugin_summary(&metadata, &command));
+            continue;
+        }
+        let spec = ExternalPluginSpec {
+            name: metadata.name.clone(),
+            command: command.display().to_string(),
+            args: Vec::new(),
+            url: None,
+            env: BTreeMap::new(),
+        };
+        if metadata.name == BLACKBOARD_PLUGIN_ID {
+            externals.insert(0, spec);
+            installed_blackboard = true;
+        } else {
+            externals.push(spec);
+        }
+    }
+    installed_blackboard
+}
+
+fn installed_plugin_command(metadata: &InstalledPluginMetadata) -> PathBuf {
+    metadata
+        .install_path
+        .join(format!("{}{}", metadata.name, std::env::consts::EXE_SUFFIX))
+}
+
+fn disabled_installed_plugin_summary(metadata: &InstalledPluginMetadata) -> PluginSummary {
+    installed_plugin_summary(metadata, "disabled", metadata.last_error.clone())
+}
+
+fn missing_installed_plugin_summary(
+    metadata: &InstalledPluginMetadata,
+    command: &Path,
+) -> PluginSummary {
+    installed_plugin_summary(
+        metadata,
+        "error",
+        Some(format!(
+            "installed plugin executable is missing: {}",
+            command.display()
+        )),
+    )
+}
+
+fn installed_store_error_summary(error: anyhow::Error) -> PluginSummary {
+    PluginSummary {
+        name: "installed-plugins".to_string(),
+        kind: "installed".to_string(),
+        enabled: false,
+        status: "error".to_string(),
+        pid: None,
+        version: None,
+        capabilities: Vec::new(),
+        command: None,
+        args: Vec::new(),
+        tools: Vec::new(),
+        manifest: None,
+        error: Some(error.to_string()),
+    }
+}
+
+fn installed_plugin_summary(
+    metadata: &InstalledPluginMetadata,
+    status: &str,
+    error: Option<String>,
+) -> PluginSummary {
+    PluginSummary {
+        name: metadata.name.clone(),
+        kind: "installed".to_string(),
+        enabled: metadata.enabled,
+        status: status.to_string(),
+        pid: None,
+        version: Some(metadata.installed_version.clone()),
+        capabilities: Vec::new(),
+        command: Some(installed_plugin_command(metadata).display().to_string()),
+        args: Vec::new(),
+        tools: Vec::new(),
+        manifest: None,
+        error,
+    }
 }
 
 pub fn blackboard_plugin_spec() -> Result<ExternalPluginSpec> {

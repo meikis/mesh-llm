@@ -92,7 +92,7 @@ impl PluginStore {
             let Some(name) = entry.file_name().to_str().map(str::to_string) else {
                 continue;
             };
-            if is_valid_name(&name) {
+            if is_valid_name(&name) && self.metadata_path(&name).exists() {
                 plugins.push(self.load(&name)?);
             }
         }
@@ -109,6 +109,14 @@ impl PluginStore {
 
     pub fn delete(&self, name: &str) -> Result<()> {
         validate_plugin_name(name)?;
+        let metadata = self.load(name).ok();
+        if let Some(metadata) = metadata
+            && metadata.install_path.exists()
+        {
+            fs::remove_dir_all(&metadata.install_path).with_context(|| {
+                format!("delete plugin install {}", metadata.install_path.display())
+            })?;
+        }
         let plugin_dir = self.plugin_dir(name);
         if plugin_dir.exists() {
             fs::remove_dir_all(&plugin_dir)
@@ -124,6 +132,14 @@ impl PluginStore {
     fn metadata_path(&self, name: &str) -> PathBuf {
         self.plugin_dir(name).join(METADATA_FILE)
     }
+}
+
+pub fn default_store_root() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("MESH_LLM_PLUGIN_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+    let home = dirs::home_dir().context("Cannot determine home directory")?;
+    Ok(home.join(".mesh-llm").join("plugins"))
 }
 
 fn validate_plugin_name(name: &str) -> Result<()> {
@@ -193,9 +209,27 @@ mod tests {
     fn deletes_metadata_directory() {
         let temp = TempDir::new().unwrap();
         let store = PluginStore::new(temp.path());
-        store.save(&metadata("blackboard")).unwrap();
+        let install_temp = TempDir::new().unwrap();
+        let install_path = install_temp.path().join("blackboard");
+        std::fs::create_dir_all(&install_path).unwrap();
+        let mut metadata = metadata("blackboard");
+        metadata.install_path = install_path.clone();
+        store.save(&metadata).unwrap();
 
         store.delete("blackboard").unwrap();
         assert!(store.list().unwrap().is_empty());
+        assert!(!install_path.exists());
+    }
+
+    #[test]
+    fn list_ignores_non_metadata_directories() {
+        let temp = TempDir::new().unwrap();
+        let store = PluginStore::new(temp.path());
+        std::fs::create_dir_all(temp.path().join("installed").join("blackboard")).unwrap();
+        store.save(&metadata("blackboard")).unwrap();
+
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "blackboard");
     }
 }

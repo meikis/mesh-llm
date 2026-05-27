@@ -49,6 +49,16 @@ pub struct GitHubPluginSource {
 }
 
 impl GitHubPluginSource {
+    pub fn from_url(url: &str) -> Result<Self, PluginInstallRefParseError> {
+        match parse_install_ref(url)? {
+            PluginInstallRef::GitHub { source, .. } => Ok(source),
+            PluginInstallRef::Catalog { .. } => Err(PluginInstallRefParseError::new(
+                url,
+                "expected GitHub repository URL",
+            )),
+        }
+    }
+
     pub fn repo_slug(&self) -> String {
         format!("{}/{}", self.owner, self.repo)
     }
@@ -313,6 +323,13 @@ mod tests {
             version.unwrap().matching_segments(),
             vec!["1.1.0", "v1.1.0"]
         );
+    }
+
+    #[test]
+    fn parses_github_source_from_url() {
+        let source =
+            GitHubPluginSource::from_url("https://github.com/mesh-llm/cool-plugin.git").unwrap();
+        assert_eq!(source.repo_slug(), "mesh-llm/cool-plugin");
     }
 
     #[test]

@@ -440,11 +440,7 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) region: Option<String>,
 
-    /// Enable blackboard on public meshes (on by default for private meshes).
-    #[arg(long)]
-    pub(crate) blackboard: bool,
-
-    /// Your display name on the blackboard.
+    /// Display name for this node.
     #[arg(long)]
     pub(crate) name: Option<String>,
 
@@ -740,40 +736,6 @@ pub(crate) enum Command {
     },
     /// Stop running mesh-llm processes.
     Stop,
-    /// Blackboard — post, search, and read messages shared across the mesh.
-    ///
-    /// Post a message:   mesh-llm blackboard "your message here"
-    /// Show feed:        mesh-llm blackboard
-    /// Search:           mesh-llm blackboard --search "query"
-    /// From a peer:      mesh-llm blackboard --from tyler
-    /// MCP server:       mesh-llm client --join <token> blackboard --mcp
-    /// Install skill:    mesh-llm blackboard install-skill
-    ///
-    /// Conventions: prefix messages with QUESTION:, STATUS:, FINDING:, TIP: etc.
-    /// Search picks these up naturally via multi-term OR matching.
-    #[command(name = "blackboard")]
-    Blackboard {
-        /// Message to post (if provided).
-        text: Option<String>,
-        /// Search the blackboard.
-        #[arg(long)]
-        search: Option<String>,
-        /// Filter by author name.
-        #[arg(long)]
-        from: Option<String>,
-        /// Only show items from the last N hours (default: 24).
-        #[arg(long)]
-        since: Option<f64>,
-        /// Max items to show (default: 20).
-        #[arg(long, default_value = "20")]
-        limit: usize,
-        /// Console/API port of the running mesh-llm instance.
-        #[arg(long, default_value = "3131")]
-        port: u16,
-        /// Run as an MCP server over stdio (for agent integration).
-        #[arg(long)]
-        mcp: bool,
-    },
     /// Plugin management.
     Plugin {
         #[command(subcommand)]
@@ -861,6 +823,9 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: AuthCommand,
     },
+    /// Run a CLI command contributed by a configured plugin.
+    #[command(external_subcommand)]
+    ExternalPlugin(Vec<OsString>),
 }
 
 #[derive(Subcommand, Debug)]
@@ -872,6 +837,8 @@ pub(crate) enum PluginCommand {
     },
     /// List auto-registered and configured plugins.
     List,
+    /// Run configured plugin tools as an MCP server over stdio.
+    Mcp,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -900,7 +867,7 @@ where
     // Recognized value-taking flags: --log-format, --mesh-discovery-mode, --max-vram,
     // --llama-flavor, --device, --tensor-split, --bind-port, --bind-ip, --max-clients,
     // --port, --console, --swarm-capture, --draft-max, --ctx-size.
-    // Boolean flags: --help-advanced, --auto, --client, --headless, --publish, --blackboard,
+    // Boolean flags: --help-advanced, --auto, --client, --headless, --publish,
     // --plugin, --auto-update, --no-draft, --split, --no-enumerate-host, --listen-all,
     // --no-console, --owner-required.
     let value_taking_flags = [
@@ -1495,6 +1462,35 @@ mod tests {
 
         let rendered = err.to_string();
         assert!(rendered.contains("--port"));
+    }
+
+    #[test]
+    fn unknown_top_level_command_is_captured_for_plugin_dispatch() {
+        let normalized = normalize_runtime_surface_args([
+            "mesh-llm",
+            "goose-next",
+            "--model",
+            "auto",
+            "--",
+            "prompt.txt",
+        ]);
+        let cli = Cli::parse_from(normalized.normalized);
+
+        match cli.command.expect("external plugin command expected") {
+            Command::ExternalPlugin(args) => {
+                assert_eq!(
+                    args,
+                    vec![
+                        OsString::from("goose-next"),
+                        OsString::from("--model"),
+                        OsString::from("auto"),
+                        OsString::from("--"),
+                        OsString::from("prompt.txt"),
+                    ]
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]

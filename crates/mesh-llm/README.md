@@ -23,4 +23,10 @@ own the reusable pieces:
 - [`../mesh-llm-plugin`](../mesh-llm-plugin) for plugin author API and plugin protobuf schema
 - existing `model-*`, `openai-frontend`, and `skippy-*` crates for their domains
 
+The compatibility re-export includes the shared config authoring API under
+`mesh_llm::sdk::config`. Embedders that need to update `config.toml`, including
+model-specific speculative decoding settings, should use `ConfigStore::update`
+and the typed editors from [`../mesh-llm-config`](../mesh-llm-config) instead
+of writing TOML directly.
+
 For install and end-user usage, see the [project README](../../README.md).

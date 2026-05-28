@@ -140,14 +140,14 @@ fn print_install_summary(report: &SkillInstallReport, dry_run: bool) {
 
     let verb = if dry_run { "planned" } else { "complete" };
     let mut parts = vec![
-        format!("{}", plural_count(installed, "install")),
-        format!("{}", plural_count(updated, "update")),
+        plural_count(installed, "install").to_string(),
+        plural_count(updated, "update").to_string(),
     ];
     if unchanged > 0 {
-        parts.push(format!("{}", plural_count(unchanged, "unchanged")));
+        parts.push(plural_count(unchanged, "unchanged").to_string());
     }
     if conflicts > 0 {
-        parts.push(format!("{}", plural_count(conflicts, "conflict")));
+        parts.push(plural_count(conflicts, "conflict").to_string());
     }
     eprintln!("✅ Skill install {verb}: {}", parts.join(", "));
 }

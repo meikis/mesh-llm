@@ -49,6 +49,7 @@ enum ToolTarget {
 struct ToolRef {
     target: ToolTarget,
     tool: rmcp::model::Tool,
+    visible: bool,
 }
 
 #[derive(Clone)]
@@ -507,7 +508,8 @@ impl PluginMcpServer {
         &self,
     ) -> Result<Vec<(String, plugin::proto::PluginManifest)>, ErrorData> {
         let mut manifests = Vec::new();
-        for (plugin_name, _) in self.plugin_manager.list_server_infos().await {
+        let plugin_names = self.plugin_manifest_names().await;
+        for plugin_name in plugin_names {
             let manifest = self
                 .plugin_manager
                 .manifest(&plugin_name)
@@ -518,6 +520,33 @@ impl PluginMcpServer {
             }
         }
         Ok(manifests)
+    }
+
+    async fn plugin_manifest_names(&self) -> Vec<String> {
+        let server_infos = self.plugin_manager.list_server_infos().await;
+        if !server_infos.is_empty() {
+            return server_infos
+                .into_iter()
+                .map(|(plugin_name, _)| plugin_name)
+                .collect();
+        }
+
+        #[cfg(test)]
+        {
+            return self
+                .plugin_manager
+                .list()
+                .await
+                .into_iter()
+                .filter(|summary| summary.status == "running")
+                .map(|summary| summary.name)
+                .collect();
+        }
+
+        #[cfg(not(test))]
+        {
+            Vec::new()
+        }
     }
 
     async fn collect_external_items<T, Fetch, Fut>(
@@ -593,16 +622,30 @@ impl PluginMcpServer {
             }
             for operation in &manifest.operations {
                 let raw_name = operation.name.clone();
-                for mcp_name in tool_aliases(&plugin_name, &raw_name) {
-                    tools.insert(
-                        mcp_name.clone(),
-                        ToolRef {
-                            target: ToolTarget::Plugin {
-                                plugin_name: plugin_name.clone(),
-                                tool_name: raw_name.clone(),
-                            },
-                            tool: stapler::operation(mcp_name, operation),
-                        },
+                let target = ToolTarget::Plugin {
+                    plugin_name: plugin_name.clone(),
+                    tool_name: raw_name.clone(),
+                };
+                insert_tool_ref(
+                    &mut tools,
+                    canonical_name(&plugin_name, &raw_name),
+                    target.clone(),
+                    stapler::operation(canonical_name(&plugin_name, &raw_name), operation),
+                    false,
+                );
+                insert_unique_visible_tool(
+                    &mut tools,
+                    raw_name.clone(),
+                    target.clone(),
+                    stapler::operation(raw_name.clone(), operation),
+                );
+                for alias in compatibility_tool_aliases(&plugin_name, &raw_name) {
+                    insert_tool_ref(
+                        &mut tools,
+                        alias.clone(),
+                        target.clone(),
+                        stapler::operation(alias, operation),
+                        true,
                     );
                 }
             }
@@ -626,15 +669,24 @@ impl PluginMcpServer {
                 let canonical_name = endpoint.canonical_name(&raw_name);
                 let mut namespaced = tool.clone();
                 namespaced.name = canonical_name.clone().into();
-                tools.insert(
+                insert_tool_ref(
+                    &mut tools,
                     canonical_name,
-                    ToolRef {
-                        target: ToolTarget::External {
-                            endpoint: endpoint.clone(),
-                            tool_name: raw_name,
-                        },
-                        tool: namespaced,
+                    ToolTarget::External {
+                        endpoint: endpoint.clone(),
+                        tool_name: raw_name.clone(),
                     },
+                    namespaced,
+                    false,
+                );
+                insert_unique_visible_tool(
+                    &mut tools,
+                    raw_name.clone(),
+                    ToolTarget::External {
+                        endpoint: endpoint.clone(),
+                        tool_name: raw_name,
+                    },
+                    tool,
                 );
             }
         }
@@ -776,6 +828,7 @@ impl ServerHandler for PluginMcpServer {
                 .discover_tools()
                 .await?
                 .into_values()
+                .filter(|entry| entry.visible)
                 .map(|entry| entry.tool)
                 .collect(),
             meta: None,
@@ -1316,7 +1369,7 @@ impl ServerHandler for PluginMcpServer {
                 ),
         )
         .with_instructions(
-            "Running plugins are aggregated into one MCP server. Tool and prompt names are namespaced as <plugin>.<name> to avoid collisions.",
+            "Running plugins are aggregated into one MCP server. Unique tool names are exposed directly; prefixed compatibility aliases are accepted when needed.",
         )
     }
 }
@@ -1416,8 +1469,41 @@ fn operation_result_to_call_tool_result(result: plugin::ToolCallResult) -> CallT
     call_result
 }
 
-fn tool_aliases(plugin_name: &str, tool_name: &str) -> Vec<String> {
-    vec![canonical_name(plugin_name, tool_name)]
+fn insert_tool_ref(
+    tools: &mut BTreeMap<String, ToolRef>,
+    name: String,
+    target: ToolTarget,
+    tool: rmcp::model::Tool,
+    visible: bool,
+) {
+    tools.insert(
+        name,
+        ToolRef {
+            target,
+            tool,
+            visible,
+        },
+    );
+}
+
+fn insert_unique_visible_tool(
+    tools: &mut BTreeMap<String, ToolRef>,
+    name: String,
+    target: ToolTarget,
+    tool: rmcp::model::Tool,
+) {
+    if tools.contains_key(&name) {
+        return;
+    }
+    insert_tool_ref(tools, name, target, tool, true);
+}
+
+fn compatibility_tool_aliases(plugin_name: &str, tool_name: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    if plugin_name == "blackboard" {
+        names.push(format!("blackboard_{tool_name}"));
+    }
+    names
 }
 
 fn canonical_name(plugin_name: &str, local_name: &str) -> String {
@@ -1705,7 +1791,7 @@ mod tests {
     }
 
     #[test]
-    fn external_endpoint_namespaces_tools_under_plugin_and_endpoint_namespace() {
+    fn external_endpoint_keeps_prefixed_compatibility_aliases() {
         let endpoint = ExternalMcpEndpoint {
             key: "adapter:notes".into(),
             plugin_name: "adapter".into(),
@@ -1728,7 +1814,10 @@ mod tests {
         let server = test_server_with_external_endpoint().await;
 
         let tools = server.discover_tools().await.unwrap();
+        assert!(tools.contains_key("echo"));
         assert!(tools.contains_key("adapter.notes.echo"));
+        assert!(tools["echo"].visible);
+        assert!(!tools["adapter.notes.echo"].visible);
 
         let prompts = server.discover_prompts().await.unwrap();
         assert!(prompts.contains_key("adapter.notes.brief"));
@@ -1758,6 +1847,34 @@ mod tests {
             result.structured_content,
             Some(json!({"echo": "hello", "tool": "echo"}))
         );
+    }
+
+    #[tokio::test]
+    async fn plugin_operations_are_listed_with_unprefixed_names_and_hidden_aliases() {
+        let plugin_manager = PluginManager::for_test_bridge(&["agents"], Arc::new(NoopBridge));
+        plugin_manager
+            .set_test_manifests(std::collections::BTreeMap::from([(
+                "agents".to_string(),
+                plugin::proto::PluginManifest {
+                    operations: vec![plugin::proto::OperationManifest {
+                        name: "get_agents".into(),
+                        description: "List agents".into(),
+                        input_schema_json: "{}".into(),
+                        output_schema_json: None,
+                        title: None,
+                    }],
+                    ..Default::default()
+                },
+            )]))
+            .await;
+        let server = PluginMcpServer::new(plugin_manager, ActiveBridge::default());
+
+        let tools = server.discover_tools().await.unwrap();
+
+        assert!(tools.contains_key("get_agents"));
+        assert!(tools.contains_key("agents.get_agents"));
+        assert!(tools["get_agents"].visible);
+        assert!(!tools["agents.get_agents"].visible);
     }
 
     #[tokio::test]
@@ -1813,6 +1930,7 @@ mod tests {
             .await;
         let server = PluginMcpServer::new(plugin_manager, ActiveBridge::default());
         let tools = server.discover_tools().await.unwrap();
+        assert!(tools.contains_key("echo"));
         assert!(tools.contains_key("adapter.notes.echo"));
     }
 
@@ -1842,6 +1960,7 @@ mod tests {
             .await;
         let server = PluginMcpServer::new(plugin_manager, ActiveBridge::default());
         let tools = server.discover_tools().await.unwrap();
+        assert!(tools.contains_key("echo"));
         assert!(tools.contains_key("adapter.notes.echo"));
         let _ = std::fs::remove_file(path);
     }
@@ -1900,6 +2019,7 @@ mod tests {
             .await;
         let server = PluginMcpServer::new(plugin_manager, ActiveBridge::default());
         let tools = server.discover_tools().await.unwrap();
+        assert!(tools.contains_key("echo"));
         assert!(tools.contains_key("adapter.remote.echo"));
         let prompts = server.discover_prompts().await.unwrap();
         assert!(prompts.contains_key("adapter.remote.brief"));

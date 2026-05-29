@@ -1152,7 +1152,7 @@ unsafe extern "C" {
 }
 
 #[cfg(has_cuda)]
-extern "C" {
+unsafe extern "C" {
     pub fn ggml_backend_cuda_set_alloc_hook(
         hook: Option<
             unsafe extern "C" fn(

@@ -632,6 +632,11 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: Option<RuntimeCommand>,
     },
+    /// Diagnose local mesh, runtime, and split-readiness problems.
+    Doctor {
+        #[command(subcommand)]
+        command: DoctorCommand,
+    },
     /// Load a local model into a running mesh-llm instance.
     Load {
         /// Model name/path/url to load
@@ -741,6 +746,11 @@ pub(crate) enum Command {
     Plugin {
         #[command(subcommand)]
         command: PluginCommand,
+    },
+    /// Install agent skills exposed by installed plugins.
+    Skills {
+        #[command(subcommand)]
+        command: SkillCommand,
     },
     /// Benchmark and compare model/runtime strategies.
     #[command(hide = true)]
@@ -868,6 +878,67 @@ pub(crate) enum PluginCommand {
     },
     /// List installed, auto-registered, and configured plugins.
     List,
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum SkillCommand {
+    /// Install skills exposed by installed plugins into supported agent skill folders.
+    Install {
+        /// Agent to install for. Repeat to install to several agents.
+        #[arg(long, value_enum, conflicts_with = "all")]
+        agent: Vec<SkillAgentArg>,
+        /// Install to all supported agent locations, even if the agent is not detected.
+        #[arg(long)]
+        all: bool,
+        /// Show what would be installed without writing files.
+        #[arg(long)]
+        dry_run: bool,
+        /// Replace an existing non-mesh-managed skill with the same directory name.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum SkillAgentArg {
+    Global,
+    Goose,
+    Pi,
+    Codex,
+    Opencode,
+    Claude,
+}
+
+impl From<SkillAgentArg> for mesh_llm_plugin_manager::SkillAgent {
+    fn from(value: SkillAgentArg) -> Self {
+        match value {
+            SkillAgentArg::Global => Self::Global,
+            SkillAgentArg::Goose => Self::Goose,
+            SkillAgentArg::Pi => Self::Pi,
+            SkillAgentArg::Codex => Self::Codex,
+            SkillAgentArg::Opencode => Self::Opencode,
+            SkillAgentArg::Claude => Self::Claude,
+        }
+    }
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum DoctorCommand {
+    /// Diagnose split-readiness for a model on a running local mesh node.
+    Split {
+        /// Model ref/name to diagnose.
+        #[arg(long, visible_alias = "model")]
+        model_ref: String,
+        /// Console/API port of the running mesh-llm instance.
+        #[arg(long, default_value = "3131")]
+        port: u16,
+        /// Print machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+        /// Write split-readiness.json to this directory for sharing with maintainers.
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1528,6 +1599,23 @@ mod tests {
         let cli = Cli::parse_from(normalized.normalized);
 
         assert_eq!(cli.log_format, LogFormat::Pretty);
+    }
+
+    #[test]
+    fn skills_install_accepts_global_agent_target() {
+        let cli = Cli::parse_from(["mesh-llm", "skills", "install", "--agent", "global"]);
+
+        match cli.command.expect("skills command expected") {
+            Command::Skills {
+                command:
+                    SkillCommand::Install {
+                        agent, all: false, ..
+                    },
+            } => {
+                assert_eq!(agent, vec![SkillAgentArg::Global]);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]

@@ -4031,6 +4031,7 @@ dependencies = [
  "dirs",
  "flate2",
  "futures-util",
+ "mesh-llm-skills",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -4065,6 +4066,17 @@ dependencies = [
  "anyhow",
  "mesh-llm-host-runtime",
  "serde_json",
+]
+
+[[package]]
+name = "mesh-llm-skills"
+version = "0.68.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

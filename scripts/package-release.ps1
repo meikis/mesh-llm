@@ -179,19 +179,88 @@ function Resolve-VulkanRuntimeDll {
     throw "Vulkan runtime DLL not found. Install the Vulkan SDK/runtime so vulkan-1.dll is available before packaging."
 }
 
+function Resolve-CudaBinDir {
+    $candidates = @()
+
+    if ($env:CUDA_PATH) {
+        $candidates += (Join-Path $env:CUDA_PATH "bin")
+    }
+
+    $cudaRoot = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
+    if (Test-Path $cudaRoot) {
+        $candidates += Get-ChildItem -Path $cudaRoot -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            ForEach-Object { Join-Path $_.FullName "bin" }
+    }
+
+    foreach ($candidate in ($candidates | Select-Object -Unique)) {
+        if ($candidate -and (Test-Path $candidate)) {
+            return $candidate
+        }
+    }
+
+    throw "CUDA toolkit bin directory not found. Install the CUDA toolkit before packaging a CUDA release."
+}
+
+function Copy-CudaRuntimeDependencies {
+    param([string]$BundleDir)
+
+    $cudaBin = Resolve-CudaBinDir
+    $requiredPatterns = @(
+        "cudart64_*.dll",
+        "cublas64_*.dll",
+        "cublasLt64_*.dll"
+    )
+    $optionalPatterns = @(
+        "nvJitLink_*.dll",
+        "nvrtc64_*.dll",
+        "nvrtc-builtins64_*.dll"
+    )
+    $copied = @()
+
+    foreach ($pattern in $requiredPatterns) {
+        $matches = @(Get-ChildItem -Path $cudaBin -Filter $pattern -File -ErrorAction SilentlyContinue | Sort-Object Name)
+        if ($matches.Count -eq 0) {
+            throw "CUDA runtime DLL not found: $pattern under $cudaBin"
+        }
+
+        foreach ($dll in $matches) {
+            Copy-Item $dll.FullName -Destination (Join-Path $BundleDir $dll.Name) -Force
+            $copied += $dll.FullName
+        }
+    }
+
+    foreach ($pattern in $optionalPatterns) {
+        $matches = @(Get-ChildItem -Path $cudaBin -Filter $pattern -File -ErrorAction SilentlyContinue | Sort-Object Name)
+        foreach ($dll in $matches) {
+            Copy-Item $dll.FullName -Destination (Join-Path $BundleDir $dll.Name) -Force
+            $copied += $dll.FullName
+        }
+    }
+
+    foreach ($source in ($copied | Select-Object -Unique)) {
+        Write-Host "Bundled CUDA runtime dependency: $source"
+    }
+}
+
 function Copy-RuntimeDependencies {
     param(
         [string]$BundleDir,
         [string]$BinaryFlavor
     )
 
-    if ($BinaryFlavor -ne "vulkan") {
-        return
+    switch ($BinaryFlavor) {
+        "vulkan" {
+            $vulkanDll = Resolve-VulkanRuntimeDll
+            Copy-Item $vulkanDll -Destination (Join-Path $BundleDir "vulkan-1.dll") -Force
+            Write-Host "Bundled Vulkan runtime dependency: $vulkanDll"
+            return
+        }
+        { $_ -in @("cuda", "cuda-blackwell") } {
+            Copy-CudaRuntimeDependencies -BundleDir $BundleDir
+            return
+        }
     }
-
-    $vulkanDll = Resolve-VulkanRuntimeDll
-    Copy-Item $vulkanDll -Destination (Join-Path $BundleDir "vulkan-1.dll") -Force
-    Write-Host "Bundled Vulkan runtime dependency: $vulkanDll"
 }
 
 function Assert-MeshBinaryVersion {

@@ -109,6 +109,16 @@ pub(super) fn resolve_speculative_config(
         model_config.and_then(|config| config.draft_gpu_layers),
         global_config.and_then(|config| config.draft_gpu_layers),
     );
+    let prefill_draft_burst_tokens = super::support::pick_value(
+        model_config.and_then(|config| config.prefill_draft_burst_tokens),
+        global_config.and_then(|config| config.prefill_draft_burst_tokens),
+        0,
+    );
+    let prefill_draft_max_consecutive_mismatches = super::support::pick_value(
+        model_config.and_then(|config| config.prefill_draft_max_consecutive_mismatches),
+        global_config.and_then(|config| config.prefill_draft_max_consecutive_mismatches),
+        0,
+    );
     let pairing_fault = normalize_pairing_fault(pick_string(
         model_config.and_then(|config| config.pairing_fault.as_deref()),
         global_config.and_then(|config| config.pairing_fault.as_deref()),
@@ -117,7 +127,9 @@ pub(super) fn resolve_speculative_config(
     let explicit = mode != "auto"
         || draft_model_path.is_some()
         || draft_max_tokens > 0
-        || draft_n_gpu_layers.is_some();
+        || draft_n_gpu_layers.is_some()
+        || prefill_draft_burst_tokens > 0
+        || prefill_draft_max_consecutive_mismatches > 0;
     if mode == "disabled" && draft_model_path.is_some() {
         bail!("skippy speculative draft source cannot be set when speculative.mode = \"disabled\"");
     }
@@ -145,6 +157,16 @@ pub(super) fn resolve_speculative_config(
         mode = "disabled".to_string();
         draft_model_path = None;
     }
+    if prefill_draft_burst_tokens > 0 && mode != "draft" {
+        bail!(
+            "skippy speculative.prefill_draft_burst_tokens requires speculative.mode = \"draft\""
+        );
+    }
+    if prefill_draft_max_consecutive_mismatches > 0 && prefill_draft_burst_tokens == 0 {
+        bail!(
+            "skippy speculative.prefill_draft_max_consecutive_mismatches requires prefill_draft_burst_tokens"
+        );
+    }
     Ok(ResolvedSpeculativeConfig {
         mode,
         draft_model_path,
@@ -152,6 +174,8 @@ pub(super) fn resolve_speculative_config(
         draft_max_tokens,
         explicit,
         draft_n_gpu_layers,
+        prefill_draft_burst_tokens,
+        prefill_draft_max_consecutive_mismatches,
     })
 }
 

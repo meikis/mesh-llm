@@ -439,6 +439,9 @@ impl SkippyModelHandle {
             draft_model_path: embedded_args.draft_model_path,
             speculative_window: embedded_args.speculative_window,
             adaptive_speculative_window: embedded_args.adaptive_speculative_window,
+            prefill_draft_burst_tokens: embedded_args.prefill_draft_burst_tokens,
+            prefill_draft_max_consecutive_mismatches: embedded_args
+                .prefill_draft_max_consecutive_mismatches,
             draft_n_gpu_layers: embedded_args.draft_n_gpu_layers,
             activation_width: embedded_args.activation_width,
             wire_dtype: embedded_args.wire_dtype,
@@ -598,6 +601,9 @@ impl SkippyModelHandle {
             draft_model_path: embedded_args.draft_model_path,
             speculative_window: embedded_args.speculative_window,
             adaptive_speculative_window: embedded_args.adaptive_speculative_window,
+            prefill_draft_burst_tokens: embedded_args.prefill_draft_burst_tokens,
+            prefill_draft_max_consecutive_mismatches: embedded_args
+                .prefill_draft_max_consecutive_mismatches,
             draft_n_gpu_layers: embedded_args.draft_n_gpu_layers,
             activation_width: embedded_args.activation_width,
             wire_dtype: embedded_args.wire_dtype,

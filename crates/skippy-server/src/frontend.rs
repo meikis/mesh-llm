@@ -75,6 +75,7 @@ mod embedded_generation;
 mod generation_flow;
 mod local_generation;
 mod prefill;
+mod prefill_draft;
 mod prefix_cache;
 mod prompting;
 mod request;
@@ -82,7 +83,7 @@ mod speculative;
 mod util;
 mod wire_messages;
 
-use self::{prefill::*, request::*, speculative::*, util::*, wire_messages::*};
+use self::{prefill::*, prefill_draft::*, request::*, speculative::*, util::*, wire_messages::*};
 
 static OPENAI_GENERATION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -190,6 +191,8 @@ pub async fn serve_openai(args: ServeOpenAiArgs) -> Result<()> {
         draft: None,
         speculative_window: 0,
         adaptive_speculative_window: false,
+        prefill_draft_burst_tokens: 0,
+        prefill_draft_max_consecutive_mismatches: 0,
         generation_limit: Arc::new(Semaphore::new(args.generation_concurrency)),
         generation_queue_depth: Arc::new(AtomicUsize::new(0)),
         generation_queue_limit: args.generation_concurrency,
@@ -226,6 +229,8 @@ pub struct EmbeddedOpenAiArgs {
     pub draft_model_path: Option<PathBuf>,
     pub speculative_window: usize,
     pub adaptive_speculative_window: bool,
+    pub prefill_draft_burst_tokens: usize,
+    pub prefill_draft_max_consecutive_mismatches: usize,
     pub draft_n_gpu_layers: Option<i32>,
     pub activation_width: i32,
     pub wire_dtype: WireActivationDType,
@@ -467,6 +472,9 @@ pub fn embedded_openai_backend(args: EmbeddedOpenAiArgs) -> Result<EmbeddedOpenA
     if args.draft_model_path.is_some() && args.speculative_window == 0 {
         bail!("--openai-speculative-window must be greater than zero when a draft model is set");
     }
+    if args.prefill_draft_burst_tokens > 0 && args.draft_model_path.is_none() {
+        bail!("--openai-prefill-draft-burst-tokens requires --openai-draft-model-path");
+    }
     if args.config.stage_index != 0 || args.config.layer_start != 0 {
         bail!("embedded OpenAI serving is only supported on stage 0");
     }
@@ -532,6 +540,8 @@ pub fn embedded_openai_backend(args: EmbeddedOpenAiArgs) -> Result<EmbeddedOpenA
         draft,
         speculative_window: args.speculative_window,
         adaptive_speculative_window: args.adaptive_speculative_window,
+        prefill_draft_burst_tokens: args.prefill_draft_burst_tokens,
+        prefill_draft_max_consecutive_mismatches: args.prefill_draft_max_consecutive_mismatches,
         generation_limit: Arc::new(Semaphore::new(args.generation_concurrency)),
         generation_queue_depth: Arc::new(AtomicUsize::new(0)),
         generation_queue_limit: args.generation_concurrency,
@@ -570,6 +580,8 @@ struct StageOpenAiBackend {
     draft: Option<Arc<Mutex<DraftRunner>>>,
     speculative_window: usize,
     adaptive_speculative_window: bool,
+    prefill_draft_burst_tokens: usize,
+    prefill_draft_max_consecutive_mismatches: usize,
     generation_limit: Arc<Semaphore>,
     generation_queue_depth: Arc<AtomicUsize>,
     generation_queue_limit: usize,
@@ -1638,6 +1650,8 @@ struct EmbeddedStageZeroGeneration<'a> {
     draft: Option<Arc<Mutex<DraftRunner>>>,
     speculative_window: usize,
     adaptive_speculative_window: bool,
+    prefill_draft_burst_tokens: usize,
+    prefill_draft_max_consecutive_mismatches: usize,
     prompt_token_ids: &'a [i32],
     max_tokens: u32,
     sampling: &'a SamplingConfig,

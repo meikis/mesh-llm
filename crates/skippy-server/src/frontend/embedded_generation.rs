@@ -643,6 +643,29 @@ impl StageOpenAiBackend {
                 }
                 _ => None,
             };
+            if !fused_reached_stop
+                && request.prefill_draft_burst_tokens > 0
+                && let Some(draft) = draft_guard.as_deref_mut()
+            {
+                let burst = self.try_prefill_draft_burst(
+                    PrefillDraftBurst {
+                        request: &request,
+                        downstream,
+                        session_key: &session_key,
+                        request_id,
+                        session_id,
+                        prefill_token_count,
+                        current,
+                        decoded_tokens,
+                    },
+                    draft,
+                    &mut context_tokens,
+                    &mut on_token,
+                )?;
+                current = burst.current;
+                decoded_tokens = burst.decoded_tokens;
+                fused_reached_stop = burst.reached_stop;
+            }
             for decode_step in decoded_tokens as u32..request.max_tokens {
                 if fused_reached_stop {
                     break;

@@ -235,6 +235,16 @@ impl ResolvedSkippyConfig {
                 0
             },
             adaptive_speculative_window: false,
+            prefill_draft_burst_tokens: if mode == "draft" {
+                self.speculative.prefill_draft_burst_tokens as usize
+            } else {
+                0
+            },
+            prefill_draft_max_consecutive_mismatches: if mode == "draft" {
+                self.speculative.prefill_draft_max_consecutive_mismatches as usize
+            } else {
+                0
+            },
             draft_n_gpu_layers: if mode == "draft" {
                 self.speculative.draft_n_gpu_layers
             } else {
@@ -341,6 +351,8 @@ impl ResolvedEmbeddedOpenAiArgs {
             draft_model_path: None,
             speculative_window: 0,
             adaptive_speculative_window: false,
+            prefill_draft_burst_tokens: 0,
+            prefill_draft_max_consecutive_mismatches: 0,
             draft_n_gpu_layers: None,
             activation_width: 0,
             wire_dtype,
@@ -370,6 +382,8 @@ impl ResolvedEmbeddedOpenAiArgs {
             draft_model_path: None,
             speculative_window: 0,
             adaptive_speculative_window: false,
+            prefill_draft_burst_tokens: 0,
+            prefill_draft_max_consecutive_mismatches: 0,
             draft_n_gpu_layers: None,
             activation_width,
             wire_dtype,
@@ -403,6 +417,8 @@ impl ResolvedEmbeddedOpenAiArgs {
             draft_model_path: self.draft_model_path,
             speculative_window: self.speculative_window,
             adaptive_speculative_window: self.adaptive_speculative_window,
+            prefill_draft_burst_tokens: self.prefill_draft_burst_tokens,
+            prefill_draft_max_consecutive_mismatches: self.prefill_draft_max_consecutive_mismatches,
             draft_n_gpu_layers: self.draft_n_gpu_layers,
             activation_width: self.activation_width,
             wire_dtype: self.wire_dtype,

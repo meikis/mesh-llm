@@ -128,6 +128,18 @@ pub struct ServeBinaryArgs {
     pub openai_adaptive_speculative_window: bool,
     #[arg(
         long,
+        default_value_t = 0,
+        help = "Front-load this many draft tokens immediately after prefill and verify them as one span before the normal decode loop. Experimental."
+    )]
+    pub openai_prefill_draft_burst_tokens: usize,
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Allow this many consecutive greedy mismatches in the front-loaded prefill draft burst. 0 keeps exact-prefix behavior."
+    )]
+    pub openai_prefill_draft_max_consecutive_mismatches: usize,
+    #[arg(
+        long,
         help = "Override n_gpu_layers for the embedded OpenAI draft model. Defaults to the stage config n_gpu_layers."
     )]
     pub openai_draft_n_gpu_layers: Option<i32>,

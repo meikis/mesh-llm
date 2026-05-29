@@ -40,6 +40,8 @@ pub struct EmbeddedOpenAiStageOptions {
     pub draft_model_path: Option<PathBuf>,
     pub speculative_window: usize,
     pub adaptive_speculative_window: bool,
+    pub prefill_draft_burst_tokens: usize,
+    pub prefill_draft_max_consecutive_mismatches: usize,
     pub draft_n_gpu_layers: Option<i32>,
 }
 
@@ -83,6 +85,9 @@ impl BinaryStageOptions {
                 draft_model_path: args.openai_draft_model_path,
                 speculative_window: args.openai_speculative_window,
                 adaptive_speculative_window: args.openai_adaptive_speculative_window,
+                prefill_draft_burst_tokens: args.openai_prefill_draft_burst_tokens,
+                prefill_draft_max_consecutive_mismatches: args
+                    .openai_prefill_draft_max_consecutive_mismatches,
                 draft_n_gpu_layers: args.openai_draft_n_gpu_layers,
             });
         Ok(Self {

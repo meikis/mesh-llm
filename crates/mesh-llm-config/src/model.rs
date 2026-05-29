@@ -376,6 +376,10 @@ pub struct SpeculativeConfig {
     #[serde(default)]
     pub draft_gpu_layers: Option<i32>,
     #[serde(default)]
+    pub prefill_draft_burst_tokens: Option<u32>,
+    #[serde(default)]
+    pub prefill_draft_max_consecutive_mismatches: Option<u32>,
+    #[serde(default)]
     pub draft_device: Option<String>,
     #[serde(default)]
     pub draft_threads: Option<usize>,

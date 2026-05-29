@@ -249,6 +249,9 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
                 draft_model_path: openai_options.draft_model_path,
                 speculative_window: openai_options.speculative_window,
                 adaptive_speculative_window: openai_options.adaptive_speculative_window,
+                prefill_draft_burst_tokens: openai_options.prefill_draft_burst_tokens,
+                prefill_draft_max_consecutive_mismatches: openai_options
+                    .prefill_draft_max_consecutive_mismatches,
                 draft_n_gpu_layers: openai_options.draft_n_gpu_layers,
                 activation_width,
                 wire_dtype,

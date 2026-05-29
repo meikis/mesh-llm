@@ -539,6 +539,10 @@ fn validate_speculative(config: &SpeculativeConfig, base_path: &str) -> Result<(
     {
         bail!("{base_path}.draft_gpu_layers must be at least -1");
     }
+    validate_optional_positive_u32(
+        config.prefill_draft_burst_tokens,
+        &format!("{base_path}.prefill_draft_burst_tokens"),
+    )?;
     validate_optional_non_empty(
         config.draft_device.as_deref(),
         &format!("{base_path}.draft_device"),

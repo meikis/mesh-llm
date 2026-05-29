@@ -2,6 +2,7 @@
 //! and peer list management (add/remove/update).
 
 use super::*;
+use crate::models::append_external_inference_models;
 
 /// Minimum peer version we accept into the local mesh table and re-broadcast.
 ///
@@ -666,16 +667,22 @@ impl Node {
 
     async fn snapshot_local_announcement_data(&self) -> LocalAnnouncementData {
         let owner_summary = self.owner_summary.lock().await.clone();
-        let hosted_models = self.hosted_models.lock().await.clone();
+        let plugin_models = self.plugin_inference_models().await;
+        let mut models = self.models.lock().await.clone();
+        append_external_inference_models(&mut models, &plugin_models);
+        let mut serving_models = self.serving_models.lock().await.clone();
+        append_external_inference_models(&mut serving_models, &plugin_models);
+        let mut hosted_models = self.hosted_models.lock().await.clone();
+        append_external_inference_models(&mut hosted_models, &plugin_models);
         let advertised_model_throughput = self
             .routing_metrics
             .advertisable_model_throughput(&hosted_models);
         LocalAnnouncementData {
             role: self.role.lock().await.clone(),
             first_joined_mesh_ts: *self.first_joined_mesh_ts.lock().await,
-            models: self.models.lock().await.clone(),
+            models,
             model_source: self.model_source.lock().await.clone(),
-            serving_models: self.serving_models.lock().await.clone(),
+            serving_models,
             hosted_models,
             available_models: self.available_models.lock().await.clone(),
             requested_models: self.requested_models.lock().await.clone(),
@@ -703,6 +710,20 @@ impl Node {
             )
             .await,
         }
+    }
+
+    async fn plugin_inference_models(&self) -> Vec<String> {
+        let plugin_manager = self.plugin_manager.lock().await.clone();
+        let Some(plugin_manager) = plugin_manager else {
+            return Vec::new();
+        };
+        plugin_manager
+            .inference_models()
+            .await
+            .unwrap_or_else(|error| {
+                tracing::debug!(%error, "failed to collect plugin inference models for gossip");
+                Vec::new()
+            })
     }
 
     fn announcement_from_peer(peer: &PeerInfo) -> PeerAnnouncement {

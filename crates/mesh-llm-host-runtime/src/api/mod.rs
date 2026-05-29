@@ -68,6 +68,7 @@ use self::status::{
     runtime_stage_wire_dtype_label,
 };
 use crate::mesh;
+use crate::models::append_external_inference_models;
 use crate::network::{affinity, nostr};
 use crate::plugin;
 use crate::runtime_data;
@@ -91,6 +92,16 @@ use crate::network::proxy;
 use crate::runtime::wakeable::{WakeableInventoryEntry, WakeableState};
 
 const MESH_LLM_VERSION: &str = crate::VERSION;
+
+async fn external_inference_models(plugin_manager: &plugin::PluginManager) -> Vec<String> {
+    plugin_manager
+        .inference_models()
+        .await
+        .unwrap_or_else(|error| {
+            tracing::debug!(%error, "failed to collect plugin inference models for status");
+            Vec::new()
+        })
+}
 
 #[cfg(test)]
 #[derive(Debug, Default, PartialEq)]
@@ -830,6 +841,7 @@ impl MeshApi {
             publication_state,
             wakeable_inventory,
             openai_guardrails,
+            plugin_manager,
         ) = {
             let inner = self.inner.lock().await;
             (
@@ -850,6 +862,7 @@ impl MeshApi {
                 inner.publication_state,
                 inner.wakeable_inventory.clone(),
                 inner.openai_guardrails.clone(),
+                inner.plugin_manager.clone(),
             )
         };
         let runtime_status = runtime_data_collector.runtime_status_snapshot();
@@ -898,6 +911,14 @@ impl MeshApi {
             })
         };
 
+        let plugin_models = external_inference_models(&plugin_manager).await;
+        let mut advertised_models = node.models().await;
+        append_external_inference_models(&mut advertised_models, &plugin_models);
+        let mut serving_models = node.serving_models().await;
+        append_external_inference_models(&mut serving_models, &plugin_models);
+        let mut hosted_models = node.hosted_models().await;
+        append_external_inference_models(&mut hosted_models, &plugin_models);
+
         let mut payload = runtime_data::status_payload(runtime_data_collector.build_status_view(
             runtime_data::StatusViewInput {
                 version: MESH_LLM_VERSION.to_string(),
@@ -909,11 +930,11 @@ impl MeshApi {
                 is_client,
                 llama_ready: runtime_status.llama_ready,
                 model_name,
-                models: node.models().await,
+                models: advertised_models,
                 available_models: node.available_models().await,
                 requested_models: node.requested_models().await,
-                serving_models: node.serving_models().await,
-                hosted_models: node.hosted_models().await,
+                serving_models,
+                hosted_models,
                 draft_name,
                 api_port,
                 inflight_requests,

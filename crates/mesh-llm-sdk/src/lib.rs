@@ -14,6 +14,13 @@ pub enum MeshDiscoveryMode {
     Mdns,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum LogFormat {
+    Pretty,
+    #[default]
+    Json,
+}
+
 #[derive(Clone, Debug)]
 pub struct HttpConfig {
     pub api_port: u16,
@@ -223,6 +230,11 @@ macro_rules! impl_common_builder_methods {
             self
         }
 
+        pub fn log_format(mut self, format: LogFormat) -> Self {
+            self.config.log_format = format;
+            self
+        }
+
         pub fn startup_timeout(mut self, timeout: Duration) -> Self {
             self.config.startup_timeout = timeout;
             self
@@ -288,6 +300,7 @@ pub mod client {
         pub http: HttpConfig,
         pub network: NetworkConfig,
         pub storage: StorageConfig,
+        pub log_format: LogFormat,
         pub startup_timeout: Duration,
     }
 
@@ -297,6 +310,7 @@ pub mod client {
                 http: HttpConfig::default(),
                 network: NetworkConfig::default(),
                 storage: StorageConfig::default(),
+                log_format: LogFormat::default(),
                 startup_timeout: Duration::from_secs(30),
             }
         }
@@ -328,6 +342,7 @@ pub mod client {
             network: config.network,
             storage: config.storage,
             serving: ServingConfig::default(),
+            log_format: config.log_format,
             startup_timeout: config.startup_timeout,
         })
         .await
@@ -344,6 +359,7 @@ pub mod serve {
         pub network: NetworkConfig,
         pub storage: StorageConfig,
         pub serving: ServingConfig,
+        pub log_format: LogFormat,
         pub startup_timeout: Duration,
     }
 
@@ -354,6 +370,7 @@ pub mod serve {
                 network: NetworkConfig::default(),
                 storage: StorageConfig::default(),
                 serving: ServingConfig::default(),
+                log_format: LogFormat::default(),
                 startup_timeout: Duration::from_secs(30),
             }
         }
@@ -404,6 +421,7 @@ pub mod serve {
             network: config.network,
             storage: config.storage,
             serving: config.serving,
+            log_format: config.log_format,
             startup_timeout: config.startup_timeout,
         })
         .await
@@ -426,6 +444,7 @@ struct EmbeddedNodeParts {
     network: NetworkConfig,
     storage: StorageConfig,
     serving: ServingConfig,
+    log_format: LogFormat,
     startup_timeout: Duration,
 }
 
@@ -480,6 +499,10 @@ fn host_config(parts: EmbeddedNodeParts) -> mesh_llm_host_runtime::sdk::Embedded
             config_path: parts.storage.config_path,
             isolated_config: parts.storage.isolated_config,
         },
+        log_format: match parts.log_format {
+            LogFormat::Pretty => mesh_llm_host_runtime::sdk::EmbeddedMeshLogFormat::Pretty,
+            LogFormat::Json => mesh_llm_host_runtime::sdk::EmbeddedMeshLogFormat::Json,
+        },
         startup_timeout: parts.startup_timeout,
     }
 }
@@ -497,6 +520,7 @@ mod tests {
             .api_port(19337)
             .console_port(13131)
             .discovery_mode(MeshDiscoveryMode::Mdns)
+            .log_format(LogFormat::Pretty)
             .build();
 
         assert!(config.network.auto_join);
@@ -504,6 +528,7 @@ mod tests {
         assert_eq!(config.http.api_port, 19337);
         assert_eq!(config.http.console_port, 13131);
         assert_eq!(config.network.discovery_mode, MeshDiscoveryMode::Mdns);
+        assert_eq!(config.log_format, LogFormat::Pretty);
     }
 
     #[test]

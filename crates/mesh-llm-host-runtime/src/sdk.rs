@@ -47,6 +47,22 @@ pub enum EmbeddedMeshDiscoveryMode {
     Mdns,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum EmbeddedMeshLogFormat {
+    Pretty,
+    #[default]
+    Json,
+}
+
+impl From<EmbeddedMeshLogFormat> for crate::cli::LogFormat {
+    fn from(format: EmbeddedMeshLogFormat) -> Self {
+        match format {
+            EmbeddedMeshLogFormat::Pretty => Self::Pretty,
+            EmbeddedMeshLogFormat::Json => Self::Json,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct EmbeddedMeshHttpConfig {
     pub api_port: u16,
@@ -131,6 +147,7 @@ pub struct EmbeddedMeshNodeConfig {
     pub serving: EmbeddedMeshServingConfig,
     pub network: EmbeddedMeshNetworkConfig,
     pub storage: EmbeddedMeshStorageConfig,
+    pub log_format: EmbeddedMeshLogFormat,
     pub startup_timeout: Duration,
 }
 
@@ -142,6 +159,7 @@ impl Default for EmbeddedMeshNodeConfig {
             serving: EmbeddedMeshServingConfig::default(),
             network: EmbeddedMeshNetworkConfig::default(),
             storage: EmbeddedMeshStorageConfig::default(),
+            log_format: EmbeddedMeshLogFormat::default(),
             startup_timeout: Duration::from_secs(30),
         }
     }
@@ -322,6 +340,11 @@ impl EmbeddedMeshNodeBuilder {
         self
     }
 
+    pub fn log_format(mut self, format: EmbeddedMeshLogFormat) -> Self {
+        self.config.log_format = format;
+        self
+    }
+
     pub fn startup_timeout(mut self, timeout: Duration) -> Self {
         self.config.startup_timeout = timeout;
         self
@@ -356,6 +379,7 @@ pub struct EmbeddedServeConfig {
     pub console_ui: bool,
     pub config_path: Option<PathBuf>,
     pub isolated_config: bool,
+    pub log_format: EmbeddedMeshLogFormat,
     pub startup_timeout: Duration,
 }
 
@@ -384,6 +408,7 @@ impl Default for EmbeddedServeConfig {
             console_ui: false,
             config_path: None,
             isolated_config: true,
+            log_format: EmbeddedMeshLogFormat::default(),
             startup_timeout: Duration::from_secs(30),
         }
     }
@@ -422,6 +447,7 @@ impl From<EmbeddedServeConfig> for EmbeddedMeshNodeConfig {
                 config_path: config.config_path,
                 isolated_config: config.isolated_config,
             },
+            log_format: config.log_format,
             startup_timeout: config.startup_timeout,
         }
     }
@@ -452,6 +478,7 @@ impl From<EmbeddedMeshNodeConfig> for EmbeddedServeConfig {
             console_ui: config.http.console_ui,
             config_path: config.storage.config_path,
             isolated_config: config.storage.isolated_config,
+            log_format: config.log_format,
             startup_timeout: config.startup_timeout,
         }
     }
@@ -471,8 +498,8 @@ pub struct EmbeddedServeHandle {
     api_base_url: String,
     console_url: String,
     invite_token: Option<String>,
-    control_tx: tokio::sync::mpsc::UnboundedSender<crate::api::RuntimeControlRequest>,
-    task: std::thread::JoinHandle<Result<()>>,
+    control_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::api::RuntimeControlRequest>>,
+    task: Option<std::thread::JoinHandle<Result<()>>>,
     _isolated_config: Option<NamedTempFile>,
 }
 
@@ -501,23 +528,40 @@ impl EmbeddedServeHandle {
         })
     }
 
-    pub async fn stop(self) -> Result<()> {
-        if self
-            .control_tx
-            .send(crate::api::RuntimeControlRequest::Shutdown { source: "sdk" })
-            .is_err()
-            && !self.task.is_finished()
-        {
+    pub async fn stop(mut self) -> Result<()> {
+        if !self.request_shutdown("sdk") && !self.task_finished() {
             anyhow::bail!("embedded mesh runtime control channel is unavailable");
         }
+        let task = self
+            .task
+            .take()
+            .context("embedded mesh runtime thread handle is unavailable")?;
         tokio::task::spawn_blocking(move || {
-            self.task
-                .join()
+            task.join()
                 .map_err(|_| anyhow::anyhow!("embedded mesh runtime thread panicked"))?
         })
         .await
         .context("join embedded mesh runtime thread")??;
         Ok(())
+    }
+
+    fn request_shutdown(&mut self, source: &'static str) -> bool {
+        self.control_tx.take().is_some_and(|tx| {
+            tx.send(crate::api::RuntimeControlRequest::Shutdown { source })
+                .is_ok()
+        })
+    }
+
+    fn task_finished(&self) -> bool {
+        self.task
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished)
+    }
+}
+
+impl Drop for EmbeddedServeHandle {
+    fn drop(&mut self) {
+        let _ = self.request_shutdown("sdk-drop");
     }
 }
 
@@ -544,13 +588,21 @@ pub async fn start_embedded_node(
             runtime.block_on(crate::runtime::run_embedded_runtime(runtime_options))
         })
         .context("spawn embedded mesh runtime thread")?;
-    let status = wait_for_embedded_status(&console_url, startup_timeout, &task).await?;
+    let status = match wait_for_embedded_status(&console_url, startup_timeout, &task).await {
+        Ok(status) => status,
+        Err(error) => {
+            let _ = control_tx.send(crate::api::RuntimeControlRequest::Shutdown {
+                source: "sdk-startup-error",
+            });
+            return Err(error);
+        }
+    };
     Ok(EmbeddedServeHandle {
         api_base_url,
         console_url,
         invite_token: token_from_status(&status),
-        control_tx,
-        task,
+        control_tx: Some(control_tx),
+        task: Some(task),
         _isolated_config: isolated_config,
     })
 }
@@ -608,7 +660,7 @@ fn embedded_runtime_options(
         listen_all: config.network.listen_all,
         enumerate_host: config.network.enumerate_host,
         config_path: config.storage.config_path.clone(),
-        log_format: crate::cli::LogFormat::Json,
+        log_format: config.log_format.into(),
         headless: !config.http.console_ui,
         control_rx,
     }

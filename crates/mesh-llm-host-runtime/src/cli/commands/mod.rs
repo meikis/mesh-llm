@@ -3,6 +3,7 @@ mod auth;
 mod benchmark;
 mod discover;
 mod doctor;
+pub(crate) mod doctor_bundle;
 mod download;
 mod gpus;
 mod model_package;
@@ -18,6 +19,7 @@ use crate::cli::commands::agent_cli::{run_claude, run_goose, run_opencode, run_p
 use crate::cli::commands::benchmark::dispatch_benchmark_command;
 use crate::cli::commands::discover::{DiscoverOptions, run_discover, run_stop};
 use crate::cli::commands::doctor::dispatch_doctor_command;
+use crate::cli::commands::doctor_bundle::run_doctor_bundle;
 use crate::cli::commands::download::dispatch_download_command;
 use crate::cli::commands::gpus::dispatch_gpu_command;
 use crate::cli::commands::models::dispatch_models_command;
@@ -25,7 +27,7 @@ use crate::cli::commands::plugin::run_plugin_command;
 use crate::cli::commands::plugin_cli::run_external_plugin_command;
 use crate::cli::commands::runtime::{dispatch_runtime_command, run_drop, run_load, run_status};
 use crate::cli::commands::update::run_update;
-use crate::cli::{AuthCommand, Cli, Command};
+use crate::cli::{AuthCommand, Cli, Command, DoctorCommand};
 use crate::network::nostr;
 
 pub(crate) async fn dispatch(cli: &Cli) -> Result<bool> {
@@ -54,12 +56,30 @@ async fn dispatch_general_command(cli: &Cli, cmd: &Command) -> Result<()> {
             dispatch_download_command(name.as_deref(), *draft).await
         }
         Command::Update { .. } => run_update(cli).await,
+        Command::Doctor {
+            command,
+            output,
+            target,
+            pid,
+            port,
+            max_log_bytes,
+        } => {
+            dispatch_doctor(
+                cli,
+                command.as_ref(),
+                output,
+                *target,
+                *pid,
+                *port,
+                *max_log_bytes,
+            )
+            .await
+        }
         Command::Gpus { json, command } => {
             dispatch_gpu_command(*json, command.as_ref())?;
             Ok(())
         }
         Command::Runtime { command } => dispatch_runtime_command(command.as_ref()).await,
-        Command::Doctor { command } => dispatch_doctor_command(command).await,
         Command::Load { name, port } => run_load(name, *port).await,
         Command::Unload { name, port } => run_drop(name, *port).await,
         Command::Status { port } => run_status(*port).await,
@@ -95,6 +115,32 @@ async fn dispatch_general_command(cli: &Cli, cmd: &Command) -> Result<()> {
         Command::Auth { command } => dispatch_auth_command(command),
         Command::ExternalPlugin(args) => run_external_plugin_command(cli, args).await,
     }
+}
+
+async fn dispatch_doctor(
+    cli: &Cli,
+    command: Option<&DoctorCommand>,
+    output: &Option<std::path::PathBuf>,
+    target: doctor_bundle::DoctorLogTarget,
+    pid: Option<u32>,
+    port: Option<u16>,
+    max_log_bytes: u64,
+) -> Result<()> {
+    if let Some(command) = command {
+        return dispatch_doctor_command(command).await;
+    }
+
+    run_doctor_bundle(
+        cli,
+        doctor_bundle::DoctorBundleOptions {
+            output: output.clone(),
+            target,
+            pid,
+            port,
+            max_log_bytes,
+        },
+    )
+    .await
 }
 
 async fn dispatch_model_prepare(cmd: &Command) -> Result<()> {

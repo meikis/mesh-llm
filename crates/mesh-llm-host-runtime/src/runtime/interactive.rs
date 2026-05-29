@@ -224,7 +224,12 @@ fn spawn_line_handler_with_runtime(
                         eprintln!("{HELP_TEXT}");
                     }
                     Some(InteractiveCommand::Quit) => {
-                        if control_tx.send(RuntimeControlRequest::Shutdown).is_err() {
+                        if control_tx
+                            .send(RuntimeControlRequest::Shutdown {
+                                source: "interactive",
+                            })
+                            .is_err()
+                        {
                             tracing::warn!("interactive shutdown request dropped because runtime control is unavailable");
                         }
                         break;
@@ -338,7 +343,12 @@ fn run_tui_loop(
                 TuiControlFlow::Continue => {}
                 TuiControlFlow::Quit => {
                     shutdown_requested = true;
-                    if control_tx.send(RuntimeControlRequest::Shutdown).is_err() {
+                    if control_tx
+                        .send(RuntimeControlRequest::Shutdown {
+                            source: "interactive",
+                        })
+                        .is_err()
+                    {
                         tracing::warn!(
                             "interactive shutdown request dropped because runtime control is unavailable"
                         );
@@ -366,7 +376,11 @@ fn run_tui_loop(
 
     if shutdown_requested
         && !shutdown_sent
-        && control_tx.send(RuntimeControlRequest::Shutdown).is_err()
+        && control_tx
+            .send(RuntimeControlRequest::Shutdown {
+                source: "interactive",
+            })
+            .is_err()
     {
         tracing::warn!(
             "interactive shutdown request dropped because runtime control is unavailable"

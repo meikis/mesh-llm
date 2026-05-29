@@ -471,6 +471,7 @@ pub struct EmbeddedServeHandle {
     api_base_url: String,
     console_url: String,
     invite_token: Option<String>,
+    control_tx: tokio::sync::mpsc::UnboundedSender<crate::api::RuntimeControlRequest>,
     task: std::thread::JoinHandle<Result<()>>,
     _isolated_config: Option<NamedTempFile>,
 }
@@ -501,14 +502,14 @@ impl EmbeddedServeHandle {
     }
 
     pub async fn stop(self) -> Result<()> {
-        let shutdown_url = format!("{}/api/runtime/shutdown", self.console_url);
-        reqwest::Client::new()
-            .post(shutdown_url)
-            .send()
-            .await
-            .context("request embedded mesh shutdown")?
-            .error_for_status()
-            .context("embedded mesh shutdown returned an error status")?;
+        if self
+            .control_tx
+            .send(crate::api::RuntimeControlRequest::Shutdown { source: "sdk" })
+            .is_err()
+            && !self.task.is_finished()
+        {
+            anyhow::bail!("embedded mesh runtime control channel is unavailable");
+        }
         tokio::task::spawn_blocking(move || {
             self.task
                 .join()
@@ -524,7 +525,8 @@ pub async fn start_embedded_node(
     mut config: EmbeddedMeshNodeConfig,
 ) -> Result<EmbeddedServeHandle> {
     let isolated_config = prepare_isolated_config(&mut config)?;
-    let runtime_options = embedded_runtime_options(&config);
+    let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
+    let runtime_options = embedded_runtime_options(&config, Some(control_rx));
     let api_base_url = format!("http://127.0.0.1:{}/v1", config.http.api_port);
     let console_url = format!("http://127.0.0.1:{}", config.http.console_port);
     let startup_timeout = config.startup_timeout;
@@ -547,6 +549,7 @@ pub async fn start_embedded_node(
         api_base_url,
         console_url,
         invite_token: token_from_status(&status),
+        control_tx,
         task,
         _isolated_config: isolated_config,
     })
@@ -571,6 +574,7 @@ fn prepare_isolated_config(config: &mut EmbeddedMeshNodeConfig) -> Result<Option
 
 fn embedded_runtime_options(
     config: &EmbeddedMeshNodeConfig,
+    control_rx: Option<tokio::sync::mpsc::UnboundedReceiver<crate::api::RuntimeControlRequest>>,
 ) -> crate::runtime::EmbeddedRuntimeOptions {
     crate::runtime::EmbeddedRuntimeOptions {
         mode: match config.mode {
@@ -606,6 +610,7 @@ fn embedded_runtime_options(
         config_path: config.storage.config_path.clone(),
         log_format: crate::cli::LogFormat::Json,
         headless: !config.http.console_ui,
+        control_rx,
     }
 }
 
@@ -1039,7 +1044,7 @@ mod tests {
             .nostr_relay("wss://nostr.example")
             .bind_port(17777)
             .build();
-        let options = embedded_runtime_options(&config);
+        let options = embedded_runtime_options(&config, None);
 
         assert_eq!(options.mode, crate::runtime::EmbeddedRuntimeMode::Serve);
         assert_eq!(options.models, vec!["Qwen3-8B-Q4_K_M".to_string()]);
@@ -1071,7 +1076,7 @@ mod tests {
             .enumerate_host(false)
             .console_ui(true)
             .build();
-        let options = embedded_runtime_options(&config);
+        let options = embedded_runtime_options(&config, None);
 
         assert_eq!(options.mode, crate::runtime::EmbeddedRuntimeMode::Client);
         assert_eq!(options.join, vec!["mesh-test-token".to_string()]);

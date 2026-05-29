@@ -154,7 +154,6 @@ pub(crate) enum EmbeddedRuntimeDiscoveryMode {
     Mdns,
 }
 
-#[derive(Clone, Debug)]
 pub(crate) struct EmbeddedRuntimeOptions {
     pub(crate) mode: EmbeddedRuntimeMode,
     pub(crate) models: Vec<String>,
@@ -178,6 +177,7 @@ pub(crate) struct EmbeddedRuntimeOptions {
     pub(crate) config_path: Option<PathBuf>,
     pub(crate) log_format: LogFormat,
     pub(crate) headless: bool,
+    pub(crate) control_rx: Option<tokio::sync::mpsc::UnboundedReceiver<api::RuntimeControlRequest>>,
 }
 
 impl EmbeddedRuntimeOptions {
@@ -3237,12 +3237,13 @@ pub(crate) async fn run() -> Result<()> {
     run_normalized_runtime_args(normalized_args).await
 }
 
-pub(crate) async fn run_embedded_runtime(options: EmbeddedRuntimeOptions) -> Result<()> {
+pub(crate) async fn run_embedded_runtime(mut options: EmbeddedRuntimeOptions) -> Result<()> {
     initialize_runtime_entrypoint()?;
 
     let surface = options.runtime_surface();
+    let control_rx = options.control_rx.take();
     let cli = cli_from_embedded_options(options);
-    run_runtime_cli(cli, Some(surface), None).await
+    run_runtime_cli(cli, Some(surface), None, control_rx).await
 }
 
 async fn run_normalized_runtime_args(
@@ -3254,7 +3255,7 @@ async fn run_normalized_runtime_args(
         &normalized_args.original,
         normalized_args.explicit_surface,
     );
-    run_runtime_cli(cli, normalized_args.explicit_surface, warning).await
+    run_runtime_cli(cli, normalized_args.explicit_surface, warning, None).await
 }
 
 fn cli_from_embedded_options(options: EmbeddedRuntimeOptions) -> Cli {
@@ -3291,6 +3292,7 @@ async fn run_runtime_cli(
     mut cli: Cli,
     explicit_surface: Option<RuntimeSurface>,
     legacy_warning: Option<String>,
+    embedded_control_rx: Option<tokio::sync::mpsc::UnboundedReceiver<api::RuntimeControlRequest>>,
 ) -> Result<()> {
     crate::cli::validate_discovery_mode_args(&cli)?;
     crate::cli::output::OutputManager::init_global(
@@ -3374,6 +3376,7 @@ async fn run_runtime_cli(
         bin_dir,
         runtime,
         auto_join_candidates,
+        embedded_control_rx,
     )
     .await
 }
@@ -5579,6 +5582,9 @@ async fn select_run_auto_model_path(
     is_client: bool,
     plugin_manager: &plugin::PluginManager,
     bootstrap_listener_tx: &mut Option<BootstrapProxyStopTx>,
+    embedded_control_rx: &mut Option<
+        tokio::sync::mpsc::UnboundedReceiver<api::RuntimeControlRequest>,
+    >,
 ) -> Result<RunAutoModelSelection> {
     let primary_startup_model = startup_models.first().cloned();
     if let Some(primary) = primary_startup_model.as_ref() {
@@ -5644,6 +5650,7 @@ async fn select_run_auto_model_path(
             is_client,
             plugin_manager.clone(),
             passive_api_listener,
+            embedded_control_rx.take(),
         )
         .await?
         {
@@ -5771,6 +5778,7 @@ struct PassiveConsoleSetupContext<'a> {
     affinity_router: &'a affinity::AffinityRouter,
     local_port: u16,
     cport: u16,
+    embedded_control_rx: Option<tokio::sync::mpsc::UnboundedReceiver<api::RuntimeControlRequest>>,
 }
 
 struct RunAutoConsoleStateContext<'a> {
@@ -6725,8 +6733,8 @@ async fn run_auto_handle_control_request(
             let _ = resp.send(result);
             false
         }
-        api::RuntimeControlRequest::Shutdown => {
-            let _ = emit_event(OutputEvent::ShutdownRequested { signal: "api" });
+        api::RuntimeControlRequest::Shutdown { source } => {
+            let _ = emit_event(OutputEvent::ShutdownRequested { signal: source });
             ctx.startup_ready_reporter.mark_shutdown_requested();
             let _ = flush_output().await;
             emit_shutdown(None).await;
@@ -6857,6 +6865,22 @@ async fn run_auto_runtime_event_loop(
     }
 }
 
+fn spawn_embedded_runtime_control_forwarder(
+    embedded_control_rx: Option<tokio::sync::mpsc::UnboundedReceiver<api::RuntimeControlRequest>>,
+    control_tx: tokio::sync::mpsc::UnboundedSender<api::RuntimeControlRequest>,
+) {
+    let Some(mut embedded_control_rx) = embedded_control_rx else {
+        return;
+    };
+    tokio::spawn(async move {
+        while let Some(command) = embedded_control_rx.recv().await {
+            if control_tx.send(command).is_err() {
+                break;
+            }
+        }
+    });
+}
+
 async fn setup_run_auto_console_state(
     ctx: RunAutoConsoleStateContext<'_>,
 ) -> Result<Option<api::MeshApi>> {
@@ -6922,6 +6946,9 @@ async fn run_auto_model_path_or_shutdown(
     is_client: bool,
     plugin_manager: &plugin::PluginManager,
     bootstrap_listener_tx: &mut Option<BootstrapProxyStopTx>,
+    embedded_control_rx: &mut Option<
+        tokio::sync::mpsc::UnboundedReceiver<api::RuntimeControlRequest>,
+    >,
 ) -> Result<Option<PathBuf>> {
     match select_run_auto_model_path(
         cli,
@@ -6931,6 +6958,7 @@ async fn run_auto_model_path_or_shutdown(
         is_client,
         plugin_manager,
         bootstrap_listener_tx,
+        embedded_control_rx,
     )
     .await?
     {
@@ -7345,6 +7373,8 @@ struct RunAutoModelSelectionContext<'a> {
     plugin_manager: &'a plugin::PluginManager,
     bootstrap_listener_tx: &'a mut Option<BootstrapProxyStopTx>,
     primary_startup_model: Option<&'a StartupModelPlan>,
+    embedded_control_rx:
+        &'a mut Option<tokio::sync::mpsc::UnboundedReceiver<api::RuntimeControlRequest>>,
 }
 
 async fn select_advertised_run_auto_model(
@@ -7358,6 +7388,7 @@ async fn select_advertised_run_auto_model(
         ctx.is_client,
         ctx.plugin_manager,
         ctx.bootstrap_listener_tx,
+        ctx.embedded_control_rx,
     )
     .await?
     else {
@@ -7378,6 +7409,9 @@ async fn run_auto(
     bin_dir: PathBuf,
     runtime: Option<std::sync::Arc<crate::runtime::instance::InstanceRuntime>>,
     auto_join_candidates: Vec<(String, Option<String>)>,
+    mut embedded_control_rx: Option<
+        tokio::sync::mpsc::UnboundedReceiver<api::RuntimeControlRequest>,
+    >,
 ) -> Result<()> {
     let resolved_plugins = resolve_plugins_from_config(&config, &cli)?;
     let swarm_capture = configure_swarm_capture(&cli)?;
@@ -7430,6 +7464,7 @@ async fn run_auto(
             plugin_manager: &plugin_manager,
             bootstrap_listener_tx: &mut bootstrap_listener_tx,
             primary_startup_model: primary_startup_model.as_ref(),
+            embedded_control_rx: &mut embedded_control_rx,
         })
         .await?
     else {
@@ -7446,6 +7481,7 @@ async fn run_auto(
     // Runtime control for local load/unload of extra models.
     let (control_tx, mut control_rx) =
         tokio::sync::mpsc::unbounded_channel::<api::RuntimeControlRequest>();
+    spawn_embedded_runtime_control_forwarder(embedded_control_rx.take(), control_tx.clone());
     let (runtime_event_tx, mut runtime_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<RuntimeEvent>();
     let mut runtime_state = initialize_run_auto_runtime_state(&cli);
@@ -7592,9 +7628,11 @@ async fn setup_passive_console_runtime(
         affinity_router,
         local_port,
         cport,
+        embedded_control_rx,
     } = ctx;
     let (control_tx, control_rx) =
         tokio::sync::mpsc::unbounded_channel::<api::RuntimeControlRequest>();
+    spawn_embedded_runtime_control_forwarder(embedded_control_rx, control_tx.clone());
     let dashboard_processes = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let label = if is_client {
         "(client)".to_string()
@@ -7722,12 +7760,12 @@ async fn run_passive_listener_loop(
                 return Ok(Some(model_name));
             }
             Some(cmd) = control_rx.recv() => {
-                if let api::RuntimeControlRequest::Shutdown = cmd {
+                if let api::RuntimeControlRequest::Shutdown { source } = cmd {
                     shutdown_passive_runtime(
                         &node,
                         &plugin_manager,
                         &mut console_server_handle,
-                        "api",
+                        source,
                     )
                     .await;
                     return Ok(None);
@@ -7748,6 +7786,7 @@ async fn run_passive(
     is_client: bool,
     plugin_manager: plugin::PluginManager,
     api_listener: Option<tokio::net::TcpListener>,
+    embedded_control_rx: Option<tokio::sync::mpsc::UnboundedReceiver<api::RuntimeControlRequest>>,
 ) -> Result<Option<String>> {
     let local_port = cli.port;
     let affinity_router = affinity::AffinityRouter::new();
@@ -7789,6 +7828,7 @@ async fn run_passive(
             affinity_router: &affinity_router,
             local_port,
             cport,
+            embedded_control_rx,
         },
         console_listener,
     )

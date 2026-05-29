@@ -219,6 +219,7 @@ mod tests {
             audio: CapabilityLevel::Supported,
             reasoning: CapabilityLevel::Likely,
             tool_use: CapabilityLevel::Supported,
+            coding: CapabilityLevel::Supported,
             moe: true,
         };
 
@@ -234,6 +235,7 @@ mod tests {
         assert!(verified.multimodal);
         assert_eq!(verified.reasoning, CapabilityLevel::Likely);
         assert_eq!(verified.tool_use, CapabilityLevel::Supported);
+        assert_eq!(verified.coding, CapabilityLevel::Supported);
         assert!(verified.moe);
         assert!(verified.supports_audio_runtime());
     }

@@ -17,6 +17,8 @@ pub struct ModelCapabilities {
     pub audio: CapabilityLevel,
     pub reasoning: CapabilityLevel,
     pub tool_use: CapabilityLevel,
+    #[serde(default)]
+    pub coding: CapabilityLevel,
     pub moe: bool,
 }
 
@@ -28,6 +30,7 @@ impl Default for ModelCapabilities {
             audio: CapabilityLevel::None,
             reasoning: CapabilityLevel::None,
             tool_use: CapabilityLevel::None,
+            coding: CapabilityLevel::None,
             moe: false,
         }
     }
@@ -126,6 +129,22 @@ impl ModelCapabilities {
         }
     }
 
+    pub fn coding_status(self) -> &'static str {
+        match self.coding {
+            CapabilityLevel::Supported => "supported",
+            CapabilityLevel::Likely => "likely",
+            CapabilityLevel::None => "none",
+        }
+    }
+
+    pub fn coding_label(self) -> Option<&'static str> {
+        match self.coding {
+            CapabilityLevel::Supported => Some("yes"),
+            CapabilityLevel::Likely => Some("likely"),
+            CapabilityLevel::None => None,
+        }
+    }
+
     pub fn upgrade_vision(&mut self, level: CapabilityLevel) {
         self.vision = self.vision.max(level);
         if self.vision != CapabilityLevel::None {
@@ -146,6 +165,10 @@ impl ModelCapabilities {
 
     pub fn upgrade_tool_use(&mut self, level: CapabilityLevel) {
         self.tool_use = self.tool_use.max(level);
+    }
+
+    pub fn upgrade_coding(&mut self, level: CapabilityLevel) {
+        self.coding = self.coding.max(level);
     }
 
     pub fn normalize(mut self) -> Self {
@@ -191,6 +214,12 @@ pub fn merge_name_signals(mut caps: ModelCapabilities, values: &[&str]) -> Model
         .any(|value| likely_tool_use_name_signal(value))
     {
         caps.upgrade_tool_use(CapabilityLevel::Likely);
+    }
+
+    if values.iter().any(|value| strong_coding_name_signal(value)) {
+        caps.upgrade_coding(CapabilityLevel::Supported);
+    } else if values.iter().any(|value| likely_coding_name_signal(value)) {
+        caps.upgrade_coding(CapabilityLevel::Likely);
     }
 
     caps.normalize()
@@ -387,6 +416,34 @@ pub fn merge_config_signals(mut caps: ModelCapabilities, config: &Value) -> Mode
         }
     }
 
+    if config
+        .get("architectures")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str())
+        .any(strong_coding_name_signal)
+    {
+        caps.upgrade_coding(CapabilityLevel::Supported);
+    } else if config
+        .get("architectures")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str())
+        .any(likely_coding_name_signal)
+    {
+        caps.upgrade_coding(CapabilityLevel::Likely);
+    }
+
+    if let Some(model_type) = config.get("model_type").and_then(|value| value.as_str()) {
+        if strong_coding_name_signal(model_type) {
+            caps.upgrade_coding(CapabilityLevel::Supported);
+        } else if likely_coding_name_signal(model_type) {
+            caps.upgrade_coding(CapabilityLevel::Likely);
+        }
+    }
+
     caps.normalize()
 }
 
@@ -502,7 +559,34 @@ fn strong_tool_use_name_signal(value: &str) -> bool {
 
 fn likely_tool_use_name_signal(value: &str) -> bool {
     let value = value.to_lowercase();
-    ["tool", "agentic", "function", "coding"]
+    ["tool", "agentic", "function"]
+        .iter()
+        .any(|needle| value.contains(needle))
+}
+
+fn strong_coding_name_signal(value: &str) -> bool {
+    let value = value.to_lowercase();
+    [
+        "coder",
+        "codestral",
+        "devstral",
+        "starcoder",
+        "magicoder",
+        "deepseek-coder",
+        "deepseek_coder",
+        "qwen-coder",
+        "qwen_coder",
+        "code-llama",
+        "codellama",
+        "code_llama",
+    ]
+    .iter()
+    .any(|needle| value.contains(needle))
+}
+
+fn likely_coding_name_signal(value: &str) -> bool {
+    let value = value.to_lowercase();
+    ["coding", "code", "programming", "software", "developer"]
         .iter()
         .any(|needle| value.contains(needle))
 }
@@ -571,5 +655,19 @@ mod tests {
         );
         assert_eq!(caps.vision, CapabilityLevel::Supported);
         assert!(caps.multimodal);
+    }
+
+    #[test]
+    fn coding_name_signal_is_supported_for_coder_models() {
+        let caps = merge_name_signals(Default::default(), &["Qwen3-Coder-30B-A3B-Instruct"]);
+
+        assert_eq!(caps.coding, CapabilityLevel::Supported);
+    }
+
+    #[test]
+    fn coding_name_signal_is_likely_for_generic_code_models() {
+        let caps = merge_name_signals(Default::default(), &["Helpful-Code-7B"]);
+
+        assert_eq!(caps.coding, CapabilityLevel::Likely);
     }
 }

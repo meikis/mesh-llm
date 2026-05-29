@@ -568,6 +568,7 @@ pub(crate) fn local_ann_to_proto_ann(
                 vision: local_capability_level_to_proto(descriptor.capabilities.vision),
                 reasoning: local_capability_level_to_proto(descriptor.capabilities.reasoning),
                 tool_use: local_capability_level_to_proto(descriptor.capabilities.tool_use),
+                coding: local_capability_level_to_proto(descriptor.capabilities.coding),
                 moe: descriptor.capabilities.moe,
                 multimodal: descriptor.capabilities.multimodal,
                 audio: local_capability_level_to_proto(descriptor.capabilities.audio),
@@ -777,6 +778,7 @@ pub(crate) fn proto_ann_to_local(
                                 audio: proto_capability_level_to_local(caps.audio),
                                 reasoning: proto_capability_level_to_local(caps.reasoning),
                                 tool_use: proto_capability_level_to_local(caps.tool_use),
+                                coding: proto_capability_level_to_local(caps.coding),
                                 moe: caps.moe,
                             })
                             .unwrap_or_default();

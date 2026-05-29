@@ -277,6 +277,8 @@ pub struct ModelCapabilities {
     pub multimodal: bool,
     #[prost(enumeration = "CapabilityLevel", tag = "6")]
     pub audio: i32,
+    #[prost(enumeration = "CapabilityLevel", tag = "7")]
+    pub coding: i32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ModelTopology {

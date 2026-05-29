@@ -1249,7 +1249,8 @@ fn model_descriptor_score(descriptor: &ServedModelDescriptor) -> u8 {
         + u8::from(descriptor.capabilities.audio != crate::models::CapabilityLevel::None)
         + u8::from(descriptor.capabilities.vision != crate::models::CapabilityLevel::None)
         + u8::from(descriptor.capabilities.reasoning != crate::models::CapabilityLevel::None)
-        + u8::from(descriptor.capabilities.tool_use != crate::models::CapabilityLevel::None);
+        + u8::from(descriptor.capabilities.tool_use != crate::models::CapabilityLevel::None)
+        + u8::from(descriptor.capabilities.coding != crate::models::CapabilityLevel::None);
     let metadata_bonus = u8::from(descriptor.metadata.is_some());
     model_identity_score(identity) + capability_bonus + metadata_bonus
 }

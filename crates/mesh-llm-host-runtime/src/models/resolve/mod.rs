@@ -76,6 +76,7 @@ pub(super) fn merge_capabilities(
         audio: left.audio.max(right.audio),
         reasoning: left.reasoning.max(right.reasoning),
         tool_use: left.tool_use.max(right.tool_use),
+        coding: left.coding.max(right.coding),
         moe: false,
     }
 }

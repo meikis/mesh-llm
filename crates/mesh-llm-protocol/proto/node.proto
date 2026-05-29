@@ -152,6 +152,7 @@ message ModelCapabilities {
   bool moe = 4;
   bool multimodal = 5;
   CapabilityLevel audio = 6;
+  CapabilityLevel coding = 7;
 }
 
 enum CapabilityLevel {

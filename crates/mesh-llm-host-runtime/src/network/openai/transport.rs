@@ -4014,6 +4014,12 @@ fn models_list_json(
             if capabilities.reasoning_label().is_some() {
                 caps.push("reasoning");
             }
+            if capabilities.tool_use_label().is_some() {
+                caps.push("tool_use");
+            }
+            if capabilities.coding_label().is_some() {
+                caps.push("coding");
+            }
             let display_name = if public_id == *m {
                 crate::models::installed_model_display_name(m)
             } else {
@@ -4029,11 +4035,13 @@ fn models_list_json(
                 "vision_status": capabilities.vision_status(),
                 "audio_status": capabilities.audio_status(),
                 "reasoning_status": capabilities.reasoning_status(),
+                "tool_use_status": capabilities.tool_use_status(),
+                "coding_status": capabilities.coding_status(),
             });
-            if let Some(metadata) = model_metadata_json(m, descriptor, runtimes) {
-                if let Some(object) = model.as_object_mut() {
-                    object.insert("metadata".to_string(), metadata);
-                }
+            if let Some(metadata) = model_metadata_json(m, descriptor, runtimes)
+                && let Some(object) = model.as_object_mut()
+            {
+                object.insert("metadata".to_string(), metadata);
             }
             Some(model)
         })
@@ -4055,10 +4063,10 @@ fn model_metadata_json(
     if let Some(value) = descriptor_metadata.and_then(|metadata| metadata.parameter_size.as_ref()) {
         metadata.insert("parameter_size".to_string(), serde_json::json!(value));
     }
-    if let Some(value) = descriptor_metadata.and_then(|metadata| metadata.parameter_count_b) {
-        if value.is_finite() {
-            metadata.insert("parameter_count_b".to_string(), serde_json::json!(value));
-        }
+    if let Some(value) = descriptor_metadata.and_then(|metadata| metadata.parameter_count_b)
+        && value.is_finite()
+    {
+        metadata.insert("parameter_count_b".to_string(), serde_json::json!(value));
     }
     if let Some(value) = descriptor_metadata.and_then(|metadata| metadata.quant.as_ref()) {
         metadata.insert("quant".to_string(), serde_json::json!(value));
@@ -4944,6 +4952,24 @@ mod tests {
         assert!(capabilities.iter().any(|cap| cap == "vision"));
         assert_eq!(body["data"][0]["vision_status"], "supported");
         assert_eq!(body["data"][0]["multimodal_status"], "supported");
+    }
+
+    #[test]
+    fn models_list_reports_coding_capability() {
+        let models = vec!["Qwen3-Coder-30B-A3B-Instruct".to_string()];
+        let descriptors = vec![local_gguf_descriptor_with_capabilities(
+            &models[0],
+            crate::models::ModelCapabilities {
+                coding: crate::models::CapabilityLevel::Supported,
+                ..Default::default()
+            },
+        )];
+
+        let body = models_list_json(&models, &descriptors, &[]);
+        let capabilities = body["data"][0]["capabilities"].as_array().unwrap();
+
+        assert!(capabilities.iter().any(|cap| cap == "coding"));
+        assert_eq!(body["data"][0]["coding_status"], "supported");
     }
 
     #[test]

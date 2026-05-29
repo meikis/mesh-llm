@@ -211,6 +211,7 @@ pub(crate) fn capabilities_json(caps: ModelCapabilities) -> Value {
         "audio": caps.audio_status(),
         "reasoning": caps.reasoning_status(),
         "tool_use": caps.tool_use_status(),
+        "coding": caps.coding_status(),
     })
 }
 

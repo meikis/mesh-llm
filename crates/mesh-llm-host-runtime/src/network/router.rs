@@ -545,6 +545,7 @@ const EXPLORATION_PROBABILITY: f64 = 0.15;
 ///
 /// Filtering:
 ///   - `needs_tools` → prefer models with `tool_use != None`
+///   - `Code`        → prefer models with `coding != None`
 ///   - `Reasoning`   → prefer models with `reasoning != None`
 ///   - `Image`       → prefer models with `vision != None`
 ///   - anything else → no capability filter
@@ -576,6 +577,10 @@ pub fn pick_model_classified<'a>(
         Category::Reasoning => available_models
             .iter()
             .filter(|c| c.caps.reasoning != CapabilityLevel::None)
+            .collect(),
+        Category::Code => available_models
+            .iter()
+            .filter(|c| c.caps.coding != CapabilityLevel::None)
             .collect(),
         Category::Image => available_models
             .iter()
@@ -1078,6 +1083,30 @@ mod tests {
         };
         let result = pick_model_classified(&cl, &available);
         assert_eq!(result, Some("tool-model"));
+    }
+
+    #[test]
+    fn test_pick_code_filters_by_capability() {
+        use crate::models::{CapabilityLevel, ModelCapabilities};
+
+        let coding_caps = ModelCapabilities {
+            coding: CapabilityLevel::Supported,
+            ..Default::default()
+        };
+        let no_caps = ModelCapabilities::default();
+
+        let available = vec![
+            RoutingCandidate::unscored("chat-model", no_caps),
+            RoutingCandidate::unscored("coder-model", coding_caps),
+        ];
+        let cl = Classification {
+            category: Category::Code,
+            complexity: Complexity::Moderate,
+            needs_tools: false,
+            has_media_inputs: false,
+        };
+        let result = pick_model_classified(&cl, &available);
+        assert_eq!(result, Some("coder-model"));
     }
 
     #[test]

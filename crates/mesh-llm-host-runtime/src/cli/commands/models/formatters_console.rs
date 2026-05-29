@@ -141,6 +141,9 @@ impl SearchFormatter for ConsoleFormatter {
             if let Some(label) = result.capabilities.tool_use_label() {
                 caps.push(format!("🛠️ tool use ({label})"));
             }
+            if let Some(label) = result.capabilities.coding_label() {
+                caps.push(format!("⌨️ coding ({label})"));
+            }
             writeln!(&mut output, "   capabilities: {}", caps.join("  "))?;
             writeln!(
                 &mut output,
@@ -266,6 +269,9 @@ impl ModelsFormatter for ConsoleFormatter {
             }
             if let Some(label) = row.capabilities.tool_use_label() {
                 caps.push(format!("🛠️ tool use ({label})"));
+            }
+            if let Some(label) = row.capabilities.coding_label() {
+                caps.push(format!("⌨️ coding ({label})"));
             }
             writeln!(&mut output, "   capabilities: {}", caps.join("  "))?;
             writeln!(&mut output, "   ref: {}", row.model_ref)?;

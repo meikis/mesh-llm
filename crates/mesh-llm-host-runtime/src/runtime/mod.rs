@@ -3368,7 +3368,7 @@ async fn run_runtime_cli(
         return Ok(());
     };
 
-    run_auto(
+    run_auto(RunAutoContext {
         cli,
         config,
         startup_models,
@@ -3377,7 +3377,7 @@ async fn run_runtime_cli(
         runtime,
         auto_join_candidates,
         embedded_control_rx,
-    )
+    })
     .await
 }
 
@@ -5575,18 +5575,9 @@ fn start_run_auto_bootstrap_proxy(
 }
 
 async fn select_run_auto_model_path(
-    cli: &Cli,
-    node: &mesh::Node,
-    startup_models: &[StartupModelPlan],
-    local_models: &[String],
-    is_client: bool,
-    plugin_manager: &plugin::PluginManager,
-    bootstrap_listener_tx: &mut Option<BootstrapProxyStopTx>,
-    embedded_control_rx: &mut Option<
-        tokio::sync::mpsc::UnboundedReceiver<api::RuntimeControlRequest>,
-    >,
+    ctx: &mut RunAutoModelSelectionContext<'_>,
 ) -> Result<RunAutoModelSelection> {
-    let primary_startup_model = startup_models.first().cloned();
+    let primary_startup_model = ctx.startup_models.first().cloned();
     if let Some(primary) = primary_startup_model.as_ref() {
         return Ok(RunAutoModelSelection::Model(primary.resolved_path.clone()));
     }
@@ -5596,20 +5587,21 @@ async fn select_run_auto_model_path(
     });
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-    let assignment = pick_model_assignment(node, local_models).await;
-    let assignment = if assignment.is_none() && (cli.auto || cli.discover.is_some()) && !is_client {
-        let pack = auto_model_pack_blocking(node.vram_bytes() as f64 / 1e9).await?;
-        if !pack.is_empty() {
-            Some(pack[0].clone())
+    let assignment = pick_model_assignment(ctx.node, ctx.local_models).await;
+    let assignment =
+        if assignment.is_none() && (ctx.cli.auto || ctx.cli.discover.is_some()) && !ctx.is_client {
+            let pack = auto_model_pack_blocking(ctx.node.vram_bytes() as f64 / 1e9).await?;
+            if !pack.is_empty() {
+                Some(pack[0].clone())
+            } else {
+                assignment
+            }
         } else {
             assignment
-        }
-    } else {
-        assignment
-    };
+        };
 
     let Some(model_name) = assignment else {
-        let passive_api_listener = match bootstrap_listener_tx.take() {
+        let passive_api_listener = match ctx.bootstrap_listener_tx.take() {
             Some(tx) => {
                 let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
                 if tx.send(resp_tx).await.is_ok() {
@@ -5624,7 +5616,7 @@ async fn select_run_auto_model_path(
             }
             _ => None,
         };
-        if is_client {
+        if ctx.is_client {
             let _ = emit_event(OutputEvent::PassiveMode {
                 role: "client".to_string(),
                 status: RuntimeStatus::Starting,
@@ -5636,8 +5628,8 @@ async fn select_run_auto_model_path(
             let _ = emit_event(OutputEvent::PassiveMode {
                 role: "standby".to_string(),
                 status: RuntimeStatus::Starting,
-                capacity_gb: Some(node.vram_bytes() as f64 / 1e9),
-                models_on_disk: Some(local_models.to_vec()),
+                capacity_gb: Some(ctx.node.vram_bytes() as f64 / 1e9),
+                models_on_disk: Some(ctx.local_models.to_vec()),
                 detail: Some(
                     "No matching model on disk — running as standby GPU node. Proxying requests to other nodes. Will activate when needed."
                         .to_string(),
@@ -5645,12 +5637,12 @@ async fn select_run_auto_model_path(
             });
         }
         return match run_passive(
-            cli,
-            node.clone(),
-            is_client,
-            plugin_manager.clone(),
+            ctx.cli,
+            ctx.node.clone(),
+            ctx.is_client,
+            ctx.plugin_manager.clone(),
             passive_api_listener,
-            embedded_control_rx.take(),
+            ctx.embedded_control_rx.take(),
         )
         .await?
         {
@@ -5663,9 +5655,9 @@ async fn select_run_auto_model_path(
 
     let _ = emit_event(OutputEvent::HostElected {
         model: model_name.clone(),
-        host: node.id().fmt_short().to_string(),
+        host: ctx.node.id().fmt_short().to_string(),
         role: Some("host".to_string()),
-        capacity_gb: Some(node.vram_bytes() as f64 / 1e9),
+        capacity_gb: Some(ctx.node.vram_bytes() as f64 / 1e9),
     });
     let model_path = models::find_model_path(&model_name);
     if model_path.exists() {
@@ -6939,29 +6931,9 @@ async fn setup_run_auto_console_state(
 }
 
 async fn run_auto_model_path_or_shutdown(
-    cli: &Cli,
-    node: &mesh::Node,
-    startup_models: &[StartupModelPlan],
-    local_models: &[String],
-    is_client: bool,
-    plugin_manager: &plugin::PluginManager,
-    bootstrap_listener_tx: &mut Option<BootstrapProxyStopTx>,
-    embedded_control_rx: &mut Option<
-        tokio::sync::mpsc::UnboundedReceiver<api::RuntimeControlRequest>,
-    >,
+    ctx: &mut RunAutoModelSelectionContext<'_>,
 ) -> Result<Option<PathBuf>> {
-    match select_run_auto_model_path(
-        cli,
-        node,
-        startup_models,
-        local_models,
-        is_client,
-        plugin_manager,
-        bootstrap_listener_tx,
-        embedded_control_rx,
-    )
-    .await?
-    {
+    match select_run_auto_model_path(ctx).await? {
         RunAutoModelSelection::Model(model) => Ok(Some(model)),
         RunAutoModelSelection::Shutdown => Ok(None),
     }
@@ -7378,20 +7350,9 @@ struct RunAutoModelSelectionContext<'a> {
 }
 
 async fn select_advertised_run_auto_model(
-    ctx: RunAutoModelSelectionContext<'_>,
+    mut ctx: RunAutoModelSelectionContext<'_>,
 ) -> Result<Option<(PathBuf, String)>> {
-    let Some(model) = run_auto_model_path_or_shutdown(
-        ctx.cli,
-        ctx.node,
-        ctx.startup_models,
-        ctx.local_models,
-        ctx.is_client,
-        ctx.plugin_manager,
-        ctx.bootstrap_listener_tx,
-        ctx.embedded_control_rx,
-    )
-    .await?
-    else {
+    let Some(model) = run_auto_model_path_or_shutdown(&mut ctx).await? else {
         return Ok(None);
     };
 
@@ -7401,18 +7362,28 @@ async fn select_advertised_run_auto_model(
 }
 
 /// Serve mode: join the mesh and serve local models through the embedded runtime.
-async fn run_auto(
-    mut cli: Cli,
+struct RunAutoContext {
+    cli: Cli,
     config: plugin::MeshConfig,
     startup_models: Vec<StartupModelPlan>,
     requested_model_names: Vec<String>,
     bin_dir: PathBuf,
     runtime: Option<std::sync::Arc<crate::runtime::instance::InstanceRuntime>>,
     auto_join_candidates: Vec<(String, Option<String>)>,
-    mut embedded_control_rx: Option<
-        tokio::sync::mpsc::UnboundedReceiver<api::RuntimeControlRequest>,
-    >,
-) -> Result<()> {
+    embedded_control_rx: Option<tokio::sync::mpsc::UnboundedReceiver<api::RuntimeControlRequest>>,
+}
+
+async fn run_auto(ctx: RunAutoContext) -> Result<()> {
+    let RunAutoContext {
+        mut cli,
+        config,
+        startup_models,
+        requested_model_names,
+        bin_dir,
+        runtime,
+        auto_join_candidates,
+        mut embedded_control_rx,
+    } = ctx;
     let resolved_plugins = resolve_plugins_from_config(&config, &cli)?;
     let swarm_capture = configure_swarm_capture(&cli)?;
     let api_port = cli.port;

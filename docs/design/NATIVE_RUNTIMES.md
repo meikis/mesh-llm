@@ -98,6 +98,21 @@ Packaged application mode should not require network access. An app can provide
 a bundled runtime directory, set downloads to false, and still use the same
 resolver path as a downloading SDK consumer.
 
+## Upgrade And Pruning
+
+An updater must install and verify the new version-matched native runtime
+before switching the active MeshLLM version. Old runtimes should be pruned only
+after the new MeshLLM binary and native runtime are known to load together.
+
+Default pruning keeps:
+
+- native runtimes for the active MeshLLM version
+- native runtimes for one previous MeshLLM version for rollback
+
+Explicit prune operations may remove all native runtimes that do not match the
+active MeshLLM version. The CLI and autoupdater should share this policy so
+interactive cleanup and automatic cleanup behave the same way.
+
 ## Consumer Shape
 
 A crates.io SDK consumer that wants dynamic local serving should configure the
@@ -145,12 +160,13 @@ should expose operations equivalent to:
 The CLI should mirror those operations, for example:
 
 ```bash
-mesh-llm native-runtime list --available
-mesh-llm native-runtime list --installed
-mesh-llm native-runtime install cuda
-mesh-llm native-runtime remove meshllm-native-linux-x86_64-cuda
-mesh-llm native-runtime prune
-mesh-llm native-runtime doctor
+mesh-llm runtime list --available
+mesh-llm runtime list --installed
+mesh-llm runtime install cuda
+mesh-llm runtime remove meshllm-native-linux-x86_64-cuda
+mesh-llm runtime prune
+mesh-llm runtime prune --active-only
+mesh-llm runtime doctor
 ```
 
 The autoupdater should use the same inventory, ranking, install, prune, and

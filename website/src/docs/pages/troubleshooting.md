@@ -62,8 +62,7 @@ If you are developing from source, use the repository cleanup commands in the te
 List models and pass one explicitly:
 
 ```sh
-MODEL_ID=$(curl -s http://localhost:9337/v1/models | jq -r '.data[0].id')
-mesh-llm goose --model "$MODEL_ID"
+mesh-llm goose
 ```
 
 ## Public mesh connection issues

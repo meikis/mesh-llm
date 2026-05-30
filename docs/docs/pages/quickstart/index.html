@@ -244,13 +244,12 @@
 </code></pre>
 <p>Other launchers use the same local endpoint:</p>
 <pre><code class="language-sh">mesh-llm claude
-mesh-llm opencode --host 127.0.0.1:9337
-mesh-llm pi --host 127.0.0.1:9337
 </code></pre>
-<p>For tools that read OpenAI environment variables:</p>
-<pre><code class="language-sh">export OPENAI_BASE_URL=http://localhost:9337/v1
-export OPENAI_API_KEY=dummy
+<pre><code class="language-sh">mesh-llm opencode --host 127.0.0.1:9337
 </code></pre>
+<pre><code class="language-sh">mesh-llm pi --host 127.0.0.1:9337
+</code></pre>
+<p>For tools without a Mesh launcher, configure an OpenAI-compatible provider with base URL <code>http://localhost:9337/v1</code> and API key <code>dummy</code>.</p>
 <h2 id="add-another-machine" tabindex="-1">Add another machine</h2>
 <p>Install Mesh on another machine and run the same command with the same mesh name:</p>
 <pre><code class="language-sh">mesh-llm serve --discover my-private-mesh --model unsloth/gemma-4-E4B-it-GGUF:UD-Q4_K_XL

@@ -8,12 +8,7 @@ Mesh exposes one local OpenAI-compatible API. Clients call the local API; Mesh d
 http://localhost:9337/v1
 ```
 
-Environment variables:
-
-```sh
-export OPENAI_BASE_URL=http://localhost:9337/v1
-export OPENAI_API_KEY=dummy
-```
+Use base URL `http://localhost:9337/v1` and any placeholder API key, such as `dummy`.
 
 ## List models
 
@@ -24,11 +19,7 @@ curl -s http://localhost:9337/v1/models | jq '.data[].id'
 ## Chat completion
 
 ```sh
-MODEL_ID=$(curl -s http://localhost:9337/v1/models | jq -r '.data[0].id')
-
-curl http://localhost:9337/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d "{\"model\":\"$MODEL_ID\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello in one sentence.\"}]}"
+curl -s http://localhost:9337/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"unsloth/gemma-4-E4B-it-GGUF:UD-Q4_K_XL","messages":[{"role":"user","content":"Say hello in one sentence."}]}'
 ```
 
 ## Streaming

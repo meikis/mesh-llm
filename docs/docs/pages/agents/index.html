@@ -191,18 +191,16 @@
 <h2 id="base-url" tabindex="-1">Base URL</h2>
 <pre><code class="language-text">http://localhost:9337/v1
 </code></pre>
-<p>If an agent asks for an API key, use any placeholder value:</p>
-<pre><code class="language-sh">export OPENAI_BASE_URL=http://localhost:9337/v1
-export OPENAI_API_KEY=dummy
-</code></pre>
+<p>If an agent asks for an API key, use any placeholder value such as <code>dummy</code>.</p>
 <h2 id="recommended-first-agent" tabindex="-1">Recommended first agent</h2>
-<pre><code class="language-sh">MODEL_ID=$(curl -s http://localhost:9337/v1/models | jq -r '.data[0].id')
-mesh-llm goose --model &quot;$MODEL_ID&quot;
+<pre><code class="language-sh">mesh-llm goose
 </code></pre>
 <h2 id="other-launchers" tabindex="-1">Other launchers</h2>
-<pre><code class="language-sh">mesh-llm claude --model &quot;$MODEL_ID&quot;
-mesh-llm opencode --host 127.0.0.1:9337 --model &quot;$MODEL_ID&quot;
-mesh-llm pi --host 127.0.0.1:9337 --model &quot;$MODEL_ID&quot;
+<pre><code class="language-sh">mesh-llm claude
+</code></pre>
+<pre><code class="language-sh">mesh-llm opencode --host 127.0.0.1:9337
+</code></pre>
+<pre><code class="language-sh">mesh-llm pi --host 127.0.0.1:9337
 </code></pre>
 <p>The built-in launchers point the agent at Mesh for you. If <code>--model</code> is omitted, Mesh chooses from models available on the local mesh.</p>
 <h2 id="manual-setup" tabindex="-1">Manual setup</h2>

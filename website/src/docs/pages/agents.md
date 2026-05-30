@@ -12,26 +12,26 @@ Use the console first. Once chat works at `http://localhost:3131`, connect an ag
 http://localhost:9337/v1
 ```
 
-If an agent asks for an API key, use any placeholder value:
-
-```sh
-export OPENAI_BASE_URL=http://localhost:9337/v1
-export OPENAI_API_KEY=dummy
-```
+If an agent asks for an API key, use any placeholder value such as `dummy`.
 
 ## Recommended first agent
 
 ```sh
-MODEL_ID=$(curl -s http://localhost:9337/v1/models | jq -r '.data[0].id')
-mesh-llm goose --model "$MODEL_ID"
+mesh-llm goose
 ```
 
 ## Other launchers
 
 ```sh
-mesh-llm claude --model "$MODEL_ID"
-mesh-llm opencode --host 127.0.0.1:9337 --model "$MODEL_ID"
-mesh-llm pi --host 127.0.0.1:9337 --model "$MODEL_ID"
+mesh-llm claude
+```
+
+```sh
+mesh-llm opencode --host 127.0.0.1:9337
+```
+
+```sh
+mesh-llm pi --host 127.0.0.1:9337
 ```
 
 The built-in launchers point the agent at Mesh for you. If `--model` is omitted, Mesh chooses from models available on the local mesh.

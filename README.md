@@ -42,9 +42,7 @@ curl -s http://localhost:9337/v1/models | jq '.data[].id'
 Send an OpenAI-compatible request:
 
 ```bash
-curl http://localhost:9337/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"GLM-4.7-Flash-Q4_K_M","messages":[{"role":"user","content":"hello"}]}'
+curl -s http://localhost:9337/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"GLM-4.7-Flash-Q4_K_M","messages":[{"role":"user","content":"hello"}]}'
 ```
 
 For server deployments, add `--headless` to hide the web UI while keeping the
@@ -105,9 +103,7 @@ runs in code (not as another model call) and only escalates to a reducer
 LLM on genuine conflict. Tool calls flow through the full pipeline.
 
 ```bash
-curl http://localhost:9337/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"mesh","messages":[{"role":"user","content":"What is the capital of Japan?"}]}'
+curl -s http://localhost:9337/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"mesh","messages":[{"role":"user","content":"What is the capital of Japan?"}]}'
 ```
 
 Requires at least two distinct models in the mesh. See

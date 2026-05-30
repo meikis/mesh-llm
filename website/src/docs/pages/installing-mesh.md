@@ -47,14 +47,13 @@ Most users should let the installer auto-detect. Force a flavor when auto-detect
 macOS/Linux:
 
 ```sh
-curl -fsSL https://mesh-llm.cloud/install.sh | MESH_LLM_INSTALL_FLAVOR=vulkan bash
+curl -fsSL https://mesh-llm.cloud/install.sh | bash -s -- --flavor vulkan
 ```
 
 Windows PowerShell:
 
 ```powershell
-$env:MESH_LLM_INSTALL_FLAVOR = "vulkan"
-irm https://mesh-llm.cloud/install.ps1 | iex
+& ([scriptblock]::Create((irm https://mesh-llm.cloud/install.ps1))) -Flavor vulkan
 ```
 
 Supported release flavors:
@@ -77,21 +76,19 @@ curl -fsSL https://mesh-llm.cloud/install.sh | bash -s -- --pre-release
 Windows PowerShell:
 
 ```powershell
-$env:MESH_LLM_INSTALL_PRERELEASE = "1"
-irm https://mesh-llm.cloud/install.ps1 | iex
+& ([scriptblock]::Create((irm https://mesh-llm.cloud/install.ps1))) -PreRelease
 ```
 
 Install somewhere else:
 
 ```sh
-curl -fsSL https://mesh-llm.cloud/install.sh | MESH_LLM_INSTALL_DIR="$HOME/bin" bash
+curl -fsSL https://mesh-llm.cloud/install.sh | bash -s -- --install-dir "$HOME/bin"
 ```
 
 Windows PowerShell:
 
 ```powershell
-$env:MESH_LLM_INSTALL_DIR = "$HOME\bin"
-irm https://mesh-llm.cloud/install.ps1 | iex
+& ([scriptblock]::Create((irm https://mesh-llm.cloud/install.ps1))) -InstallDir "$HOME\bin"
 ```
 
 ## Next step

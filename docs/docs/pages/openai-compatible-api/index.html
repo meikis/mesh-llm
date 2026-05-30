@@ -191,19 +191,12 @@
 <h2 id="base-url" tabindex="-1">Base URL</h2>
 <pre><code class="language-text">http://localhost:9337/v1
 </code></pre>
-<p>Environment variables:</p>
-<pre><code class="language-sh">export OPENAI_BASE_URL=http://localhost:9337/v1
-export OPENAI_API_KEY=dummy
-</code></pre>
+<p>Use base URL <code>http://localhost:9337/v1</code> and any placeholder API key, such as <code>dummy</code>.</p>
 <h2 id="list-models" tabindex="-1">List models</h2>
 <pre><code class="language-sh">curl -s http://localhost:9337/v1/models | jq '.data[].id'
 </code></pre>
 <h2 id="chat-completion" tabindex="-1">Chat completion</h2>
-<pre><code class="language-sh">MODEL_ID=$(curl -s http://localhost:9337/v1/models | jq -r '.data[0].id')
-
-curl http://localhost:9337/v1/chat/completions \
-  -H &quot;Content-Type: application/json&quot; \
-  -d &quot;{\&quot;model\&quot;:\&quot;$MODEL_ID\&quot;,\&quot;messages\&quot;:[{\&quot;role\&quot;:\&quot;user\&quot;,\&quot;content\&quot;:\&quot;Say hello in one sentence.\&quot;}]}&quot;
+<pre><code class="language-sh">curl -s http://localhost:9337/v1/chat/completions -H &quot;Content-Type: application/json&quot; -d '{&quot;model&quot;:&quot;unsloth/gemma-4-E4B-it-GGUF:UD-Q4_K_XL&quot;,&quot;messages&quot;:[{&quot;role&quot;:&quot;user&quot;,&quot;content&quot;:&quot;Say hello in one sentence.&quot;}]}'
 </code></pre>
 <h2 id="streaming" tabindex="-1">Streaming</h2>
 <p>Clients that support streamed OpenAI-compatible responses can use the same base URL.</p>

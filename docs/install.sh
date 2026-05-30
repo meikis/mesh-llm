@@ -53,10 +53,12 @@ bool_is_true() {
 
 usage() {
     cat <<EOF
-Usage: install.sh [--pre-release] [--service] [--no-start-service]
+Usage: install.sh [--pre-release] [--flavor <flavor>] [--install-dir <dir>] [--service] [--no-start-service]
 
 Options:
   --pre-release              Install the latest published GitHub prerelease instead of the latest stable release.
+  --flavor <flavor>          Release bundle flavor to install.
+  --install-dir <dir>        Install directory. Defaults to ~/.local/bin.
   --service                  Install a per-user background service for this platform.
   --no-start-service         Install the service files but do not start them yet.
   -h, --help                 Show this help text.
@@ -76,6 +78,22 @@ parse_args() {
         case "$1" in
             --pre-release)
                 INSTALL_PRERELEASE=1
+                ;;
+            --flavor)
+                shift
+                if [[ $# -eq 0 || -z "${1:-}" ]]; then
+                    echo "error: --flavor requires a value" >&2
+                    exit 1
+                fi
+                INSTALL_FLAVOR="$1"
+                ;;
+            --install-dir)
+                shift
+                if [[ $# -eq 0 || -z "${1:-}" ]]; then
+                    echo "error: --install-dir requires a value" >&2
+                    exit 1
+                fi
+                INSTALL_DIR="$1"
                 ;;
             --service)
                 INSTALL_SERVICE=1

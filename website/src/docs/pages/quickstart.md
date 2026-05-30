@@ -83,16 +83,17 @@ Other launchers use the same local endpoint:
 
 ```sh
 mesh-llm claude
+```
+
+```sh
 mesh-llm opencode --host 127.0.0.1:9337
+```
+
+```sh
 mesh-llm pi --host 127.0.0.1:9337
 ```
 
-For tools that read OpenAI environment variables:
-
-```sh
-export OPENAI_BASE_URL=http://localhost:9337/v1
-export OPENAI_API_KEY=dummy
-```
+For tools without a Mesh launcher, configure an OpenAI-compatible provider with base URL `http://localhost:9337/v1` and API key `dummy`.
 
 ## Add another machine
 

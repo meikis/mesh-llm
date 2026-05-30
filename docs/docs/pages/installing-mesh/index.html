@@ -229,11 +229,10 @@
 <h2 id="force-a-flavor" tabindex="-1">Force a flavor</h2>
 <p>Most users should let the installer auto-detect. Force a flavor when auto-detection is wrong, when you are preparing a machine image, or when you intentionally want CPU/Vulkan instead of a vendor GPU backend.</p>
 <p>macOS/Linux:</p>
-<pre><code class="language-sh">curl -fsSL https://mesh-llm.cloud/install.sh | MESH_LLM_INSTALL_FLAVOR=vulkan bash
+<pre><code class="language-sh">curl -fsSL https://mesh-llm.cloud/install.sh | bash -s -- --flavor vulkan
 </code></pre>
 <p>Windows PowerShell:</p>
-<pre><code class="language-powershell">$env:MESH_LLM_INSTALL_FLAVOR = &quot;vulkan&quot;
-irm https://mesh-llm.cloud/install.ps1 | iex
+<pre><code class="language-powershell">&amp; ([scriptblock]::Create((irm https://mesh-llm.cloud/install.ps1))) -Flavor vulkan
 </code></pre>
 <p>Supported release flavors:</p>
 <table>
@@ -267,15 +266,13 @@ irm https://mesh-llm.cloud/install.ps1 | iex
 <pre><code class="language-sh">curl -fsSL https://mesh-llm.cloud/install.sh | bash -s -- --pre-release
 </code></pre>
 <p>Windows PowerShell:</p>
-<pre><code class="language-powershell">$env:MESH_LLM_INSTALL_PRERELEASE = &quot;1&quot;
-irm https://mesh-llm.cloud/install.ps1 | iex
+<pre><code class="language-powershell">&amp; ([scriptblock]::Create((irm https://mesh-llm.cloud/install.ps1))) -PreRelease
 </code></pre>
 <p>Install somewhere else:</p>
-<pre><code class="language-sh">curl -fsSL https://mesh-llm.cloud/install.sh | MESH_LLM_INSTALL_DIR=&quot;$HOME/bin&quot; bash
+<pre><code class="language-sh">curl -fsSL https://mesh-llm.cloud/install.sh | bash -s -- --install-dir &quot;$HOME/bin&quot;
 </code></pre>
 <p>Windows PowerShell:</p>
-<pre><code class="language-powershell">$env:MESH_LLM_INSTALL_DIR = &quot;$HOME\bin&quot;
-irm https://mesh-llm.cloud/install.ps1 | iex
+<pre><code class="language-powershell">&amp; ([scriptblock]::Create((irm https://mesh-llm.cloud/install.ps1))) -InstallDir &quot;$HOME\bin&quot;
 </code></pre>
 <h2 id="next-step" tabindex="-1">Next step</h2>
 <p>Run the <a href="/docs/pages/quickstart/">Quickstart</a> to start a private node and open the console.</p>

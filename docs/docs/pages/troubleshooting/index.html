@@ -218,8 +218,7 @@ mesh-llm serve --discover my-private-mesh --model unsloth/gemma-4-E2B-it-GGUF:UD
 <p>If you are developing from source, use the repository cleanup commands in the testing docs.</p>
 <h2 id="agent-fails-but-console-works" tabindex="-1">Agent fails but console works</h2>
 <p>List models and pass one explicitly:</p>
-<pre><code class="language-sh">MODEL_ID=$(curl -s http://localhost:9337/v1/models | jq -r '.data[0].id')
-mesh-llm goose --model &quot;$MODEL_ID&quot;
+<pre><code class="language-sh">mesh-llm goose
 </code></pre>
 <h2 id="public-mesh-connection-issues" tabindex="-1">Public mesh connection issues</h2>
 <p>For first-run testing, prefer a private mesh:</p>

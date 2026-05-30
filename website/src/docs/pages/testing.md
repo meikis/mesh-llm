@@ -238,9 +238,7 @@ mesh-llm unload Llama-3.2-1B-Instruct-Q4_K_M
 # REST surface
 curl localhost:3131/api/runtime
 curl localhost:3131/api/runtime/processes
-curl -X POST localhost:3131/api/runtime/models \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"Llama-3.2-1B-Instruct-Q4_K_M"}'
+curl -X POST localhost:3131/api/runtime/models -H 'Content-Type: application/json' -d '{"model":"Llama-3.2-1B-Instruct-Q4_K_M"}'
 curl -X DELETE localhost:3131/api/runtime/models/Llama-3.2-1B-Instruct-Q4_K_M
 ```
 
@@ -363,9 +361,7 @@ mesh-llm serve --auto
 curl localhost:3131/api/status   # JSON: node, peers, routing, mesh_id, mesh_name
 curl localhost:3131/api/events   # SSE stream
 curl 'localhost:3131/api/search?q=qwen&catalog=true&artifact=gguf&limit=5' # JSON search results
-curl -X POST localhost:3131/api/model-interests \
-  -H 'Content-Type: application/json' \
-  -d '{"model_ref":"Qwen3-Coder-Next-Q4_K_M","source":"ui"}'
+curl -X POST localhost:3131/api/model-interests -H 'Content-Type: application/json' -d '{"model_ref":"Qwen3-Coder-Next-Q4_K_M","source":"ui"}'
 curl localhost:3131/api/model-interests
 curl localhost:3131/api/model-targets
 curl localhost:3131/api/discover # Nostr meshes (current mesh marked by mesh_id)
@@ -459,8 +455,8 @@ cached and a worker does not:
   advertised `skippy-stage/1` `artifact-transfer` support must not be dialed
   for artifact transfer; the worker must fall back to local/HF package
   resolution.
-- Opt-out: with `MESH_LLM_ARTIFACT_TRANSFER=off`, the node must advertise
-  no `artifact-transfer` feature and reject inbound artifact transfer requests.
+- Opt-out: when artifact transfer is disabled, the node must advertise no
+  `artifact-transfer` feature and reject inbound artifact transfer requests.
 - Privacy check: gossip/status output must not include local package inventory,
   cache roots, or artifact file lists; only subprotocol feature support is
   advertised.
@@ -469,17 +465,17 @@ cached and a worker does not:
 
 ## Single-machine testing with ephemeral keys
 
-Set `MESH_LLM_EPHEMERAL_KEY=1` to give a second process a unique identity on the same machine.
-Without this, both processes share `~/.mesh-llm/key` and appear as the same node.
+Use a second machine or a separate OS user for tests that need two unique node identities.
+Two processes under the same user share `~/.mesh-llm/key` and appear as the same node.
 
 ### 14. Forced split on one machine
 
 ```bash
-# Terminal 1: host with --split
 mesh-llm serve --model Qwen2.5-3B --port 9337 --split --console
+```
 
-# Terminal 2: worker with ephemeral key
-MESH_LLM_EPHEMERAL_KEY=1 mesh-llm serve --model Qwen2.5-3B --join <TOKEN> --port 9338 --split --max-vram 1
+```bash
+mesh-llm serve --model Qwen2.5-3B --join <TOKEN> --port 9338 --split --max-vram 1
 ```
 
 - Host starts solo, then re-elects with split when worker joins

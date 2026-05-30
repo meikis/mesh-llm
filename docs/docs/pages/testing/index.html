@@ -416,9 +416,7 @@ mesh-llm unload Llama-3.2-1B-Instruct-Q4_K_M
 # REST surface
 curl localhost:3131/api/runtime
 curl localhost:3131/api/runtime/processes
-curl -X POST localhost:3131/api/runtime/models \
-  -H 'Content-Type: application/json' \
-  -d '{&quot;model&quot;:&quot;Llama-3.2-1B-Instruct-Q4_K_M&quot;}'
+curl -X POST localhost:3131/api/runtime/models -H 'Content-Type: application/json' -d '{&quot;model&quot;:&quot;Llama-3.2-1B-Instruct-Q4_K_M&quot;}'
 curl -X DELETE localhost:3131/api/runtime/models/Llama-3.2-1B-Instruct-Q4_K_M
 </code></pre>
 <ul>
@@ -524,9 +522,7 @@ curl -X POST localhost:3131/api/join -H 'Content-Type: application/json' -d '{&q
 curl localhost:3131/api/status   # JSON: node, peers, routing, mesh_id, mesh_name
 curl localhost:3131/api/events   # SSE stream
 curl 'localhost:3131/api/search?q=qwen&amp;catalog=true&amp;artifact=gguf&amp;limit=5' # JSON search results
-curl -X POST localhost:3131/api/model-interests \
-  -H 'Content-Type: application/json' \
-  -d '{&quot;model_ref&quot;:&quot;Qwen3-Coder-Next-Q4_K_M&quot;,&quot;source&quot;:&quot;ui&quot;}'
+curl -X POST localhost:3131/api/model-interests -H 'Content-Type: application/json' -d '{&quot;model_ref&quot;:&quot;Qwen3-Coder-Next-Q4_K_M&quot;,&quot;source&quot;:&quot;ui&quot;}'
 curl localhost:3131/api/model-interests
 curl localhost:3131/api/model-targets
 curl localhost:3131/api/discover # Nostr meshes (current mesh marked by mesh_id)
@@ -652,8 +648,8 @@ peer, but new outbound artifact transfer should use <code>STREAM_SUBPROTOCOL</co
 advertised <code>skippy-stage/1</code> <code>artifact-transfer</code> support must not be dialed
 for artifact transfer; the worker must fall back to local/HF package
 resolution.</li>
-<li>Opt-out: with <code>MESH_LLM_ARTIFACT_TRANSFER=off</code>, the node must advertise
-no <code>artifact-transfer</code> feature and reject inbound artifact transfer requests.</li>
+<li>Opt-out: when artifact transfer is disabled, the node must advertise no
+<code>artifact-transfer</code> feature and reject inbound artifact transfer requests.</li>
 <li>Privacy check: gossip/status output must not include local package inventory,
 cache roots, or artifact file lists; only subprotocol feature support is
 advertised.</li>
@@ -661,14 +657,12 @@ advertised.</li>
 rejected by SHA-256 verification before stage load.</li>
 </ul>
 <h2 id="single-machine-testing-with-ephemeral-keys" tabindex="-1">Single-machine testing with ephemeral keys</h2>
-<p>Set <code>MESH_LLM_EPHEMERAL_KEY=1</code> to give a second process a unique identity on the same machine.
-Without this, both processes share <code>~/.mesh-llm/key</code> and appear as the same node.</p>
+<p>Use a second machine or a separate OS user for tests that need two unique node identities.
+Two processes under the same user share <code>~/.mesh-llm/key</code> and appear as the same node.</p>
 <h3 id="14-forced-split-on-one-machine" tabindex="-1">14. Forced split on one machine</h3>
-<pre><code class="language-bash"># Terminal 1: host with --split
-mesh-llm serve --model Qwen2.5-3B --port 9337 --split --console
-
-# Terminal 2: worker with ephemeral key
-MESH_LLM_EPHEMERAL_KEY=1 mesh-llm serve --model Qwen2.5-3B --join &lt;TOKEN&gt; --port 9338 --split --max-vram 1
+<pre><code class="language-bash">mesh-llm serve --model Qwen2.5-3B --port 9337 --split --console
+</code></pre>
+<pre><code class="language-bash">mesh-llm serve --model Qwen2.5-3B --join &lt;TOKEN&gt; --port 9338 --split --max-vram 1
 </code></pre>
 <ul>
 <li>Host starts solo, then re-elects with split when worker joins</li>

@@ -189,10 +189,10 @@ Mesh LLM is experimental distributed-systems software. When you report bugs,
 run `mesh-llm doctor` first and attach the output archive to a new GitHub issue:
 
 ```sh
-mesh-llm doctor split --model-ref <model-ref> --output-dir mesh-llm-doctor
-tar -czf mesh-llm-doctor.tar.gz mesh-llm-doctor
+mesh-llm doctor
 ```
 
-Open `https://github.com/Mesh-LLM/mesh-llm/issues/new` and include the command
-you ran, platform/backend flavor, model ref, `/api/status` output if available,
-and whether the node was private, published, or joined with `--auto`.
+Open `https://github.com/Mesh-LLM/mesh-llm/issues/new`, attach the archive
+created by `mesh-llm doctor`, and include the command you ran, platform/backend
+flavor, model ref, `/api/status` output if available, and whether the node was
+private, published, or joined with `--auto`.

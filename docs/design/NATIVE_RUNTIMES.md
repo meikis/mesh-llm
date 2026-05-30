@@ -113,6 +113,22 @@ Explicit prune operations may remove all native runtimes that do not match the
 active MeshLLM version. The CLI and autoupdater should share this policy so
 interactive cleanup and automatic cleanup behave the same way.
 
+## Installer Bootstrap
+
+`install.sh` and `install.ps1` should not duplicate GPU or runtime flavor
+detection once native runtimes are available. Their long-term job is to detect
+only enough OS/architecture information to download and install the matching
+MeshLLM host binary, then delegate native runtime selection to MeshLLM:
+
+```bash
+mesh-llm runtime install
+```
+
+That command installs the recommended compatible native runtime for the active
+MeshLLM version. Shell and PowerShell installers should use the same command as
+manual users and autoupdate flows, so CUDA, CUDA Blackwell, ROCm, Vulkan, CPU,
+verification, cache layout, and progress UX stay in one implementation.
+
 ## Consumer Shape
 
 A crates.io SDK consumer that wants dynamic local serving should configure the
@@ -152,7 +168,8 @@ should expose operations equivalent to:
 
 - list available native runtimes for the current MeshLLM version
 - list installed native runtimes in the configured cache
-- install a selected native runtime
+- install the recommended native runtime for this host
+- optionally install an explicitly selected native runtime
 - remove a selected native runtime
 - prune runtimes for older MeshLLM versions
 - diagnose why a runtime was selected or rejected
@@ -162,11 +179,16 @@ The `mesh-llm runtime` CLI should own inventory and cache management:
 ```bash
 mesh-llm runtime list --available
 mesh-llm runtime list --installed
+mesh-llm runtime install
 mesh-llm runtime install cuda
 mesh-llm runtime remove meshllm-native-linux-x86_64-cuda
 mesh-llm runtime prune
 mesh-llm runtime prune --active-only
 ```
+
+With no runtime argument, `mesh-llm runtime install` detects the host and
+installs the recommended compatible native runtime. Explicit flavor or runtime
+ID arguments are overrides for advanced users, CI, and prepared images.
 
 Selected-runtime diagnostics belong in `mesh-llm doctor`, not in a separate
 `mesh-llm runtime doctor` command. Doctor output should include the active

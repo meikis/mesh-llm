@@ -169,6 +169,18 @@ mesh-llm runtime prune --active-only
 mesh-llm runtime doctor
 ```
 
+The `mesh-llm runtime` commands should use the same interactive UX conventions
+as the rest of the MeshLLM CLI:
+
+- emoji status markers where other user-facing commands use them
+- spinners or progress lines during hardware, driver, and runtime detection
+- byte and percent progress while downloading native runtime artifacts
+- clear status transitions for resolving, downloading, verifying, installing,
+  pruning, and already-current outcomes
+- concise success output that names the selected runtime flavor and version
+- structured output for JSON/non-interactive modes without terminal control
+  characters
+
 The autoupdater should use the same inventory, ranking, install, prune, and
 diagnostic code. It should not maintain a separate platform matrix.
 

@@ -12,7 +12,7 @@ use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
 use tokio::sync::Mutex;
 
@@ -31,6 +31,7 @@ pub mod config {
 }
 
 const DEFAULT_EMBEDDED_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+const EMBEDDED_STARTUP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EmbeddedMeshNodeMode {
@@ -536,12 +537,7 @@ impl EmbeddedServeHandle {
             .task
             .take()
             .context("embedded mesh runtime thread handle is unavailable")?;
-        tokio::task::spawn_blocking(move || {
-            task.join()
-                .map_err(|_| anyhow::anyhow!("embedded mesh runtime thread panicked"))?
-        })
-        .await
-        .context("join embedded mesh runtime thread")??;
+        join_embedded_runtime_thread(task).await?;
         Ok(())
     }
 
@@ -591,9 +587,13 @@ pub async fn start_embedded_node(
     let status = match wait_for_embedded_status(&console_url, startup_timeout, &task).await {
         Ok(status) => status,
         Err(error) => {
-            let _ = control_tx.send(crate::api::RuntimeControlRequest::Shutdown {
-                source: "sdk-startup-error",
-            });
+            if let Err(shutdown_error) = shutdown_failed_embedded_startup(control_tx, task).await {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to shut down embedded mesh runtime after startup error: {shutdown_error}"
+                    )
+                });
+            }
             return Err(error);
         }
     };
@@ -664,6 +664,50 @@ fn embedded_runtime_options(
         headless: !config.http.console_ui,
         control_rx,
     }
+}
+
+async fn shutdown_failed_embedded_startup(
+    control_tx: tokio::sync::mpsc::UnboundedSender<crate::api::RuntimeControlRequest>,
+    task: std::thread::JoinHandle<Result<()>>,
+) -> Result<()> {
+    let _ = control_tx.send(crate::api::RuntimeControlRequest::Shutdown {
+        source: "sdk-startup-error",
+    });
+    join_embedded_runtime_thread_with_timeout(task, EMBEDDED_STARTUP_SHUTDOWN_TIMEOUT).await
+}
+
+async fn join_embedded_runtime_thread(task: std::thread::JoinHandle<Result<()>>) -> Result<()> {
+    tokio::task::spawn_blocking(move || join_embedded_runtime_thread_blocking(task))
+        .await
+        .context("join embedded mesh runtime thread")?
+}
+
+async fn join_embedded_runtime_thread_with_timeout(
+    task: std::thread::JoinHandle<Result<()>>,
+    timeout: Duration,
+) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if task.is_finished() {
+                return join_embedded_runtime_thread_blocking(task);
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "timed out after {:?} waiting for embedded mesh runtime thread to exit",
+                    timeout
+                );
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    })
+    .await
+    .context("join embedded mesh runtime thread after startup failure")?
+}
+
+fn join_embedded_runtime_thread_blocking(task: std::thread::JoinHandle<Result<()>>) -> Result<()> {
+    task.join()
+        .map_err(|_| anyhow::anyhow!("embedded mesh runtime thread panicked"))?
 }
 
 async fn wait_for_embedded_status(

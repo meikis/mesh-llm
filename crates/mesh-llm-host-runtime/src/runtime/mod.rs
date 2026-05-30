@@ -3063,8 +3063,8 @@ async fn wait_shutdown_signal() -> &'static str {
     }
 }
 
-fn init_runtime_tracing() -> Result<()> {
-    let subscriber = tracing_subscriber::fmt()
+fn runtime_tracing_subscriber() -> Result<impl tracing::Subscriber + Send + Sync + 'static> {
+    Ok(tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("mesh_inference=info".parse()?)
@@ -3073,8 +3073,22 @@ fn init_runtime_tracing() -> Result<()> {
                 .add_directive("noq_proto::connection=warn".parse()?),
         )
         .with_writer(MeshTracingStderr)
-        .finish();
-    let _ = tracing::subscriber::set_global_default(subscriber);
+        .finish())
+}
+
+fn init_runtime_tracing() -> Result<()> {
+    let subscriber = runtime_tracing_subscriber()?;
+    tracing::subscriber::set_global_default(subscriber)
+        .map_err(|err| anyhow::anyhow!("install runtime tracing subscriber: {err}"))
+}
+
+fn init_embedded_runtime_tracing() -> Result<()> {
+    let subscriber = runtime_tracing_subscriber()?;
+    if let Err(err) = tracing::subscriber::set_global_default(subscriber) {
+        eprintln!(
+            "mesh-llm embedded runtime using existing tracing subscriber; could not install mesh-llm subscriber: {err}"
+        );
+    }
     Ok(())
 }
 
@@ -3119,7 +3133,7 @@ fn initialize_runtime_entrypoint() -> Result<()> {
 
 fn initialize_embedded_runtime_entrypoint() -> Result<()> {
     crate::system::backend::clear_runtime_shutting_down();
-    init_runtime_tracing()
+    init_embedded_runtime_tracing()
 }
 
 fn acquire_instance_runtime(cli: &Cli) -> Option<Arc<crate::runtime::instance::InstanceRuntime>> {

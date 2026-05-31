@@ -2,7 +2,7 @@ use std::{
     fs,
     process::{Command, Stdio},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -35,13 +35,30 @@ struct TextRequest<'a> {
     max_new_tokens: usize,
 }
 
+#[derive(Serialize)]
+struct TextRequestResult {
+    request_id: String,
+    session_id: String,
+    elapsed_ms: f64,
+    tokenize_elapsed_ms: Option<f64>,
+    prefill_elapsed_ms: Option<f64>,
+    decode_elapsed_ms: Option<f64>,
+    prompt_token_count: usize,
+    generated_token_count: usize,
+    generated_tokens_per_sec: Option<f64>,
+    decode_tokens_per_sec: Option<f64>,
+}
+
 pub fn local_single(args: LocalSingleArgs) -> Result<()> {
     if args.layer_start >= args.layer_end {
         bail!("layer_start must be less than layer_end");
     }
+    if args.request_count == 0 {
+        bail!("request_count must be greater than zero");
+    }
 
     let client = Client::builder()
-        .timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(args.startup_timeout_secs))
         .build()
         .context("failed to build HTTP client")?;
     let run_id = args.run_id.unwrap_or_else(generate_run_id);
@@ -152,21 +169,99 @@ pub fn local_single(args: LocalSingleArgs) -> Result<()> {
     })
     .context("stage server did not become ready")?;
 
-    let request = TextRequest {
-        request_id: "local-single-request-1",
-        session_id: "local-single-session-1",
-        prompt: &args.prompt,
-        max_new_tokens: args.max_new_tokens,
+    if args.warmup_new_tokens > 0 {
+        let warmup_request = TextRequest {
+            request_id: "local-single-warmup-1",
+            session_id: "local-single-warmup-session-1",
+            prompt: &args.prompt,
+            max_new_tokens: args.warmup_new_tokens,
+        };
+        client
+            .post(format!("{stage_http}/v1/text"))
+            .json(&warmup_request)
+            .send()
+            .context("failed to send warmup text request")?
+            .error_for_status()
+            .context("warmup text request failed")?;
+    }
+
+    let mut request_results = Vec::new();
+    let mut text_response = Value::Null;
+    for request_index in 0..args.request_count {
+        let request_id = format!("local-single-request-{}", request_index + 1);
+        let session_id = if args.reuse_session {
+            "local-single-session-1".to_string()
+        } else {
+            format!("local-single-session-{}", request_index + 1)
+        };
+        let request = TextRequest {
+            request_id: &request_id,
+            session_id: &session_id,
+            prompt: &args.prompt,
+            max_new_tokens: args.max_new_tokens,
+        };
+        let text_request_start = Instant::now();
+        text_response = client
+            .post(format!("{stage_http}/v1/text"))
+            .json(&request)
+            .send()
+            .context("failed to send text request")?
+            .error_for_status()
+            .context("text request failed")?
+            .json()
+            .context("failed to parse text response")?;
+        let elapsed = text_request_start.elapsed();
+        let generated_token_count = text_response
+            .get("generated_token_ids")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let prompt_token_count = text_response
+            .get("prompt_token_ids")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let tokenize_elapsed_ms = text_response
+            .get("tokenize_elapsed_ms")
+            .and_then(Value::as_f64);
+        let prefill_elapsed_ms = text_response
+            .get("prefill_elapsed_ms")
+            .and_then(Value::as_f64);
+        let decode_elapsed_ms = text_response
+            .get("decode_elapsed_ms")
+            .and_then(Value::as_f64);
+        let generated_tokens_per_sec = if elapsed.as_secs_f64() > 0.0 {
+            Some(generated_token_count as f64 / elapsed.as_secs_f64())
+        } else {
+            None
+        };
+        let decode_tokens_per_sec = decode_elapsed_ms
+            .filter(|elapsed_ms| *elapsed_ms > 0.0)
+            .map(|elapsed_ms| generated_token_count as f64 / (elapsed_ms / 1000.0));
+        request_results.push(TextRequestResult {
+            request_id,
+            session_id,
+            elapsed_ms: elapsed.as_secs_f64() * 1000.0,
+            tokenize_elapsed_ms,
+            prefill_elapsed_ms,
+            decode_elapsed_ms,
+            prompt_token_count,
+            generated_token_count,
+            generated_tokens_per_sec,
+            decode_tokens_per_sec,
+        });
+    }
+    let generated_token_count = request_results
+        .iter()
+        .map(|request| request.generated_token_count)
+        .sum::<usize>();
+    let text_request_elapsed_ms = request_results
+        .iter()
+        .map(|request| request.elapsed_ms)
+        .sum::<f64>();
+    let generated_tokens_per_sec = if text_request_elapsed_ms > 0.0 {
+        Some(generated_token_count as f64 / (text_request_elapsed_ms / 1000.0))
+    } else {
+        None
     };
-    let text_response: Value = client
-        .post(format!("{stage_http}/v1/text"))
-        .json(&request)
-        .send()
-        .context("failed to send text request")?
-        .error_for_status()
-        .context("text request failed")?
-        .json()
-        .context("failed to parse text response")?;
 
     thread::sleep(Duration::from_secs(1));
     client
@@ -195,6 +290,13 @@ pub fn local_single(args: LocalSingleArgs) -> Result<()> {
             "run_id": run_id,
             "model_identity": run_config["model_identity"],
             "text_response": text_response,
+            "text_request_elapsed_ms": text_request_elapsed_ms,
+            "generated_token_count": generated_token_count,
+            "generated_tokens_per_sec": generated_tokens_per_sec,
+            "warmup_new_tokens": args.warmup_new_tokens,
+            "request_count": args.request_count,
+            "reuse_session": args.reuse_session,
+            "request_results": request_results,
             "report_counts": report["counts"],
         }))?
     );

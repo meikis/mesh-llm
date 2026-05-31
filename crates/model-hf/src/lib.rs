@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use hf_hub::{
     HFClient, HFClientBuilder, RepoType, RepoTypeModel,
     cache::{CachedRepoInfo, HFCacheInfo},
+    progress::{DownloadEvent, Progress, ProgressEvent, ProgressHandler},
     repository::ModelInfo,
 };
 use model_artifact::{ModelArtifactFile, ModelIdentity, ModelRepository, ResolvedModelArtifact};
@@ -16,6 +17,7 @@ use model_ref::{
     quant_selector_from_gguf_file,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub struct HfModelRepository {
@@ -37,12 +39,26 @@ impl HfModelRepository {
     }
 
     pub async fn download_file(&self, repo: &str, revision: &str, file: &str) -> Result<PathBuf> {
+        self.download_file_with_progress(repo, revision, file, None)
+            .await
+    }
+
+    pub async fn download_file_with_progress(
+        &self,
+        repo: &str,
+        revision: &str,
+        file: &str,
+        progress: Option<ModelDownloadProgress>,
+    ) -> Result<PathBuf> {
         let (owner, name) = repo_parts(repo);
+        let progress_handler = progress
+            .map(|progress| Progress::from(Arc::new(HfDownloadProgress::new(file, progress))));
         self.api
             .model(owner, name)
             .download_file()
             .filename(file.to_string())
             .revision(revision.to_string())
+            .maybe_progress(progress_handler)
             .send()
             .await
             .with_context(|| format!("download Hugging Face model file {repo}@{revision}/{file}"))
@@ -52,18 +68,219 @@ impl HfModelRepository {
         &self,
         artifact: &ResolvedModelArtifact,
     ) -> Result<Vec<PathBuf>> {
+        self.download_artifact_files_with_progress(artifact, None)
+            .await
+    }
+
+    pub async fn download_artifact_files_with_progress(
+        &self,
+        artifact: &ResolvedModelArtifact,
+        progress: Option<ModelDownloadProgress>,
+    ) -> Result<Vec<PathBuf>> {
         let mut paths = Vec::with_capacity(artifact.files.len());
-        for file in &artifact.files {
-            paths.push(
-                self.download_file(&artifact.source_repo, &artifact.source_revision, &file.path)
-                    .await?,
-            );
+        let total_files = artifact.files.len();
+        for (index, file) in artifact.files.iter().enumerate() {
+            if let Some(progress) = progress.as_ref() {
+                progress.emit(ModelDownloadProgressEvent::Ensuring {
+                    file: file.path.clone(),
+                    index: index + 1,
+                    total_files,
+                    total_bytes: file.size_bytes,
+                });
+            }
+            let path = self
+                .download_file_with_progress(
+                    &artifact.source_repo,
+                    &artifact.source_revision,
+                    &file.path,
+                    progress.clone(),
+                )
+                .await?;
+            if let Some(progress) = progress.as_ref() {
+                let size_bytes = std::fs::metadata(&path).ok().map(|metadata| metadata.len());
+                progress.emit(ModelDownloadProgressEvent::Ready {
+                    file: file.path.clone(),
+                    index: index + 1,
+                    total_files,
+                    path: path.clone(),
+                    size_bytes,
+                });
+            }
+            paths.push(path);
         }
         Ok(paths)
     }
 
     pub fn identity_for_path(&self, path: &Path) -> Option<HfModelIdentity> {
         huggingface_identity_for_path_in_cache(path, &self.cache_dir)
+    }
+}
+
+#[derive(Clone)]
+pub struct ModelDownloadProgress {
+    callback: Arc<dyn Fn(ModelDownloadProgressEvent) + Send + Sync>,
+}
+
+impl ModelDownloadProgress {
+    pub fn new(callback: impl Fn(ModelDownloadProgressEvent) + Send + Sync + 'static) -> Self {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    fn emit(&self, event: ModelDownloadProgressEvent) {
+        (self.callback)(event);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ModelDownloadProgressEvent {
+    Ensuring {
+        file: String,
+        index: usize,
+        total_files: usize,
+        total_bytes: Option<u64>,
+    },
+    Started {
+        file: String,
+        total_files: usize,
+        total_bytes: Option<u64>,
+    },
+    Progress {
+        file: String,
+        downloaded_bytes: u64,
+        total_bytes: Option<u64>,
+        bytes_per_sec: Option<f64>,
+    },
+    Ready {
+        file: String,
+        index: usize,
+        total_files: usize,
+        path: PathBuf,
+        size_bytes: Option<u64>,
+    },
+    Complete {
+        file: String,
+    },
+}
+
+#[derive(Debug)]
+struct HfDownloadProgressState {
+    file: String,
+    total_files: usize,
+    total_bytes: Option<u64>,
+    downloaded_bytes: u64,
+}
+
+struct HfDownloadProgress {
+    progress: ModelDownloadProgress,
+    state: Mutex<HfDownloadProgressState>,
+}
+
+impl HfDownloadProgress {
+    fn new(file: &str, progress: ModelDownloadProgress) -> Self {
+        Self {
+            progress,
+            state: Mutex::new(HfDownloadProgressState {
+                file: file.to_string(),
+                total_files: 1,
+                total_bytes: None,
+                downloaded_bytes: 0,
+            }),
+        }
+    }
+
+    fn handle_download_event(&self, event: &DownloadEvent) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        match event {
+            DownloadEvent::Start {
+                total_files,
+                total_bytes,
+            } => self.started(&mut state, *total_files, *total_bytes),
+            DownloadEvent::Progress { files } => self.file_progress(&mut state, files),
+            DownloadEvent::AggregateProgress {
+                bytes_completed,
+                total_bytes,
+                bytes_per_sec,
+            } => {
+                self.aggregate_progress(&mut state, *bytes_completed, *total_bytes, *bytes_per_sec)
+            }
+            DownloadEvent::Complete => self.complete(&state),
+        }
+    }
+
+    fn started(&self, state: &mut HfDownloadProgressState, total_files: usize, total_bytes: u64) {
+        state.total_files = total_files;
+        state.total_bytes = (total_bytes > 0).then_some(total_bytes);
+        self.progress.emit(ModelDownloadProgressEvent::Started {
+            file: state.file.clone(),
+            total_files,
+            total_bytes: state.total_bytes,
+        });
+    }
+
+    fn file_progress(
+        &self,
+        state: &mut HfDownloadProgressState,
+        files: &[hf_hub::progress::FileProgress],
+    ) {
+        if let Some(first) = files.first()
+            && !first.filename.is_empty()
+        {
+            state.file = first.filename.clone();
+        }
+        let downloaded = files.iter().map(|file| file.bytes_completed).sum::<u64>();
+        let total = files.iter().map(|file| file.total_bytes).sum::<u64>();
+        if downloaded > 0 {
+            state.downloaded_bytes = state.downloaded_bytes.max(downloaded);
+        }
+        if total > 0 {
+            state.total_bytes = Some(state.total_bytes.unwrap_or_default().max(total));
+        }
+        self.emit_progress(state, None);
+    }
+
+    fn aggregate_progress(
+        &self,
+        state: &mut HfDownloadProgressState,
+        downloaded: u64,
+        total: u64,
+        bytes_per_sec: Option<f64>,
+    ) {
+        state.downloaded_bytes = state.downloaded_bytes.max(downloaded);
+        if total > 0 {
+            state.total_bytes = Some(state.total_bytes.unwrap_or_default().max(total));
+        }
+        self.emit_progress(state, bytes_per_sec);
+    }
+
+    fn emit_progress(&self, state: &HfDownloadProgressState, bytes_per_sec: Option<f64>) {
+        if state.downloaded_bytes == 0 && state.total_bytes.is_none() {
+            return;
+        }
+        self.progress.emit(ModelDownloadProgressEvent::Progress {
+            file: state.file.clone(),
+            downloaded_bytes: state.downloaded_bytes,
+            total_bytes: state.total_bytes,
+            bytes_per_sec,
+        });
+    }
+
+    fn complete(&self, state: &HfDownloadProgressState) {
+        self.progress.emit(ModelDownloadProgressEvent::Complete {
+            file: state.file.clone(),
+        });
+    }
+}
+
+impl ProgressHandler for HfDownloadProgress {
+    fn on_progress(&self, event: &ProgressEvent) {
+        let ProgressEvent::Download(event) = event else {
+            return;
+        };
+        self.handle_download_event(event);
     }
 }
 
@@ -493,6 +710,48 @@ mod tests {
             huggingface_repo_folder_name("org/repo", RepoTypeModel),
             "models--org--repo"
         );
+    }
+
+    #[test]
+    fn download_progress_handler_emits_transfer_events() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let progress = ModelDownloadProgress::new(move |event| {
+            captured.lock().unwrap().push(event);
+        });
+        let handler = HfDownloadProgress::new("model.gguf", progress);
+
+        handler.handle_download_event(&DownloadEvent::Start {
+            total_files: 1,
+            total_bytes: 1_000,
+        });
+        handler.handle_download_event(&DownloadEvent::AggregateProgress {
+            bytes_completed: 250,
+            total_bytes: 1_000,
+            bytes_per_sec: Some(100.0),
+        });
+        handler.handle_download_event(&DownloadEvent::Complete);
+
+        let events = events.lock().unwrap();
+        assert!(matches!(
+            events[0],
+            ModelDownloadProgressEvent::Started {
+                total_bytes: Some(1_000),
+                ..
+            }
+        ));
+        assert!(matches!(
+            events[1],
+            ModelDownloadProgressEvent::Progress {
+                downloaded_bytes: 250,
+                total_bytes: Some(1_000),
+                ..
+            }
+        ));
+        assert!(matches!(
+            events[2],
+            ModelDownloadProgressEvent::Complete { .. }
+        ));
     }
 
     #[tokio::test]

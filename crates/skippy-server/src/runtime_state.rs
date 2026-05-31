@@ -1257,7 +1257,7 @@ mod tests {
             n_batch: None,
             n_ubatch: None,
             n_gpu_layers: -1,
-            cache_type_k: "auto".to_string(),
+            cache_type_k: "not-a-cache-type".to_string(),
             cache_type_v: "f16".to_string(),
             flash_attn_type: FlashAttentionType::Auto,
             filter_tensors_on_load: false,

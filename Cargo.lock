@@ -4205,6 +4205,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "model-fit"
+version = "0.68.0"
+dependencies = [
+ "anyhow",
+ "mesh-llm-gpu-bench",
+ "mesh-llm-system",
+ "model-artifact",
+ "model-hf",
+ "model-ref",
+ "model-resolver",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "model-hf"
 version = "0.68.0"
 dependencies = [

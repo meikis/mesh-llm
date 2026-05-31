@@ -97,6 +97,9 @@ struct TextResponse {
     prompt_token_ids: Vec<i32>,
     generated_token_ids: Vec<i32>,
     generated_text: String,
+    tokenize_elapsed_ms: f64,
+    prefill_elapsed_ms: f64,
+    decode_elapsed_ms: f64,
 }
 
 fn default_max_new_tokens() -> usize {
@@ -418,16 +421,19 @@ async fn text_entrypoint(
         )));
     };
 
+    let tokenize_started = Instant::now();
     let prompt_token_ids = {
         let runtime = runtime.lock().expect("runtime lock poisoned");
         runtime
             .model
             .tokenize(&request.prompt, request.add_special)?
     };
+    let tokenize_elapsed_ms = tokenize_started.elapsed().as_secs_f64() * 1000.0;
     if prompt_token_ids.is_empty() {
         return Err(AppError(anyhow!("prompt produced no tokens")));
     }
 
+    let prefill_started = Instant::now();
     let mut pending_kv_records = Vec::new();
     if prompt_token_ids.len() > 1 {
         let base = text_message_base(&state.config, &request);
@@ -456,9 +462,11 @@ async fn text_entrypoint(
             };
         }
     }
+    let prefill_elapsed_ms = prefill_started.elapsed().as_secs_f64() * 1000.0;
 
     let mut current = *prompt_token_ids.last().expect("checked non-empty prompt");
     let mut generated_token_ids = Vec::new();
+    let decode_started = Instant::now();
     {
         let mut runtime = runtime.lock().expect("runtime lock poisoned");
         for _ in 0..request.max_new_tokens {
@@ -466,6 +474,7 @@ async fn text_entrypoint(
             generated_token_ids.push(current);
         }
     }
+    let decode_elapsed_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
     let generated_text = {
         let runtime = runtime.lock().expect("runtime lock poisoned");
         runtime.model.detokenize(&generated_token_ids)?
@@ -483,6 +492,9 @@ async fn text_entrypoint(
         prompt_token_ids,
         generated_token_ids,
         generated_text,
+        tokenize_elapsed_ms,
+        prefill_elapsed_ms,
+        decode_elapsed_ms,
     }))
 }
 

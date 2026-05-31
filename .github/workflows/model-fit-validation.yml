@@ -1,0 +1,115 @@
+name: Model Fit Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest:
+        description: "Validation corpus to run: smoke or deep"
+        required: false
+        default: smoke
+      runner_labels:
+        description: 'JSON array of self-hosted runner labels'
+        required: false
+        default: '["self-hosted","macos","metal"]'
+  pull_request:
+    paths:
+      - "crates/model-fit/**"
+      - "crates/mesh-llm-gpu-bench/**"
+      - "crates/skippy-bench/**"
+      - "crates/skippy-server/**"
+      - ".github/workflows/model-fit-validation.yml"
+
+concurrency:
+  group: model-fit-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  metadata:
+    name: metadata checks
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test model-fit
+        run: cargo test -p model-fit --lib
+      - name: Clippy model-fit
+        run: cargo clippy -p model-fit --all-targets -- -D warnings
+
+  gpu-smoke:
+    name: GPU fit smoke
+    runs-on: ${{ fromJSON(inputs.runner_labels || vars.MODEL_FIT_GPU_RUNS_ON || '["self-hosted","macos","metal"]') }}
+    timeout-minutes: 240
+    env:
+      MODEL_FIT_MANIFEST: ${{ inputs.manifest || 'smoke' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binaries
+        run: |
+          just release-build
+          cargo build --release --locked \
+            -p model-fit --bins \
+            -p skippy-bench \
+            -p skippy-server \
+            -p metrics-server
+
+      - name: Capture measured GPU benchmark
+        run: |
+          target/release/mesh-llm gpus benchmark --json > "$RUNNER_TEMP/model-fit-gpu-benchmark.json"
+
+      - name: Select validation manifest
+        id: manifest
+        run: |
+          case "$MODEL_FIT_MANIFEST" in
+            smoke)
+              manifest_path="crates/model-fit/validation/smoke-models.txt"
+              min_models=8
+              ;;
+            deep)
+              manifest_path="crates/model-fit/validation/deep-models.txt"
+              min_models=12
+              ;;
+            *)
+              echo "unknown MODEL_FIT_MANIFEST=$MODEL_FIT_MANIFEST" >&2
+              exit 1
+              ;;
+          esac
+          echo "path=$manifest_path" >> "$GITHUB_OUTPUT"
+          echo "min_models=$min_models" >> "$GITHUB_OUTPUT"
+
+      - name: Validate model-fit against Skippy single-stage benchmarks
+        run: |
+          target/release/model-fit-validate \
+            --no-progress \
+            --gpu-benchmark-json "$RUNNER_TEMP/model-fit-gpu-benchmark.json" \
+            --models-file "${{ steps.manifest.outputs.path }}" \
+            --output-json "$RUNNER_TEMP/model-fit-validation.json"
+
+      - name: Check validation thresholds
+        run: |
+          target/release/model-fit-check-validation \
+            --min-models "${{ steps.manifest.outputs.min_models }}" \
+            --max-median-absolute-error 0.10 \
+            --max-individual-error 0.15 \
+            --max-noisy 0 \
+            --markdown-out "$RUNNER_TEMP/model-fit-validation.md" \
+            "$RUNNER_TEMP/model-fit-validation.json"
+          cat "$RUNNER_TEMP/model-fit-validation.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: model-fit-validation-${{ env.MODEL_FIT_MANIFEST }}
+          path: |
+            ${{ runner.temp }}/model-fit-gpu-benchmark.json
+            ${{ runner.temp }}/model-fit-validation.json
+            ${{ runner.temp }}/model-fit-validation.md

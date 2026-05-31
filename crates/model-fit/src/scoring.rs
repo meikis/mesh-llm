@@ -425,33 +425,21 @@ fn active_moe_decode_weight_bytes(model: &ModelProfile) -> u64 {
 }
 
 fn decode_weight_traffic_bytes(model: &ModelProfile, storage_bytes: u64) -> u64 {
-    // GGUF tensor bytes are a resident-storage fact, not a perfect proxy for the
-    // effective memory traffic seen by one llama.cpp decode token. The selector
-    // still starts from tensor-group storage because it is the durable metadata
-    // available for arbitrary GGUFs, then applies only quantization/structure
-    // corrections that come from the file metadata itself.
+    // GGUF tensor bytes are a resident-storage fact. For a decode-token
+    // GGML_OP_MUL_MAT / GGML_OP_MUL_MAT_ID path, those bytes are the only
+    // source-grounded value we currently have for arbitrary GGUFs unless the
+    // profile also carries per-tensor type/shape data and a llama.cpp matmul
+    // kernel cost model.
     //
-    // The important case is Q8_0. Q8_0 stores about twice as many bytes as a
-    // Q4_K model, but it is a simple block format with less dequant bookkeeping
-    // than the K-quants. In validation, treating Q8 resident bytes as literal
-    // per-token traffic consistently underpredicted dense Q8 decode throughput.
-    // This is not a backend or model-name boost: any GGUF with the same
-    // quantization and dense/MoE structure gets the same storage-to-traffic
-    // adjustment. Memory fit still uses resident bytes; only the decode traffic
-    // slope is adjusted.
-    let scale = decode_weight_traffic_scale(model);
-    ((storage_bytes as f64) * f64::from(scale)).round() as u64
-}
-
-fn decode_weight_traffic_scale(model: &ModelProfile) -> f32 {
-    if !quantization_is_q8(model.quantization.as_deref()) {
-        return 1.0;
-    }
-    match model.architecture_class {
-        ModelArchitectureClass::SparseMoeTransformer => 0.78,
-        ModelArchitectureClass::DenseTransformer | ModelArchitectureClass::Unknown => 0.60,
-        _ => 1.0,
-    }
+    // Do not apply validation-derived quantization multipliers here. Q8_0,
+    // Q4_K, IQ, and MoE tensors do take different llama.cpp kernels, but the
+    // right representation is an explicit matmul model derived from GGML tensor
+    // block layout and backend kernel traits, not a storage-to-traffic scale
+    // tuned until one local validation set looks good. Until that model exists,
+    // decode prediction should remain conservative and the validator should
+    // report misses honestly.
+    let _ = model;
+    storage_bytes
 }
 
 fn tensor_groups_available(groups: TensorGroupBytes) -> bool {
@@ -1117,8 +1105,10 @@ fn context_score(
 }
 
 fn rope_context_penalty(model: &ModelProfile, required: u32, warnings: &mut Vec<String>) -> f32 {
-    if let Some(original) = model.rope.original_context_length
-        && original < required
+    if model
+        .rope
+        .original_context_length
+        .is_some_and(|original| original < required)
         && model.rope.finetuned != Some(true)
     {
         warnings.push("requested context appears to rely on unconfirmed rope scaling".into());
@@ -1395,13 +1385,16 @@ fn add_decode_estimate_reason(
             fixed_ms
         ));
     }
-    if let Some((shape_factor, medium_width_ms, low_active_ms)) = shape_adjustment
-        && (shape_factor != 1.0 || medium_width_ms > 0.0 || low_active_ms > 0.0)
-    {
-        reasons.push(format!(
-            "decode estimate applies {:.2}x shape bandwidth factor, {:.1} ms/token dense-width overhead, and {:.1} ms/token low-active overhead from hidden size and active bytes",
-            shape_factor, medium_width_ms, low_active_ms
-        ));
+    match shape_adjustment {
+        Some((shape_factor, medium_width_ms, low_active_ms))
+            if shape_factor != 1.0 || medium_width_ms > 0.0 || low_active_ms > 0.0 =>
+        {
+            reasons.push(format!(
+                "decode estimate applies {:.2}x shape bandwidth factor, {:.1} ms/token dense-width overhead, and {:.1} ms/token low-active overhead from hidden size and active bytes",
+                shape_factor, medium_width_ms, low_active_ms
+            ));
+        }
+        _ => {}
     }
 }
 

@@ -336,7 +336,7 @@ fn measured_gpu_bandwidth_uses_backend_neutral_efficiency() {
 }
 
 #[test]
-fn q8_decode_traffic_uses_quantization_shape_not_resident_bytes() {
+fn q8_decode_traffic_stays_resident_bytes_without_matmul_profile() {
     let hardware = m1_ultra();
     let mut config = SelectionConfig {
         workload: WorkloadProfile::chat(),
@@ -362,10 +362,10 @@ fn q8_decode_traffic_uses_quantization_shape_not_resident_bytes() {
     let q4_active = q4_rec.estimated_active_decode_bytes_per_token.unwrap();
     let q8_active = q8_rec.estimated_active_decode_bytes_per_token.unwrap();
 
-    assert!(q8_active < q4_active * 2);
+    assert!(q8_active > q4_active * 19 / 10);
     assert!(
         q8_rec.estimated_decode_tokens_per_sec.unwrap()
-            > q4_rec.estimated_decode_tokens_per_sec.unwrap() * 0.70
+            < q4_rec.estimated_decode_tokens_per_sec.unwrap() * 0.70
     );
 }
 

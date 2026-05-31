@@ -4,7 +4,7 @@ use std::{cmp::Ordering, env, fs, path::PathBuf};
 
 const DEFAULT_SCENARIO: &str = "steady_decode";
 const DEFAULT_MAX_MEDIAN_ABSOLUTE_ERROR: f64 = 0.10;
-const DEFAULT_MAX_INDIVIDUAL_ERROR: f64 = 0.15;
+const DEFAULT_MAX_INDIVIDUAL_ERROR: f64 = 0.10;
 const DEFAULT_MAX_NOISY: usize = 0;
 const DEFAULT_MAX_RUNTIME_ERRORS: usize = 0;
 
@@ -228,14 +228,15 @@ fn enforce_thresholds(
             ));
         }
     }
-    if let Some(min_models) = args.min_models
-        && accuracy_rows.len() < min_models
-    {
-        failures.push(format!(
-            "scenario {} produced {} accuracy-gated samples, expected at least {min_models}",
-            args.scenario,
-            accuracy_rows.len()
-        ));
+    match args.min_models {
+        Some(min_models) if accuracy_rows.len() < min_models => {
+            failures.push(format!(
+                "scenario {} produced {} accuracy-gated samples, expected at least {min_models}",
+                args.scenario,
+                accuracy_rows.len()
+            ));
+        }
+        _ => {}
     }
     let noisy = noisy_count(rows);
     if noisy > args.max_noisy {
@@ -251,14 +252,15 @@ fn enforce_thresholds(
             args.scenario, args.max_runtime_errors
         ));
     }
-    if let Some(median_error) = median_absolute_error(&accuracy_rows)
-        && median_error > args.max_median_absolute_error
-    {
-        failures.push(format!(
-            "median absolute error {:.2}% exceeded {:.2}%",
-            median_error * 100.0,
-            args.max_median_absolute_error * 100.0
-        ));
+    match median_absolute_error(&accuracy_rows) {
+        Some(median_error) if median_error > args.max_median_absolute_error => {
+            failures.push(format!(
+                "median absolute error {:.2}% exceeded {:.2}%",
+                median_error * 100.0,
+                args.max_median_absolute_error * 100.0
+            ));
+        }
+        _ => {}
     }
     for row in accuracy_rows {
         if row.absolute_error > args.max_individual_error {
@@ -364,6 +366,6 @@ fn next_value(args: &mut impl Iterator<Item = String>, name: &str) -> Result<Str
 
 fn print_usage() {
     eprintln!(
-        "usage: model-fit-check-validation [--scenario steady_decode] [--max-median-absolute-error 0.10] [--max-individual-error 0.15] [--max-noisy 0] [--max-runtime-errors 0] [--min-models N] [--markdown-out report.md] report.json"
+        "usage: model-fit-check-validation [--scenario steady_decode] [--max-median-absolute-error 0.10] [--max-individual-error 0.10] [--max-noisy 0] [--max-runtime-errors 0] [--min-models N] [--markdown-out report.md] report.json"
     );
 }

@@ -19,6 +19,7 @@ struct ExecutionBudget {
     memory_bandwidth_bytes_per_sec: Option<u64>,
     bandwidth_source: MeasurementSource,
     benchmark_noise_pct: Option<f32>,
+    compute_tflops_fp16: Option<f32>,
     unified_memory: bool,
 }
 
@@ -63,6 +64,7 @@ pub fn score_model(
             memory_bandwidth_bytes_per_sec: None,
             bandwidth_source: MeasurementSource::Unknown,
             benchmark_noise_pct: None,
+            compute_tflops_fp16: None,
             unified_memory: false,
         };
         return score_for_budget(model, config, &budget);
@@ -92,7 +94,14 @@ fn score_for_budget(
 ) -> ModelRecommendation {
     let memory = runtime_memory_estimate(model, config);
     let active_decode_bytes = active_decode_bytes_per_token(model, config);
-    let estimated_decode_tps = decode_tokens_per_sec(active_decode_bytes, budget, config, model);
+    let active_decode_flops = active_decode_flops_per_token(model);
+    let estimated_decode_tps = decode_tokens_per_sec(
+        active_decode_bytes,
+        active_decode_flops,
+        budget,
+        config,
+        model,
+    );
     let estimated_decode_range =
         decode_tokens_per_sec_range(estimated_decode_tps, active_decode_bytes, model, budget);
     let estimated_prefill_tps = prefill_tokens_per_sec(model, config, estimated_decode_tps);
@@ -191,6 +200,7 @@ fn execution_budgets(hardware: &HardwareProfile) -> Vec<ExecutionBudget> {
                 .map(|_| MeasurementSource::Measured)
                 .unwrap_or(MeasurementSource::Unknown),
             benchmark_noise_pct: None,
+            compute_tflops_fp16: None,
             unified_memory: false,
         });
     }
@@ -227,6 +237,7 @@ fn accelerator_budget(
         memory_bandwidth_bytes_per_sec: accelerator.memory_bandwidth_bytes_per_sec,
         bandwidth_source: accelerator.bandwidth_source,
         benchmark_noise_pct: accelerator.benchmark_noise_pct,
+        compute_tflops_fp16: accelerator.compute_tflops_fp16,
         unified_memory: accelerator.unified_memory,
     }
 }
@@ -389,6 +400,9 @@ fn active_decode_bytes_per_token(model: &ModelProfile, config: &SelectionConfig)
 }
 
 fn active_dense_decode_weight_bytes(model: &ModelProfile) -> u64 {
+    if model.tensor_matmul.base_bytes > 0 {
+        return model.tensor_matmul.base_bytes;
+    }
     let groups = model.tensor_group_bytes;
     let storage_bytes = if tensor_groups_available(groups) {
         groups
@@ -404,6 +418,16 @@ fn active_dense_decode_weight_bytes(model: &ModelProfile) -> u64 {
 }
 
 fn active_moe_decode_weight_bytes(model: &ModelProfile) -> u64 {
+    if model.tensor_matmul.base_bytes > 0 || model.tensor_matmul.expert_bytes > 0 {
+        return model
+            .tensor_matmul
+            .base_bytes
+            .saturating_add(active_expert_bytes(
+                model.tensor_matmul.expert_bytes,
+                model.expert_count,
+                model.expert_used_count,
+            ));
+    }
     let groups = model.tensor_group_bytes;
     let storage_bytes = if tensor_groups_available(groups) {
         let active_expert_bytes = active_expert_bytes(
@@ -440,6 +464,27 @@ fn decode_weight_traffic_bytes(model: &ModelProfile, storage_bytes: u64) -> u64 
     // report misses honestly.
     let _ = model;
     storage_bytes
+}
+
+fn active_decode_flops_per_token(model: &ModelProfile) -> Option<u64> {
+    let matmul = &model.tensor_matmul;
+    match model.architecture_class {
+        ModelArchitectureClass::DenseTransformer | ModelArchitectureClass::Unknown => {
+            (matmul.base_flops_per_token > 0).then_some(matmul.base_flops_per_token)
+        }
+        ModelArchitectureClass::SparseMoeTransformer => {
+            let active_expert_flops = active_expert_bytes(
+                matmul.expert_flops_per_token,
+                model.expert_count,
+                model.expert_used_count,
+            );
+            let flops = matmul
+                .base_flops_per_token
+                .saturating_add(active_expert_flops);
+            (flops > 0).then_some(flops)
+        }
+        _ => None,
+    }
 }
 
 fn tensor_groups_available(groups: TensorGroupBytes) -> bool {
@@ -479,6 +524,7 @@ fn activation_overhead_bytes(model: &ModelProfile) -> u64 {
 
 fn decode_tokens_per_sec(
     active_decode_bytes: Option<u64>,
+    active_decode_flops: Option<u64>,
     budget: &ExecutionBudget,
     config: &SelectionConfig,
     model: &ModelProfile,
@@ -517,12 +563,19 @@ fn decode_tokens_per_sec(
         * quantization_factor
         * shape_factor;
     let bandwidth_ms = bytes as f32 / effective_bandwidth.max(1.0) * 1000.0;
+    let compute_ms = decode_compute_ms(active_decode_flops, budget).unwrap_or(0.0);
     let overhead_ms = fixed_decode_overhead_ms(budget, config)
         + architecture_decode_overhead_ms(model, config)
         + dense_medium_width_decode_overhead_ms(model, bytes)
         + low_active_decode_overhead_ms(model, budget, bytes)
         + small_width_decode_overhead_ms(model, budget, bytes);
-    Some(1000.0 / (bandwidth_ms + overhead_ms).max(0.001))
+    Some(1000.0 / (bandwidth_ms.max(compute_ms) + overhead_ms).max(0.001))
+}
+
+fn decode_compute_ms(active_decode_flops: Option<u64>, budget: &ExecutionBudget) -> Option<f32> {
+    let flops = active_decode_flops? as f32;
+    let tflops = budget.compute_tflops_fp16.filter(|value| *value > 0.0)?;
+    Some(flops / (tflops * 1_000_000_000_000.0) * 1000.0)
 }
 
 fn decode_shape_bandwidth_factor(model: &ModelProfile, active_decode_bytes: u64) -> f32 {
@@ -1359,7 +1412,19 @@ fn add_decode_estimate_reason(
     if !uses_transformer_kv_cache(model.architecture_class) {
         return;
     }
-    if tensor_groups_available(model.tensor_group_bytes) {
+    if model.tensor_matmul.base_bytes > 0 || model.tensor_matmul.expert_bytes > 0 {
+        reasons.push(format!(
+            "decode estimate uses GGUF matmul tensors ({:.1} GiB base, {:.1} GiB expert pool) and active MoE experts when present",
+            gib(model.tensor_matmul.base_bytes),
+            gib(model.tensor_matmul.expert_bytes)
+        ));
+        if let Some(flops) = active_decode_flops_per_token(model) {
+            reasons.push(format!(
+                "decode estimate includes {:.1} GFLOP/token matmul compute floor from GGUF tensor shapes",
+                flops as f32 / 1_000_000_000.0
+            ));
+        }
+    } else if tensor_groups_available(model.tensor_group_bytes) {
         reasons.push(
             "decode estimate uses GGUF tensor groups for attention, FFN, experts, output, and KV pressure"
                 .into(),

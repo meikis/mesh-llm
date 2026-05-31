@@ -60,6 +60,17 @@ fn dense_model(id: &str, bytes: u64, layers: u32, hidden: u32, context: u32) -> 
                 .saturating_sub(bytes / 12)
                 .saturating_sub(bytes / 100),
         },
+        tensor_matmul: TensorMatmulProfile {
+            base_bytes: bytes / 3 + bytes / 2 + bytes / 12,
+            expert_bytes: 0,
+            base_flops_per_token: 0,
+            expert_flops_per_token: 0,
+            base_type_bytes: TensorTypeBytes {
+                q4_k_bytes: bytes / 3 + bytes / 2 + bytes / 12,
+                ..TensorTypeBytes::default()
+            },
+            expert_type_bytes: TensorTypeBytes::default(),
+        },
         parameter_count: None,
         quantization: Some("Q4_K_M".into()),
         layer_count: Some(layers),
@@ -176,6 +187,8 @@ fn moe_decode_uses_active_expert_bytes() {
     moe.tensor_group_bytes.attention_bytes = 8 * GIB;
     moe.tensor_group_bytes.feed_forward_bytes = 4 * GIB;
     moe.tensor_group_bytes.expert_feed_forward_bytes = 48 * GIB;
+    moe.tensor_matmul.base_bytes = 12 * GIB;
+    moe.tensor_matmul.expert_bytes = 48 * GIB;
     moe.expert_count = Some(16);
     moe.expert_used_count = Some(2);
 
@@ -356,6 +369,9 @@ fn q8_decode_traffic_stays_resident_bytes_without_matmul_profile() {
     q8.tensor_group_bytes.embedding_bytes *= 2;
     q8.tensor_group_bytes.normalization_bytes *= 2;
     q8.tensor_group_bytes.other_bytes *= 2;
+    q8.tensor_matmul.base_bytes *= 2;
+    q8.tensor_matmul.base_type_bytes.q4_k_bytes = 0;
+    q8.tensor_matmul.base_type_bytes.q8_0_bytes = q8.tensor_matmul.base_bytes;
 
     let q4_rec = score_model(&hardware, &q4, &config);
     let q8_rec = score_model(&hardware, &q8, &config);

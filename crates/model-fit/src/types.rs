@@ -109,6 +109,7 @@ pub struct ModelProfile {
     pub base_resident_bytes: Option<u64>,
     pub expert_tensor_bytes: Option<u64>,
     pub tensor_group_bytes: TensorGroupBytes,
+    pub tensor_matmul: TensorMatmulProfile,
     pub parameter_count: Option<u64>,
     pub quantization: Option<String>,
     pub layer_count: Option<u32>,
@@ -135,6 +136,31 @@ pub struct TensorGroupBytes {
     pub output_bytes: u64,
     pub normalization_bytes: u64,
     pub other_bytes: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TensorMatmulProfile {
+    pub base_bytes: u64,
+    pub expert_bytes: u64,
+    pub base_flops_per_token: u64,
+    pub expert_flops_per_token: u64,
+    pub base_type_bytes: TensorTypeBytes,
+    pub expert_type_bytes: TensorTypeBytes,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TensorTypeBytes {
+    pub f32_bytes: u64,
+    pub f16_bytes: u64,
+    pub bf16_bytes: u64,
+    pub q4_0_bytes: u64,
+    pub q4_k_bytes: u64,
+    pub q5_k_bytes: u64,
+    pub q6_k_bytes: u64,
+    pub q8_0_bytes: u64,
+    pub iq_bytes: u64,
+    pub other_quantized_bytes: u64,
+    pub unknown_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

@@ -1,6 +1,6 @@
 use crate::{
     CapabilityEvidence, ModelArchitectureClass, ModelProfile, ModelSource, RopeProfile,
-    TensorGroupBytes, TokenizerProfile, WeightCoverage,
+    TensorGroupBytes, TensorMatmulProfile, TensorTypeBytes, TokenizerProfile, WeightCoverage,
 };
 use anyhow::{Context, Result};
 use model_artifact::gguf::{
@@ -48,6 +48,14 @@ pub fn profile_gguf_path(path: impl AsRef<Path>) -> Result<ModelProfile> {
             normalization_bytes: tensor_profile.group_bytes.normalization_bytes,
             other_bytes: tensor_profile.group_bytes.other_bytes,
         },
+        tensor_matmul: TensorMatmulProfile {
+            base_bytes: tensor_profile.matmul.base_bytes,
+            expert_bytes: tensor_profile.matmul.expert_bytes,
+            base_flops_per_token: tensor_profile.matmul.base_flops_per_token,
+            expert_flops_per_token: tensor_profile.matmul.expert_flops_per_token,
+            base_type_bytes: tensor_type_bytes(tensor_profile.matmul.base_type_bytes),
+            expert_type_bytes: tensor_type_bytes(tensor_profile.matmul.expert_type_bytes),
+        },
         parameter_count: parameter_count_from_size_label(compact.parameter_size.as_deref()),
         quantization: fit
             .file_type
@@ -76,6 +84,22 @@ pub fn profile_gguf_path(path: impl AsRef<Path>) -> Result<ModelProfile> {
         },
         capability_evidence,
     })
+}
+
+fn tensor_type_bytes(bytes: model_artifact::gguf::GgufTensorTypeByteProfile) -> TensorTypeBytes {
+    TensorTypeBytes {
+        f32_bytes: bytes.f32_bytes,
+        f16_bytes: bytes.f16_bytes,
+        bf16_bytes: bytes.bf16_bytes,
+        q4_0_bytes: bytes.q4_0_bytes,
+        q4_k_bytes: bytes.q4_k_bytes,
+        q5_k_bytes: bytes.q5_k_bytes,
+        q6_k_bytes: bytes.q6_k_bytes,
+        q8_0_bytes: bytes.q8_0_bytes,
+        iq_bytes: bytes.iq_bytes,
+        other_quantized_bytes: bytes.other_quantized_bytes,
+        unknown_bytes: bytes.unknown_bytes,
+    }
 }
 
 fn weight_coverage(

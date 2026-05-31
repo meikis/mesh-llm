@@ -510,6 +510,7 @@ pub struct GgufTensorByteProfile {
     pub base_resident_bytes: u64,
     pub expert_tensor_bytes: u64,
     pub group_bytes: GgufTensorGroupByteProfile,
+    pub matmul: GgufTensorMatmulProfile,
     pub file_overhead_bytes: u64,
 }
 
@@ -527,7 +528,34 @@ pub struct GgufTensorGroupByteProfile {
 #[derive(Clone, Debug)]
 struct GgufTensorInfo {
     name: String,
+    dimensions: Vec<u64>,
+    tensor_type: u32,
     offset: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GgufTensorMatmulProfile {
+    pub base_bytes: u64,
+    pub expert_bytes: u64,
+    pub base_flops_per_token: u64,
+    pub expert_flops_per_token: u64,
+    pub base_type_bytes: GgufTensorTypeByteProfile,
+    pub expert_type_bytes: GgufTensorTypeByteProfile,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GgufTensorTypeByteProfile {
+    pub f32_bytes: u64,
+    pub f16_bytes: u64,
+    pub bf16_bytes: u64,
+    pub q4_0_bytes: u64,
+    pub q4_k_bytes: u64,
+    pub q5_k_bytes: u64,
+    pub q6_k_bytes: u64,
+    pub q8_0_bytes: u64,
+    pub iq_bytes: u64,
+    pub other_quantized_bytes: u64,
+    pub unknown_bytes: u64,
 }
 
 /// Scan a GGUF file header and return compact structural metadata.
@@ -615,17 +643,20 @@ pub fn scan_gguf_compact_meta(path: &Path) -> Option<GgufCompactMeta> {
         }
     }
 
-    if meta.key_length == 0
-        && meta.head_count > 0
-        && let Some(key_length) = meta.embedding_size.checked_div(meta.head_count)
-    {
-        meta.key_length = key_length;
+    match meta.embedding_size.checked_div(meta.head_count.max(1)) {
+        Some(key_length) if meta.key_length == 0 && meta.head_count > 0 => {
+            meta.key_length = key_length;
+        }
+        _ => {}
     }
-    if meta.value_length == 0
-        && let Some(effective_kv) = meta.effective_kv_head_count()
-        && let Some(value_length) = meta.embedding_size.checked_div(effective_kv)
+    match meta
+        .effective_kv_head_count()
+        .and_then(|effective_kv| meta.embedding_size.checked_div(effective_kv))
     {
-        meta.value_length = value_length;
+        Some(value_length) if meta.value_length == 0 => {
+            meta.value_length = value_length;
+        }
+        _ => {}
     }
 
     Some(meta)
@@ -753,12 +784,24 @@ fn read_tensor_infos(
                 "too many GGUF tensor dimensions",
             ));
         }
+        let mut dimensions = Vec::new();
+        dimensions.try_reserve(n_dims as usize).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "GGUF tensor dimensions require too much memory",
+            )
+        })?;
         for _ in 0..n_dims {
-            let _ = read_u64(f)?;
+            dimensions.push(read_u64(f)?);
         }
-        let _ = read_u32(f)?;
+        let tensor_type = read_u32(f)?;
         let offset = read_u64(f)?;
-        tensors.push(GgufTensorInfo { name, offset });
+        tensors.push(GgufTensorInfo {
+            name,
+            dimensions,
+            tensor_type,
+            offset,
+        });
     }
     Ok(tensors)
 }
@@ -884,6 +927,72 @@ fn add_tensor_group_bytes(
     }
 }
 
+fn add_matmul_profile(
+    profile: &mut GgufTensorMatmulProfile,
+    tensor: &GgufTensorInfo,
+    group: TensorGroup,
+    tensor_bytes: u64,
+) {
+    if !is_decode_matmul_group(group) {
+        return;
+    }
+    let flops = tensor_flops_per_token(tensor);
+    if is_expert_partitioned_tensor(&tensor.name) {
+        profile.expert_bytes = profile.expert_bytes.saturating_add(tensor_bytes);
+        profile.expert_flops_per_token = profile.expert_flops_per_token.saturating_add(flops);
+        add_tensor_type_bytes(
+            &mut profile.expert_type_bytes,
+            tensor.tensor_type,
+            tensor_bytes,
+        );
+    } else {
+        profile.base_bytes = profile.base_bytes.saturating_add(tensor_bytes);
+        profile.base_flops_per_token = profile.base_flops_per_token.saturating_add(flops);
+        add_tensor_type_bytes(
+            &mut profile.base_type_bytes,
+            tensor.tensor_type,
+            tensor_bytes,
+        );
+    }
+}
+
+fn is_decode_matmul_group(group: TensorGroup) -> bool {
+    matches!(
+        group,
+        TensorGroup::Attention
+            | TensorGroup::FeedForward
+            | TensorGroup::ExpertFeedForward
+            | TensorGroup::Output
+    )
+}
+
+fn tensor_flops_per_token(tensor: &GgufTensorInfo) -> u64 {
+    tensor
+        .dimensions
+        .iter()
+        .try_fold(1u64, |acc, dim| acc.checked_mul(*dim))
+        .unwrap_or(u64::MAX / 2)
+        .saturating_mul(2)
+}
+
+fn add_tensor_type_bytes(profile: &mut GgufTensorTypeByteProfile, tensor_type: u32, bytes: u64) {
+    match tensor_type {
+        0 => profile.f32_bytes = profile.f32_bytes.saturating_add(bytes),
+        1 => profile.f16_bytes = profile.f16_bytes.saturating_add(bytes),
+        2 => profile.q4_0_bytes = profile.q4_0_bytes.saturating_add(bytes),
+        8 => profile.q8_0_bytes = profile.q8_0_bytes.saturating_add(bytes),
+        12 => profile.q4_k_bytes = profile.q4_k_bytes.saturating_add(bytes),
+        13 => profile.q5_k_bytes = profile.q5_k_bytes.saturating_add(bytes),
+        14 => profile.q6_k_bytes = profile.q6_k_bytes.saturating_add(bytes),
+        16..=23 | 29 => profile.iq_bytes = profile.iq_bytes.saturating_add(bytes),
+        30 => profile.bf16_bytes = profile.bf16_bytes.saturating_add(bytes),
+        3 | 6 | 7 | 9..=11 | 15 | 34 | 35 | 39 | 40 => {
+            profile.other_quantized_bytes = profile.other_quantized_bytes.saturating_add(bytes);
+        }
+        _ => profile.unknown_bytes = profile.unknown_bytes.saturating_add(bytes),
+    }
+}
+
 /// Scan GGUF tensor metadata and estimate which bytes are always resident versus
 /// expert-partitioned. Reads only the header and tensor-info tables.
 pub fn scan_gguf_tensor_byte_profile(path: &Path) -> Option<GgufTensorByteProfile> {
@@ -943,6 +1052,7 @@ pub fn scan_gguf_tensor_byte_profile(path: &Path) -> Option<GgufTensorByteProfil
             base_resident_bytes: 0,
             expert_tensor_bytes: 0,
             group_bytes: GgufTensorGroupByteProfile::default(),
+            matmul: GgufTensorMatmulProfile::default(),
             file_overhead_bytes: file_len,
         });
     }
@@ -962,6 +1072,7 @@ pub fn scan_gguf_tensor_byte_profile(path: &Path) -> Option<GgufTensorByteProfil
     let mut base_resident_bytes = 0u64;
     let mut expert_tensor_bytes = 0u64;
     let mut group_bytes = GgufTensorGroupByteProfile::default();
+    let mut matmul = GgufTensorMatmulProfile::default();
     let mut block_indices = std::collections::BTreeSet::new();
     let mut block_tensor_count = 0u64;
     let mut has_token_embedding_tensor = false;
@@ -976,11 +1087,9 @@ pub fn scan_gguf_tensor_byte_profile(path: &Path) -> Option<GgufTensorByteProfil
             return None;
         }
         let tensor_bytes = next_offset - tensor.offset;
-        add_tensor_group_bytes(
-            &mut group_bytes,
-            classify_tensor_group(&tensor.name),
-            tensor_bytes,
-        );
+        let tensor_group = classify_tensor_group(&tensor.name);
+        add_tensor_group_bytes(&mut group_bytes, tensor_group, tensor_bytes);
+        add_matmul_profile(&mut matmul, tensor, tensor_group, tensor_bytes);
         if is_expert_partitioned_tensor(&tensor.name) {
             expert_tensor_bytes = expert_tensor_bytes.saturating_add(tensor_bytes);
         } else {
@@ -1009,6 +1118,7 @@ pub fn scan_gguf_tensor_byte_profile(path: &Path) -> Option<GgufTensorByteProfil
         base_resident_bytes,
         expert_tensor_bytes,
         group_bytes,
+        matmul,
         file_overhead_bytes,
     })
 }
@@ -1270,6 +1380,12 @@ mod tests {
         assert_eq!(profile.base_resident_bytes, 32);
         assert_eq!(profile.group_bytes.expert_feed_forward_bytes, 64);
         assert_eq!(profile.group_bytes.attention_bytes, 32);
+        assert_eq!(profile.matmul.expert_bytes, 64);
+        assert_eq!(profile.matmul.base_bytes, 32);
+        assert_eq!(profile.matmul.expert_flops_per_token, 32);
+        assert_eq!(profile.matmul.base_flops_per_token, 32);
+        assert_eq!(profile.matmul.expert_type_bytes.f32_bytes, 64);
+        assert_eq!(profile.matmul.base_type_bytes.f32_bytes, 32);
         assert_eq!(profile.full_model_bytes, bytes.len() as u64);
         assert_eq!(
             profile.full_model_bytes,

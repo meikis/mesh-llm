@@ -84,6 +84,13 @@ The steady-decode estimator is source-grounded rather than model-name grounded:
   time. That keeps request/setup residuals visible instead of blaming them on
   decode or prefill.
 
+TODO: Verify the ROCm/HIP dense and MoE prefill probes on a real AMD host. The
+HIP backend is implemented with hipBLAS and should emit
+`prefill_matmul_tflops_fp16` plus `prefill_moe_matmul_tflops_fp16`, but this
+must be checked with `mesh-llm gpus benchmark --json` on AMD hardware before we
+claim ROCm validation coverage. Treat the run as backend verification only; do
+not tune model-fit constants from that single machine.
+
 Representative two-machine broader validation after the ABI decode probe,
 source-grounded graph-overhead estimator, prefill scenario split, and
 single-model execution-budget selector:

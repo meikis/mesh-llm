@@ -91,6 +91,7 @@ fn gpu_facts_from_backend_devices(
             mem_bandwidth_gbps: None,
             decode_effective_gbps: None,
             decode_fixed_overhead_ms: None,
+            post_prefill_decode_overhead_ms: None,
             compute_tflops_fp32: None,
             compute_tflops_fp16: None,
             prefill_matmul_tflops_fp16: None,

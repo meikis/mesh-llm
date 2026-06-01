@@ -47,6 +47,15 @@ pub struct AcceleratorProfile {
     /// equation and reports that the decode calibration is incomplete.
     #[serde(default)]
     pub decode_fixed_overhead_ms: Option<f32>,
+    /// Lower-bound cost of issuing the first decode-shaped command after a
+    /// prefill-shaped matmul.
+    ///
+    /// The benchmark measures this without a GGUF model, so it captures backend
+    /// queue/command transition cost rather than llama.cpp graph/session work.
+    /// First-token validation keeps the remaining residual visible instead of
+    /// hiding it inside this field.
+    #[serde(default)]
+    pub post_prefill_decode_overhead_ms: Option<f32>,
     pub bandwidth_source: MeasurementSource,
     /// Run-to-run spread from the GPU bandwidth benchmark.
     ///
@@ -107,6 +116,8 @@ pub struct CpuProfile {
     /// branches.
     #[serde(default)]
     pub compute_tflops_fp16: Option<f32>,
+    #[serde(default)]
+    pub post_prefill_decode_overhead_ms: Option<f32>,
     #[serde(default)]
     pub prefill_matmul_tflops_fp16: Option<f32>,
     #[serde(default)]

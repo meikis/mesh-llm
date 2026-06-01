@@ -20,6 +20,7 @@ struct ExecutionBudget {
     memory_bandwidth_bytes_per_sec: Option<u64>,
     decode_effective_bandwidth_bytes_per_sec: Option<u64>,
     decode_fixed_overhead_ms: Option<f32>,
+    post_prefill_decode_overhead_ms: Option<f32>,
     bandwidth_source: MeasurementSource,
     benchmark_noise_pct: Option<f32>,
     compute_tflops_fp16: Option<f32>,
@@ -69,6 +70,7 @@ pub fn score_model(
             memory_bandwidth_bytes_per_sec: None,
             decode_effective_bandwidth_bytes_per_sec: None,
             decode_fixed_overhead_ms: None,
+            post_prefill_decode_overhead_ms: None,
             bandwidth_source: MeasurementSource::Unknown,
             benchmark_noise_pct: None,
             compute_tflops_fp16: None,
@@ -114,7 +116,8 @@ fn score_for_budget(
     let estimated_decode_range =
         decode_tokens_per_sec_range(estimated_decode_tps, active_decode_bytes, model, budget);
     let estimated_prefill_tps = prefill_tokens_per_sec(model, config, budget, estimated_decode_tps);
-    let first_token = first_token_estimate(estimated_prefill_tps, estimated_decode_tps, config);
+    let first_token =
+        first_token_estimate(estimated_prefill_tps, estimated_decode_tps, config, budget);
     let estimated_first_token_range = first_token_ms_range(first_token.total_ms, model, budget);
     let memory_limit = memory_limit_with_margin(budget.usable_memory_bytes, config.safety_margin);
     let mut warnings = Vec::new();
@@ -225,6 +228,7 @@ fn execution_budgets(hardware: &HardwareProfile) -> Vec<ExecutionBudget> {
                 .map(|_| MeasurementSource::Measured)
                 .unwrap_or(MeasurementSource::Unknown),
             benchmark_noise_pct: None,
+            post_prefill_decode_overhead_ms: hardware.cpu.post_prefill_decode_overhead_ms,
             compute_tflops_fp16: hardware.cpu.compute_tflops_fp16,
             prefill_matmul_tflops_fp16: hardware.cpu.prefill_matmul_tflops_fp16,
             prefill_moe_matmul_tflops_fp16: hardware.cpu.prefill_moe_matmul_tflops_fp16,
@@ -265,6 +269,7 @@ fn accelerator_budget(
         decode_effective_bandwidth_bytes_per_sec: accelerator
             .decode_effective_bandwidth_bytes_per_sec,
         decode_fixed_overhead_ms: accelerator.decode_fixed_overhead_ms,
+        post_prefill_decode_overhead_ms: accelerator.post_prefill_decode_overhead_ms,
         bandwidth_source: accelerator.bandwidth_source,
         benchmark_noise_pct: accelerator.benchmark_noise_pct,
         compute_tflops_fp16: accelerator.compute_tflops_fp16,
@@ -1178,6 +1183,7 @@ fn first_token_estimate(
     prefill_tps: Option<f32>,
     decode_tps: Option<f32>,
     config: &SelectionConfig,
+    budget: &ExecutionBudget,
 ) -> FirstTokenEstimate {
     let prefill_ms = config
         .workload
@@ -1186,12 +1192,13 @@ fn first_token_estimate(
         .zip(prefill_tps)
         .map(|(prompt_tokens, tps)| prompt_tokens as f32 / tps.max(0.001) * 1000.0);
     let decode_ms = decode_tps.map(|tps| 1000.0 / tps.max(0.001));
-    // We deliberately leave request/setup/tokenize overhead as a separate zero
-    // term. Skippy validation observes it through end-to-end request timing,
-    // but model-fit does not yet have a model-independent hardware benchmark
-    // for HTTP/runtime setup or tokenizer throughput. Keeping the field visible
-    // prevents first-token misses from being misattributed to prefill/decode.
-    let overhead_value_ms = 0.0;
+    // This is a lower-bound hardware/runtime transition fact: it measures the
+    // backend cost of issuing decode-shaped work immediately after
+    // prefill-shaped matmul work without loading a GGUF. It deliberately does
+    // not try to cover llama.cpp graph construction, KV/session bookkeeping,
+    // tokenization, HTTP, or sampling. Validation keeps those residuals visible
+    // so we do not smuggle model-benchmark observations into metadata-only fit.
+    let overhead_value_ms = budget.post_prefill_decode_overhead_ms.unwrap_or(0.0);
     let overhead_ms = Some(overhead_value_ms);
     let total_ms =
         prefill_ms.map(|prefill| prefill + decode_ms.unwrap_or_default() + overhead_value_ms);

@@ -457,6 +457,7 @@ char *mesh_llm_gpu_bench_metal_json(char **error_out) {
                                  dense_flops);
             (void)run_mps_moe_matmul(queue, moe_gemm, moe_left, moe_right, moe_result,
                                      moe_flops);
+            (void)run_empty_dispatch_overhead_ms(queue, pso_empty, sink, empty_grid, empty_tpg, 1);
         }
 
         const int runs = 20;
@@ -466,6 +467,7 @@ char *mesh_llm_gpu_bench_metal_json(char **error_out) {
         NSMutableArray<NSNumber *> *fp16_samples = [NSMutableArray arrayWithCapacity:runs];
         NSMutableArray<NSNumber *> *prefill_matmul_samples = [NSMutableArray arrayWithCapacity:runs];
         NSMutableArray<NSNumber *> *prefill_moe_matmul_samples = [NSMutableArray arrayWithCapacity:runs];
+        NSMutableArray<NSNumber *> *post_prefill_decode_samples = [NSMutableArray arrayWithCapacity:runs];
         NSMutableArray<NSNumber *> *decode_effective_samples = [NSMutableArray arrayWithCapacity:runs];
         NSMutableArray<NSNumber *> *fixed_overhead_samples = [NSMutableArray arrayWithCapacity:runs];
 
@@ -483,6 +485,14 @@ char *mesh_llm_gpu_bench_metal_json(char **error_out) {
                                                                        moe_left, moe_right,
                                                                        moe_result,
                                                                        moe_flops))];
+            (void)run_mps_matmul(queue, dense_gemm, dense_left, dense_right, dense_result,
+                                 dense_flops);
+            [post_prefill_decode_samples addObject:@(run_empty_dispatch_overhead_ms(queue,
+                                                                                   pso_empty,
+                                                                                   sink,
+                                                                                   empty_grid,
+                                                                                   empty_tpg,
+                                                                                   1))];
             [decode_effective_samples addObject:@(run_decode_like_memread(queue, pso, buf, sink,
                                                                           decode_grid, tpg,
                                                                           decode_chunk_bytes,
@@ -501,6 +511,7 @@ char *mesh_llm_gpu_bench_metal_json(char **error_out) {
             percentile_value(prefill_matmul_samples, (NSUInteger)((double)runs * 0.90) - 1);
         double prefill_moe_matmul_measured =
             percentile_value(prefill_moe_matmul_samples, (NSUInteger)((double)runs * 0.90) - 1);
+        double post_prefill_decode_measured = percentile_value(post_prefill_decode_samples, runs / 2);
         double decode_effective = percentile_value(decode_effective_samples, (NSUInteger)((double)runs * 0.90) - 1);
         decode_effective = MIN(decode_effective, p90);
         double fixed_overhead = percentile_value(fixed_overhead_samples, runs / 2);
@@ -513,9 +524,9 @@ char *mesh_llm_gpu_bench_metal_json(char **error_out) {
         double efficiency = has_rated ? p90 / rated * 100.0 : 0.0;
 
         NSMutableString *json = [NSMutableString stringWithFormat:
-            @"[{\"device\":\"%@\",\"buffer_mb\":512,\"runs\":%d,\"p50_gbps\":%.2f,\"p90_gbps\":%.2f,\"noise_pct\":%.2f,\"runtime_s\":%.3f,\"decode_effective_gbps\":%.2f,\"decode_fixed_overhead_ms\":%.4f,\"compute_tflops_fp32\":%.2f,\"compute_tflops_fp16\":%.2f,\"prefill_matmul_tflops_fp16\":%.2f,\"prefill_moe_matmul_tflops_fp16\":%.2f",
+            @"[{\"device\":\"%@\",\"buffer_mb\":512,\"runs\":%d,\"p50_gbps\":%.2f,\"p90_gbps\":%.2f,\"noise_pct\":%.2f,\"runtime_s\":%.3f,\"decode_effective_gbps\":%.2f,\"decode_fixed_overhead_ms\":%.4f,\"post_prefill_decode_overhead_ms\":%.4f,\"compute_tflops_fp32\":%.2f,\"compute_tflops_fp16\":%.2f,\"prefill_matmul_tflops_fp16\":%.2f,\"prefill_moe_matmul_tflops_fp16\":%.2f",
             device_name, runs, p50, p90, noise, runtime_secs, decode_effective, fixed_overhead,
-            fp32_measured, fp16_measured, prefill_matmul_measured,
+            post_prefill_decode_measured, fp32_measured, fp16_measured, prefill_matmul_measured,
             prefill_moe_matmul_measured];
         if (has_rated) {
             [json appendFormat:@",\"rated_gbps\":%.0f,\"rated_estimated\":%@", rated, estimated ? @"true" : @"false"];

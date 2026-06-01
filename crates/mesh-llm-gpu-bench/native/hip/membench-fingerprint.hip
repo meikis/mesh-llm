@@ -315,12 +315,47 @@ int main(int argc, char** argv) {
             return totalFlops / (ms / 1000.0) / 1e12;
         };
 
+        auto measure_post_prefill_decode_overhead_ms = [&]() -> double {
+            const float alpha = 1.0f;
+            const float beta = 0.0f;
+            check_hipblas(
+                hipblasGemmEx(hipblas,
+                              HIPBLAS_OP_N,
+                              HIPBLAS_OP_N,
+                              PREFILL_MATMUL_SIZE,
+                              PREFILL_MATMUL_SIZE,
+                              PREFILL_MATMUL_SIZE,
+                              &alpha,
+                              dMatmulA,
+                              HIPBLAS_R_16F,
+                              PREFILL_MATMUL_SIZE,
+                              dMatmulB,
+                              HIPBLAS_R_16F,
+                              PREFILL_MATMUL_SIZE,
+                              &beta,
+                              dMatmulC,
+                              HIPBLAS_R_16F,
+                              PREFILL_MATMUL_SIZE,
+                              HIPBLAS_R_32F,
+                              HIPBLAS_GEMM_DEFAULT),
+                "hipblasGemmEx post prefill");
+            check(hipEventRecord(evStart, 0), "hipEventRecord post prefill decode start");
+            memread<<<1, BLOCK_SIZE>>>(dSrc, dSink, BLOCK_SIZE);
+            check(hipGetLastError(), "post prefill decode launch");
+            check(hipEventRecord(evStop, 0), "hipEventRecord post prefill decode stop");
+            check(hipEventSynchronize(evStop), "hipEventSync post prefill decode");
+            float ms = 0.0f;
+            check(hipEventElapsedTime(&ms, evStart, evStop), "hipEventElapsed post prefill decode");
+            return (double)ms;
+        };
+
         for (int i = 0; i < WARMUP_RUNS; i++) dispatch();
         for (int i = 0; i < WARMUP_RUNS; i++) {
             (void)measure_compute_fp32();
             (void)measure_compute_fp16();
             (void)measure_prefill_matmul_fp16();
             (void)measure_prefill_moe_matmul_fp16();
+            (void)measure_post_prefill_decode_overhead_ms();
         }
 
         double wallStart = steady_seconds();
@@ -330,12 +365,14 @@ int main(int argc, char** argv) {
         double fp16Samples[TIMED_RUNS];
         double prefillMatmulSamples[TIMED_RUNS];
         double prefillMoeMatmulSamples[TIMED_RUNS];
+        double postPrefillDecodeSamples[TIMED_RUNS];
         for (int i = 0; i < TIMED_RUNS; i++) {
             samples[i] = dispatch();
             fp32Samples[i] = measure_compute_fp32();
             fp16Samples[i] = measure_compute_fp16();
             prefillMatmulSamples[i] = measure_prefill_matmul_fp16();
             prefillMoeMatmulSamples[i] = measure_prefill_moe_matmul_fp16();
+            postPrefillDecodeSamples[i] = measure_post_prefill_decode_overhead_ms();
         }
 
         double wallEnd = steady_seconds();
@@ -346,12 +383,14 @@ int main(int argc, char** argv) {
         qsort(fp16Samples, TIMED_RUNS, sizeof(double), cmp_double);
         qsort(prefillMatmulSamples, TIMED_RUNS, sizeof(double), cmp_double);
         qsort(prefillMoeMatmulSamples, TIMED_RUNS, sizeof(double), cmp_double);
+        qsort(postPrefillDecodeSamples, TIMED_RUNS, sizeof(double), cmp_double);
         double p50      = samples[TIMED_RUNS / 2];
         double p90      = samples[(int)(TIMED_RUNS * 0.90) - 1];
         double tf32P90  = fp32Samples[(int)(TIMED_RUNS * 0.90) - 1];
         double tf16P90  = fp16Samples[(int)(TIMED_RUNS * 0.90) - 1];
         double prefillMatmulP90 = prefillMatmulSamples[(int)(TIMED_RUNS * 0.90) - 1];
         double prefillMoeMatmulP90 = prefillMoeMatmulSamples[(int)(TIMED_RUNS * 0.90) - 1];
+        double postPrefillDecodeP50 = postPrefillDecodeSamples[TIMED_RUNS / 2];
         double noisePct = (p90 - p50) / p90 * 100.0;
         double effPct   = p90 / ratedGBps * 100.0;
 
@@ -370,6 +409,7 @@ int main(int argc, char** argv) {
                    "\"efficiency_pct\":%.2f,"
                    "\"bus_width_bits\":%d,"
                    "\"mem_clock_mhz\":%.0f,"
+                   "\"post_prefill_decode_overhead_ms\":%.4f,"
                    "\"compute_tflops_fp32\":%.2f,"
                    "\"compute_tflops_fp16\":%.2f,"
                    "\"prefill_matmul_tflops_fp16\":%.2f,"
@@ -382,6 +422,7 @@ int main(int argc, char** argv) {
                    effPct,
                    props.memoryBusWidth,
                    props.memoryClockRate / 1000.0,
+                   postPrefillDecodeP50,
                    tf32P90,
                    tf16P90,
                    prefillMatmulP90,
@@ -405,6 +446,7 @@ int main(int argc, char** argv) {
             printf("tf16    : %.2f TFLOPS\n", tf16P90);
             printf("prefill matmul fp16: %.2f TFLOPS\n", prefillMatmulP90);
             printf("prefill moe matmul fp16: %.2f TFLOPS\n", prefillMoeMatmulP90);
+            printf("post-prefill decode overhead: %.4f ms\n", postPrefillDecodeP50);
             printf("noise   : %.1f%%  (p90-p50 spread -- lower is better)\n", noisePct);
             printf("runtime : %.2fs\n", runtimeSecs);
             if (dev < deviceCount - 1) printf("\n");

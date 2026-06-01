@@ -84,6 +84,9 @@ fn accelerator_from_benchmark(
             .decode_effective_gbps
             .map(|value| (value * 1_000_000_000.0).round() as u64),
         decode_fixed_overhead_ms: output.decode_fixed_overhead_ms.map(|value| value as f32),
+        post_prefill_decode_overhead_ms: output
+            .post_prefill_decode_overhead_ms
+            .map(|value| value as f32),
         bandwidth_source: MeasurementSource::Measured,
         benchmark_noise_pct: Some(output.noise_pct as f32),
         bandwidth_efficiency_pct: output.efficiency_pct.map(|value| value as f32),

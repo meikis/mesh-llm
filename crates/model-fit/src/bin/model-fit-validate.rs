@@ -1920,6 +1920,9 @@ fn gpu_output_from_command_json(gpu: &Value, p90_gbps: f64) -> GpuBenchmarkOutpu
         p90_gbps,
         decode_effective_gbps: gpu.get("decode_effective_gbps").and_then(Value::as_f64),
         decode_fixed_overhead_ms: gpu.get("decode_fixed_overhead_ms").and_then(Value::as_f64),
+        post_prefill_decode_overhead_ms: gpu
+            .get("post_prefill_decode_overhead_ms")
+            .and_then(Value::as_f64),
         compute_tflops_fp32: gpu.get("compute_tflops_fp32").and_then(Value::as_f64),
         compute_tflops_fp16: gpu.get("compute_tflops_fp16").and_then(Value::as_f64),
         prefill_matmul_tflops_fp16: gpu
@@ -2055,6 +2058,7 @@ fn cpu_profile() -> CpuProfile {
             .and_then(|count| u32::try_from(count.get()).ok()),
         memory_bandwidth_bytes_per_sec: None,
         compute_tflops_fp16: None,
+        post_prefill_decode_overhead_ms: None,
         prefill_matmul_tflops_fp16: None,
         prefill_moe_matmul_tflops_fp16: None,
     }
@@ -2293,6 +2297,7 @@ fn fit_input_contract() -> FitInputContract {
             "accelerators.memory_bandwidth_bytes_per_sec",
             "accelerators.decode_effective_bandwidth_bytes_per_sec",
             "accelerators.decode_fixed_overhead_ms",
+            "accelerators.post_prefill_decode_overhead_ms",
             "accelerators.bandwidth_source",
             "accelerators.benchmark_noise_pct",
             "accelerators.compute_tflops_fp16",
@@ -2301,6 +2306,7 @@ fn fit_input_contract() -> FitInputContract {
             "accelerators.unified_memory",
             "cpu.memory_bandwidth_bytes_per_sec",
             "cpu.compute_tflops_fp16",
+            "cpu.post_prefill_decode_overhead_ms",
             "cpu.prefill_matmul_tflops_fp16",
             "cpu.prefill_moe_matmul_tflops_fp16",
         ],

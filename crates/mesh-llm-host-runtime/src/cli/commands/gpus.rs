@@ -92,6 +92,7 @@ fn gpu_json(gpu: &GpuFacts) -> Value {
         "mem_bandwidth_gbps": gpu.mem_bandwidth_gbps,
         "decode_effective_gbps": gpu.decode_effective_gbps,
         "decode_fixed_overhead_ms": gpu.decode_fixed_overhead_ms,
+        "post_prefill_decode_overhead_ms": gpu.post_prefill_decode_overhead_ms,
         "compute_tflops_fp32": gpu.compute_tflops_fp32,
         "compute_tflops_fp16": gpu.compute_tflops_fp16,
         "prefill_matmul_tflops_fp16": gpu.prefill_matmul_tflops_fp16,
@@ -163,6 +164,11 @@ fn gpu_benchmark_json(hw: &HardwareSurvey, saved: &SavedBenchmark) -> Value {
                     .decode_fixed_overhead_ms
                     .as_ref()
                     .and_then(|values| values.get(index)),
+                "post_prefill_decode_overhead_ms": saved
+                    .result
+                    .post_prefill_decode_overhead_ms
+                    .as_ref()
+                    .and_then(|values| values.get(index)),
                 "compute_tflops_fp32": saved
                     .result
                     .compute_tflops_fp32
@@ -215,6 +221,7 @@ fn attach_cached_bandwidth(hw: &mut HardwareSurvey) {
         gpu.mem_bandwidth_gbps = Some(cached.p90_gbps);
         gpu.decode_effective_gbps = cached.decode_effective_gbps;
         gpu.decode_fixed_overhead_ms = cached.decode_fixed_overhead_ms;
+        gpu.post_prefill_decode_overhead_ms = cached.post_prefill_decode_overhead_ms;
         gpu.compute_tflops_fp32 = cached.compute_tflops_fp32;
         gpu.compute_tflops_fp16 = cached.compute_tflops_fp16;
         gpu.prefill_matmul_tflops_fp16 = cached.prefill_matmul_tflops_fp16;
@@ -290,8 +297,11 @@ mod tests {
             mem_bandwidth_gbps: Some(1008.0),
             decode_effective_gbps: Some(402.0),
             decode_fixed_overhead_ms: Some(1.25),
+            post_prefill_decode_overhead_ms: Some(1.5),
             compute_tflops_fp32: Some(82.4),
             compute_tflops_fp16: Some(164.8),
+            prefill_matmul_tflops_fp16: Some(11.0),
+            prefill_moe_matmul_tflops_fp16: Some(9.0),
             unified_memory: false,
             stable_id: Some(format!("stable-{index}")),
             pci_bdf: Some(format!("0000:{index:02x}:00.0")),
@@ -367,8 +377,11 @@ mod tests {
                 mem_bandwidth_gbps: vec![1008.0, 912.5],
                 decode_effective_gbps: Some(vec![402.0, 365.0]),
                 decode_fixed_overhead_ms: Some(vec![1.25, 1.5]),
+                post_prefill_decode_overhead_ms: Some(vec![1.5, 1.75]),
                 compute_tflops_fp32: Some(vec![82.4, 70.2]),
                 compute_tflops_fp16: Some(vec![164.8, 140.4]),
+                prefill_matmul_tflops_fp16: Some(vec![11.0, 10.0]),
+                prefill_moe_matmul_tflops_fp16: Some(vec![9.0, 8.0]),
             },
         };
 
@@ -400,8 +413,11 @@ mod tests {
                 mem_bandwidth_gbps: vec![1008.0],
                 decode_effective_gbps: Some(vec![402.0]),
                 decode_fixed_overhead_ms: Some(vec![1.25]),
+                post_prefill_decode_overhead_ms: Some(vec![1.5]),
                 compute_tflops_fp32: Some(vec![82.4]),
                 compute_tflops_fp16: Some(vec![164.8]),
+                prefill_matmul_tflops_fp16: Some(vec![11.0]),
+                prefill_moe_matmul_tflops_fp16: Some(vec![9.0]),
             },
         };
 

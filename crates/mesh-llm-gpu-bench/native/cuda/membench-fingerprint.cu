@@ -3,6 +3,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cublas_v2.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,6 +29,7 @@
 #define DECODE_CHUNK_BYTES (256 * 1024 * 1024)
 #define DECODE_DISPATCHES 8
 #define FIXED_OVERHEAD_DISPATCHES 256
+#define PREFILL_MATMUL_SIZE 4096
 
 __global__ void empty_kernel(float* sink) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
@@ -102,6 +104,13 @@ static void check(cudaError_t err, const char* ctx) {
     }
 }
 
+static void check_cublas(cublasStatus_t status, const char* ctx) {
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        fprintf(stderr, "cuBLAS error at %s: %d\n", ctx, (int)status);
+        exit(1);
+    }
+}
+
 static int cmp_double(const void* a, const void* b) {
     double da = *(const double*)a, db = *(const double*)b;
     return (da > db) - (da < db);
@@ -155,12 +164,26 @@ int main(int argc, char** argv) {
         float4* dSrc;
         float*  dSink;
         float*  dComputeSink;
+        __half* dMatmulA;
+        __half* dMatmulB;
+        __half* dMatmulC;
         check(cudaMalloc(&dSrc,  BUFFER_BYTES), "cudaMalloc src");
         check(cudaMalloc(&dSink, sizeof(float)), "cudaMalloc sink");
         check(cudaMalloc(&dComputeSink, sizeof(float) * computeThreads), "cudaMalloc compute sink");
+        size_t matmulBytes = (size_t)PREFILL_MATMUL_SIZE * (size_t)PREFILL_MATMUL_SIZE * sizeof(__half);
+        check(cudaMalloc(&dMatmulA, matmulBytes), "cudaMalloc matmul A");
+        check(cudaMalloc(&dMatmulB, matmulBytes), "cudaMalloc matmul B");
+        check(cudaMalloc(&dMatmulC, matmulBytes), "cudaMalloc matmul C");
         check(cudaMemset(dSrc,  0, BUFFER_BYTES), "cudaMemset src");
         check(cudaMemset(dSink, 0, sizeof(float)), "cudaMemset sink");
         check(cudaMemset(dComputeSink, 0, sizeof(float) * computeThreads), "cudaMemset compute sink");
+        check(cudaMemset(dMatmulA, 1, matmulBytes), "cudaMemset matmul A");
+        check(cudaMemset(dMatmulB, 1, matmulBytes), "cudaMemset matmul B");
+        check(cudaMemset(dMatmulC, 0, matmulBytes), "cudaMemset matmul C");
+
+        cublasHandle_t cublas;
+        check_cublas(cublasCreate(&cublas), "cublasCreate");
+        check_cublas(cublasSetMathMode(cublas, CUBLAS_TENSOR_OP_MATH), "cublasSetMathMode");
 
         cudaEvent_t evStart, evStop;
         check(cudaEventCreate(&evStart), "eventCreate start");
@@ -203,6 +226,40 @@ int main(int argc, char** argv) {
             return totalFlops / (ms / 1000.0) / 1e12;
         };
 
+        auto measure_prefill_matmul_fp16 = [&]() -> double {
+            const float alpha = 1.0f;
+            const float beta = 0.0f;
+            check(cudaEventRecord(evStart), "eventRecord prefill matmul start");
+            check_cublas(
+                cublasGemmEx(cublas,
+                             CUBLAS_OP_N,
+                             CUBLAS_OP_N,
+                             PREFILL_MATMUL_SIZE,
+                             PREFILL_MATMUL_SIZE,
+                             PREFILL_MATMUL_SIZE,
+                             &alpha,
+                             dMatmulA,
+                             CUDA_R_16F,
+                             PREFILL_MATMUL_SIZE,
+                             dMatmulB,
+                             CUDA_R_16F,
+                             PREFILL_MATMUL_SIZE,
+                             &beta,
+                             dMatmulC,
+                             CUDA_R_16F,
+                             PREFILL_MATMUL_SIZE,
+                             CUBLAS_COMPUTE_32F,
+                             CUBLAS_GEMM_DEFAULT_TENSOR_OP),
+                "cublasGemmEx prefill matmul");
+            check(cudaEventRecord(evStop), "eventRecord prefill matmul stop");
+            check(cudaEventSynchronize(evStop), "eventSync prefill matmul");
+            float ms = 0.0f;
+            check(cudaEventElapsedTime(&ms, evStart, evStop), "eventElapsed prefill matmul");
+            double n = (double)PREFILL_MATMUL_SIZE;
+            double totalFlops = 2.0 * n * n * n;
+            return totalFlops / (ms / 1000.0) / 1e12;
+        };
+
         auto measure_decode_effective_gbps = [&]() -> double {
             int chunkElements = DECODE_CHUNK_BYTES / sizeof(float4);
             int chunkGridSize = (chunkElements + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -236,6 +293,7 @@ int main(int argc, char** argv) {
         for (int i = 0; i < WARMUP_RUNS; i++) {
             (void)measure_compute_fp32();
             (void)measure_compute_fp16();
+            (void)measure_prefill_matmul_fp16();
             (void)measure_decode_effective_gbps();
             (void)measure_fixed_overhead_ms();
         }
@@ -245,12 +303,14 @@ int main(int argc, char** argv) {
         double samples[TIMED_RUNS];
         double fp32Samples[TIMED_RUNS];
         double fp16Samples[TIMED_RUNS];
+        double prefillMatmulSamples[TIMED_RUNS];
         double decodeEffectiveSamples[TIMED_RUNS];
         double fixedOverheadSamples[TIMED_RUNS];
         for (int i = 0; i < TIMED_RUNS; i++) {
             samples[i] = dispatch();
             fp32Samples[i] = measure_compute_fp32();
             fp16Samples[i] = measure_compute_fp16();
+            prefillMatmulSamples[i] = measure_prefill_matmul_fp16();
             decodeEffectiveSamples[i] = measure_decode_effective_gbps();
             fixedOverheadSamples[i] = measure_fixed_overhead_ms();
         }
@@ -261,12 +321,14 @@ int main(int argc, char** argv) {
         qsort(samples, TIMED_RUNS, sizeof(double), cmp_double);
         qsort(fp32Samples, TIMED_RUNS, sizeof(double), cmp_double);
         qsort(fp16Samples, TIMED_RUNS, sizeof(double), cmp_double);
+        qsort(prefillMatmulSamples, TIMED_RUNS, sizeof(double), cmp_double);
         qsort(decodeEffectiveSamples, TIMED_RUNS, sizeof(double), cmp_double);
         qsort(fixedOverheadSamples, TIMED_RUNS, sizeof(double), cmp_double);
         double p50      = samples[TIMED_RUNS / 2];
         double p90      = samples[(int)(TIMED_RUNS * 0.90) - 1];
         double tf32P90  = fp32Samples[(int)(TIMED_RUNS * 0.90) - 1];
         double tf16P90  = fp16Samples[(int)(TIMED_RUNS * 0.90) - 1];
+        double prefillMatmulP90 = prefillMatmulSamples[(int)(TIMED_RUNS * 0.90) - 1];
         double decodeEffectiveP90 = decodeEffectiveSamples[(int)(TIMED_RUNS * 0.90) - 1];
         decodeEffectiveP90 = std::min(decodeEffectiveP90, p90);
         double fixedOverheadP50 = fixedOverheadSamples[TIMED_RUNS / 2];
@@ -290,7 +352,8 @@ int main(int argc, char** argv) {
                    "\"decode_effective_gbps\":%.2f,"
                    "\"decode_fixed_overhead_ms\":%.4f,"
                    "\"compute_tflops_fp32\":%.2f,"
-                   "\"compute_tflops_fp16\":%.2f}",
+                   "\"compute_tflops_fp16\":%.2f,"
+                   "\"prefill_matmul_tflops_fp16\":%.2f}",
                    props.name, TIMED_RUNS,
                    p50, p90, noisePct, runtimeSecs,
                    ratedGBps, effPct,
@@ -298,7 +361,7 @@ int main(int argc, char** argv) {
                    memClockKHz / 1000.0,
                    decodeEffectiveP90,
                    fixedOverheadP50,
-                   tf32P90, tf16P90);
+                   tf32P90, tf16P90, prefillMatmulP90);
             if (dev < deviceCount - 1) printf(",");
             else printf("]\n");
         } else {
@@ -311,6 +374,7 @@ int main(int argc, char** argv) {
             printf("p90    : %.1f GB/s  efficiency: %.1f%%\n", p90, effPct);
             printf("tf32   : %.2f TFLOPS\n", tf32P90);
             printf("tf16   : %.2f TFLOPS\n", tf16P90);
+            printf("prefill matmul fp16: %.2f TFLOPS\n", prefillMatmulP90);
             printf("decode : %.1f GB/s effective, %.4f ms fixed dispatch\n",
                    decodeEffectiveP90, fixedOverheadP50);
             printf("noise  : %.1f%%  (p90-p50 spread -- lower is better)\n", noisePct);
@@ -321,6 +385,10 @@ int main(int argc, char** argv) {
         cudaFree(dSrc);
         cudaFree(dSink);
         cudaFree(dComputeSink);
+        cudaFree(dMatmulA);
+        cudaFree(dMatmulB);
+        cudaFree(dMatmulC);
+        cublasDestroy(cublas);
         cudaEventDestroy(evStart);
         cudaEventDestroy(evStop);
     }

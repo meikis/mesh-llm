@@ -89,6 +89,7 @@ fn accelerator_from_benchmark(
         bandwidth_efficiency_pct: output.efficiency_pct.map(|value| value as f32),
         compute_tflops_fp32: output.compute_tflops_fp32.map(|value| value as f32),
         compute_tflops_fp16: output.compute_tflops_fp16.map(|value| value as f32),
+        prefill_matmul_tflops_fp16: output.prefill_matmul_tflops_fp16.map(|value| value as f32),
         unified_memory: facts.unified_memory,
     }
 }

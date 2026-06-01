@@ -13,6 +13,8 @@ pub struct BenchmarkOutput {
     pub decode_fixed_overhead_ms: Option<f64>,
     pub compute_tflops_fp32: Option<f64>,
     pub compute_tflops_fp16: Option<f64>,
+    #[serde(default)]
+    pub prefill_matmul_tflops_fp16: Option<f64>,
     pub noise_pct: f64,
     pub runtime_s: f64,
     pub rated_gbps: Option<f64>,

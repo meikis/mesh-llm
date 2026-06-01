@@ -1857,6 +1857,9 @@ fn gpu_output_from_command_json(gpu: &Value, p90_gbps: f64) -> GpuBenchmarkOutpu
         decode_fixed_overhead_ms: gpu.get("decode_fixed_overhead_ms").and_then(Value::as_f64),
         compute_tflops_fp32: gpu.get("compute_tflops_fp32").and_then(Value::as_f64),
         compute_tflops_fp16: gpu.get("compute_tflops_fp16").and_then(Value::as_f64),
+        prefill_matmul_tflops_fp16: gpu
+            .get("prefill_matmul_tflops_fp16")
+            .and_then(Value::as_f64),
         noise_pct: 0.0,
         runtime_s: 0.0,
         rated_gbps: None,
@@ -2222,6 +2225,7 @@ fn fit_input_contract() -> FitInputContract {
             "accelerators.bandwidth_source",
             "accelerators.benchmark_noise_pct",
             "accelerators.compute_tflops_fp16",
+            "accelerators.prefill_matmul_tflops_fp16",
             "accelerators.unified_memory",
             "cpu.memory_bandwidth_bytes_per_sec",
         ],

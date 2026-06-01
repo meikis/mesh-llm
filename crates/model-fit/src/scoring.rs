@@ -9,6 +9,7 @@ use std::cmp::Ordering;
 
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
+const LLAMA_DEFAULT_UBATCH_TOKENS: u32 = 512;
 
 #[derive(Clone, Debug)]
 struct ExecutionBudget {
@@ -22,6 +23,7 @@ struct ExecutionBudget {
     bandwidth_source: MeasurementSource,
     benchmark_noise_pct: Option<f32>,
     compute_tflops_fp16: Option<f32>,
+    prefill_matmul_tflops_fp16: Option<f32>,
     unified_memory: bool,
 }
 
@@ -69,6 +71,7 @@ pub fn score_model(
             bandwidth_source: MeasurementSource::Unknown,
             benchmark_noise_pct: None,
             compute_tflops_fp16: None,
+            prefill_matmul_tflops_fp16: None,
             unified_memory: false,
         };
         return score_for_budget(model, config, &budget);
@@ -108,7 +111,7 @@ fn score_for_budget(
     );
     let estimated_decode_range =
         decode_tokens_per_sec_range(estimated_decode_tps, active_decode_bytes, model, budget);
-    let estimated_prefill_tps = prefill_tokens_per_sec(model, config, estimated_decode_tps);
+    let estimated_prefill_tps = prefill_tokens_per_sec(model, config, budget, estimated_decode_tps);
     let estimated_first_token_ms =
         first_token_ms(estimated_prefill_tps, estimated_decode_tps, config);
     let estimated_first_token_range = first_token_ms_range(estimated_first_token_ms, model, budget);
@@ -219,6 +222,7 @@ fn execution_budgets(hardware: &HardwareProfile) -> Vec<ExecutionBudget> {
                 .unwrap_or(MeasurementSource::Unknown),
             benchmark_noise_pct: None,
             compute_tflops_fp16: None,
+            prefill_matmul_tflops_fp16: None,
             unified_memory: false,
         });
     }
@@ -259,6 +263,7 @@ fn accelerator_budget(
         bandwidth_source: accelerator.bandwidth_source,
         benchmark_noise_pct: accelerator.benchmark_noise_pct,
         compute_tflops_fp16: accelerator.compute_tflops_fp16,
+        prefill_matmul_tflops_fp16: accelerator.prefill_matmul_tflops_fp16,
         unified_memory: accelerator.unified_memory,
     }
 }
@@ -951,21 +956,9 @@ fn decode_base_bandwidth_bytes_per_sec(budget: &ExecutionBudget, config: &Select
 fn prefill_tokens_per_sec(
     model: &ModelProfile,
     config: &SelectionConfig,
+    budget: &ExecutionBudget,
     decode_tokens_per_sec: Option<f32>,
 ) -> Option<f32> {
-    // Prefill and decode are not the same operation. Prefill processes many
-    // prompt tokens at once and can expose much more parallelism; decode is a
-    // repeated one-token loop and is commonly memory-bandwidth-bound. In early
-    // validation, trying to independently predict prefill from raw bandwidth,
-    // attention proxies, and prompt length produced unstable results from the
-    // small amount of metadata we can rely on for arbitrary GGUFs.
-    //
-    // The current first-pass model derives prefill throughput from the decode
-    // estimate multiplied by a shape-based parallelism factor. That keeps the
-    // two estimates correlated through the same hardware/profile facts while
-    // still allowing prefill to be much faster for narrow or small active-byte
-    // models. The first-token estimator then combines prompt_tokens / prefill
-    // with one decode step.
     if !uses_transformer_kv_cache(model.architecture_class) {
         return None;
     }
@@ -973,6 +966,116 @@ fn prefill_tokens_per_sec(
     if prompt_tokens == 0 {
         return None;
     }
+    if let Some(tokens_per_sec) =
+        prefill_roofline_tokens_per_sec(model, config, budget, prompt_tokens)
+    {
+        return Some(tokens_per_sec);
+    }
+    legacy_prefill_tokens_per_sec(model, decode_tokens_per_sec)
+}
+
+fn prefill_roofline_tokens_per_sec(
+    model: &ModelProfile,
+    config: &SelectionConfig,
+    budget: &ExecutionBudget,
+    prompt_tokens: u32,
+) -> Option<f32> {
+    // llama.cpp builds a different graph for prompt processing than for
+    // one-token decode. `llama-context.cpp` splits the prompt into ubatches
+    // (`n_ubatch` defaults to 512 in `llama_context_default_params`), and
+    // the backend receives batched `GGML_OP_MUL_MAT` / `GGML_OP_MUL_MAT_ID`
+    // work instead of a long stream of single-token matvecs. That gives prefill
+    // a compute-shaped roofline:
+    //
+    //   total_ms = max(prompt_matmul_flops / measured_compute,
+    //                  ubatches * active_weight_bytes / measured_bandwidth)
+    //              + ubatches * graph_overhead
+    //
+    // This is intentionally not a CUDA/Metal/ROCm branch. The scorer consumes
+    // only the GGUF-derived matmul FLOPs/bytes and the measured hardware facts
+    // that `mesh-llm gpus benchmark` already places in `HardwareProfile`.
+    //
+    // Very narrow models are the awkward corner. Their prompt graph is often
+    // dominated by non-matmul kernels, scheduling, logits/pooling work, and
+    // launch latency that our current generic hardware benchmark does not
+    // measure directly. For those, keep the older decode-correlated fallback
+    // until we add a measured prefill-shaped hardware probe.
+    if !prefill_roofline_has_enough_matmul_shape(model) {
+        return None;
+    }
+    let flops_per_token = active_decode_flops_per_token(model)? as f32;
+    let active_weight_bytes = active_prefill_pressure_bytes(model)? as f32;
+    let ubatches = prefill_ubatch_count(prompt_tokens) as f32;
+    let compute_ms = prefill_compute_ms(flops_per_token, prompt_tokens, budget)?;
+    let bandwidth_ms = prefill_weight_stream_ms(active_weight_bytes, ubatches, budget)?;
+    let overhead_ms = prefill_graph_overhead_ms(model, budget, config, ubatches);
+    let total_ms = compute_ms.max(bandwidth_ms) + overhead_ms;
+    (total_ms > 0.0).then_some(prompt_tokens as f32 / total_ms * 1000.0)
+}
+
+fn prefill_roofline_has_enough_matmul_shape(model: &ModelProfile) -> bool {
+    // The generic FP16 matmul hardware probe measures dense batched GEMM. Sparse
+    // MoE prefill in llama.cpp routes through expert selection and
+    // `GGML_OP_MUL_MAT_ID`; its bottleneck includes dispatch, id mapping, expert
+    // grouping, weighting, and aggregation. Treating that as a dense GEMM
+    // roofline overpredicts active-expert MoE prefill, so keep MoE on the
+    // existing MoE-aware fallback until the benchmark has a measured
+    // prefill-shaped MUL_MAT_ID probe.
+    if model.architecture_class == ModelArchitectureClass::SparseMoeTransformer {
+        return false;
+    }
+    let Some(hidden) = model.hidden_size else {
+        return false;
+    };
+    hidden >= 2048
+}
+
+fn prefill_ubatch_count(prompt_tokens: u32) -> u32 {
+    prompt_tokens.div_ceil(LLAMA_DEFAULT_UBATCH_TOKENS).max(1)
+}
+
+fn prefill_compute_ms(
+    flops_per_token: f32,
+    prompt_tokens: u32,
+    budget: &ExecutionBudget,
+) -> Option<f32> {
+    let tflops = budget
+        .prefill_matmul_tflops_fp16
+        .or(budget.compute_tflops_fp16)
+        .filter(|value| *value > 0.0)?;
+    let total_flops = flops_per_token * prompt_tokens as f32;
+    Some(total_flops / (tflops * 1_000_000_000_000.0) * 1000.0)
+}
+
+fn prefill_weight_stream_ms(
+    active_weight_bytes: f32,
+    ubatches: f32,
+    budget: &ExecutionBudget,
+) -> Option<f32> {
+    let bandwidth = raw_memory_bandwidth_bytes_per_sec(budget) as f32;
+    (bandwidth > 0.0).then_some(active_weight_bytes * ubatches / bandwidth * 1000.0)
+}
+
+fn prefill_graph_overhead_ms(
+    model: &ModelProfile,
+    budget: &ExecutionBudget,
+    config: &SelectionConfig,
+    ubatches: f32,
+) -> f32 {
+    ubatches
+        * (measured_decode_graph_overhead_ms(model, budget)
+            + architecture_decode_overhead_ms(model, budget, config))
+}
+
+fn legacy_prefill_tokens_per_sec(
+    model: &ModelProfile,
+    decode_tokens_per_sec: Option<f32>,
+) -> Option<f32> {
+    // This fallback is still useful for tiny and narrow models where the
+    // matmul roofline has the wrong dominant term. It is deliberately isolated
+    // from the main prefill path so future work can replace it with a measured
+    // prefill-shaped hardware probe instead of spreading more special cases
+    // through the scorer.
     let decode_tokens_per_sec = decode_tokens_per_sec?;
     let parallelism = prefill_decode_parallelism_factor(model)?;
     let prefill_tokens_per_sec = decode_tokens_per_sec * parallelism;

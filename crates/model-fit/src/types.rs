@@ -69,6 +69,17 @@ pub struct AcceleratorProfile {
     pub compute_tflops_fp32: Option<f32>,
     #[serde(default)]
     pub compute_tflops_fp16: Option<f32>,
+    /// Optional prefill-shaped FP16 matrix-multiply throughput from the GPU
+    /// benchmark.
+    ///
+    /// This is separate from scalar/vector FP16 throughput. Prompt prefill in
+    /// llama.cpp is dominated by batched `GGML_OP_MUL_MAT` work, so a generic
+    /// dense matmul probe is a better hardware fact for the prefill roofline
+    /// than decode bandwidth or scalar FMA throughput. The value is still
+    /// model-independent: it must come from `mesh-llm gpus benchmark`, not from
+    /// benchmarking the GGUF being fitted.
+    #[serde(default)]
+    pub prefill_matmul_tflops_fp16: Option<f32>,
     pub unified_memory: bool,
 }
 

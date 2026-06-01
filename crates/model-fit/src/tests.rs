@@ -24,6 +24,7 @@ fn m1_ultra() -> HardwareProfile {
             bandwidth_efficiency_pct: None,
             compute_tflops_fp32: None,
             compute_tflops_fp16: None,
+            prefill_matmul_tflops_fp16: None,
             unified_memory: true,
         }],
         cpu: CpuProfile {
@@ -408,6 +409,36 @@ fn prefill_estimate_reports_first_token_latency_range() {
 }
 
 #[test]
+fn prefill_roofline_uses_measured_compute_for_wide_models() {
+    let mut slow_compute = m1_ultra();
+    slow_compute.memory.available_system_bytes = None;
+    slow_compute.accelerators[0].compute_tflops_fp16 = Some(5.0);
+    let mut fast_compute = m1_ultra();
+    fast_compute.memory.available_system_bytes = None;
+    fast_compute.accelerators[0].compute_tflops_fp16 = Some(25.0);
+    let mut config = SelectionConfig {
+        workload: WorkloadProfile::chat(),
+        ..SelectionConfig::default()
+    };
+    config.workload.interaction.expected_prompt_tokens = Some(2048);
+    config.weights = config.workload.default_weights();
+    let mut model = dense_model("wide-prefill", 4 * GIB, 32, 4096, 32_768);
+    model.tensor_matmul.base_flops_per_token = 12_000_000_000;
+    model.tensor_matmul.attention.flops_per_token = 2_000_000_000;
+    model.tensor_matmul.feed_forward.flops_per_token = 9_000_000_000;
+    model.tensor_matmul.output.flops_per_token = 1_000_000_000;
+
+    let slow = score_model(&slow_compute, &model, &config)
+        .estimated_prefill_tokens_per_sec
+        .expect("slow compute should produce prefill estimate");
+    let fast = score_model(&fast_compute, &model, &config)
+        .estimated_prefill_tokens_per_sec
+        .expect("fast compute should produce prefill estimate");
+
+    assert!(fast > slow);
+}
+
+#[test]
 fn decode_estimate_uses_measured_graph_overhead_for_deeper_shapes() {
     let mut hardware = m1_ultra();
     hardware.memory.available_system_bytes = None;
@@ -470,6 +501,7 @@ fn budget_selection_prefers_faster_measured_gpu_over_cpu_headroom() {
             bandwidth_efficiency_pct: Some(90.0),
             compute_tflops_fp32: None,
             compute_tflops_fp16: Some(50.0),
+            prefill_matmul_tflops_fp16: None,
             unified_memory: false,
         }],
         cpu: CpuProfile {
@@ -572,6 +604,7 @@ fn hardware_profile_uses_mesh_gpu_benchmark_output_as_measured_bandwidth() {
             decode_fixed_overhead_ms: Some(1.25),
             compute_tflops_fp32: None,
             compute_tflops_fp16: None,
+            prefill_matmul_tflops_fp16: None,
             noise_pct: 1.0,
             runtime_s: 0.25,
             rated_gbps: None,

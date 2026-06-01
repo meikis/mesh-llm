@@ -4,7 +4,8 @@
 
 The crate is intentionally metadata-first and deterministic. It consumes:
 
-- hardware facts and measured GPU bandwidth from `mesh-llm gpus benchmark`
+- hardware facts and measured GPU bandwidth, decode overhead, scalar compute,
+  and prefill-shaped matmul throughput from `mesh-llm gpus benchmark`
 - GGUF-derived model metadata such as tensor bytes, layer count, hidden width,
   KV dimensions, context length, architecture class, quantization, tokenizer
   metadata, and workload capability evidence
@@ -22,6 +23,7 @@ The crate includes two validation manifests:
 
 - `validation/smoke-models.txt` for self-hosted PR smoke testing
 - `validation/deep-models.txt` for manual or nightly high-memory validation
+- `validation/q8-moe-models.txt` for focused Q8, dense prefill, and MoE checks
 
 Run a local validation pass:
 

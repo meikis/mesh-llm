@@ -25,6 +25,8 @@ pub struct GpuBandwidth {
     pub compute_tflops_fp32: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compute_tflops_fp16: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefill_matmul_tflops_fp16: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +43,7 @@ pub struct BenchmarkResult {
     pub decode_fixed_overhead_ms: Option<Vec<f64>>,
     pub compute_tflops_fp32: Option<Vec<f64>>,
     pub compute_tflops_fp16: Option<Vec<f64>>,
+    pub prefill_matmul_tflops_fp16: Option<Vec<f64>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -359,6 +362,11 @@ pub fn run_or_load(
                 .iter()
                 .map(|g| g.compute_tflops_fp16)
                 .collect::<Option<Vec<f64>>>();
+            let prefill_matmul_tflops_fp16 = cached
+                .gpus
+                .iter()
+                .map(|g| g.prefill_matmul_tflops_fp16)
+                .collect::<Option<Vec<f64>>>();
             let decode_effective_gbps = cached
                 .gpus
                 .iter()
@@ -375,6 +383,7 @@ pub fn run_or_load(
                 decode_fixed_overhead_ms,
                 compute_tflops_fp32,
                 compute_tflops_fp16,
+                prefill_matmul_tflops_fp16,
             };
             tracing::info!(
                 "Using cached bandwidth fingerprint: {} GPUs",
@@ -478,6 +487,7 @@ fn build_benchmark_result(
             decode_fixed_overhead_ms: outputs[i].decode_fixed_overhead_ms,
             compute_tflops_fp32: outputs[i].compute_tflops_fp32,
             compute_tflops_fp16: outputs[i].compute_tflops_fp16,
+            prefill_matmul_tflops_fp16: outputs[i].prefill_matmul_tflops_fp16,
         })
         .collect();
 
@@ -498,6 +508,10 @@ fn build_benchmark_result(
         .iter()
         .map(|g| g.compute_tflops_fp16)
         .collect::<Option<Vec<f64>>>();
+    let prefill_matmul_tflops_fp16 = gpus
+        .iter()
+        .map(|g| g.prefill_matmul_tflops_fp16)
+        .collect::<Option<Vec<f64>>>();
 
     (
         gpus,
@@ -507,6 +521,7 @@ fn build_benchmark_result(
             decode_fixed_overhead_ms,
             compute_tflops_fp32,
             compute_tflops_fp16,
+            prefill_matmul_tflops_fp16,
         },
     )
 }

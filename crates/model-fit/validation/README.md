@@ -78,8 +78,8 @@ single-model execution-budget selector:
 |---|---|---|---:|---|
 | Mac Studio M1 Ultra | Metal | steady_decode | 9.8% | 16 benchmarked samples; tiny models now select measured Metal instead of optimistic CPU fallback, with Q5/Q6/Q8 coder and reranker misses still visible. |
 | white.local | CUDA | steady_decode | 8.6% | 16 benchmarked samples; Qwen2.5-Coder Q4/Q5/Q6 matched, while Q8, OLMoE, and reranker behavior remain honest misses. |
-| Mac Studio M1 Ultra | Metal | prefill | 24.6% | Prefill is validated as prompt tokens divided by Skippy's `prefill_elapsed_ms`; it is separate from first-token latency and not yet within the steady-decode band. |
-| white.local | CUDA | prefill | 108.1% | CUDA prefill is much faster than the current metadata prediction for several dense models, so this remains future source-work rather than a tuned constant. |
+| Mac Studio M1 Ultra | Metal | prefill | 24.6% | Broader prefill before the roofline split; focused Metal prefill below is now inside the target band. |
+| white.local | CUDA | prefill | 108.1% | Broader prefill before the measured prefill-matmul hardware probe; focused CUDA dense prefill below is now inside the target band. |
 | Mac Studio M1 Ultra | Metal | first_token | 19.2% | First-token latency includes tokenize, prefill, first decode, and request overhead; larger coder quants are still slower than fit. |
 | white.local | CUDA | first_token | 58.9% | First-token prediction still needs prompt-shape and backend scheduling work. |
 | Mac Studio M1 Ultra | Metal | kv_warm_reuse | 13.7% | KV reuse is close but still over-predicts Qwen2.5-Coder Q4/Q5 and bge reranker. |
@@ -90,14 +90,16 @@ thresholds, add model-specific exceptions, or use observed throughput in the
 metadata-only estimator to make this table pass. Treat misses as hypotheses to
 test against source behavior, hardware facts, or broader held-out models.
 
-Focused Q8/MoE follow-up after removing the Q8_0 stored-byte discount and
-making measured MoE dispatch overhead use measured fixed submission cost:
+Focused Q8/MoE follow-up after removing the Q8_0 stored-byte discount,
+making measured MoE dispatch overhead use measured fixed submission cost, and
+splitting prefill onto a dense matmul roofline when the hardware profile
+contains `prefill_matmul_tflops_fp16`:
 
 | machine | backend | scenario | samples | median abs error | notable result |
 |---|---|---|---:|---:|---|
 | Mac Studio M1 Ultra | Metal | steady_decode | 6 | 8.8% | Qwen2.5-Coder Q8 moved from slower-than-fit to a 1.06 observed/fit match; OLMoE remained close but noisy; bge reranker stayed slower-than-fit. |
 | white.local | CUDA | steady_decode | 6 | 8.3% | Qwen2.5-Coder Q8 improved from 0.60 to 0.86 observed/fit, and OLMoE improved from 1.97 faster-than-fit to 0.90 match. |
-| Mac Studio M1 Ultra | Metal | prefill | 5 | 12.2% | Qwen2.5-Coder Q4/Q5/Q6 and OLMoE are close; Q8 prefill remains noisy/slower-than-fit. |
-| white.local | CUDA | prefill | 5 | 223.6% | CUDA prefill remains a known residual miss and should not be hidden by decode changes. |
+| Mac Studio M1 Ultra | Metal | prefill | 5 | 3.7% | Dense roofline split matches Qwen2.5-Coder Q5/Q8 and OLMoE; Q4 is 15% faster-than-fit and Q6/Q8 had noisy samples in this run. |
+| white.local | CUDA | prefill | 5 | 5.7% | Measured dense FP16 prefill-matmul probe brings Qwen2.5-Coder Q4/Q5/Q8 into band; Q6 is 14% slower-than-fit, and OLMoE stays on the MoE fallback as noisy/slower-than-fit. |
 | Mac Studio M1 Ultra | Metal | kv_warm_reuse | 6 | 14.3% | Qwen2.5-Coder Q8 now matches KV reuse; Q4/Q5 and bge reranker remain slower-than-fit/noisy. |
 | white.local | CUDA | kv_warm_reuse | 6 | 17.5% | Qwen2.5-Coder and bge reranker KV reuse remain slower than steady-decode fit. |

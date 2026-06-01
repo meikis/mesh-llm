@@ -7,7 +7,7 @@ The lists are stratified by estimator behavior rather than popularity:
 - tiny dense models check fixed decode overhead and low-active-byte behavior
 - small dense models check the transition into memory-bandwidth-bound decode
 - 7B/8B and coder models check common local serving shapes
-- quant pairs check Q4/Q8 slope changes without changing architecture
+- quant pairs check Q4/Q5/Q6/Q8 slope changes without changing architecture
 - MoE models check active expert bytes instead of total expert bytes
 - embedding/reranker models check workload suitability in metadata reports
 
@@ -60,17 +60,20 @@ The steady-decode estimator is source-grounded rather than model-name grounded:
   backend submission overhead; model-fit consumes those hardware facts instead
   of assuming Metal, CUDA, or ROCm behavior.
 
-Representative two-machine five-model validation after the ABI decode probe and
-source-grounded graph-overhead estimator:
+Representative two-machine broader validation after the ABI decode probe,
+source-grounded graph-overhead estimator, prefill scenario split, and
+single-model execution-budget selector:
 
 | machine | backend | scenario | median abs error | notable result |
 |---|---|---|---:|---|
-| Mac Studio M1 Ultra | Metal | steady_decode | 8.9% | Qwen3 8B matched at 0.98 observed/fit; Qwen3 0.6B remained a 0.79 miss and two samples were noisy. |
-| white.local | CUDA | steady_decode | 5.8% | All five steady-decode samples matched within the 10% target band. |
-| Mac Studio M1 Ultra | Metal | first_token | 12.1% | First-token latency is close but still misses on Qwen3 0.6B, Llama 3.2 3B, and Qwen3 8B. |
-| white.local | CUDA | first_token | 59.7% | First-token prediction still needs separate prefill and prompt-shape work. |
-| Mac Studio M1 Ultra | Metal | kv_warm_reuse | 18.8% | KV reuse has noisy small-model samples and slower-than-fit misses on 3B/8B. |
-| white.local | CUDA | kv_warm_reuse | 14.0% | CUDA KV reuse is stable but remains slower than fit on several models. |
+| Mac Studio M1 Ultra | Metal | steady_decode | 9.8% | 16 benchmarked samples; tiny models now select measured Metal instead of optimistic CPU fallback, with Q5/Q6/Q8 coder and reranker misses still visible. |
+| white.local | CUDA | steady_decode | 8.6% | 16 benchmarked samples; Qwen2.5-Coder Q4/Q5/Q6 matched, while Q8, OLMoE, and reranker behavior remain honest misses. |
+| Mac Studio M1 Ultra | Metal | prefill | 24.6% | Prefill is validated as prompt tokens divided by Skippy's `prefill_elapsed_ms`; it is separate from first-token latency and not yet within the steady-decode band. |
+| white.local | CUDA | prefill | 108.1% | CUDA prefill is much faster than the current metadata prediction for several dense models, so this remains future source-work rather than a tuned constant. |
+| Mac Studio M1 Ultra | Metal | first_token | 19.2% | First-token latency includes tokenize, prefill, first decode, and request overhead; larger coder quants are still slower than fit. |
+| white.local | CUDA | first_token | 58.9% | First-token prediction still needs prompt-shape and backend scheduling work. |
+| Mac Studio M1 Ultra | Metal | kv_warm_reuse | 13.7% | KV reuse is close but still over-predicts Qwen2.5-Coder Q4/Q5 and bge reranker. |
+| white.local | CUDA | kv_warm_reuse | 16.4% | CUDA KV reuse is stable but remains slower than fit on several dense and reranker samples. |
 
 These numbers are validation evidence, not calibration inputs. Do not loosen
 thresholds, add model-specific exceptions, or use observed throughput in the

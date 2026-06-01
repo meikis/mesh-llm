@@ -74,7 +74,7 @@ pub fn score_model(
         return score_for_budget(model, config, &budget);
     }
 
-    recommendations.sort_by(compare_recommendations);
+    recommendations.sort_by(compare_execution_budget_recommendations);
     recommendations.remove(0)
 }
 
@@ -1777,6 +1777,58 @@ fn compare_recommendations(left: &ModelRecommendation, right: &ModelRecommendati
                 .cmp(&right.estimated_runtime_memory_bytes)
         })
         .then_with(|| left.source.id.cmp(&right.source.id))
+}
+
+fn compare_execution_budget_recommendations(
+    left: &ModelRecommendation,
+    right: &ModelRecommendation,
+) -> Ordering {
+    // This comparator is deliberately different from cross-model ranking.
+    //
+    // When we are choosing *how this one model should run on this one machine*,
+    // memory headroom should decide only after the execution path is viable and
+    // the estimated throughput is known. Otherwise a CPU budget with lots of
+    // spare RAM can beat a measured GPU budget, causing the model's published
+    // fit estimate to describe the wrong execution path. The Qwen2.5-Coder 7B
+    // validation run caught exactly that shape: the model fit in GPU VRAM, but
+    // the old comparator selected the CPU memory budget because its memory
+    // score was higher, dropping the predicted decode rate by almost an order of
+    // magnitude.
+    //
+    // Also prefer estimates backed by measured hardware facts over estimates
+    // that came from fallback bandwidth constants. A fallback CPU budget should
+    // not outrank a measured Metal/CUDA/ROCm budget just because the fallback
+    // has no measured graph overhead. If a future CPU has measured bandwidth
+    // and genuinely predicts faster decode, it can still win on the same rule.
+    //
+    // This is not a CUDA/Metal/backend preference and it is not model-specific.
+    // It says: for a single model, among budgets with the same fit status and
+    // estimate evidence quality, prefer the budget whose metadata-only estimate
+    // predicts faster decode.
+    status_rank(left.fit_status)
+        .cmp(&status_rank(right.fit_status))
+        .then_with(|| estimate_evidence_rank(left).cmp(&estimate_evidence_rank(right)))
+        .then_with(|| {
+            compare_option_f32_desc(
+                left.estimated_decode_tokens_per_sec,
+                right.estimated_decode_tokens_per_sec,
+            )
+        })
+        .then_with(|| compare_f32_desc(left.total_score, right.total_score))
+        .then_with(|| compare_f32_desc(left.memory_score, right.memory_score))
+        .then_with(|| {
+            left.estimated_runtime_memory_bytes
+                .cmp(&right.estimated_runtime_memory_bytes)
+        })
+        .then_with(|| left.source.id.cmp(&right.source.id))
+}
+
+fn estimate_evidence_rank(recommendation: &ModelRecommendation) -> u8 {
+    match recommendation.estimate_confidence {
+        EstimateConfidence::High => 0,
+        EstimateConfidence::Medium => 1,
+        EstimateConfidence::Low => 2,
+    }
 }
 
 fn status_rank(status: FitStatus) -> u8 {

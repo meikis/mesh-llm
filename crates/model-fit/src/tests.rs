@@ -416,6 +416,55 @@ fn measured_gpu_bandwidth_uses_backend_neutral_efficiency() {
 }
 
 #[test]
+fn budget_selection_prefers_faster_measured_gpu_over_cpu_headroom() {
+    let hardware = HardwareProfile {
+        memory: MemoryProfile {
+            total_system_bytes: Some(32 * GIB),
+            available_system_bytes: Some(30 * GIB),
+            total_unified_bytes: None,
+            available_unified_bytes: None,
+        },
+        accelerators: vec![AcceleratorProfile {
+            name: Some("Measured CUDA GPU".into()),
+            kind: AcceleratorKind::DiscreteGpu,
+            backend: BackendKind::Cuda,
+            total_memory_bytes: Some(16 * GIB),
+            available_memory_bytes: Some(15 * GIB),
+            memory_bandwidth_bytes_per_sec: Some(900_000_000_000),
+            decode_effective_bandwidth_bytes_per_sec: Some(850_000_000_000),
+            decode_fixed_overhead_ms: Some(0.002),
+            bandwidth_source: MeasurementSource::Measured,
+            benchmark_noise_pct: Some(0.5),
+            bandwidth_efficiency_pct: Some(90.0),
+            compute_tflops_fp32: None,
+            compute_tflops_fp16: Some(50.0),
+            unified_memory: false,
+        }],
+        cpu: CpuProfile {
+            physical_cores: Some(8),
+            logical_cores: Some(16),
+            memory_bandwidth_bytes_per_sec: None,
+        },
+    };
+    let mut config = SelectionConfig {
+        workload: WorkloadProfile::chat(),
+        ..SelectionConfig::default()
+    };
+    config.weights = config.workload.default_weights();
+    let model = dense_model("fits-gpu-and-cpu", 7 * GIB, 28, 3584, 32_768);
+
+    let rec = score_model(&hardware, &model, &config);
+
+    assert_eq!(rec.selected_backend, BackendKind::Cuda);
+    assert!(
+        !rec.warnings
+            .iter()
+            .any(|warning| warning.contains("memory bandwidth is missing"))
+    );
+    assert!(rec.estimated_decode_tokens_per_sec.unwrap() > 100.0);
+}
+
+#[test]
 fn q8_decode_uses_ggml_type_kernel_traffic() {
     let hardware = m1_ultra();
     let mut config = SelectionConfig {

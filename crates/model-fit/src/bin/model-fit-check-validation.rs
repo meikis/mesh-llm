@@ -406,6 +406,6 @@ fn next_value(args: &mut impl Iterator<Item = String>, name: &str) -> Result<Str
 
 fn print_usage() {
     eprintln!(
-        "usage: model-fit-check-validation [--scenario steady_decode|first_token|kv_warm_reuse|all] [--max-median-absolute-error 0.10] [--max-individual-error 0.10] [--max-noisy 0] [--max-runtime-errors 0] [--min-models N] [--markdown-out report.md] report.json"
+        "usage: model-fit-check-validation [--scenario steady_decode|prefill|first_token|kv_warm_reuse|all] [--max-median-absolute-error 0.10] [--max-individual-error 0.10] [--max-noisy 0] [--max-runtime-errors 0] [--min-models N] [--markdown-out report.md] report.json"
     );
 }

@@ -170,8 +170,22 @@ struct WorkloadRecommendation {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BenchmarkScenarioKind {
+    // Sustained one-token-at-a-time generation. This is the scenario model-fit
+    // is currently best at predicting because it is closest to llama.cpp's
+    // memory-bandwidth-bound decode loop.
     SteadyDecode,
+    // Prompt ingestion only, measured as prompt tokens divided by Skippy's
+    // `prefill_elapsed_ms`. This is intentionally separate from first-token
+    // latency so a miss can be attributed to prefill matmul throughput rather
+    // than request setup or the first decode step after prefill.
+    Prefill,
+    // End-to-end request latency for a long prompt and one generated token.
+    // Lower is better, so verdict labels are inverted after the generic ratio
+    // check. This scenario is a user-visible latency target, not a pure decode
+    // or pure prefill micro-benchmark.
     FirstToken,
+    // Short repeated generation with session reuse. This gives us a small
+    // signal for agent/tool loops where the same prefix remains resident.
     KvWarmReuse,
 }
 
@@ -213,6 +227,11 @@ struct BenchmarkSummary {
     successful_repeats: usize,
     sample_count: usize,
     raw_sample_count: usize,
+    // Historical field name: for throughput scenarios this is tokens/sec; for
+    // first-token latency it stores milliseconds so the same denoising and
+    // spread machinery can be reused. The scenario wrapper exposes the actual
+    // metric name through `fit_metric`, and Markdown rendering labels the value
+    // generically as predicted/observed.
     median_tokens_per_sec: Option<f64>,
     min_tokens_per_sec: Option<f64>,
     max_tokens_per_sec: Option<f64>,
@@ -947,6 +966,11 @@ fn benchmark_skip_reason(
     {
         return Some("fit algorithm did not produce a decode tokens/sec estimate".into());
     }
+    if scenario == BenchmarkScenarioKind::Prefill
+        && recommendation.estimated_prefill_tokens_per_sec.is_none()
+    {
+        return Some("fit algorithm did not produce a prefill tokens/sec estimate".into());
+    }
     if !args.benchmark_all
         && !matches!(
             recommendation.fit_status,
@@ -997,7 +1021,7 @@ fn finalize_benchmark_summary(
     scenario: &BenchmarkScenarioSpec,
     expected: BenchmarkExpected,
 ) -> BenchmarkSummary {
-    let samples = throughput_samples(&summary, scenario);
+    let samples = scenario_metric_samples(&summary, scenario);
     summary.raw_sample_count = samples.len();
     summary.successful_repeats = summary
         .observations
@@ -1106,7 +1130,7 @@ fn ordered_sample_drop(
     summary: &BenchmarkSummary,
     scenario: &BenchmarkScenarioSpec,
 ) -> Option<f64> {
-    let samples = throughput_samples(summary, scenario);
+    let samples = scenario_metric_samples(summary, scenario);
     let first = samples.first().copied().filter(|sample| *sample > 0.0)?;
     let last = samples.last().copied()?;
     (last < first).then_some((first - last) / first)
@@ -1245,7 +1269,10 @@ fn benchmark_has_runtime_error(summary: &BenchmarkSummary) -> bool {
             .any(|observation| observation.error.is_some())
 }
 
-fn throughput_samples(summary: &BenchmarkSummary, scenario: &BenchmarkScenarioSpec) -> Vec<f64> {
+fn scenario_metric_samples(
+    summary: &BenchmarkSummary,
+    scenario: &BenchmarkScenarioSpec,
+) -> Vec<f64> {
     // Scenario sampling intentionally differs by workload shape.
     //
     // Steady decode should represent sustained token generation, so each repeat
@@ -1255,14 +1282,27 @@ fn throughput_samples(summary: &BenchmarkSummary, scenario: &BenchmarkScenarioSp
     // "cheating" against the fit estimate: the prediction is unchanged and
     // metadata-only; we are only making the observation less noisy.
     //
+    // Prefill is a separate metric from first-token latency. It uses Skippy's
+    // request timing fields to compare prompt tokens / prefill elapsed time
+    // against `estimated_prefill_tokens_per_sec`. That keeps the validation
+    // falsifiable without using observed prefill speed as a scoring input.
+    //
     // KV warm reuse cares about the reused final request, so it samples the last
-    // request. First-token falls back to the aggregate run metric because the
-    // scenario is explicitly about the whole tokenize/prefill/first-decode path.
+    // request. First-token samples end-to-end request latency in milliseconds:
+    // tokenize + prefill + the first decode step. That latency is deliberately
+    // kept separate from prefill throughput because single-token decode after a
+    // prompt can include graph/session/synchronization costs that sustained
+    // steady decode does not see.
     let request_samples = match scenario.kind {
         BenchmarkScenarioKind::SteadyDecode => summary
             .observations
             .iter()
             .filter_map(steady_decode_observation_tokens_per_sec)
+            .collect::<Vec<_>>(),
+        BenchmarkScenarioKind::Prefill => summary
+            .observations
+            .iter()
+            .filter_map(prefill_observation_tokens_per_sec)
             .collect::<Vec<_>>(),
         BenchmarkScenarioKind::KvWarmReuse => summary
             .observations
@@ -1270,7 +1310,11 @@ fn throughput_samples(summary: &BenchmarkSummary, scenario: &BenchmarkScenarioSp
             .filter_map(|observation| observation.request_results.last())
             .filter_map(|request| request.generated_tokens_per_sec)
             .collect::<Vec<_>>(),
-        BenchmarkScenarioKind::FirstToken => Vec::new(),
+        BenchmarkScenarioKind::FirstToken => summary
+            .observations
+            .iter()
+            .filter_map(|observation| observation.text_request_elapsed_ms)
+            .collect::<Vec<_>>(),
     };
     if !request_samples.is_empty() {
         return request_samples;
@@ -1307,6 +1351,23 @@ fn steady_decode_observation_tokens_per_sec(observation: &BenchmarkObservation) 
     })
 }
 
+fn prefill_observation_tokens_per_sec(observation: &BenchmarkObservation) -> Option<f64> {
+    let prompt_tokens = observation
+        .request_results
+        .iter()
+        .map(|request| request.prompt_token_count.unwrap_or_default())
+        .sum::<u64>();
+    let prefill_elapsed_ms = observation
+        .request_results
+        .iter()
+        .filter_map(|request| request.prefill_elapsed_ms)
+        .sum::<f64>();
+    if prompt_tokens > 0 && prefill_elapsed_ms > 0.0 {
+        return Some(prompt_tokens as f64 / (prefill_elapsed_ms / 1000.0));
+    }
+    None
+}
+
 fn benchmark_scenario_recommendation(
     hardware: &HardwareProfile,
     profile: &ModelProfile,
@@ -1314,7 +1375,10 @@ fn benchmark_scenario_recommendation(
     scenario: &BenchmarkScenarioSpec,
     benchmark: &BenchmarkSummary,
 ) -> ModelRecommendation {
-    if scenario.kind != BenchmarkScenarioKind::FirstToken {
+    if !matches!(
+        scenario.kind,
+        BenchmarkScenarioKind::FirstToken | BenchmarkScenarioKind::Prefill
+    ) {
         return fallback.clone();
     }
     let Some(prompt_tokens) = median_prompt_token_count(benchmark) else {
@@ -1408,6 +1472,7 @@ fn scenario_observed(
 ) -> Option<f64> {
     match scenario.kind {
         BenchmarkScenarioKind::SteadyDecode => benchmark.median_tokens_per_sec,
+        BenchmarkScenarioKind::Prefill => benchmark.median_tokens_per_sec,
         BenchmarkScenarioKind::FirstToken => {
             median_observation_value(benchmark, |observation| observation.text_request_elapsed_ms)
         }
@@ -1444,6 +1509,9 @@ fn scenario_prediction(
         BenchmarkScenarioKind::SteadyDecode | BenchmarkScenarioKind::KvWarmReuse => recommendation
             .estimated_decode_tokens_per_sec
             .map(f64::from),
+        BenchmarkScenarioKind::Prefill => recommendation
+            .estimated_prefill_tokens_per_sec
+            .map(f64::from),
         BenchmarkScenarioKind::FirstToken => recommendation.estimated_first_token_ms.map(f64::from),
     }
 }
@@ -1456,6 +1524,7 @@ fn scenario_prediction_range(
         BenchmarkScenarioKind::SteadyDecode | BenchmarkScenarioKind::KvWarmReuse => recommendation
             .estimated_decode_tokens_per_sec_range
             .map(|range| (f64::from(range.lower), f64::from(range.upper))),
+        BenchmarkScenarioKind::Prefill => None,
         BenchmarkScenarioKind::FirstToken => recommendation
             .estimated_first_token_ms_range
             .map(|range| (f64::from(range.lower_ms), f64::from(range.upper_ms))),
@@ -2101,6 +2170,17 @@ fn benchmark_scenarios() -> Vec<BenchmarkScenarioSpec> {
             max_new_tokens: DEFAULT_MAX_NEW_TOKENS,
             warmup_tokens: DEFAULT_WARMUP_TOKENS,
             request_count: 3,
+            reuse_session: false,
+        },
+        BenchmarkScenarioSpec {
+            kind: BenchmarkScenarioKind::Prefill,
+            name: "prefill",
+            fit_metric: "estimated_prefill_tokens_per_sec",
+            prompt: first_token_prompt(),
+            ctx_size: DEFAULT_CTX_SIZE,
+            max_new_tokens: FIRST_TOKEN_MAX_NEW_TOKENS,
+            warmup_tokens: 0,
+            request_count: 1,
             reuse_session: false,
         },
         BenchmarkScenarioSpec {

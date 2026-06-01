@@ -222,12 +222,18 @@ struct BenchmarkScenarioSummary {
 
 #[derive(Clone, Debug, Serialize)]
 struct FirstTokenBreakdown {
+    prompt_token_count: Option<u64>,
+    tokenizer_vocab_size: Option<u32>,
+    chat_template_available: bool,
     predicted_prefill_ms: Option<f64>,
     predicted_decode_ms: Option<f64>,
     predicted_overhead_ms: Option<f64>,
+    predicted_sampled_decode_ms: Option<f64>,
     observed_tokenize_ms: Option<f64>,
     observed_prefill_ms: Option<f64>,
     observed_decode_ms: Option<f64>,
+    observed_sampled_decode_residual_ms: Option<f64>,
+    observed_sampled_decode_residual_us_per_prompt_token: Option<f64>,
     observed_unattributed_ms: Option<f64>,
 }
 
@@ -881,7 +887,7 @@ fn benchmark_scenario(
     };
     if let Some(reason) = benchmark_skip_reason(args, model, recommendation, scenario.kind) {
         summary.skip_reason = Some(reason);
-        return scenario_summary(scenario, recommendation, summary);
+        return scenario_summary(scenario, &model.profile, recommendation, summary);
     }
 
     let prediction = scenario_prediction(&scenario, recommendation);
@@ -925,7 +931,7 @@ fn benchmark_scenario(
         &scenario,
         &summary,
     );
-    scenario_summary(scenario, &scenario_recommendation, summary)
+    scenario_summary(scenario, &model.profile, &scenario_recommendation, summary)
 }
 
 fn run_benchmark_repeats(
@@ -1417,6 +1423,7 @@ fn median_prompt_token_count(benchmark: &BenchmarkSummary) -> Option<u32> {
 
 fn scenario_summary(
     scenario: BenchmarkScenarioSpec,
+    model: &ModelProfile,
     recommendation: &ModelRecommendation,
     mut benchmark: BenchmarkSummary,
 ) -> BenchmarkScenarioSummary {
@@ -1441,7 +1448,7 @@ fn scenario_summary(
         predicted,
         observed,
         observed_over_fit,
-        first_token_breakdown: first_token_breakdown(&scenario, recommendation, &benchmark),
+        first_token_breakdown: first_token_breakdown(&scenario, model, recommendation, &benchmark),
         verdict,
         benchmark,
     }
@@ -1449,35 +1456,65 @@ fn scenario_summary(
 
 fn first_token_breakdown(
     scenario: &BenchmarkScenarioSpec,
+    model: &ModelProfile,
     recommendation: &ModelRecommendation,
     benchmark: &BenchmarkSummary,
 ) -> Option<FirstTokenBreakdown> {
     if scenario.kind != BenchmarkScenarioKind::FirstToken {
         return None;
     }
+    let prompt_token_count = median_prompt_token_count(benchmark).map(u64::from);
     let observed_tokenize_ms =
         median_request_value(benchmark, |request| request.tokenize_elapsed_ms);
     let observed_prefill_ms = median_request_value(benchmark, |request| request.prefill_elapsed_ms);
     let observed_decode_ms = median_request_value(benchmark, |request| request.decode_elapsed_ms);
     let observed_total_ms =
         median_observation_value(benchmark, |observation| observation.text_request_elapsed_ms);
+    let predicted_decode_ms = recommendation
+        .estimated_first_token_decode_ms
+        .map(f64::from);
+    let predicted_overhead_ms = recommendation
+        .estimated_first_token_overhead_ms
+        .map(f64::from);
+    let predicted_sampled_decode_ms =
+        predicted_decode_ms.map(|decode| decode + predicted_overhead_ms.unwrap_or_default());
+    // `/v1/text` measures the first decode call with sampling included. In
+    // Skippy that call eventually reaches `skippy_decode_step_sampled()`,
+    // which runs `skippy_sync_chat_sampling_history()` before applying the
+    // sampler chain. The sync loop accepts each prompt token into the sampler
+    // history on the first sampled decode after prefill; subsequent decode
+    // steps only accept the newly generated token. We report the residual here
+    // instead of hiding it in a tuned estimator constant so validation can show
+    // whether first-token misses scale with prompt length and vocabulary size.
+    let observed_sampled_decode_residual_ms =
+        match (observed_decode_ms, predicted_sampled_decode_ms) {
+            (Some(observed), Some(predicted)) => Some((observed - predicted).max(0.0)),
+            _ => None,
+        };
+    let observed_sampled_decode_residual_us_per_prompt_token = observed_sampled_decode_residual_ms
+        .zip(prompt_token_count)
+        .and_then(|(residual_ms, tokens)| {
+            (tokens > 0).then_some(residual_ms * 1000.0 / tokens as f64)
+        });
     let observed_sum = observed_tokenize_ms.unwrap_or_default()
         + observed_prefill_ms.unwrap_or_default()
         + observed_decode_ms.unwrap_or_default();
     let observed_unattributed_ms = observed_total_ms.map(|total| (total - observed_sum).max(0.0));
     Some(FirstTokenBreakdown {
+        prompt_token_count,
+        tokenizer_vocab_size: model.tokenizer.vocab_size,
+        chat_template_available: model.tokenizer.chat_template_available,
         predicted_prefill_ms: recommendation
             .estimated_first_token_prefill_ms
             .map(f64::from),
-        predicted_decode_ms: recommendation
-            .estimated_first_token_decode_ms
-            .map(f64::from),
-        predicted_overhead_ms: recommendation
-            .estimated_first_token_overhead_ms
-            .map(f64::from),
+        predicted_decode_ms,
+        predicted_overhead_ms,
+        predicted_sampled_decode_ms,
         observed_tokenize_ms,
         observed_prefill_ms,
         observed_decode_ms,
+        observed_sampled_decode_residual_ms,
+        observed_sampled_decode_residual_us_per_prompt_token,
         observed_unattributed_ms,
     })
 }
@@ -1871,14 +1908,18 @@ fn parse_gpu_benchmark_json(
     raw_json: &Value,
     survey: &HardwareSurvey,
 ) -> Result<(Vec<GpuBenchmarkOutput>, Vec<GpuBenchmarkAcceleratorFacts>)> {
-    if let Ok(outputs) = serde_json::from_value::<Vec<GpuBenchmarkOutput>>(raw_json.clone())
-        && !outputs.is_empty()
-    {
-        return Ok((outputs.clone(), default_facts(survey, outputs.len())));
+    match serde_json::from_value::<Vec<GpuBenchmarkOutput>>(raw_json.clone()) {
+        Ok(outputs) if !outputs.is_empty() => {
+            return Ok((outputs.clone(), default_facts(survey, outputs.len())));
+        }
+        _ => {}
     }
-    if let Some(raw_outputs) = raw_json.get("outputs")
-        && let Ok(outputs) = serde_json::from_value::<Vec<GpuBenchmarkOutput>>(raw_outputs.clone())
-        && !outputs.is_empty()
+    if let Some(outputs) = raw_json
+        .get("outputs")
+        .and_then(|raw_outputs| {
+            serde_json::from_value::<Vec<GpuBenchmarkOutput>>(raw_outputs.clone()).ok()
+        })
+        .filter(|outputs| !outputs.is_empty())
     {
         return Ok((outputs.clone(), default_facts(survey, outputs.len())));
     }
@@ -2778,10 +2819,9 @@ impl Drop for TerminalDownloadProgress {
         if Arc::strong_count(&self.state) != 1 {
             return;
         }
-        if let Ok(state) = self.state.lock()
-            && state.active_line
-        {
-            eprintln!();
+        match self.state.lock() {
+            Ok(state) if state.active_line => eprintln!(),
+            _ => {}
         }
     }
 }

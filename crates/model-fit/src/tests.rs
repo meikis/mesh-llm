@@ -109,6 +109,7 @@ fn dense_model(id: &str, bytes: u64, layers: u32, hidden: u32, context: u32) -> 
         rope: RopeProfile::default(),
         tokenizer: TokenizerProfile {
             model: Some("gpt2".into()),
+            vocab_size: Some(32_000),
             chat_template_available: true,
         },
         capability_evidence: vec![

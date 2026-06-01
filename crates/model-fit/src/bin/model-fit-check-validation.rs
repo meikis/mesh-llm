@@ -46,8 +46,20 @@ struct ScenarioReport {
     predicted: Option<f64>,
     observed: Option<f64>,
     observed_over_fit: Option<f64>,
+    first_token_breakdown: Option<FirstTokenBreakdown>,
     verdict: String,
     benchmark: BenchmarkSummary,
+}
+
+#[derive(Debug, Deserialize)]
+struct FirstTokenBreakdown {
+    prompt_token_count: Option<u64>,
+    tokenizer_vocab_size: Option<u32>,
+    predicted_prefill_ms: Option<f64>,
+    observed_prefill_ms: Option<f64>,
+    observed_decode_ms: Option<f64>,
+    observed_sampled_decode_residual_ms: Option<f64>,
+    observed_sampled_decode_residual_us_per_prompt_token: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -201,28 +213,68 @@ fn render_scenario_markdown(
         "| median absolute error | {} |\n\n",
         percent_option(median_error)
     ));
+    if scenario == "first_token" {
+        render_first_token_rows(rows, &mut markdown);
+    } else {
+        render_standard_rows(rows, &mut markdown);
+    }
+    markdown
+}
+
+fn render_standard_rows(rows: &[ScenarioRow<'_>], markdown: &mut String) {
     markdown.push_str("| model | predicted | observed | observed/fit | spread | raw spread | samples | outliers | verdict |\n");
     markdown.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---|\n");
     for row in rows {
+        markdown.push_str(&standard_row_markdown(row));
+    }
+}
+
+fn standard_row_markdown(row: &ScenarioRow<'_>) -> String {
+    format!(
+        "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+        row.model.input_ref,
+        number_option(row.scenario.predicted),
+        number_option(row.scenario.observed),
+        ratio_option(row.scenario.observed_over_fit),
+        percent_option(row.scenario.benchmark.spread_pct.map(|value| value / 100.0)),
+        percent_option(
+            row.scenario
+                .benchmark
+                .raw_spread_pct
+                .map(|value| value / 100.0)
+        ),
+        sample_count_label(&row.scenario.benchmark),
+        row.scenario.benchmark.denoised_outlier_count,
+        row.scenario.verdict
+    )
+}
+
+fn render_first_token_rows(rows: &[ScenarioRow<'_>], markdown: &mut String) {
+    markdown.push_str("| model | predicted ms | observed ms | observed/fit | prompt toks | vocab | pred prefill | obs prefill | obs decode | sampled residual | residual us/tok | spread | samples | verdict |\n");
+    markdown.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n");
+    for row in rows {
+        let breakdown = row.scenario.first_token_breakdown.as_ref();
         markdown.push_str(&format!(
-            "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             row.model.input_ref,
             number_option(row.scenario.predicted),
             number_option(row.scenario.observed),
             ratio_option(row.scenario.observed_over_fit),
-            percent_option(row.scenario.benchmark.spread_pct.map(|value| value / 100.0)),
-            percent_option(
-                row.scenario
-                    .benchmark
-                    .raw_spread_pct
-                    .map(|value| value / 100.0)
+            integer_option(breakdown.and_then(|value| value.prompt_token_count)),
+            integer_option(breakdown.and_then(|value| value.tokenizer_vocab_size.map(u64::from))),
+            number_option(breakdown.and_then(|value| value.predicted_prefill_ms)),
+            number_option(breakdown.and_then(|value| value.observed_prefill_ms)),
+            number_option(breakdown.and_then(|value| value.observed_decode_ms)),
+            number_option(breakdown.and_then(|value| value.observed_sampled_decode_residual_ms)),
+            number_option(
+                breakdown
+                    .and_then(|value| value.observed_sampled_decode_residual_us_per_prompt_token)
             ),
+            percent_option(row.scenario.benchmark.spread_pct.map(|value| value / 100.0)),
             sample_count_label(&row.scenario.benchmark),
-            row.scenario.benchmark.denoised_outlier_count,
             row.scenario.verdict
         ));
     }
-    markdown
 }
 
 fn enforce_thresholds(args: &Args, report: &ValidationReport) -> Result<()> {
@@ -377,6 +429,10 @@ fn sample_count_label(summary: &BenchmarkSummary) -> String {
 
 fn number_option(value: Option<f64>) -> String {
     value.map_or_else(|| "-".into(), |value| format!("{value:.1}"))
+}
+
+fn integer_option(value: Option<u64>) -> String {
+    value.map_or_else(|| "-".into(), |value| value.to_string())
 }
 
 fn ratio_option(value: Option<f64>) -> String {

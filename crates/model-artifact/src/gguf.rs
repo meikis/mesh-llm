@@ -271,6 +271,30 @@ fn read_gguf_value_as_string_array(
     }
 }
 
+fn read_gguf_value_as_array_len(
+    f: &mut std::fs::File,
+    typ: GgufType,
+) -> std::io::Result<Option<u32>> {
+    match typ {
+        GgufType::Array => {
+            let elem_type = GgufType::from_u32(read_u32(f)?).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "bad array type")
+            })?;
+            let count = read_bounded_len(f, MAX_GGUF_ARRAY_ELEMENTS, "array")?;
+            for _ in 0..count {
+                skip_gguf_value_with_depth(f, elem_type, 1)?;
+            }
+            u32::try_from(count).map(Some).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "array too large")
+            })
+        }
+        _ => {
+            skip_gguf_value(f, typ)?;
+            Ok(None)
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct GgufCompactMeta {
     pub architecture: String,
@@ -654,6 +678,11 @@ pub fn scan_gguf_compact_meta(path: &Path) -> Option<GgufCompactMeta> {
         } else if key.ends_with(".vocab_size") {
             if let Ok(Some(v)) = read_gguf_value_as_u32(&mut f, vtype) {
                 meta.vocab_size = v;
+            }
+        } else if key == "tokenizer.ggml.tokens" {
+            match read_gguf_value_as_array_len(&mut f, vtype) {
+                Ok(Some(v)) if meta.vocab_size == 0 => meta.vocab_size = v,
+                _ => {}
             }
         } else if key.ends_with(".expert_count") {
             if let Ok(Some(v)) = read_gguf_value_as_u32(&mut f, vtype) {
@@ -1310,6 +1339,15 @@ mod tests {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
 
+    fn push_string_array_kv(bytes: &mut Vec<u8>, key: &str, values: &[&str]) {
+        push_gguf_string(bytes, key);
+        bytes.extend_from_slice(&(GgufType::Array as u32).to_le_bytes());
+        push_array_header(bytes, GgufType::String, values.len() as u64);
+        for value in values {
+            push_gguf_string(bytes, value);
+        }
+    }
+
     fn push_tensor_info(bytes: &mut Vec<u8>, name: &str, offset: u64) {
         push_gguf_string(bytes, name);
         bytes.extend_from_slice(&1u32.to_le_bytes());
@@ -1417,6 +1455,25 @@ mod tests {
         assert_eq!(meta.effective_kv_head_count(), Some(8));
         assert_eq!(meta.k_cache_bytes_per_token_f16(), Some(49_152));
         assert_eq!(meta.v_cache_bytes_per_token_f16(), Some(49_152));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scan_gguf_compact_meta_derives_vocab_size_from_token_array() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"GGUF");
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&0i64.to_le_bytes());
+        bytes.extend_from_slice(&1i64.to_le_bytes());
+        push_string_array_kv(
+            &mut bytes,
+            "tokenizer.ggml.tokens",
+            &["<unk>", "hello", "world"],
+        );
+
+        let path = write_bytes("model-artifact-gguf-token-array-vocab", &bytes);
+        let meta = scan_gguf_compact_meta(&path).expect("should parse GGUF");
+        assert_eq!(meta.vocab_size, 3);
         let _ = std::fs::remove_file(path);
     }
 

@@ -85,6 +85,7 @@ pub fn profile_gguf_path(path: impl AsRef<Path>) -> Result<ModelProfile> {
         },
         tokenizer: TokenizerProfile {
             model: non_empty(compact.tokenizer_model_name.clone()),
+            vocab_size: non_zero(compact.vocab_size),
             chat_template_available: fit.has_chat_template(),
         },
         capability_evidence,

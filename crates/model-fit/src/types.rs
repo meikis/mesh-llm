@@ -286,6 +286,17 @@ pub struct RopeProfile {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TokenizerProfile {
     pub model: Option<String>,
+    /// Tokenizer vocabulary size from GGUF metadata.
+    ///
+    /// This is not used as a model-name or reputation shortcut. It is a
+    /// source-shaped cost input for sampled decode diagnostics: llama.cpp
+    /// sampling constructs a candidate array over the vocabulary, and Skippy's
+    /// chat sampling path also syncs sampler history across prompt tokens on
+    /// the first sampled decode after prefill. Keeping vocab size in the model
+    /// profile lets validation expose that work without benchmarking the model
+    /// as an input to fit.
+    #[serde(default)]
+    pub vocab_size: Option<u32>,
     pub chat_template_available: bool,
 }
 

@@ -69,6 +69,16 @@ The steady-decode estimator is source-grounded rather than model-name grounded:
 - `mesh-llm gpus benchmark` supplies measured decode-shaped bandwidth and fixed
   backend submission overhead; model-fit consumes those hardware facts instead
   of assuming Metal, CUDA, or ROCm behavior.
+- Dense prefill uses a separate roofline over GGUF matmul FLOPs, llama.cpp
+  ubatch count, measured memory bandwidth, measured graph overhead, and the
+  optional `prefill_matmul_tflops_fp16` hardware probe. Sparse MoE records a
+  separate `prefill_moe_matmul_tflops_fp16` probe, but the scorer treats that as
+  an upper bound because raw expert GEMM does not include router/id-map,
+  weighting, and aggregation work around `GGML_OP_MUL_MAT_ID`.
+- First-token validation serializes predicted prefill, decode, and overhead
+  components plus observed tokenize, prefill, decode, and unattributed request
+  time. That keeps request/setup residuals visible instead of blaming them on
+  decode or prefill.
 
 Representative two-machine broader validation after the ABI decode probe,
 source-grounded graph-overhead estimator, prefill scenario split, and
@@ -100,6 +110,14 @@ contains `prefill_matmul_tflops_fp16`:
 | Mac Studio M1 Ultra | Metal | steady_decode | 6 | 8.8% | Qwen2.5-Coder Q8 moved from slower-than-fit to a 1.06 observed/fit match; OLMoE remained close but noisy; bge reranker stayed slower-than-fit. |
 | white.local | CUDA | steady_decode | 6 | 8.3% | Qwen2.5-Coder Q8 improved from 0.60 to 0.86 observed/fit, and OLMoE improved from 1.97 faster-than-fit to 0.90 match. |
 | Mac Studio M1 Ultra | Metal | prefill | 5 | 3.7% | Dense roofline split matches Qwen2.5-Coder Q5/Q8 and OLMoE; Q4 is 15% faster-than-fit and Q6/Q8 had noisy samples in this run. |
-| white.local | CUDA | prefill | 5 | 5.7% | Measured dense FP16 prefill-matmul probe brings Qwen2.5-Coder Q4/Q5/Q8 into band; Q6 is 14% slower-than-fit, and OLMoE stays on the MoE fallback as noisy/slower-than-fit. |
+| white.local | CUDA | prefill | 5 | 5.4% | Measured dense and MoE-shaped FP16 prefill probes keep Qwen2.5-Coder Q4/Q5/Q8 in band; Q6 is 14% slower-than-fit, and OLMoE remains noisy because the MoE probe is an upper bound, not a complete router/aggregation model. |
 | Mac Studio M1 Ultra | Metal | kv_warm_reuse | 6 | 14.3% | Qwen2.5-Coder Q8 now matches KV reuse; Q4/Q5 and bge reranker remain slower-than-fit/noisy. |
 | white.local | CUDA | kv_warm_reuse | 6 | 17.5% | Qwen2.5-Coder and bge reranker KV reuse remain slower than steady-decode fit. |
+
+Focused CUDA first-token validation now reports component timing as well as the
+aggregate miss. In the latest white.local Q8/MoE run, observed tokenize time was
+about 7 ms and observed unattributed request time was near zero; the residual is
+mostly the first decode after prefill, where the benchmark observed roughly
+54-83 ms while the metadata-only steady-decode component predicted roughly
+1-8 ms. Keep that as a visible residual until model-fit has a source-grounded
+first-decode-after-prefill hardware fact.

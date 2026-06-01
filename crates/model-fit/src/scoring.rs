@@ -24,6 +24,7 @@ struct ExecutionBudget {
     benchmark_noise_pct: Option<f32>,
     compute_tflops_fp16: Option<f32>,
     prefill_matmul_tflops_fp16: Option<f32>,
+    prefill_moe_matmul_tflops_fp16: Option<f32>,
     unified_memory: bool,
 }
 
@@ -72,6 +73,7 @@ pub fn score_model(
             benchmark_noise_pct: None,
             compute_tflops_fp16: None,
             prefill_matmul_tflops_fp16: None,
+            prefill_moe_matmul_tflops_fp16: None,
             unified_memory: false,
         };
         return score_for_budget(model, config, &budget);
@@ -112,9 +114,8 @@ fn score_for_budget(
     let estimated_decode_range =
         decode_tokens_per_sec_range(estimated_decode_tps, active_decode_bytes, model, budget);
     let estimated_prefill_tps = prefill_tokens_per_sec(model, config, budget, estimated_decode_tps);
-    let estimated_first_token_ms =
-        first_token_ms(estimated_prefill_tps, estimated_decode_tps, config);
-    let estimated_first_token_range = first_token_ms_range(estimated_first_token_ms, model, budget);
+    let first_token = first_token_estimate(estimated_prefill_tps, estimated_decode_tps, config);
+    let estimated_first_token_range = first_token_ms_range(first_token.total_ms, model, budget);
     let memory_limit = memory_limit_with_margin(budget.usable_memory_bytes, config.safety_margin);
     let mut warnings = Vec::new();
     let mut reasons = Vec::new();
@@ -169,7 +170,7 @@ fn score_for_budget(
         gib(memory.backend_overhead_bytes)
     ));
     add_decode_estimate_reason(model, budget, config, &mut reasons);
-    add_prefill_estimate_reason(estimated_first_token_ms, config, &mut reasons);
+    add_prefill_estimate_reason(first_token.total_ms, config, &mut reasons);
     add_architecture_warnings(model, &mut warnings);
 
     ModelRecommendation {
@@ -191,7 +192,10 @@ fn score_for_budget(
         estimated_decode_tokens_per_sec: estimated_decode_tps,
         estimated_decode_tokens_per_sec_range: estimated_decode_range,
         estimated_prefill_tokens_per_sec: estimated_prefill_tps,
-        estimated_first_token_ms,
+        estimated_first_token_prefill_ms: first_token.prefill_ms,
+        estimated_first_token_decode_ms: first_token.decode_ms,
+        estimated_first_token_overhead_ms: first_token.overhead_ms,
+        estimated_first_token_ms: first_token.total_ms,
         estimated_first_token_ms_range: estimated_first_token_range,
         split_candidate: split_candidate(model, &memory, budget, memory_limit, fit_status),
         capability_evidence: model.capability_evidence.clone(),
@@ -223,6 +227,7 @@ fn execution_budgets(hardware: &HardwareProfile) -> Vec<ExecutionBudget> {
             benchmark_noise_pct: None,
             compute_tflops_fp16: None,
             prefill_matmul_tflops_fp16: None,
+            prefill_moe_matmul_tflops_fp16: None,
             unified_memory: false,
         });
     }
@@ -264,6 +269,7 @@ fn accelerator_budget(
         benchmark_noise_pct: accelerator.benchmark_noise_pct,
         compute_tflops_fp16: accelerator.compute_tflops_fp16,
         prefill_matmul_tflops_fp16: accelerator.prefill_matmul_tflops_fp16,
+        prefill_moe_matmul_tflops_fp16: accelerator.prefill_moe_matmul_tflops_fp16,
         unified_memory: accelerator.unified_memory,
     }
 }
@@ -966,12 +972,16 @@ fn prefill_tokens_per_sec(
     if prompt_tokens == 0 {
         return None;
     }
-    if let Some(tokens_per_sec) =
-        prefill_roofline_tokens_per_sec(model, config, budget, prompt_tokens)
-    {
-        return Some(tokens_per_sec);
+    let roofline = prefill_roofline_tokens_per_sec(model, config, budget, prompt_tokens);
+    let fallback = legacy_prefill_tokens_per_sec(model, decode_tokens_per_sec);
+    if model.architecture_class == ModelArchitectureClass::SparseMoeTransformer {
+        return match (roofline, fallback) {
+            (Some(roofline), Some(fallback)) => Some(roofline.min(fallback)),
+            (Some(roofline), None) => Some(roofline),
+            (None, fallback) => fallback,
+        };
     }
-    legacy_prefill_tokens_per_sec(model, decode_tokens_per_sec)
+    roofline.or(fallback)
 }
 
 fn prefill_roofline_tokens_per_sec(
@@ -1006,7 +1016,7 @@ fn prefill_roofline_tokens_per_sec(
     let flops_per_token = active_decode_flops_per_token(model)? as f32;
     let active_weight_bytes = active_prefill_pressure_bytes(model)? as f32;
     let ubatches = prefill_ubatch_count(prompt_tokens) as f32;
-    let compute_ms = prefill_compute_ms(flops_per_token, prompt_tokens, budget)?;
+    let compute_ms = prefill_compute_ms(flops_per_token, prompt_tokens, model, budget)?;
     let bandwidth_ms = prefill_weight_stream_ms(active_weight_bytes, ubatches, budget)?;
     let overhead_ms = prefill_graph_overhead_ms(model, budget, config, ubatches);
     let total_ms = compute_ms.max(bandwidth_ms) + overhead_ms;
@@ -1014,15 +1024,8 @@ fn prefill_roofline_tokens_per_sec(
 }
 
 fn prefill_roofline_has_enough_matmul_shape(model: &ModelProfile) -> bool {
-    // The generic FP16 matmul hardware probe measures dense batched GEMM. Sparse
-    // MoE prefill in llama.cpp routes through expert selection and
-    // `GGML_OP_MUL_MAT_ID`; its bottleneck includes dispatch, id mapping, expert
-    // grouping, weighting, and aggregation. Treating that as a dense GEMM
-    // roofline overpredicts active-expert MoE prefill, so keep MoE on the
-    // existing MoE-aware fallback until the benchmark has a measured
-    // prefill-shaped MUL_MAT_ID probe.
     if model.architecture_class == ModelArchitectureClass::SparseMoeTransformer {
-        return false;
+        return true;
     }
     let Some(hidden) = model.hidden_size else {
         return false;
@@ -1037,14 +1040,28 @@ fn prefill_ubatch_count(prompt_tokens: u32) -> u32 {
 fn prefill_compute_ms(
     flops_per_token: f32,
     prompt_tokens: u32,
+    model: &ModelProfile,
     budget: &ExecutionBudget,
 ) -> Option<f32> {
-    let tflops = budget
-        .prefill_matmul_tflops_fp16
-        .or(budget.compute_tflops_fp16)
-        .filter(|value| *value > 0.0)?;
+    let tflops = prefill_compute_tflops(model, budget)?;
     let total_flops = flops_per_token * prompt_tokens as f32;
     Some(total_flops / (tflops * 1_000_000_000_000.0) * 1000.0)
+}
+
+fn prefill_compute_tflops(model: &ModelProfile, budget: &ExecutionBudget) -> Option<f32> {
+    // Dense and sparse-MoE prefill are intentionally separate measured hardware
+    // facts. Dense prompt processing maps to batched GEMM. Sparse MoE routes
+    // through expert selection and `GGML_OP_MUL_MAT_ID`, so it only uses the
+    // MoE-shaped probe when that probe is present. If the MoE probe is absent,
+    // return `None` so the caller falls back to the older MoE-aware estimate
+    // instead of overpredicting MoE with the dense matmul probe.
+    let measured = match model.architecture_class {
+        ModelArchitectureClass::SparseMoeTransformer => budget.prefill_moe_matmul_tflops_fp16,
+        _ => budget
+            .prefill_matmul_tflops_fp16
+            .or(budget.compute_tflops_fp16),
+    };
+    measured.filter(|value| *value > 0.0)
 }
 
 fn prefill_weight_stream_ms(
@@ -1149,16 +1166,41 @@ fn quantization_is_q8(quantization: Option<&str>) -> bool {
     lower.contains("q8_0") || gguf_file_type_is(&lower, 7)
 }
 
-fn first_token_ms(
+#[derive(Clone, Copy, Debug, Default)]
+struct FirstTokenEstimate {
+    prefill_ms: Option<f32>,
+    decode_ms: Option<f32>,
+    overhead_ms: Option<f32>,
+    total_ms: Option<f32>,
+}
+
+fn first_token_estimate(
     prefill_tps: Option<f32>,
     decode_tps: Option<f32>,
     config: &SelectionConfig,
-) -> Option<f32> {
-    let prompt_tokens = config.workload.interaction.expected_prompt_tokens?;
-    let prefill_tps = prefill_tps?;
-    let prefill_ms = prompt_tokens as f32 / prefill_tps.max(0.001) * 1000.0;
-    let decode_ms = decode_tps.map(|tps| 1000.0 / tps.max(0.001)).unwrap_or(0.0);
-    Some(prefill_ms + decode_ms)
+) -> FirstTokenEstimate {
+    let prefill_ms = config
+        .workload
+        .interaction
+        .expected_prompt_tokens
+        .zip(prefill_tps)
+        .map(|(prompt_tokens, tps)| prompt_tokens as f32 / tps.max(0.001) * 1000.0);
+    let decode_ms = decode_tps.map(|tps| 1000.0 / tps.max(0.001));
+    // We deliberately leave request/setup/tokenize overhead as a separate zero
+    // term. Skippy validation observes it through end-to-end request timing,
+    // but model-fit does not yet have a model-independent hardware benchmark
+    // for HTTP/runtime setup or tokenizer throughput. Keeping the field visible
+    // prevents first-token misses from being misattributed to prefill/decode.
+    let overhead_value_ms = 0.0;
+    let overhead_ms = Some(overhead_value_ms);
+    let total_ms =
+        prefill_ms.map(|prefill| prefill + decode_ms.unwrap_or_default() + overhead_value_ms);
+    FirstTokenEstimate {
+        prefill_ms,
+        decode_ms,
+        overhead_ms,
+        total_ms,
+    }
 }
 
 fn first_token_ms_range(

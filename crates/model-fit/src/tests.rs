@@ -25,6 +25,7 @@ fn m1_ultra() -> HardwareProfile {
             compute_tflops_fp32: None,
             compute_tflops_fp16: None,
             prefill_matmul_tflops_fp16: None,
+            prefill_moe_matmul_tflops_fp16: None,
             unified_memory: true,
         }],
         cpu: CpuProfile {
@@ -302,6 +303,37 @@ fn measured_moe_dispatch_overhead_uses_submission_cost() {
 }
 
 #[test]
+fn moe_prefill_probe_is_upper_bound_not_free_speedup() {
+    let mut without_probe = m1_ultra();
+    without_probe.memory.available_system_bytes = None;
+    without_probe.accelerators[0].compute_tflops_fp16 = Some(50.0);
+    let mut with_probe = without_probe.clone();
+    with_probe.accelerators[0].prefill_moe_matmul_tflops_fp16 = Some(1_000.0);
+    let mut config = SelectionConfig {
+        workload: WorkloadProfile::chat(),
+        ..SelectionConfig::default()
+    };
+    config.workload.interaction.expected_prompt_tokens = Some(2048);
+    config.weights = config.workload.default_weights();
+    let mut moe = dense_model("measured-moe-prefill", 4 * GIB, 16, 2048, 4096);
+    moe.architecture_class = ModelArchitectureClass::SparseMoeTransformer;
+    moe.expert_count = Some(64);
+    moe.expert_used_count = Some(8);
+    moe.tensor_group_bytes.expert_feed_forward_bytes = 3 * GIB;
+    moe.tensor_matmul.expert_bytes = 3 * GIB;
+    moe.tensor_matmul.expert_flops_per_token = 12_000_000_000;
+
+    let fallback = score_model(&without_probe, &moe, &config)
+        .estimated_prefill_tokens_per_sec
+        .expect("fallback prefill estimate should exist");
+    let measured = score_model(&with_probe, &moe, &config)
+        .estimated_prefill_tokens_per_sec
+        .expect("measured MoE prefill estimate should exist");
+
+    assert!(measured <= fallback * 1.001);
+}
+
+#[test]
 fn filename_like_identifier_does_not_create_coding_suitability() {
     let hardware = m1_ultra();
     let mut config = SelectionConfig {
@@ -502,6 +534,7 @@ fn budget_selection_prefers_faster_measured_gpu_over_cpu_headroom() {
             compute_tflops_fp32: None,
             compute_tflops_fp16: Some(50.0),
             prefill_matmul_tflops_fp16: None,
+            prefill_moe_matmul_tflops_fp16: None,
             unified_memory: false,
         }],
         cpu: CpuProfile {
@@ -605,6 +638,7 @@ fn hardware_profile_uses_mesh_gpu_benchmark_output_as_measured_bandwidth() {
             compute_tflops_fp32: None,
             compute_tflops_fp16: None,
             prefill_matmul_tflops_fp16: None,
+            prefill_moe_matmul_tflops_fp16: None,
             noise_pct: 1.0,
             runtime_s: 0.25,
             rated_gbps: None,

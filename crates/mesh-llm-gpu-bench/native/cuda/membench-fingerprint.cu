@@ -30,6 +30,10 @@
 #define DECODE_DISPATCHES 8
 #define FIXED_OVERHEAD_DISPATCHES 256
 #define PREFILL_MATMUL_SIZE 4096
+#define PREFILL_MOE_M 1024
+#define PREFILL_MOE_N 512
+#define PREFILL_MOE_K 2048
+#define PREFILL_MOE_EXPERTS 8
 
 __global__ void empty_kernel(float* sink) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
@@ -167,6 +171,9 @@ int main(int argc, char** argv) {
         __half* dMatmulA;
         __half* dMatmulB;
         __half* dMatmulC;
+        __half* dMoeA;
+        __half* dMoeB;
+        __half* dMoeC;
         check(cudaMalloc(&dSrc,  BUFFER_BYTES), "cudaMalloc src");
         check(cudaMalloc(&dSink, sizeof(float)), "cudaMalloc sink");
         check(cudaMalloc(&dComputeSink, sizeof(float) * computeThreads), "cudaMalloc compute sink");
@@ -174,12 +181,21 @@ int main(int argc, char** argv) {
         check(cudaMalloc(&dMatmulA, matmulBytes), "cudaMalloc matmul A");
         check(cudaMalloc(&dMatmulB, matmulBytes), "cudaMalloc matmul B");
         check(cudaMalloc(&dMatmulC, matmulBytes), "cudaMalloc matmul C");
+        size_t moeABytes = (size_t)PREFILL_MOE_EXPERTS * (size_t)PREFILL_MOE_M * (size_t)PREFILL_MOE_K * sizeof(__half);
+        size_t moeBBytes = (size_t)PREFILL_MOE_EXPERTS * (size_t)PREFILL_MOE_K * (size_t)PREFILL_MOE_N * sizeof(__half);
+        size_t moeCBytes = (size_t)PREFILL_MOE_EXPERTS * (size_t)PREFILL_MOE_M * (size_t)PREFILL_MOE_N * sizeof(__half);
+        check(cudaMalloc(&dMoeA, moeABytes), "cudaMalloc moe A");
+        check(cudaMalloc(&dMoeB, moeBBytes), "cudaMalloc moe B");
+        check(cudaMalloc(&dMoeC, moeCBytes), "cudaMalloc moe C");
         check(cudaMemset(dSrc,  0, BUFFER_BYTES), "cudaMemset src");
         check(cudaMemset(dSink, 0, sizeof(float)), "cudaMemset sink");
         check(cudaMemset(dComputeSink, 0, sizeof(float) * computeThreads), "cudaMemset compute sink");
         check(cudaMemset(dMatmulA, 1, matmulBytes), "cudaMemset matmul A");
         check(cudaMemset(dMatmulB, 1, matmulBytes), "cudaMemset matmul B");
         check(cudaMemset(dMatmulC, 0, matmulBytes), "cudaMemset matmul C");
+        check(cudaMemset(dMoeA, 1, moeABytes), "cudaMemset moe A");
+        check(cudaMemset(dMoeB, 1, moeBBytes), "cudaMemset moe B");
+        check(cudaMemset(dMoeC, 0, moeCBytes), "cudaMemset moe C");
 
         cublasHandle_t cublas;
         check_cublas(cublasCreate(&cublas), "cublasCreate");
@@ -260,6 +276,47 @@ int main(int argc, char** argv) {
             return totalFlops / (ms / 1000.0) / 1e12;
         };
 
+        auto measure_prefill_moe_matmul_fp16 = [&]() -> double {
+            const float alpha = 1.0f;
+            const float beta = 0.0f;
+            check(cudaEventRecord(evStart), "eventRecord prefill moe matmul start");
+            check_cublas(
+                cublasGemmStridedBatchedEx(cublas,
+                                           CUBLAS_OP_N,
+                                           CUBLAS_OP_N,
+                                           PREFILL_MOE_M,
+                                           PREFILL_MOE_N,
+                                           PREFILL_MOE_K,
+                                           &alpha,
+                                           dMoeA,
+                                           CUDA_R_16F,
+                                           PREFILL_MOE_M,
+                                           (long long)PREFILL_MOE_M * PREFILL_MOE_K,
+                                           dMoeB,
+                                           CUDA_R_16F,
+                                           PREFILL_MOE_K,
+                                           (long long)PREFILL_MOE_K * PREFILL_MOE_N,
+                                           &beta,
+                                           dMoeC,
+                                           CUDA_R_16F,
+                                           PREFILL_MOE_M,
+                                           (long long)PREFILL_MOE_M * PREFILL_MOE_N,
+                                           PREFILL_MOE_EXPERTS,
+                                           CUBLAS_COMPUTE_32F,
+                                           CUBLAS_GEMM_DEFAULT_TENSOR_OP),
+                "cublasGemmStridedBatchedEx prefill moe matmul");
+            check(cudaEventRecord(evStop), "eventRecord prefill moe matmul stop");
+            check(cudaEventSynchronize(evStop), "eventSync prefill moe matmul");
+            float ms = 0.0f;
+            check(cudaEventElapsedTime(&ms, evStart, evStop), "eventElapsed prefill moe matmul");
+            double totalFlops = 2.0
+                * (double)PREFILL_MOE_M
+                * (double)PREFILL_MOE_N
+                * (double)PREFILL_MOE_K
+                * (double)PREFILL_MOE_EXPERTS;
+            return totalFlops / (ms / 1000.0) / 1e12;
+        };
+
         auto measure_decode_effective_gbps = [&]() -> double {
             int chunkElements = DECODE_CHUNK_BYTES / sizeof(float4);
             int chunkGridSize = (chunkElements + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -294,6 +351,7 @@ int main(int argc, char** argv) {
             (void)measure_compute_fp32();
             (void)measure_compute_fp16();
             (void)measure_prefill_matmul_fp16();
+            (void)measure_prefill_moe_matmul_fp16();
             (void)measure_decode_effective_gbps();
             (void)measure_fixed_overhead_ms();
         }
@@ -304,6 +362,7 @@ int main(int argc, char** argv) {
         double fp32Samples[TIMED_RUNS];
         double fp16Samples[TIMED_RUNS];
         double prefillMatmulSamples[TIMED_RUNS];
+        double prefillMoeMatmulSamples[TIMED_RUNS];
         double decodeEffectiveSamples[TIMED_RUNS];
         double fixedOverheadSamples[TIMED_RUNS];
         for (int i = 0; i < TIMED_RUNS; i++) {
@@ -311,6 +370,7 @@ int main(int argc, char** argv) {
             fp32Samples[i] = measure_compute_fp32();
             fp16Samples[i] = measure_compute_fp16();
             prefillMatmulSamples[i] = measure_prefill_matmul_fp16();
+            prefillMoeMatmulSamples[i] = measure_prefill_moe_matmul_fp16();
             decodeEffectiveSamples[i] = measure_decode_effective_gbps();
             fixedOverheadSamples[i] = measure_fixed_overhead_ms();
         }
@@ -322,6 +382,7 @@ int main(int argc, char** argv) {
         qsort(fp32Samples, TIMED_RUNS, sizeof(double), cmp_double);
         qsort(fp16Samples, TIMED_RUNS, sizeof(double), cmp_double);
         qsort(prefillMatmulSamples, TIMED_RUNS, sizeof(double), cmp_double);
+        qsort(prefillMoeMatmulSamples, TIMED_RUNS, sizeof(double), cmp_double);
         qsort(decodeEffectiveSamples, TIMED_RUNS, sizeof(double), cmp_double);
         qsort(fixedOverheadSamples, TIMED_RUNS, sizeof(double), cmp_double);
         double p50      = samples[TIMED_RUNS / 2];
@@ -329,6 +390,7 @@ int main(int argc, char** argv) {
         double tf32P90  = fp32Samples[(int)(TIMED_RUNS * 0.90) - 1];
         double tf16P90  = fp16Samples[(int)(TIMED_RUNS * 0.90) - 1];
         double prefillMatmulP90 = prefillMatmulSamples[(int)(TIMED_RUNS * 0.90) - 1];
+        double prefillMoeMatmulP90 = prefillMoeMatmulSamples[(int)(TIMED_RUNS * 0.90) - 1];
         double decodeEffectiveP90 = decodeEffectiveSamples[(int)(TIMED_RUNS * 0.90) - 1];
         decodeEffectiveP90 = std::min(decodeEffectiveP90, p90);
         double fixedOverheadP50 = fixedOverheadSamples[TIMED_RUNS / 2];
@@ -353,7 +415,8 @@ int main(int argc, char** argv) {
                    "\"decode_fixed_overhead_ms\":%.4f,"
                    "\"compute_tflops_fp32\":%.2f,"
                    "\"compute_tflops_fp16\":%.2f,"
-                   "\"prefill_matmul_tflops_fp16\":%.2f}",
+                   "\"prefill_matmul_tflops_fp16\":%.2f,"
+                   "\"prefill_moe_matmul_tflops_fp16\":%.2f}",
                    props.name, TIMED_RUNS,
                    p50, p90, noisePct, runtimeSecs,
                    ratedGBps, effPct,
@@ -361,7 +424,7 @@ int main(int argc, char** argv) {
                    memClockKHz / 1000.0,
                    decodeEffectiveP90,
                    fixedOverheadP50,
-                   tf32P90, tf16P90, prefillMatmulP90);
+                   tf32P90, tf16P90, prefillMatmulP90, prefillMoeMatmulP90);
             if (dev < deviceCount - 1) printf(",");
             else printf("]\n");
         } else {
@@ -375,6 +438,7 @@ int main(int argc, char** argv) {
             printf("tf32   : %.2f TFLOPS\n", tf32P90);
             printf("tf16   : %.2f TFLOPS\n", tf16P90);
             printf("prefill matmul fp16: %.2f TFLOPS\n", prefillMatmulP90);
+            printf("prefill moe matmul fp16: %.2f TFLOPS\n", prefillMoeMatmulP90);
             printf("decode : %.1f GB/s effective, %.4f ms fixed dispatch\n",
                    decodeEffectiveP90, fixedOverheadP50);
             printf("noise  : %.1f%%  (p90-p50 spread -- lower is better)\n", noisePct);
@@ -388,6 +452,9 @@ int main(int argc, char** argv) {
         cudaFree(dMatmulA);
         cudaFree(dMatmulB);
         cudaFree(dMatmulC);
+        cudaFree(dMoeA);
+        cudaFree(dMoeB);
+        cudaFree(dMoeC);
         cublasDestroy(cublas);
         cudaEventDestroy(evStart);
         cudaEventDestroy(evStop);

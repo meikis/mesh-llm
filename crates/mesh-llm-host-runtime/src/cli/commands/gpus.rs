@@ -95,6 +95,7 @@ fn gpu_json(gpu: &GpuFacts) -> Value {
         "compute_tflops_fp32": gpu.compute_tflops_fp32,
         "compute_tflops_fp16": gpu.compute_tflops_fp16,
         "prefill_matmul_tflops_fp16": gpu.prefill_matmul_tflops_fp16,
+        "prefill_moe_matmul_tflops_fp16": gpu.prefill_moe_matmul_tflops_fp16,
         "unified_memory": gpu.unified_memory,
         "pci_bdf": gpu.pci_bdf,
         "vendor_uuid": gpu.vendor_uuid,
@@ -177,6 +178,11 @@ fn gpu_benchmark_json(hw: &HardwareSurvey, saved: &SavedBenchmark) -> Value {
                     .prefill_matmul_tflops_fp16
                     .as_ref()
                     .and_then(|values| values.get(index)),
+                "prefill_moe_matmul_tflops_fp16": saved
+                    .result
+                    .prefill_moe_matmul_tflops_fp16
+                    .as_ref()
+                    .and_then(|values| values.get(index)),
             })
         })
         .collect::<Vec<_>>();
@@ -212,6 +218,7 @@ fn attach_cached_bandwidth(hw: &mut HardwareSurvey) {
         gpu.compute_tflops_fp32 = cached.compute_tflops_fp32;
         gpu.compute_tflops_fp16 = cached.compute_tflops_fp16;
         gpu.prefill_matmul_tflops_fp16 = cached.prefill_matmul_tflops_fp16;
+        gpu.prefill_moe_matmul_tflops_fp16 = cached.prefill_moe_matmul_tflops_fp16;
     }
 }
 

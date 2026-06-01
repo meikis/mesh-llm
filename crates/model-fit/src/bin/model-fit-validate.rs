@@ -215,8 +215,20 @@ struct BenchmarkScenarioSummary {
     predicted: Option<f64>,
     observed: Option<f64>,
     observed_over_fit: Option<f64>,
+    first_token_breakdown: Option<FirstTokenBreakdown>,
     verdict: String,
     benchmark: BenchmarkSummary,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct FirstTokenBreakdown {
+    predicted_prefill_ms: Option<f64>,
+    predicted_decode_ms: Option<f64>,
+    predicted_overhead_ms: Option<f64>,
+    observed_tokenize_ms: Option<f64>,
+    observed_prefill_ms: Option<f64>,
+    observed_decode_ms: Option<f64>,
+    observed_unattributed_ms: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -1429,9 +1441,62 @@ fn scenario_summary(
         predicted,
         observed,
         observed_over_fit,
+        first_token_breakdown: first_token_breakdown(&scenario, recommendation, &benchmark),
         verdict,
         benchmark,
     }
+}
+
+fn first_token_breakdown(
+    scenario: &BenchmarkScenarioSpec,
+    recommendation: &ModelRecommendation,
+    benchmark: &BenchmarkSummary,
+) -> Option<FirstTokenBreakdown> {
+    if scenario.kind != BenchmarkScenarioKind::FirstToken {
+        return None;
+    }
+    let observed_tokenize_ms =
+        median_request_value(benchmark, |request| request.tokenize_elapsed_ms);
+    let observed_prefill_ms = median_request_value(benchmark, |request| request.prefill_elapsed_ms);
+    let observed_decode_ms = median_request_value(benchmark, |request| request.decode_elapsed_ms);
+    let observed_total_ms =
+        median_observation_value(benchmark, |observation| observation.text_request_elapsed_ms);
+    let observed_sum = observed_tokenize_ms.unwrap_or_default()
+        + observed_prefill_ms.unwrap_or_default()
+        + observed_decode_ms.unwrap_or_default();
+    let observed_unattributed_ms = observed_total_ms.map(|total| (total - observed_sum).max(0.0));
+    Some(FirstTokenBreakdown {
+        predicted_prefill_ms: recommendation
+            .estimated_first_token_prefill_ms
+            .map(f64::from),
+        predicted_decode_ms: recommendation
+            .estimated_first_token_decode_ms
+            .map(f64::from),
+        predicted_overhead_ms: recommendation
+            .estimated_first_token_overhead_ms
+            .map(f64::from),
+        observed_tokenize_ms,
+        observed_prefill_ms,
+        observed_decode_ms,
+        observed_unattributed_ms,
+    })
+}
+
+fn median_request_value(
+    benchmark: &BenchmarkSummary,
+    value: impl Fn(&BenchmarkRequestObservation) -> Option<f64>,
+) -> Option<f64> {
+    let mut samples = benchmark
+        .observations
+        .iter()
+        .flat_map(|observation| observation.request_results.iter())
+        .filter_map(value)
+        .collect::<Vec<_>>();
+    if samples.is_empty() {
+        return None;
+    }
+    samples.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+    Some(median(&samples))
 }
 
 fn scenario_level_verdict(
@@ -1860,6 +1925,9 @@ fn gpu_output_from_command_json(gpu: &Value, p90_gbps: f64) -> GpuBenchmarkOutpu
         prefill_matmul_tflops_fp16: gpu
             .get("prefill_matmul_tflops_fp16")
             .and_then(Value::as_f64),
+        prefill_moe_matmul_tflops_fp16: gpu
+            .get("prefill_moe_matmul_tflops_fp16")
+            .and_then(Value::as_f64),
         noise_pct: 0.0,
         runtime_s: 0.0,
         rated_gbps: None,
@@ -2226,6 +2294,7 @@ fn fit_input_contract() -> FitInputContract {
             "accelerators.benchmark_noise_pct",
             "accelerators.compute_tflops_fp16",
             "accelerators.prefill_matmul_tflops_fp16",
+            "accelerators.prefill_moe_matmul_tflops_fp16",
             "accelerators.unified_memory",
             "cpu.memory_bandwidth_bytes_per_sec",
         ],

@@ -15,6 +15,8 @@ pub struct BenchmarkOutput {
     pub compute_tflops_fp16: Option<f64>,
     #[serde(default)]
     pub prefill_matmul_tflops_fp16: Option<f64>,
+    #[serde(default)]
+    pub prefill_moe_matmul_tflops_fp16: Option<f64>,
     pub noise_pct: f64,
     pub runtime_s: f64,
     pub rated_gbps: Option<f64>,

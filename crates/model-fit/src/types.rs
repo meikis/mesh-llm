@@ -80,6 +80,16 @@ pub struct AcceleratorProfile {
     /// benchmarking the GGUF being fitted.
     #[serde(default)]
     pub prefill_matmul_tflops_fp16: Option<f32>,
+    /// Optional MoE-prefill-shaped FP16 matrix-multiply throughput from the GPU
+    /// benchmark.
+    ///
+    /// Sparse MoE prompt processing does not behave like one large dense GEMM:
+    /// llama.cpp routes expert work through `GGML_OP_MUL_MAT_ID`, with expert
+    /// selection, id mapping, and aggregation around many expert matmuls. A
+    /// separate probe lets the fit model consume that hardware fact without
+    /// hard-coding backend names.
+    #[serde(default)]
+    pub prefill_moe_matmul_tflops_fp16: Option<f32>,
     pub unified_memory: bool,
 }
 
@@ -477,6 +487,9 @@ pub struct ModelRecommendation {
     pub estimated_decode_tokens_per_sec: Option<f32>,
     pub estimated_decode_tokens_per_sec_range: Option<DecodeEstimateRange>,
     pub estimated_prefill_tokens_per_sec: Option<f32>,
+    pub estimated_first_token_prefill_ms: Option<f32>,
+    pub estimated_first_token_decode_ms: Option<f32>,
+    pub estimated_first_token_overhead_ms: Option<f32>,
     pub estimated_first_token_ms: Option<f32>,
     pub estimated_first_token_ms_range: Option<FirstTokenEstimateRange>,
     pub split_candidate: Option<SplitCandidateEstimate>,

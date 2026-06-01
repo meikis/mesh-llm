@@ -2813,6 +2813,7 @@ pub async fn handle_mesh_request(
         &mut request,
         moa_model_name.as_deref(),
         None, // passive path has no local targets table
+        &affinity,
     )
     .await
     {

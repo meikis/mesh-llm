@@ -12,7 +12,9 @@
 
 use crate::inference::election;
 use crate::mesh;
+use crate::network::affinity::AffinityRouter;
 use crate::network::openai::transport as proxy;
+use crate::network::target_health::TargetHealthOutcome;
 use mesh_mixture_of_agents as moa;
 use progress::ProgressContinuation;
 use tokio::io::AsyncWriteExt;
@@ -38,6 +40,7 @@ pub async fn try_handle_moa(
     request: &mut proxy::BufferedHttpRequest,
     effective_model: Option<&str>,
     targets: Option<&election::ModelTargets>,
+    affinity: &AffinityRouter,
 ) -> Option<TcpStream> {
     if effective_model != Some(moa::VIRTUAL_MODEL_NAME) {
         return Some(tcp_stream);
@@ -51,7 +54,7 @@ pub async fn try_handle_moa(
 
     let enable_thinking = effective_enable_thinking_for_moa(&body_json);
 
-    let Some(mut config) = build_moa_config(node, targets).await else {
+    let Some(mut config) = build_moa_config(node, targets, affinity).await else {
         let _ = proxy::send_503(tcp_stream, "MoA requires ≥2 models available in the mesh").await;
         return None;
     };
@@ -333,10 +336,13 @@ fn build_moa_headers(result: &moa::TurnResult) -> Vec<(&'static str, String)> {
 pub async fn build_moa_config(
     node: &mesh::Node,
     targets: Option<&election::ModelTargets>,
+    affinity: &AffinityRouter,
 ) -> Option<moa::GatewayConfig> {
     let http = reqwest::Client::new();
-    let mut backends: Vec<std::sync::Arc<dyn moa::ModelBackend>> = Vec::new();
-    let mut models: Vec<moa::ModelEntry> = Vec::new();
+    let mut workers = MoaWorkerSet {
+        backends: Vec::new(),
+        models: Vec::new(),
+    };
     let mut local_count = 0usize;
 
     // Full mesh-wide model list (local + every peer's advertised
@@ -362,33 +368,37 @@ pub async fn build_moa_config(
             targets,
             &http,
             &aliases,
-            &mut backends,
-            &mut models,
+            &mut workers,
             &mut local_count,
+            affinity,
         )
         .await;
     }
 
-    if models.len() < 2 {
+    if workers.models.len() < 2 {
         tracing::warn!(
             "MoA: only {} model(s) reachable, need ≥2 (models={:?})",
-            models.len(),
-            models.iter().map(|m| &m.name).collect::<Vec<_>>()
+            workers.models.len(),
+            workers.models.iter().map(|m| &m.name).collect::<Vec<_>>()
         );
         return None;
     }
 
     tracing::info!(
         "MoA config: {} workers ({} local, {} remote): {:?}",
-        models.len(),
+        workers.models.len(),
         local_count,
-        models.len() - local_count,
-        models.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+        workers.models.len() - local_count,
+        workers
+            .models
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect::<Vec<_>>(),
     );
 
     Some(moa::GatewayConfig {
-        backends,
-        models,
+        backends: workers.backends,
+        models: workers.models,
         // Bumped from 15s → 60s. 15s was tight for big-context interactive
         // turns: a large model with a 10–20k-token prompt and tool schema
         // (typical for agent harnesses like OpenCode/Goose) can need 20–30s
@@ -444,15 +454,20 @@ async fn resolve_one_worker_from_aliases(
     targets: Option<&election::ModelTargets>,
     http: &reqwest::Client,
     aliases: &[String],
-    backends: &mut Vec<std::sync::Arc<dyn moa::ModelBackend>>,
-    models: &mut Vec<moa::ModelEntry>,
+    workers: &mut MoaWorkerSet,
     local_count: &mut usize,
+    affinity: &AffinityRouter,
 ) {
     for name in aliases {
-        if add_worker_backend(node, targets, http, name, backends, models, local_count).await {
+        if add_worker_backend(node, targets, http, name, workers, local_count, affinity).await {
             return;
         }
     }
+}
+
+struct MoaWorkerSet {
+    backends: Vec<std::sync::Arc<dyn moa::ModelBackend>>,
+    models: Vec<moa::ModelEntry>,
 }
 
 /// Group all advertised model names by their canonical base so each
@@ -531,9 +546,9 @@ async fn add_worker_backend(
     targets: Option<&election::ModelTargets>,
     http: &reqwest::Client,
     name: &str,
-    backends: &mut Vec<std::sync::Arc<dyn moa::ModelBackend>>,
-    models: &mut Vec<moa::ModelEntry>,
+    workers: &mut MoaWorkerSet,
     local_count: &mut usize,
+    affinity: &AffinityRouter,
 ) -> bool {
     // Prefer local skippy port when this node serves the model.
     let local_port = targets.and_then(|t| {
@@ -545,12 +560,14 @@ async fn add_worker_backend(
         })
     });
     if let Some(port) = local_port {
-        let backend_idx = backends.len();
-        backends.push(std::sync::Arc::new(LocalModelBackend {
-            port,
-            http: http.clone(),
-        }));
-        models.push(moa::ModelEntry {
+        let backend_idx = workers.backends.len();
+        workers
+            .backends
+            .push(std::sync::Arc::new(LocalModelBackend {
+                port,
+                http: http.clone(),
+            }));
+        workers.models.push(moa::ModelEntry {
             name: name.to_string(),
             backend_index: backend_idx,
         });
@@ -559,21 +576,43 @@ async fn add_worker_backend(
     }
 
     // Otherwise find a remote host. hosts_for_model returns peers in
-    // hash-preferred order; take the first.
+    // hash-preferred order; target health can skip a recently timed-out
+    // peer when another candidate exists.
     let remote_hosts = node.hosts_for_model(name).await;
-    if let Some(peer_id) = remote_hosts.into_iter().next() {
-        let backend_idx = backends.len();
-        backends.push(std::sync::Arc::new(RemoteModelBackend {
-            node: node.clone(),
-            peer_id,
-        }));
-        models.push(moa::ModelEntry {
+    if let Some(peer_id) = select_remote_host_for_moa(name, remote_hosts, affinity) {
+        let backend_idx = workers.backends.len();
+        workers
+            .backends
+            .push(std::sync::Arc::new(RemoteModelBackend {
+                node: node.clone(),
+                peer_id,
+                affinity: affinity.clone(),
+            }));
+        workers.models.push(moa::ModelEntry {
             name: name.to_string(),
             backend_index: backend_idx,
         });
         return true;
     }
     false
+}
+
+fn select_remote_host_for_moa(
+    model: &str,
+    hosts: Vec<iroh::EndpointId>,
+    affinity: &AffinityRouter,
+) -> Option<iroh::EndpointId> {
+    let candidates: Vec<election::InferenceTarget> = hosts
+        .into_iter()
+        .map(election::InferenceTarget::Remote)
+        .collect();
+    affinity
+        .route_eligible_candidates(model, &candidates)
+        .into_iter()
+        .find_map(|target| match target {
+            election::InferenceTarget::Remote(peer_id) => Some(peer_id),
+            election::InferenceTarget::Local(_) | election::InferenceTarget::None => None,
+        })
 }
 
 /// Canonical name used for cross-peer dedup. Different peers advertise the
@@ -664,6 +703,7 @@ impl moa::ModelBackend for LocalModelBackend {
 struct RemoteModelBackend {
     node: mesh::Node,
     peer_id: iroh::EndpointId,
+    affinity: AffinityRouter,
 }
 
 #[async_trait::async_trait]
@@ -704,7 +744,7 @@ impl moa::ModelBackend for RemoteModelBackend {
         let mut raw = http_request.into_bytes();
         raw.extend_from_slice(&body_bytes);
 
-        tokio::time::timeout(timeout, async {
+        let response = match tokio::time::timeout(timeout, async {
             let (mut send, mut recv) = self
                 .node
                 .open_http_tunnel(self.peer_id)
@@ -721,7 +761,25 @@ impl moa::ModelBackend for RemoteModelBackend {
             parse_quic_http_response(&response)
         })
         .await
-        .map_err(|_| format!("remote timeout after {}s", timeout.as_secs()))?
+        {
+            Ok(result) => result,
+            Err(_) => {
+                self.record_target_outcome(model, TargetHealthOutcome::Timeout);
+                return Err(format!("remote timeout after {}s", timeout.as_secs()));
+            }
+        }?;
+        self.record_target_outcome(model, TargetHealthOutcome::Success);
+        Ok(response)
+    }
+}
+
+impl RemoteModelBackend {
+    fn record_target_outcome(&self, model: &str, outcome: TargetHealthOutcome) {
+        self.affinity.record_target_outcome(
+            Some(model),
+            &election::InferenceTarget::Remote(self.peer_id),
+            outcome,
+        );
     }
 }
 
@@ -1189,6 +1247,13 @@ fn short_id_from_response(response: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iroh::SecretKey;
+
+    fn make_id(seed: u8) -> iroh::EndpointId {
+        let mut bytes = [0u8; 32];
+        bytes[0] = seed;
+        SecretKey::from_bytes(&bytes).public()
+    }
 
     #[test]
     fn canonical_base_dedupes_unsloth_and_gguf_variants() {
@@ -1211,6 +1276,48 @@ mod tests {
         assert_ne!(
             canonical_base_name("unsloth/Qwen3-32B-GGUF:Q4_K_M"),
             canonical_base_name("unsloth/MiniMax-M2.5-GGUF:Q4_K_M")
+        );
+    }
+
+    #[test]
+    fn moa_remote_host_selection_avoids_cooling_timeout_target() {
+        let affinity = AffinityRouter::new();
+        let first = make_id(1);
+        let second = make_id(2);
+
+        affinity.record_target_outcome(
+            Some("qwen"),
+            &election::InferenceTarget::Remote(first),
+            TargetHealthOutcome::Timeout,
+        );
+
+        assert_eq!(
+            select_remote_host_for_moa("qwen", vec![first, second], &affinity),
+            Some(second)
+        );
+        assert_eq!(
+            affinity
+                .stats_snapshot()
+                .target_reputation
+                .penalized_targets,
+            1
+        );
+    }
+
+    #[test]
+    fn moa_remote_host_selection_preserves_only_available_timeout_target() {
+        let affinity = AffinityRouter::new();
+        let first = make_id(1);
+
+        affinity.record_target_outcome(
+            Some("qwen"),
+            &election::InferenceTarget::Remote(first),
+            TargetHealthOutcome::Timeout,
+        );
+
+        assert_eq!(
+            select_remote_host_for_moa("qwen", vec![first], &affinity),
+            Some(first)
         );
     }
 

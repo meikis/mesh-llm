@@ -50,6 +50,7 @@ struct Args {
     metrics_server_bin: PathBuf,
     gpu_benchmark_json: Option<PathBuf>,
     model_files: Vec<PathBuf>,
+    benchmark_scenarios: Vec<String>,
     base_port: u16,
     benchmark_all: bool,
     show_progress: bool,
@@ -228,6 +229,7 @@ struct FirstTokenBreakdown {
     predicted_prefill_ms: Option<f64>,
     predicted_decode_ms: Option<f64>,
     predicted_overhead_ms: Option<f64>,
+    predicted_sampler_ms: Option<f64>,
     predicted_sampled_decode_ms: Option<f64>,
     observed_tokenize_ms: Option<f64>,
     observed_prefill_ms: Option<f64>,
@@ -365,7 +367,7 @@ async fn main() -> Result<()> {
         models.push(report);
     }
 
-    let summary = summarize(&models, DEFAULT_TOLERANCE);
+    let summary = summarize(&args, &models, DEFAULT_TOLERANCE);
     let report = ValidationReport {
         schema_version: 1,
         generated_at_unix_secs: unix_timestamp_secs(),
@@ -396,6 +398,7 @@ impl Args {
             metrics_server_bin: default_binary_path("metrics-server"),
             gpu_benchmark_json: None,
             model_files: Vec::new(),
+            benchmark_scenarios: Vec::new(),
             base_port: 18400,
             benchmark_all: false,
             show_progress: true,
@@ -406,6 +409,7 @@ impl Args {
             parsed.parse_arg(arg, &mut values)?;
         }
         parsed.load_model_files()?;
+        parsed.validate_benchmark_scenarios()?;
 
         if parsed.models.is_empty() {
             bail!("provide at least one model ref");
@@ -435,6 +439,18 @@ impl Args {
             "--models-file" => {
                 self.model_files
                     .push(PathBuf::from(next_value(values, "--models-file")?));
+            }
+            "--scenario" => self
+                .benchmark_scenarios
+                .push(next_value(values, "--scenario")?),
+            "--scenarios" => {
+                self.benchmark_scenarios.extend(
+                    next_value(values, "--scenarios")?
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string),
+                );
             }
             "--base-port" => self.base_port = parse_next(values, "--base-port")?,
             "--benchmark-all" => self.benchmark_all = true,
@@ -478,6 +494,30 @@ impl Args {
         }
         Ok(())
     }
+
+    fn validate_benchmark_scenarios(&self) -> Result<()> {
+        if self.benchmark_scenarios.is_empty()
+            || self
+                .benchmark_scenarios
+                .iter()
+                .any(|scenario| scenario == "all")
+        {
+            return Ok(());
+        }
+        let valid = benchmark_scenarios()
+            .into_iter()
+            .map(|scenario| scenario.name)
+            .collect::<Vec<_>>();
+        for requested in &self.benchmark_scenarios {
+            if !valid.contains(&requested.as_str()) {
+                bail!(
+                    "unknown benchmark scenario {requested}; valid scenarios: {}",
+                    valid.join(", ")
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 fn parse_model_manifest_line(line: &str) -> Option<&str> {
@@ -497,6 +537,10 @@ fn default_binary_path(name: &str) -> PathBuf {
 
 impl ValidationConfig {
     fn from_args(args: &Args) -> Self {
+        let benchmark_scenarios = selected_benchmark_scenarios(args)
+            .into_iter()
+            .map(|scenario| scenario.name.to_string())
+            .collect();
         Self {
             ctx_size: DEFAULT_CTX_SIZE,
             warmup_tokens: DEFAULT_WARMUP_TOKENS,
@@ -519,10 +563,7 @@ impl ValidationConfig {
                 .iter()
                 .map(|(label, _)| (*label).to_string())
                 .collect(),
-            benchmark_scenarios: benchmark_scenarios()
-                .iter()
-                .map(|scenario| scenario.name.to_string())
-                .collect(),
+            benchmark_scenarios,
         }
     }
 }
@@ -854,7 +895,7 @@ fn benchmark_model(
     recommendation: &ModelRecommendation,
     model_index: usize,
 ) -> Vec<BenchmarkScenarioSummary> {
-    benchmark_scenarios()
+    selected_benchmark_scenarios(args)
         .into_iter()
         .enumerate()
         .map(|(scenario_index, scenario)| {
@@ -1123,17 +1164,20 @@ fn remeasure_reason(
     summary: &BenchmarkSummary,
     scenario: &BenchmarkScenarioSpec,
 ) -> Option<String> {
-    if scenario.kind != BenchmarkScenarioKind::SteadyDecode || benchmark_has_runtime_error(summary)
-    {
+    if benchmark_has_runtime_error(summary) {
         return None;
     }
     let raw_spread = summary.raw_spread_pct? / 100.0;
     if raw_spread >= DEFAULT_REMEASURE_RAW_SPREAD {
         return Some(format!(
-            "raw steady-decode spread {:.1}% exceeded remeasure threshold {:.1}%",
+            "raw {} spread {:.1}% exceeded remeasure threshold {:.1}%",
+            scenario.name,
             raw_spread * 100.0,
             DEFAULT_REMEASURE_RAW_SPREAD * 100.0
         ));
+    }
+    if scenario.kind != BenchmarkScenarioKind::SteadyDecode {
+        return None;
     }
     let ordered_drop = ordered_sample_drop(summary, scenario)?;
     (ordered_drop >= DEFAULT_REMEASURE_ORDERED_DROP).then(|| {
@@ -1476,8 +1520,14 @@ fn first_token_breakdown(
     let predicted_overhead_ms = recommendation
         .estimated_first_token_overhead_ms
         .map(f64::from);
-    let predicted_sampled_decode_ms =
-        predicted_decode_ms.map(|decode| decode + predicted_overhead_ms.unwrap_or_default());
+    let predicted_sampler_ms = recommendation
+        .estimated_first_token_sampler_ms
+        .map(f64::from);
+    let predicted_sampled_decode_ms = predicted_decode_ms.map(|decode| {
+        decode
+            + predicted_overhead_ms.unwrap_or_default()
+            + predicted_sampler_ms.unwrap_or_default()
+    });
     // `/v1/text` measures the first decode call with sampling included. In
     // Skippy that call eventually reaches `skippy_decode_step_sampled()`,
     // which runs `skippy_sync_chat_sampling_history()` before applying the
@@ -1509,6 +1559,7 @@ fn first_token_breakdown(
             .map(f64::from),
         predicted_decode_ms,
         predicted_overhead_ms,
+        predicted_sampler_ms,
         predicted_sampled_decode_ms,
         observed_tokenize_ms,
         observed_prefill_ms,
@@ -1829,9 +1880,10 @@ fn benchmark_port_base(
 ) -> Result<u16> {
     let repeats_per_scenario =
         DEFAULT_REPEATS + DEFAULT_REMEASURE_REPEATS + DEFAULT_CONFIRM_REPEATS;
+    let scenario_count = selected_benchmark_scenarios(args).len().max(1);
     args.base_port
         .checked_add(
-            (model_index * benchmark_scenarios().len() * repeats_per_scenario
+            (model_index * scenario_count * repeats_per_scenario
                 + scenario_index * repeats_per_scenario
                 + repeat) as u16
                 * 10,
@@ -1975,6 +2027,12 @@ fn gpu_output_from_command_json(gpu: &Value, p90_gbps: f64) -> GpuBenchmarkOutpu
         prefill_moe_matmul_tflops_fp16: gpu
             .get("prefill_moe_matmul_tflops_fp16")
             .and_then(Value::as_f64),
+        sampler_history_us_per_token: gpu
+            .get("sampler_history_us_per_token")
+            .and_then(Value::as_f64),
+        sampler_vocab_us_per_token: gpu
+            .get("sampler_vocab_us_per_token")
+            .and_then(Value::as_f64),
         noise_pct: 0.0,
         runtime_s: 0.0,
         rated_gbps: None,
@@ -2106,6 +2164,8 @@ fn cpu_profile() -> CpuProfile {
         prefill_matmul_tflops_fp16: None,
         prefill_ubatch_matmul_tflops_fp16: None,
         prefill_moe_matmul_tflops_fp16: None,
+        sampler_history_us_per_token: None,
+        sampler_vocab_us_per_token: None,
     }
 }
 
@@ -2331,6 +2391,35 @@ fn benchmark_scenarios() -> Vec<BenchmarkScenarioSpec> {
     ]
 }
 
+fn selected_benchmark_scenarios(args: &Args) -> Vec<BenchmarkScenarioSpec> {
+    let scenarios = benchmark_scenarios();
+    if args.benchmark_scenarios.is_empty() {
+        return scenarios;
+    }
+    if args
+        .benchmark_scenarios
+        .iter()
+        .any(|scenario| scenario == "all")
+    {
+        return scenarios;
+    }
+    let mut selected = Vec::new();
+    for requested in &args.benchmark_scenarios {
+        let scenario = scenarios
+            .iter()
+            .find(|scenario| scenario.name == requested)
+            .cloned()
+            .expect("scenario names are validated during argument parsing");
+        if !selected
+            .iter()
+            .any(|existing: &BenchmarkScenarioSpec| existing.name == scenario.name)
+        {
+            selected.push(scenario);
+        }
+    }
+    selected
+}
+
 fn fit_input_contract() -> FitInputContract {
     FitInputContract {
         hardware_fields_consumed: vec![
@@ -2349,6 +2438,8 @@ fn fit_input_contract() -> FitInputContract {
             "accelerators.prefill_matmul_tflops_fp16",
             "accelerators.prefill_ubatch_matmul_tflops_fp16",
             "accelerators.prefill_moe_matmul_tflops_fp16",
+            "accelerators.sampler_history_us_per_token",
+            "accelerators.sampler_vocab_us_per_token",
             "accelerators.unified_memory",
             "cpu.memory_bandwidth_bytes_per_sec",
             "cpu.compute_tflops_fp16",
@@ -2356,6 +2447,8 @@ fn fit_input_contract() -> FitInputContract {
             "cpu.prefill_matmul_tflops_fp16",
             "cpu.prefill_ubatch_matmul_tflops_fp16",
             "cpu.prefill_moe_matmul_tflops_fp16",
+            "cpu.sampler_history_us_per_token",
+            "cpu.sampler_vocab_us_per_token",
         ],
         model_fields_consumed: vec![
             "architecture",
@@ -2416,7 +2509,7 @@ fn download_progress(args: &Args, model_ref: &str) -> Option<ModelDownloadProgre
     })
 }
 
-fn summarize(models: &[ModelValidationReport], tolerance: f64) -> ValidationSummary {
+fn summarize(args: &Args, models: &[ModelValidationReport], tolerance: f64) -> ValidationSummary {
     let mut summary = ValidationSummary {
         model_count: models.len(),
         ..ValidationSummary::default()
@@ -2429,15 +2522,16 @@ fn summarize(models: &[ModelValidationReport], tolerance: f64) -> ValidationSumm
     summary.median_observed_over_fit = (!ratios.is_empty()).then(|| median(&ratios));
     summary.mean_observed_over_fit = mean(&ratios);
     summary.median_absolute_percent_error = median_absolute_percent_error(&ratios);
-    summary.scenario_summaries = summarize_scenarios(models, tolerance);
+    summary.scenario_summaries = summarize_scenarios(args, models, tolerance);
     summary
 }
 
 fn summarize_scenarios(
+    args: &Args,
     models: &[ModelValidationReport],
     tolerance: f64,
 ) -> Vec<ScenarioValidationSummary> {
-    benchmark_scenarios()
+    selected_benchmark_scenarios(args)
         .into_iter()
         .map(|scenario| summarize_scenario(models, scenario.name, tolerance))
         .collect()
@@ -2963,6 +3057,6 @@ fn unix_timestamp_secs() -> u64 {
 
 fn print_usage() {
     eprintln!(
-        "usage: model-fit-validate [--output-json report.json] [--models-file refs.txt] [--benchmark-all] [--no-progress] org/repo:Q4_K_M [org/repo:Q5_K_M ...]"
+        "usage: model-fit-validate [--output-json report.json] [--models-file refs.txt] [--scenario steady_decode|prefill|first_token|kv_warm_reuse|all] [--benchmark-all] [--no-progress] org/repo:Q4_K_M [org/repo:Q5_K_M ...]"
     );
 }

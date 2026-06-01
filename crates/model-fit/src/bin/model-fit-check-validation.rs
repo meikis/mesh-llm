@@ -56,6 +56,7 @@ struct FirstTokenBreakdown {
     prompt_token_count: Option<u64>,
     tokenizer_vocab_size: Option<u32>,
     predicted_prefill_ms: Option<f64>,
+    predicted_sampler_ms: Option<f64>,
     observed_prefill_ms: Option<f64>,
     observed_decode_ms: Option<f64>,
     observed_sampled_decode_residual_ms: Option<f64>,
@@ -250,12 +251,13 @@ fn standard_row_markdown(row: &ScenarioRow<'_>) -> String {
 }
 
 fn render_first_token_rows(rows: &[ScenarioRow<'_>], markdown: &mut String) {
-    markdown.push_str("| model | predicted ms | observed ms | observed/fit | prompt toks | vocab | pred prefill | obs prefill | obs decode | sampled residual | residual us/tok | spread | samples | verdict |\n");
-    markdown.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n");
+    markdown.push_str("| model | predicted ms | observed ms | observed/fit | prompt toks | vocab | pred prefill | pred sampler | obs prefill | obs decode | sampled residual | residual us/tok | spread | samples | verdict |\n");
+    markdown
+        .push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|\n");
     for row in rows {
         let breakdown = row.scenario.first_token_breakdown.as_ref();
         markdown.push_str(&format!(
-            "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             row.model.input_ref,
             number_option(row.scenario.predicted),
             number_option(row.scenario.observed),
@@ -263,6 +265,7 @@ fn render_first_token_rows(rows: &[ScenarioRow<'_>], markdown: &mut String) {
             integer_option(breakdown.and_then(|value| value.prompt_token_count)),
             integer_option(breakdown.and_then(|value| value.tokenizer_vocab_size.map(u64::from))),
             number_option(breakdown.and_then(|value| value.predicted_prefill_ms)),
+            number_option(breakdown.and_then(|value| value.predicted_sampler_ms)),
             number_option(breakdown.and_then(|value| value.observed_prefill_ms)),
             number_option(breakdown.and_then(|value| value.observed_decode_ms)),
             number_option(breakdown.and_then(|value| value.observed_sampled_decode_residual_ms)),

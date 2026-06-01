@@ -98,6 +98,8 @@ fn gpu_json(gpu: &GpuFacts) -> Value {
         "prefill_matmul_tflops_fp16": gpu.prefill_matmul_tflops_fp16,
         "prefill_ubatch_matmul_tflops_fp16": gpu.prefill_ubatch_matmul_tflops_fp16,
         "prefill_moe_matmul_tflops_fp16": gpu.prefill_moe_matmul_tflops_fp16,
+        "sampler_history_us_per_token": gpu.sampler_history_us_per_token,
+        "sampler_vocab_us_per_token": gpu.sampler_vocab_us_per_token,
         "unified_memory": gpu.unified_memory,
         "pci_bdf": gpu.pci_bdf,
         "vendor_uuid": gpu.vendor_uuid,
@@ -195,6 +197,16 @@ fn gpu_benchmark_json(hw: &HardwareSurvey, saved: &SavedBenchmark) -> Value {
                     .prefill_moe_matmul_tflops_fp16
                     .as_ref()
                     .and_then(|values| values.get(index)),
+                "sampler_history_us_per_token": saved
+                    .result
+                    .sampler_history_us_per_token
+                    .as_ref()
+                    .and_then(|values| values.get(index)),
+                "sampler_vocab_us_per_token": saved
+                    .result
+                    .sampler_vocab_us_per_token
+                    .as_ref()
+                    .and_then(|values| values.get(index)),
             })
         })
         .collect::<Vec<_>>();
@@ -233,6 +245,8 @@ fn attach_cached_bandwidth(hw: &mut HardwareSurvey) {
         gpu.prefill_matmul_tflops_fp16 = cached.prefill_matmul_tflops_fp16;
         gpu.prefill_ubatch_matmul_tflops_fp16 = cached.prefill_ubatch_matmul_tflops_fp16;
         gpu.prefill_moe_matmul_tflops_fp16 = cached.prefill_moe_matmul_tflops_fp16;
+        gpu.sampler_history_us_per_token = cached.sampler_history_us_per_token;
+        gpu.sampler_vocab_us_per_token = cached.sampler_vocab_us_per_token;
     }
 }
 
@@ -310,6 +324,8 @@ mod tests {
             prefill_matmul_tflops_fp16: Some(11.0),
             prefill_ubatch_matmul_tflops_fp16: Some(7.5),
             prefill_moe_matmul_tflops_fp16: Some(9.0),
+            sampler_history_us_per_token: Some(0.05),
+            sampler_vocab_us_per_token: Some(0.0003),
             unified_memory: false,
             stable_id: Some(format!("stable-{index}")),
             pci_bdf: Some(format!("0000:{index:02x}:00.0")),
@@ -391,6 +407,8 @@ mod tests {
                 prefill_matmul_tflops_fp16: Some(vec![11.0, 10.0]),
                 prefill_ubatch_matmul_tflops_fp16: Some(vec![7.5, 7.0]),
                 prefill_moe_matmul_tflops_fp16: Some(vec![9.0, 8.0]),
+                sampler_history_us_per_token: Some(vec![0.05, 0.06]),
+                sampler_vocab_us_per_token: Some(vec![0.0003, 0.0004]),
             },
         };
 
@@ -432,6 +450,8 @@ mod tests {
                 prefill_matmul_tflops_fp16: Some(vec![11.0]),
                 prefill_ubatch_matmul_tflops_fp16: Some(vec![7.5]),
                 prefill_moe_matmul_tflops_fp16: Some(vec![9.0]),
+                sampler_history_us_per_token: Some(vec![0.05]),
+                sampler_vocab_us_per_token: Some(vec![0.0003]),
             },
         };
 

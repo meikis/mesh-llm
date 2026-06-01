@@ -28,6 +28,8 @@ fn m1_ultra() -> HardwareProfile {
             prefill_matmul_tflops_fp16: None,
             prefill_ubatch_matmul_tflops_fp16: None,
             prefill_moe_matmul_tflops_fp16: None,
+            sampler_history_us_per_token: None,
+            sampler_vocab_us_per_token: None,
             unified_memory: true,
         }],
         cpu: CpuProfile {
@@ -39,6 +41,8 @@ fn m1_ultra() -> HardwareProfile {
             prefill_matmul_tflops_fp16: None,
             prefill_ubatch_matmul_tflops_fp16: None,
             prefill_moe_matmul_tflops_fp16: None,
+            sampler_history_us_per_token: None,
+            sampler_vocab_us_per_token: None,
         },
     }
 }
@@ -627,6 +631,8 @@ fn budget_selection_prefers_faster_measured_gpu_over_cpu_headroom() {
             prefill_matmul_tflops_fp16: None,
             prefill_ubatch_matmul_tflops_fp16: None,
             prefill_moe_matmul_tflops_fp16: None,
+            sampler_history_us_per_token: None,
+            sampler_vocab_us_per_token: None,
             unified_memory: false,
         }],
         cpu: CpuProfile {
@@ -638,6 +644,8 @@ fn budget_selection_prefers_faster_measured_gpu_over_cpu_headroom() {
             prefill_matmul_tflops_fp16: None,
             prefill_ubatch_matmul_tflops_fp16: None,
             prefill_moe_matmul_tflops_fp16: None,
+            sampler_history_us_per_token: None,
+            sampler_vocab_us_per_token: None,
         },
     };
     let mut config = SelectionConfig {
@@ -738,6 +746,8 @@ fn hardware_profile_uses_mesh_gpu_benchmark_output_as_measured_bandwidth() {
             prefill_matmul_tflops_fp16: None,
             prefill_ubatch_matmul_tflops_fp16: None,
             prefill_moe_matmul_tflops_fp16: None,
+            sampler_history_us_per_token: None,
+            sampler_vocab_us_per_token: None,
             noise_pct: 1.0,
             runtime_s: 0.25,
             rated_gbps: None,

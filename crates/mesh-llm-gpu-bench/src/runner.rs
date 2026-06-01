@@ -7,7 +7,17 @@ use anyhow::Result;
     not(feature = "intel")
 ))]
 use anyhow::anyhow;
-use std::time::Duration;
+use std::{hint::black_box, time::Duration};
+
+const SAMPLER_PROBE_PROMPT_TOKENS: usize = 4096;
+const SAMPLER_PROBE_VOCAB_TOKENS: usize = 131_072;
+const SAMPLER_PROBE_RUNS: usize = 9;
+
+#[derive(Clone, Copy)]
+struct SamplerProbe {
+    history_us_per_token: f64,
+    vocab_us_per_token: f64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BenchmarkBackend {
@@ -103,12 +113,85 @@ pub fn parse_benchmark_output(stdout: &[u8]) -> Option<Vec<BenchmarkOutput>> {
 }
 
 pub fn run_benchmark(runner: BenchmarkRunner, _timeout: Duration) -> Result<Vec<BenchmarkOutput>> {
-    match runner.backend {
+    let mut outputs = match runner.backend {
         BenchmarkBackend::Metal => run_metal_benchmark(),
         BenchmarkBackend::Cuda => run_cuda_benchmark(),
         BenchmarkBackend::Hip => run_hip_benchmark(),
         BenchmarkBackend::Intel => run_intel_benchmark(),
+    }?;
+    attach_sampler_probe(&mut outputs);
+    Ok(outputs)
+}
+
+fn attach_sampler_probe(outputs: &mut [BenchmarkOutput]) {
+    let probe = measure_sampler_probe();
+    for output in outputs {
+        output.sampler_history_us_per_token = Some(probe.history_us_per_token);
+        output.sampler_vocab_us_per_token = Some(probe.vocab_us_per_token);
     }
+}
+
+fn measure_sampler_probe() -> SamplerProbe {
+    let mut history_samples = Vec::with_capacity(SAMPLER_PROBE_RUNS);
+    let mut vocab_samples = Vec::with_capacity(SAMPLER_PROBE_RUNS);
+    for _ in 0..SAMPLER_PROBE_RUNS {
+        history_samples.push(measure_sampler_history_us_per_token());
+        vocab_samples.push(measure_sampler_vocab_us_per_token());
+    }
+    history_samples.sort_by(|left, right| left.total_cmp(right));
+    vocab_samples.sort_by(|left, right| left.total_cmp(right));
+    SamplerProbe {
+        history_us_per_token: history_samples[SAMPLER_PROBE_RUNS / 2],
+        vocab_us_per_token: vocab_samples[SAMPLER_PROBE_RUNS / 2],
+    }
+}
+
+fn measure_sampler_history_us_per_token() -> f64 {
+    let tokens = (0..SAMPLER_PROBE_PROMPT_TOKENS)
+        .map(|index| ((index * 1_103 + 17) % SAMPLER_PROBE_VOCAB_TOKENS) as u32)
+        .collect::<Vec<_>>();
+    let mut recent_counts = vec![0u16; 65_536];
+    let started = std::time::Instant::now();
+    let mut state = 0u64;
+    for token in &tokens {
+        let slot = (*token as usize) & (recent_counts.len() - 1);
+        recent_counts[slot] = recent_counts[slot].wrapping_add(1);
+        state = state
+            .wrapping_mul(1_099_511_628_211)
+            .wrapping_add(u64::from(*token))
+            .wrapping_add(u64::from(recent_counts[slot]));
+        black_box(state);
+    }
+    started.elapsed().as_secs_f64() * 1_000_000.0 / tokens.len() as f64
+}
+
+fn measure_sampler_vocab_us_per_token() -> f64 {
+    #[derive(Clone, Copy)]
+    struct Candidate {
+        id: u32,
+        logit: f32,
+        p: f32,
+    }
+
+    let started = std::time::Instant::now();
+    let mut candidates = Vec::with_capacity(SAMPLER_PROBE_VOCAB_TOKENS);
+    let mut max_logit = f32::NEG_INFINITY;
+    let mut max_id = 0u32;
+    for id in 0..SAMPLER_PROBE_VOCAB_TOKENS as u32 {
+        let logit =
+            ((id.wrapping_mul(1_664_525).wrapping_add(1_013_904_223) & 0xffff) as f32) / 65_536.0;
+        if logit > max_logit {
+            max_logit = logit;
+            max_id = id;
+        }
+        candidates.push(Candidate { id, logit, p: 0.0 });
+    }
+    let selected = candidates
+        .get(max_id as usize % candidates.len())
+        .copied()
+        .map(|candidate| (candidate.id, candidate.logit, candidate.p));
+    black_box((selected, candidates.len()));
+    started.elapsed().as_secs_f64() * 1_000_000.0 / SAMPLER_PROBE_VOCAB_TOKENS as f64
 }
 
 #[cfg(target_os = "macos")]

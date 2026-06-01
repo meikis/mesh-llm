@@ -109,6 +109,25 @@ pub struct AcceleratorProfile {
     /// hard-coding backend names.
     #[serde(default)]
     pub prefill_moe_matmul_tflops_fp16: Option<f32>,
+    /// CPU/runtime cost of syncing sampler history for one prompt token.
+    ///
+    /// Skippy's sampled first-token path calls into llama.cpp sampling after
+    /// prefill. The chat sampler syncs accepted prompt tokens into the sampler
+    /// chain before it samples the first generated token, so first-token
+    /// latency has a source-shaped term that steady decode does not have.
+    /// This is measured as a hardware/runtime fact by `mesh-llm gpus
+    /// benchmark`; model-fit multiplies it by expected prompt tokens only.
+    #[serde(default)]
+    pub sampler_history_us_per_token: Option<f32>,
+    /// CPU/runtime cost of constructing/scanning one sampled-decode vocabulary
+    /// candidate.
+    ///
+    /// llama.cpp sampling builds token candidates from logits over the
+    /// vocabulary. This measured fact is paired with GGUF tokenizer vocab size
+    /// when estimating first-token sampled-decode overhead. It is intentionally
+    /// model-independent and does not come from benchmarking the fitted GGUF.
+    #[serde(default)]
+    pub sampler_vocab_us_per_token: Option<f32>,
     pub unified_memory: bool,
 }
 
@@ -134,6 +153,10 @@ pub struct CpuProfile {
     pub prefill_ubatch_matmul_tflops_fp16: Option<f32>,
     #[serde(default)]
     pub prefill_moe_matmul_tflops_fp16: Option<f32>,
+    #[serde(default)]
+    pub sampler_history_us_per_token: Option<f32>,
+    #[serde(default)]
+    pub sampler_vocab_us_per_token: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -537,6 +560,7 @@ pub struct ModelRecommendation {
     pub estimated_first_token_prefill_ms: Option<f32>,
     pub estimated_first_token_decode_ms: Option<f32>,
     pub estimated_first_token_overhead_ms: Option<f32>,
+    pub estimated_first_token_sampler_ms: Option<f32>,
     pub estimated_first_token_ms: Option<f32>,
     pub estimated_first_token_ms_range: Option<FirstTokenEstimateRange>,
     pub split_candidate: Option<SplitCandidateEstimate>,

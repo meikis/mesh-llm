@@ -33,6 +33,10 @@ pub struct GpuBandwidth {
     pub prefill_ubatch_matmul_tflops_fp16: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefill_moe_matmul_tflops_fp16: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sampler_history_us_per_token: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sampler_vocab_us_per_token: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +57,8 @@ pub struct BenchmarkResult {
     pub prefill_matmul_tflops_fp16: Option<Vec<f64>>,
     pub prefill_ubatch_matmul_tflops_fp16: Option<Vec<f64>>,
     pub prefill_moe_matmul_tflops_fp16: Option<Vec<f64>>,
+    pub sampler_history_us_per_token: Option<Vec<f64>>,
+    pub sampler_vocab_us_per_token: Option<Vec<f64>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -411,6 +417,16 @@ pub fn run_or_load(
                 prefill_matmul_tflops_fp16,
                 prefill_ubatch_matmul_tflops_fp16,
                 prefill_moe_matmul_tflops_fp16,
+                sampler_history_us_per_token: cached
+                    .gpus
+                    .iter()
+                    .map(|g| g.sampler_history_us_per_token)
+                    .collect::<Option<Vec<f64>>>(),
+                sampler_vocab_us_per_token: cached
+                    .gpus
+                    .iter()
+                    .map(|g| g.sampler_vocab_us_per_token)
+                    .collect::<Option<Vec<f64>>>(),
             };
             tracing::info!(
                 "Using cached bandwidth fingerprint: {} GPUs",
@@ -518,6 +534,8 @@ fn build_benchmark_result(
             prefill_matmul_tflops_fp16: outputs[i].prefill_matmul_tflops_fp16,
             prefill_ubatch_matmul_tflops_fp16: outputs[i].prefill_ubatch_matmul_tflops_fp16,
             prefill_moe_matmul_tflops_fp16: outputs[i].prefill_moe_matmul_tflops_fp16,
+            sampler_history_us_per_token: outputs[i].sampler_history_us_per_token,
+            sampler_vocab_us_per_token: outputs[i].sampler_vocab_us_per_token,
         })
         .collect();
 
@@ -554,6 +572,14 @@ fn build_benchmark_result(
         .iter()
         .map(|g| g.prefill_moe_matmul_tflops_fp16)
         .collect::<Option<Vec<f64>>>();
+    let sampler_history_us_per_token = gpus
+        .iter()
+        .map(|g| g.sampler_history_us_per_token)
+        .collect::<Option<Vec<f64>>>();
+    let sampler_vocab_us_per_token = gpus
+        .iter()
+        .map(|g| g.sampler_vocab_us_per_token)
+        .collect::<Option<Vec<f64>>>();
 
     (
         gpus,
@@ -567,6 +593,8 @@ fn build_benchmark_result(
             prefill_matmul_tflops_fp16,
             prefill_ubatch_matmul_tflops_fp16,
             prefill_moe_matmul_tflops_fp16,
+            sampler_history_us_per_token,
+            sampler_vocab_us_per_token,
         },
     )
 }
@@ -617,6 +645,8 @@ mod tests {
             prefill_matmul_tflops_fp16: None,
             prefill_ubatch_matmul_tflops_fp16: None,
             prefill_moe_matmul_tflops_fp16: None,
+            sampler_history_us_per_token: None,
+            sampler_vocab_us_per_token: None,
             noise_pct: 0.0,
             runtime_s: 0.0,
             rated_gbps: None,
@@ -678,6 +708,8 @@ mod tests {
                 prefill_matmul_tflops_fp16: None,
                 prefill_ubatch_matmul_tflops_fp16: None,
                 prefill_moe_matmul_tflops_fp16: None,
+                sampler_history_us_per_token: None,
+                sampler_vocab_us_per_token: None,
                 unified_memory: false,
                 stable_id: None,
                 pci_bdf: None,
@@ -705,6 +737,11 @@ mod tests {
                 post_prefill_decode_overhead_ms: None,
                 compute_tflops_fp32: None,
                 compute_tflops_fp16: None,
+                prefill_matmul_tflops_fp16: None,
+                prefill_ubatch_matmul_tflops_fp16: None,
+                prefill_moe_matmul_tflops_fp16: None,
+                sampler_history_us_per_token: None,
+                sampler_vocab_us_per_token: None,
             }],
             false,
         );
@@ -726,6 +763,11 @@ mod tests {
                 post_prefill_decode_overhead_ms: None,
                 compute_tflops_fp32: None,
                 compute_tflops_fp16: None,
+                prefill_matmul_tflops_fp16: None,
+                prefill_ubatch_matmul_tflops_fp16: None,
+                prefill_moe_matmul_tflops_fp16: None,
+                sampler_history_us_per_token: None,
+                sampler_vocab_us_per_token: None,
             }],
             false,
         );
@@ -752,6 +794,11 @@ mod tests {
                 post_prefill_decode_overhead_ms: None,
                 compute_tflops_fp32: None,
                 compute_tflops_fp16: None,
+                prefill_matmul_tflops_fp16: None,
+                prefill_ubatch_matmul_tflops_fp16: None,
+                prefill_moe_matmul_tflops_fp16: None,
+                sampler_history_us_per_token: None,
+                sampler_vocab_us_per_token: None,
             }],
             false,
         );
@@ -925,6 +972,11 @@ mod tests {
                 post_prefill_decode_overhead_ms: None,
                 compute_tflops_fp32: None,
                 compute_tflops_fp16: None,
+                prefill_matmul_tflops_fp16: None,
+                prefill_ubatch_matmul_tflops_fp16: None,
+                prefill_moe_matmul_tflops_fp16: None,
+                sampler_history_us_per_token: None,
+                sampler_vocab_us_per_token: None,
             }],
             false,
         );
@@ -949,6 +1001,11 @@ mod tests {
                 post_prefill_decode_overhead_ms: Some(1.5),
                 compute_tflops_fp32: Some(19.5),
                 compute_tflops_fp16: Some(312.0),
+                prefill_matmul_tflops_fp16: None,
+                prefill_ubatch_matmul_tflops_fp16: None,
+                prefill_moe_matmul_tflops_fp16: None,
+                sampler_history_us_per_token: None,
+                sampler_vocab_us_per_token: None,
             }],
             false,
         );
@@ -979,6 +1036,11 @@ mod tests {
                 post_prefill_decode_overhead_ms: Some(1.5),
                 compute_tflops_fp32: Some(19.5),
                 compute_tflops_fp16: Some(312.0),
+                prefill_matmul_tflops_fp16: None,
+                prefill_ubatch_matmul_tflops_fp16: None,
+                prefill_moe_matmul_tflops_fp16: None,
+                sampler_history_us_per_token: None,
+                sampler_vocab_us_per_token: None,
             }],
             false,
         );
@@ -1014,6 +1076,11 @@ mod tests {
                 post_prefill_decode_overhead_ms: None,
                 compute_tflops_fp32: None,
                 compute_tflops_fp16: None,
+                prefill_matmul_tflops_fp16: None,
+                prefill_ubatch_matmul_tflops_fp16: None,
+                prefill_moe_matmul_tflops_fp16: None,
+                sampler_history_us_per_token: None,
+                sampler_vocab_us_per_token: None,
             }],
             cfg!(target_os = "macos"),
         );
@@ -1041,6 +1108,11 @@ mod tests {
                 post_prefill_decode_overhead_ms: Some(2.5),
                 compute_tflops_fp32: None,
                 compute_tflops_fp16: None,
+                prefill_matmul_tflops_fp16: None,
+                prefill_ubatch_matmul_tflops_fp16: None,
+                prefill_moe_matmul_tflops_fp16: None,
+                sampler_history_us_per_token: None,
+                sampler_vocab_us_per_token: None,
                 noise_pct: 0.1,
                 runtime_s: 0.5,
                 rated_gbps: None,
@@ -1202,6 +1274,11 @@ mod tests {
             post_prefill_decode_overhead_ms: Some(1.5),
             compute_tflops_fp32: Some(19.5),
             compute_tflops_fp16: Some(312.0),
+            prefill_matmul_tflops_fp16: None,
+            prefill_ubatch_matmul_tflops_fp16: None,
+            prefill_moe_matmul_tflops_fp16: None,
+            sampler_history_us_per_token: Some(0.05),
+            sampler_vocab_us_per_token: Some(0.0003),
         };
 
         let json = serde_json::to_string(&gpu).expect("should serialize");
@@ -1222,6 +1299,11 @@ mod tests {
             post_prefill_decode_overhead_ms: None,
             compute_tflops_fp32: None,
             compute_tflops_fp16: None,
+            prefill_matmul_tflops_fp16: None,
+            prefill_ubatch_matmul_tflops_fp16: None,
+            prefill_moe_matmul_tflops_fp16: None,
+            sampler_history_us_per_token: None,
+            sampler_vocab_us_per_token: None,
         };
 
         let value = serde_json::to_value(&gpu).expect("should serialize");
@@ -1285,6 +1367,11 @@ mod tests {
                 post_prefill_decode_overhead_ms: None,
                 compute_tflops_fp32: None,
                 compute_tflops_fp16: None,
+                prefill_matmul_tflops_fp16: None,
+                prefill_ubatch_matmul_tflops_fp16: None,
+                prefill_moe_matmul_tflops_fp16: None,
+                sampler_history_us_per_token: None,
+                sampler_vocab_us_per_token: None,
                 noise_pct: 0.0,
                 runtime_s: 0.0,
                 rated_gbps: None,
@@ -1306,6 +1393,11 @@ mod tests {
                 post_prefill_decode_overhead_ms: None,
                 compute_tflops_fp32: None,
                 compute_tflops_fp16: None,
+                prefill_matmul_tflops_fp16: None,
+                prefill_ubatch_matmul_tflops_fp16: None,
+                prefill_moe_matmul_tflops_fp16: None,
+                sampler_history_us_per_token: None,
+                sampler_vocab_us_per_token: None,
                 noise_pct: 0.0,
                 runtime_s: 0.0,
                 rated_gbps: None,

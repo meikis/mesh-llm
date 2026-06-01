@@ -27,6 +27,8 @@ struct ExecutionBudget {
     prefill_matmul_tflops_fp16: Option<f32>,
     prefill_ubatch_matmul_tflops_fp16: Option<f32>,
     prefill_moe_matmul_tflops_fp16: Option<f32>,
+    sampler_history_us_per_token: Option<f32>,
+    sampler_vocab_us_per_token: Option<f32>,
     unified_memory: bool,
 }
 
@@ -78,6 +80,8 @@ pub fn score_model(
             prefill_matmul_tflops_fp16: None,
             prefill_ubatch_matmul_tflops_fp16: None,
             prefill_moe_matmul_tflops_fp16: None,
+            sampler_history_us_per_token: None,
+            sampler_vocab_us_per_token: None,
             unified_memory: false,
         };
         return score_for_budget(model, config, &budget);
@@ -118,8 +122,13 @@ fn score_for_budget(
     let estimated_decode_range =
         decode_tokens_per_sec_range(estimated_decode_tps, active_decode_bytes, model, budget);
     let estimated_prefill_tps = prefill_tokens_per_sec(model, config, budget, estimated_decode_tps);
-    let first_token =
-        first_token_estimate(estimated_prefill_tps, estimated_decode_tps, config, budget);
+    let first_token = first_token_estimate(
+        model,
+        estimated_prefill_tps,
+        estimated_decode_tps,
+        config,
+        budget,
+    );
     let estimated_first_token_range = first_token_ms_range(first_token.total_ms, model, budget);
     let memory_limit = memory_limit_with_margin(budget.usable_memory_bytes, config.safety_margin);
     let mut warnings = Vec::new();
@@ -200,6 +209,7 @@ fn score_for_budget(
         estimated_first_token_prefill_ms: first_token.prefill_ms,
         estimated_first_token_decode_ms: first_token.decode_ms,
         estimated_first_token_overhead_ms: first_token.overhead_ms,
+        estimated_first_token_sampler_ms: first_token.sampler_ms,
         estimated_first_token_ms: first_token.total_ms,
         estimated_first_token_ms_range: estimated_first_token_range,
         split_candidate: split_candidate(model, &memory, budget, memory_limit, fit_status),
@@ -235,6 +245,8 @@ fn execution_budgets(hardware: &HardwareProfile) -> Vec<ExecutionBudget> {
             prefill_matmul_tflops_fp16: hardware.cpu.prefill_matmul_tflops_fp16,
             prefill_ubatch_matmul_tflops_fp16: hardware.cpu.prefill_ubatch_matmul_tflops_fp16,
             prefill_moe_matmul_tflops_fp16: hardware.cpu.prefill_moe_matmul_tflops_fp16,
+            sampler_history_us_per_token: hardware.cpu.sampler_history_us_per_token,
+            sampler_vocab_us_per_token: hardware.cpu.sampler_vocab_us_per_token,
             unified_memory: false,
         });
     }
@@ -279,6 +291,8 @@ fn accelerator_budget(
         prefill_matmul_tflops_fp16: accelerator.prefill_matmul_tflops_fp16,
         prefill_ubatch_matmul_tflops_fp16: accelerator.prefill_ubatch_matmul_tflops_fp16,
         prefill_moe_matmul_tflops_fp16: accelerator.prefill_moe_matmul_tflops_fp16,
+        sampler_history_us_per_token: accelerator.sampler_history_us_per_token,
+        sampler_vocab_us_per_token: accelerator.sampler_vocab_us_per_token,
         unified_memory: accelerator.unified_memory,
     }
 }
@@ -1238,10 +1252,12 @@ struct FirstTokenEstimate {
     prefill_ms: Option<f32>,
     decode_ms: Option<f32>,
     overhead_ms: Option<f32>,
+    sampler_ms: Option<f32>,
     total_ms: Option<f32>,
 }
 
 fn first_token_estimate(
+    model: &ModelProfile,
     prefill_tps: Option<f32>,
     decode_tps: Option<f32>,
     config: &SelectionConfig,
@@ -1262,14 +1278,41 @@ fn first_token_estimate(
     // so we do not smuggle model-benchmark observations into metadata-only fit.
     let overhead_value_ms = budget.post_prefill_decode_overhead_ms.unwrap_or(0.0);
     let overhead_ms = Some(overhead_value_ms);
-    let total_ms =
-        prefill_ms.map(|prefill| prefill + decode_ms.unwrap_or_default() + overhead_value_ms);
+    let sampler_ms = sampler_first_token_ms(model, config, budget);
+    let total_ms = prefill_ms.map(|prefill| {
+        prefill + decode_ms.unwrap_or_default() + overhead_value_ms + sampler_ms.unwrap_or_default()
+    });
     FirstTokenEstimate {
         prefill_ms,
         decode_ms,
         overhead_ms,
+        sampler_ms,
         total_ms,
     }
+}
+
+fn sampler_first_token_ms(
+    model: &ModelProfile,
+    config: &SelectionConfig,
+    budget: &ExecutionBudget,
+) -> Option<f32> {
+    let prompt_tokens = config.workload.interaction.expected_prompt_tokens?;
+    if budget.sampler_history_us_per_token.is_none() && budget.sampler_vocab_us_per_token.is_none()
+    {
+        return None;
+    }
+    let history_us = budget.sampler_history_us_per_token.unwrap_or(0.0);
+    let vocab_us = budget.sampler_vocab_us_per_token.unwrap_or(0.0);
+    if history_us <= 0.0 && vocab_us <= 0.0 {
+        return Some(0.0);
+    }
+    let history_ms = prompt_tokens as f32 * history_us / 1000.0;
+    let vocab_ms = model
+        .tokenizer
+        .vocab_size
+        .map(|vocab| vocab as f32 * vocab_us / 1000.0)
+        .unwrap_or_default();
+    Some(history_ms + vocab_ms)
 }
 
 fn first_token_ms_range(

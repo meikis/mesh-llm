@@ -99,6 +99,10 @@ fn accelerator_from_benchmark(
         prefill_moe_matmul_tflops_fp16: output
             .prefill_moe_matmul_tflops_fp16
             .map(|value| value as f32),
+        sampler_history_us_per_token: output
+            .sampler_history_us_per_token
+            .map(|value| value as f32),
+        sampler_vocab_us_per_token: output.sampler_vocab_us_per_token.map(|value| value as f32),
         unified_memory: facts.unified_memory,
     }
 }

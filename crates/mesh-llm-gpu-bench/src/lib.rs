@@ -16,7 +16,7 @@ mod intel;
 #[cfg(target_os = "macos")]
 mod metal;
 
-pub use output::BenchmarkOutput;
+pub use output::{BenchmarkOutput, DecodeKernelProbe};
 pub use runner::{
     BenchmarkBackend, BenchmarkRunner, parse_benchmark_output, run_benchmark, runner_for,
 };

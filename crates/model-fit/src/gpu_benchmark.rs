@@ -103,6 +103,7 @@ fn accelerator_from_benchmark(
             .sampler_history_us_per_token
             .map(|value| value as f32),
         sampler_vocab_us_per_token: output.sampler_vocab_us_per_token.map(|value| value as f32),
+        decode_kernel_probes: output.decode_kernel_probes,
         unified_memory: facts.unified_memory,
     }
 }

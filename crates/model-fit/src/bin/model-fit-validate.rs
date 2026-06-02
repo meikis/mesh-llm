@@ -125,7 +125,6 @@ struct ModelValidationReport {
     model_profile: Option<ModelProfile>,
     recommendation: Option<ModelRecommendation>,
     fit_interpretation: Option<FitInterpretation>,
-    split_validation: Option<SplitValidationSummary>,
     recommendations: Vec<WorkloadRecommendation>,
     abi_decode_probe: Option<AbiDecodeProbeSummary>,
     benchmarks: Vec<BenchmarkScenarioSummary>,
@@ -139,16 +138,6 @@ struct FitInterpretation {
     single_node_validation_allowed: bool,
     summary: String,
     details: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct SplitValidationSummary {
-    status: String,
-    attempted: bool,
-    estimated_stages: Option<u32>,
-    per_stage_memory_budget_bytes: Option<u64>,
-    reason: String,
-    warning: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -679,7 +668,6 @@ fn validate_prepared_model(
         model_index,
     ));
     let fit_interpretation = Some(fit_interpretation(&recommendation));
-    let split_validation = split_validation_summary(&recommendation);
     let benchmark = benchmarks
         .iter()
         .find(|benchmark| benchmark.scenario == "steady_decode")
@@ -698,7 +686,6 @@ fn validate_prepared_model(
         model_profile: Some(prepared.profile),
         recommendation: Some(recommendation),
         fit_interpretation,
-        split_validation,
         recommendations,
         abi_decode_probe,
         benchmarks,
@@ -719,27 +706,10 @@ fn fit_interpretation(recommendation: &ModelRecommendation) -> FitInterpretation
     let summary = match recommendation.fit_status {
         FitStatus::FitsLocal => "fits local selected backend".into(),
         FitStatus::FitsWithWarning => "fits local selected backend with warnings".into(),
-        FitStatus::SplitCandidate => {
-            "does not fit single-node local selected backend; candidate for Skippy split serving"
-                .into()
-        }
-        FitStatus::Rejected => "does not fit this hardware profile".into(),
+        FitStatus::Rejected => "does not fit local selected backend".into(),
     };
     let mut details = Vec::new();
     match recommendation.fit_status {
-        FitStatus::SplitCandidate => {
-            details.push(
-                "single-stage local validation is skipped by default because it would force a runtime shape the fit algorithm rejected"
-                    .into(),
-            );
-            if let Some(split) = recommendation.split_candidate.as_ref() {
-                details.push(format!(
-                    "estimated split plan requires {} stages with about {:.1} GiB safety-adjusted memory budget per stage",
-                    split.estimated_stages,
-                    split.per_stage_memory_budget_bytes as f64 / 1024_f64.powi(3)
-                ));
-            }
-        }
         FitStatus::Rejected => {
             details.push(
                 "validation is skipped by default because no local serving shape was selected"
@@ -759,21 +729,6 @@ fn fit_interpretation(recommendation: &ModelRecommendation) -> FitInterpretation
         summary,
         details,
     }
-}
-
-fn split_validation_summary(
-    recommendation: &ModelRecommendation,
-) -> Option<SplitValidationSummary> {
-    let split = recommendation.split_candidate.as_ref()?;
-    Some(SplitValidationSummary {
-        status: "requires-mesh-split-validation".into(),
-        attempted: false,
-        estimated_stages: Some(split.estimated_stages),
-        per_stage_memory_budget_bytes: Some(split.per_stage_memory_budget_bytes),
-        reason: "model-fit identified a split candidate; single-host local-single validation is not evidence that a multi-node Skippy split can serve it"
-            .into(),
-        warning: Some(split.warning.clone()),
-    })
 }
 
 async fn prepare_model(
@@ -2535,6 +2490,10 @@ fn gpu_output_from_command_json(gpu: &Value, p90_gbps: f64) -> GpuBenchmarkOutpu
         sampler_vocab_us_per_token: gpu
             .get("sampler_vocab_us_per_token")
             .and_then(Value::as_f64),
+        decode_kernel_probes: gpu
+            .get("decode_kernel_probes")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default(),
         noise_pct: 0.0,
         runtime_s: 0.0,
         rated_gbps: None,
@@ -3163,7 +3122,6 @@ fn error_report(input_ref: String, error: String) -> ModelValidationReport {
         model_profile: None,
         recommendation: None,
         fit_interpretation: None,
-        split_validation: None,
         recommendations: Vec::new(),
         abi_decode_probe: None,
         benchmarks: Vec::new(),
@@ -3218,6 +3176,9 @@ fn display_selected_backend(row: &ModelValidationReport) -> String {
 }
 
 fn display_abi_decode_probe(row: &ModelValidationReport) -> String {
+    if !row_is_local_fit(row) {
+        return "-".into();
+    }
     row.abi_decode_probe
         .as_ref()
         .and_then(|probe| probe.tokens_per_second)
@@ -3241,6 +3202,9 @@ fn fit_status(row: &ModelValidationReport) -> String {
 }
 
 fn display_estimated_tps(row: &ModelValidationReport) -> String {
+    if !row_is_local_fit(row) {
+        return "-".into();
+    }
     row.recommendation
         .as_ref()
         .and_then(|rec| rec.estimated_decode_tokens_per_sec)
@@ -3249,11 +3213,23 @@ fn display_estimated_tps(row: &ModelValidationReport) -> String {
 }
 
 fn display_estimated_range(row: &ModelValidationReport) -> String {
+    if !row_is_local_fit(row) {
+        return "-".into();
+    }
     row.recommendation
         .as_ref()
         .and_then(|rec| rec.estimated_decode_tokens_per_sec_range)
         .map(|range| format!("{:.1}-{:.1}", range.lower, range.upper))
         .unwrap_or_else(|| "-".into())
+}
+
+fn row_is_local_fit(row: &ModelValidationReport) -> bool {
+    row.recommendation.as_ref().is_some_and(|rec| {
+        matches!(
+            rec.fit_status,
+            FitStatus::FitsLocal | FitStatus::FitsWithWarning
+        )
+    })
 }
 
 fn display_opt(value: Option<f64>) -> String {

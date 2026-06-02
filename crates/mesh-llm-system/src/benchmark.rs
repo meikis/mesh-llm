@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-pub use mesh_llm_gpu_bench::BenchmarkOutput;
+pub use mesh_llm_gpu_bench::{BenchmarkOutput, DecodeKernelProbe};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -37,6 +37,8 @@ pub struct GpuBandwidth {
     pub sampler_history_us_per_token: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sampler_vocab_us_per_token: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decode_kernel_probes: Vec<DecodeKernelProbe>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +61,7 @@ pub struct BenchmarkResult {
     pub prefill_moe_matmul_tflops_fp16: Option<Vec<f64>>,
     pub sampler_history_us_per_token: Option<Vec<f64>>,
     pub sampler_vocab_us_per_token: Option<Vec<f64>>,
+    pub decode_kernel_probes: Option<Vec<Vec<DecodeKernelProbe>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -427,6 +430,17 @@ pub fn run_or_load(
                     .iter()
                     .map(|g| g.sampler_vocab_us_per_token)
                     .collect::<Option<Vec<f64>>>(),
+                decode_kernel_probes: cached
+                    .gpus
+                    .iter()
+                    .any(|g| !g.decode_kernel_probes.is_empty())
+                    .then(|| {
+                        cached
+                            .gpus
+                            .iter()
+                            .map(|g| g.decode_kernel_probes.clone())
+                            .collect()
+                    }),
             };
             tracing::info!(
                 "Using cached bandwidth fingerprint: {} GPUs",
@@ -536,6 +550,7 @@ fn build_benchmark_result(
             prefill_moe_matmul_tflops_fp16: outputs[i].prefill_moe_matmul_tflops_fp16,
             sampler_history_us_per_token: outputs[i].sampler_history_us_per_token,
             sampler_vocab_us_per_token: outputs[i].sampler_vocab_us_per_token,
+            decode_kernel_probes: outputs[i].decode_kernel_probes.clone(),
         })
         .collect();
 
@@ -580,6 +595,14 @@ fn build_benchmark_result(
         .iter()
         .map(|g| g.sampler_vocab_us_per_token)
         .collect::<Option<Vec<f64>>>();
+    let decode_kernel_probes = gpus
+        .iter()
+        .any(|g| !g.decode_kernel_probes.is_empty())
+        .then(|| {
+            gpus.iter()
+                .map(|g| g.decode_kernel_probes.clone())
+                .collect::<Vec<_>>()
+        });
 
     (
         gpus,
@@ -595,6 +618,7 @@ fn build_benchmark_result(
             prefill_moe_matmul_tflops_fp16,
             sampler_history_us_per_token,
             sampler_vocab_us_per_token,
+            decode_kernel_probes,
         },
     )
 }
@@ -647,6 +671,7 @@ mod tests {
             prefill_moe_matmul_tflops_fp16: None,
             sampler_history_us_per_token: None,
             sampler_vocab_us_per_token: None,
+            decode_kernel_probes: Vec::new(),
             noise_pct: 0.0,
             runtime_s: 0.0,
             rated_gbps: None,
@@ -742,6 +767,7 @@ mod tests {
                 prefill_moe_matmul_tflops_fp16: None,
                 sampler_history_us_per_token: None,
                 sampler_vocab_us_per_token: None,
+                decode_kernel_probes: Vec::new(),
             }],
             false,
         );
@@ -768,6 +794,7 @@ mod tests {
                 prefill_moe_matmul_tflops_fp16: None,
                 sampler_history_us_per_token: None,
                 sampler_vocab_us_per_token: None,
+                decode_kernel_probes: Vec::new(),
             }],
             false,
         );
@@ -799,6 +826,7 @@ mod tests {
                 prefill_moe_matmul_tflops_fp16: None,
                 sampler_history_us_per_token: None,
                 sampler_vocab_us_per_token: None,
+                decode_kernel_probes: Vec::new(),
             }],
             false,
         );
@@ -977,6 +1005,7 @@ mod tests {
                 prefill_moe_matmul_tflops_fp16: None,
                 sampler_history_us_per_token: None,
                 sampler_vocab_us_per_token: None,
+                decode_kernel_probes: Vec::new(),
             }],
             false,
         );
@@ -1006,6 +1035,7 @@ mod tests {
                 prefill_moe_matmul_tflops_fp16: None,
                 sampler_history_us_per_token: None,
                 sampler_vocab_us_per_token: None,
+                decode_kernel_probes: Vec::new(),
             }],
             false,
         );
@@ -1041,6 +1071,7 @@ mod tests {
                 prefill_moe_matmul_tflops_fp16: None,
                 sampler_history_us_per_token: None,
                 sampler_vocab_us_per_token: None,
+                decode_kernel_probes: Vec::new(),
             }],
             false,
         );
@@ -1081,6 +1112,7 @@ mod tests {
                 prefill_moe_matmul_tflops_fp16: None,
                 sampler_history_us_per_token: None,
                 sampler_vocab_us_per_token: None,
+                decode_kernel_probes: Vec::new(),
             }],
             cfg!(target_os = "macos"),
         );
@@ -1113,6 +1145,7 @@ mod tests {
                 prefill_moe_matmul_tflops_fp16: None,
                 sampler_history_us_per_token: None,
                 sampler_vocab_us_per_token: None,
+                decode_kernel_probes: Vec::new(),
                 noise_pct: 0.1,
                 runtime_s: 0.5,
                 rated_gbps: None,
@@ -1279,6 +1312,7 @@ mod tests {
             prefill_moe_matmul_tflops_fp16: None,
             sampler_history_us_per_token: Some(0.05),
             sampler_vocab_us_per_token: Some(0.0003),
+            decode_kernel_probes: Vec::new(),
         };
 
         let json = serde_json::to_string(&gpu).expect("should serialize");
@@ -1304,6 +1338,7 @@ mod tests {
             prefill_moe_matmul_tflops_fp16: None,
             sampler_history_us_per_token: None,
             sampler_vocab_us_per_token: None,
+            decode_kernel_probes: Vec::new(),
         };
 
         let value = serde_json::to_value(&gpu).expect("should serialize");
@@ -1372,6 +1407,7 @@ mod tests {
                 prefill_moe_matmul_tflops_fp16: None,
                 sampler_history_us_per_token: None,
                 sampler_vocab_us_per_token: None,
+                decode_kernel_probes: Vec::new(),
                 noise_pct: 0.0,
                 runtime_s: 0.0,
                 rated_gbps: None,
@@ -1398,6 +1434,7 @@ mod tests {
                 prefill_moe_matmul_tflops_fp16: None,
                 sampler_history_us_per_token: None,
                 sampler_vocab_us_per_token: None,
+                decode_kernel_probes: Vec::new(),
                 noise_pct: 0.0,
                 runtime_s: 0.0,
                 rated_gbps: None,

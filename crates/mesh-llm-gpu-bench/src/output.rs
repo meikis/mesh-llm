@@ -25,6 +25,8 @@ pub struct BenchmarkOutput {
     pub sampler_history_us_per_token: Option<f64>,
     #[serde(default)]
     pub sampler_vocab_us_per_token: Option<f64>,
+    #[serde(default)]
+    pub decode_kernel_probes: Vec<DecodeKernelProbe>,
     pub noise_pct: f64,
     pub runtime_s: f64,
     pub rated_gbps: Option<f64>,
@@ -34,4 +36,16 @@ pub struct BenchmarkOutput {
     pub mem_clock_mhz: Option<u64>,
     pub gcn_arch: Option<String>,
     pub hbm: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct DecodeKernelProbe {
+    pub name: String,
+    pub tensor_type: String,
+    pub rows: u32,
+    pub cols: u32,
+    pub batch_tokens: u32,
+    pub effective_gbps: f64,
+    pub tflops: Option<f64>,
+    pub runs: u32,
 }

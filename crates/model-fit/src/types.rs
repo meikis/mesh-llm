@@ -1,3 +1,4 @@
+use mesh_llm_gpu_bench::DecodeKernelProbe;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -128,6 +129,17 @@ pub struct AcceleratorProfile {
     /// model-independent and does not come from benchmarking the fitted GGUF.
     #[serde(default)]
     pub sampler_vocab_us_per_token: Option<f32>,
+    /// Optional llama-shaped decode kernel probes from `mesh-llm gpus
+    /// benchmark`.
+    ///
+    /// Raw memory bandwidth and decode-shaped streaming bandwidth are still
+    /// useful broad hardware facts, but ±10% tok/s confidence needs facts that
+    /// look closer to llama.cpp's `GGML_OP_MUL_MAT` decode path: tensor type,
+    /// matrix shape, and batch/token geometry. These probes are explicit
+    /// evidence. If absent, model-fit must not claim high tok/s confidence for
+    /// buckets that require them.
+    #[serde(default)]
+    pub decode_kernel_probes: Vec<DecodeKernelProbe>,
     pub unified_memory: bool,
 }
 
@@ -563,7 +575,6 @@ pub struct ModelRecommendation {
     pub estimated_first_token_sampler_ms: Option<f32>,
     pub estimated_first_token_ms: Option<f32>,
     pub estimated_first_token_ms_range: Option<FirstTokenEstimateRange>,
-    pub split_candidate: Option<SplitCandidateEstimate>,
     pub capability_evidence: Vec<CapabilityEvidence>,
     pub reasons: Vec<String>,
     pub warnings: Vec<String>,
@@ -585,7 +596,6 @@ pub struct FirstTokenEstimateRange {
 pub enum FitStatus {
     FitsLocal,
     FitsWithWarning,
-    SplitCandidate,
     Rejected,
 }
 
@@ -594,13 +604,6 @@ pub enum EstimateConfidence {
     High,
     Medium,
     Low,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SplitCandidateEstimate {
-    pub estimated_stages: u32,
-    pub per_stage_memory_budget_bytes: u64,
-    pub warning: String,
 }
 
 impl Default for SelectionConfig {

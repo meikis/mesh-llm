@@ -2,8 +2,8 @@ use crate::{
     AcceleratorKind, AcceleratorProfile, BackendKind, CapabilityEvidence, DecodeEstimateRange,
     EstimateConfidence, FirstTokenEstimateRange, FitStatus, HardwareProfile, KvCacheKind,
     MatmulShapeProfile, MeasurementSource, ModelArchitectureClass, ModelProfile,
-    ModelRecommendation, Requirement, ScoreWeights, SelectionConfig, SplitCandidateEstimate,
-    TensorGroupBytes, TensorMatmulGroupProfile, TensorTypeBytes, WeightCoverage, WorkloadTask,
+    ModelRecommendation, Requirement, ScoreWeights, SelectionConfig, TensorGroupBytes,
+    TensorMatmulGroupProfile, TensorTypeBytes, WeightCoverage, WorkloadTask,
 };
 use std::cmp::Ordering;
 
@@ -29,6 +29,7 @@ struct ExecutionBudget {
     prefill_moe_matmul_tflops_fp16: Option<f32>,
     sampler_history_us_per_token: Option<f32>,
     sampler_vocab_us_per_token: Option<f32>,
+    decode_kernel_probe_count: usize,
     unified_memory: bool,
 }
 
@@ -82,6 +83,7 @@ pub fn score_model(
             prefill_moe_matmul_tflops_fp16: None,
             sampler_history_us_per_token: None,
             sampler_vocab_us_per_token: None,
+            decode_kernel_probe_count: 0,
             unified_memory: false,
         };
         return score_for_budget(model, config, &budget);
@@ -139,7 +141,6 @@ fn score_for_budget(
     let fit_status = fit_status(
         model,
         &memory,
-        budget,
         memory_limit,
         workload_reject,
         &mut reasons,
@@ -175,11 +176,18 @@ fn score_for_budget(
                 .into(),
         );
     }
+    if measured_gpu_budget(budget) && budget.decode_kernel_probe_count == 0 {
+        warnings.push(
+            "measured GPU profile is missing llama-shaped decode kernel probes; tok/s confidence cannot be high"
+                .into(),
+        );
+    }
     if budget.unified_memory {
         reasons.push("using unified-memory budget for model weights, KV cache, and scratch".into());
     }
     reasons.push(format!(
-        "runtime estimate includes {:.1} GiB scratch and {:.1} GiB backend overhead",
+        "runtime estimate includes {:.1} GiB resident weights, {:.1} GiB scratch, and {:.1} GiB backend overhead",
+        gib(memory.resident_weight_bytes),
         gib(memory.scratch_bytes),
         gib(memory.backend_overhead_bytes)
     ));
@@ -192,7 +200,7 @@ fn score_for_budget(
         selected_backend: budget.backend,
         selected_accelerator: budget.accelerator_name.clone(),
         architecture_class: model.architecture_class,
-        estimate_confidence: estimate_confidence(model, budget),
+        estimate_confidence: estimate_confidence(model, budget, fit_status),
         fit_status,
         total_score,
         memory_score,
@@ -212,7 +220,6 @@ fn score_for_budget(
         estimated_first_token_sampler_ms: first_token.sampler_ms,
         estimated_first_token_ms: first_token.total_ms,
         estimated_first_token_ms_range: estimated_first_token_range,
-        split_candidate: split_candidate(model, &memory, budget, memory_limit, fit_status),
         capability_evidence: model.capability_evidence.clone(),
         reasons,
         warnings,
@@ -249,6 +256,7 @@ fn execution_budgets(hardware: &HardwareProfile, config: &SelectionConfig) -> Ve
             prefill_moe_matmul_tflops_fp16: hardware.cpu.prefill_moe_matmul_tflops_fp16,
             sampler_history_us_per_token: hardware.cpu.sampler_history_us_per_token,
             sampler_vocab_us_per_token: hardware.cpu.sampler_vocab_us_per_token,
+            decode_kernel_probe_count: 0,
             unified_memory: false,
         });
     }
@@ -268,7 +276,7 @@ fn include_cpu_budget(hardware: &HardwareProfile, config: &SelectionConfig) -> b
     // through CPU RAM would conflate "can be mmap'd somewhere" with "fits the
     // machine profile that mesh-llm will actually serve with." For those
     // generation workloads, keep the accelerator budget in charge so the result
-    // becomes `SplitCandidate` or `Rejected` instead.
+    // becomes `Rejected` instead.
     !has_non_cpu_accelerator(hardware) || cpu_is_valid_workload_budget(config.workload.task)
 }
 
@@ -325,6 +333,7 @@ fn accelerator_budget(
         prefill_moe_matmul_tflops_fp16: accelerator.prefill_moe_matmul_tflops_fp16,
         sampler_history_us_per_token: accelerator.sampler_history_us_per_token,
         sampler_vocab_us_per_token: accelerator.sampler_vocab_us_per_token,
+        decode_kernel_probe_count: accelerator.decode_kernel_probes.len(),
         unified_memory: accelerator.unified_memory,
     }
 }
@@ -1570,7 +1579,6 @@ fn moe_dispatch_overhead_ms_per_layer(budget: &ExecutionBudget, config: &Selecti
 fn fit_status(
     model: &ModelProfile,
     memory: &RuntimeMemoryEstimate,
-    budget: &ExecutionBudget,
     memory_limit: u64,
     workload_reject: bool,
     reasons: &mut Vec<String>,
@@ -1595,9 +1603,6 @@ fn fit_status(
         } else {
             FitStatus::FitsLocal
         }
-    } else if split_viable(model, memory, budget) {
-        warnings.push("model does not fit locally but may be a Skippy split candidate".into());
-        FitStatus::SplitCandidate
     } else {
         reasons.push(format!(
             "estimated runtime memory exceeds safety-adjusted budget ({:.1} GiB > {:.1} GiB)",
@@ -1638,37 +1643,6 @@ fn standalone_weight_coverage(
             false
         }
     }
-}
-
-fn split_viable(
-    model: &ModelProfile,
-    memory: &RuntimeMemoryEstimate,
-    budget: &ExecutionBudget,
-) -> bool {
-    uses_transformer_kv_cache(model.architecture_class)
-        && budget.usable_memory_bytes > 0
-        && memory.resident_weight_bytes > budget.usable_memory_bytes / 2
-}
-
-fn split_candidate(
-    model: &ModelProfile,
-    memory: &RuntimeMemoryEstimate,
-    _budget: &ExecutionBudget,
-    memory_limit: u64,
-    fit_status: FitStatus,
-) -> Option<SplitCandidateEstimate> {
-    if fit_status != FitStatus::SplitCandidate || memory_limit == 0 {
-        return None;
-    }
-    let stages = memory.runtime_bytes.div_ceil(memory_limit).max(2);
-    Some(SplitCandidateEstimate {
-        estimated_stages: stages.min(u64::from(u32::MAX)) as u32,
-        per_stage_memory_budget_bytes: memory_limit,
-        warning: format!(
-            "activation transfer depends on hidden_size={:?}, layers={:?}, and network bandwidth",
-            model.hidden_size, model.layer_count
-        ),
-    })
 }
 
 fn memory_limit_with_margin(usable_memory_bytes: u64, safety_margin: f32) -> u64 {
@@ -1901,7 +1875,6 @@ fn total_score(
     let status_factor = match fit_status {
         FitStatus::FitsLocal => 1.0,
         FitStatus::FitsWithWarning => 0.85,
-        FitStatus::SplitCandidate => 0.55,
         FitStatus::Rejected => 0.0,
     };
     (score / weight_sum * status_factor).clamp(0.0, 1.0)
@@ -2074,7 +2047,14 @@ fn add_prefill_estimate_reason(
     ));
 }
 
-fn estimate_confidence(model: &ModelProfile, budget: &ExecutionBudget) -> EstimateConfidence {
+fn estimate_confidence(
+    model: &ModelProfile,
+    budget: &ExecutionBudget,
+    fit_status: FitStatus,
+) -> EstimateConfidence {
+    if fit_status == FitStatus::Rejected {
+        return EstimateConfidence::Low;
+    }
     if model.weight_coverage != WeightCoverage::Full {
         return EstimateConfidence::Low;
     }
@@ -2089,6 +2069,8 @@ fn estimate_confidence(model: &ModelProfile, budget: &ExecutionBudget) -> Estima
         && model.layer_count.is_some()
         && model.hidden_size.is_some()
         && model.context_length.is_some()
+        && measured_gpu_budget(budget)
+        && budget.decode_kernel_probe_count > 0
     {
         EstimateConfidence::High
     } else {
@@ -2170,8 +2152,7 @@ fn status_rank(status: FitStatus) -> u8 {
     match status {
         FitStatus::FitsLocal => 0,
         FitStatus::FitsWithWarning => 1,
-        FitStatus::SplitCandidate => 2,
-        FitStatus::Rejected => 3,
+        FitStatus::Rejected => 2,
     }
 }
 

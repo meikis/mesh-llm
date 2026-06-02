@@ -212,9 +212,7 @@ fn print_table(recommendations: &[ModelRecommendation]) {
             rec.total_score,
             rec.context_score,
             rec.estimated_runtime_memory_bytes as f64 / GIB as f64,
-            rec.estimated_decode_tokens_per_sec
-                .map(|tps| format!("{tps:.1}"))
-                .unwrap_or_else(|| "-".into()),
+            display_decode_tps(rec),
             decode_range(rec),
             format!("{:?}", rec.architecture_class),
             format!("{:?}", rec.selected_backend),
@@ -300,9 +298,7 @@ fn print_best_table(recommendations: &[(String, ModelRecommendation)]) {
             format!("{:?}", rec.fit_status),
             rec.total_score,
             rec.estimated_runtime_memory_bytes as f64 / GIB as f64,
-            rec.estimated_decode_tokens_per_sec
-                .map(|tps| format!("{tps:.1}"))
-                .unwrap_or_else(|| "-".into()),
+            display_decode_tps(rec),
             decode_range(rec),
             format!("{:?}", rec.architecture_class),
             serve_target(rec),
@@ -315,9 +311,28 @@ fn print_best_table(recommendations: &[(String, ModelRecommendation)]) {
 }
 
 fn decode_range(rec: &ModelRecommendation) -> String {
+    if !local_fit(rec) {
+        return "-".into();
+    }
     rec.estimated_decode_tokens_per_sec_range
         .map(|range| format!("{:.1}-{:.1}", range.lower, range.upper))
         .unwrap_or_else(|| "-".into())
+}
+
+fn display_decode_tps(rec: &ModelRecommendation) -> String {
+    if !local_fit(rec) {
+        return "-".into();
+    }
+    rec.estimated_decode_tokens_per_sec
+        .map(|tps| format!("{tps:.1}"))
+        .unwrap_or_else(|| "-".into())
+}
+
+fn local_fit(rec: &ModelRecommendation) -> bool {
+    matches!(
+        rec.fit_status,
+        FitStatus::FitsLocal | FitStatus::FitsWithWarning
+    )
 }
 
 fn serve_target(rec: &ModelRecommendation) -> String {

@@ -30,6 +30,7 @@ fn m1_ultra() -> HardwareProfile {
             prefill_moe_matmul_tflops_fp16: None,
             sampler_history_us_per_token: None,
             sampler_vocab_us_per_token: None,
+            decode_kernel_probes: Vec::new(),
             unified_memory: true,
         }],
         cpu: CpuProfile {
@@ -75,6 +76,7 @@ fn discrete_cuda_16g() -> HardwareProfile {
             prefill_moe_matmul_tflops_fp16: None,
             sampler_history_us_per_token: None,
             sampler_vocab_us_per_token: None,
+            decode_kernel_probes: Vec::new(),
             unified_memory: false,
         }],
         cpu: CpuProfile {
@@ -494,7 +496,7 @@ fn filename_like_identifier_does_not_create_coding_suitability() {
 }
 
 #[test]
-fn oversized_dense_model_becomes_split_candidate() {
+fn oversized_dense_model_is_rejected_for_local_fit() {
     let hardware = m1_ultra();
     let mut config = SelectionConfig {
         workload: WorkloadProfile::summarization(),
@@ -505,8 +507,7 @@ fn oversized_dense_model_becomes_split_candidate() {
 
     let rec = score_model(&hardware, &model, &config);
 
-    assert_eq!(rec.fit_status, FitStatus::SplitCandidate);
-    assert!(rec.split_candidate.is_some());
+    assert_eq!(rec.fit_status, FitStatus::Rejected);
 }
 
 #[test]
@@ -761,13 +762,12 @@ fn generation_workload_does_not_use_cpu_ram_as_discrete_gpu_fit() {
     let rec = score_model(&hardware, &model, &config);
 
     assert_eq!(rec.selected_backend, BackendKind::Cuda);
-    assert_eq!(rec.fit_status, FitStatus::SplitCandidate);
-    assert!(rec.split_candidate.is_some());
+    assert_eq!(rec.fit_status, FitStatus::Rejected);
     assert!(rec.estimated_runtime_memory_bytes > 15 * GIB);
 }
 
 #[test]
-fn white_qwen3_moe_fixture_is_split_candidate_not_cpu_fit() {
+fn white_qwen3_moe_fixture_is_rejected_not_cpu_fit() {
     let hardware = discrete_cuda_16g();
     let mut config = SelectionConfig {
         workload: WorkloadProfile::chat(),
@@ -779,8 +779,7 @@ fn white_qwen3_moe_fixture_is_split_candidate_not_cpu_fit() {
     let rec = score_model(&hardware, &model, &config);
 
     assert_eq!(rec.selected_backend, BackendKind::Cuda);
-    assert_eq!(rec.fit_status, FitStatus::SplitCandidate);
-    assert!(rec.split_candidate.is_some());
+    assert_eq!(rec.fit_status, FitStatus::Rejected);
     assert!(rec.estimated_runtime_memory_bytes > 19 * GIB);
     assert!(
         rec.warnings
@@ -871,6 +870,7 @@ fn hardware_profile_uses_mesh_gpu_benchmark_output_as_measured_bandwidth() {
             prefill_moe_matmul_tflops_fp16: None,
             sampler_history_us_per_token: None,
             sampler_vocab_us_per_token: None,
+            decode_kernel_probes: Vec::new(),
             noise_pct: 1.0,
             runtime_s: 0.25,
             rated_gbps: None,

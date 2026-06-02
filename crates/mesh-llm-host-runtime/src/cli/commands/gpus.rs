@@ -207,6 +207,11 @@ fn gpu_benchmark_json(hw: &HardwareSurvey, saved: &SavedBenchmark) -> Value {
                     .sampler_vocab_us_per_token
                     .as_ref()
                     .and_then(|values| values.get(index)),
+                "decode_kernel_probes": saved
+                    .result
+                    .decode_kernel_probes
+                    .as_ref()
+                    .and_then(|values| values.get(index)),
             })
         })
         .collect::<Vec<_>>();
@@ -409,6 +414,7 @@ mod tests {
                 prefill_moe_matmul_tflops_fp16: Some(vec![9.0, 8.0]),
                 sampler_history_us_per_token: Some(vec![0.05, 0.06]),
                 sampler_vocab_us_per_token: Some(vec![0.0003, 0.0004]),
+                decode_kernel_probes: None,
             },
         };
 
@@ -452,6 +458,7 @@ mod tests {
                 prefill_moe_matmul_tflops_fp16: Some(vec![9.0]),
                 sampler_history_us_per_token: Some(vec![0.05]),
                 sampler_vocab_us_per_token: Some(vec![0.0003]),
+                decode_kernel_probes: None,
             },
         };
 

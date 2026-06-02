@@ -10512,6 +10512,7 @@ mod tests {
             prefill_moe_matmul_tflops_fp16: None,
             sampler_history_us_per_token: None,
             sampler_vocab_us_per_token: None,
+            decode_kernel_probes: None,
         };
 
         store_benchmark_metrics(

@@ -1415,16 +1415,6 @@ fn benchmark_skip_reason(
     if model.profile.layer_count.is_none() {
         return Some("model metadata did not include layer count".into());
     }
-    if scenario == BenchmarkScenarioKind::SteadyDecode
-        && recommendation.estimated_decode_tokens_per_sec.is_none()
-    {
-        return Some("fit algorithm did not produce a decode tokens/sec estimate".into());
-    }
-    if scenario == BenchmarkScenarioKind::Prefill
-        && recommendation.estimated_prefill_tokens_per_sec.is_none()
-    {
-        return Some("fit algorithm did not produce a prefill tokens/sec estimate".into());
-    }
     if !args.benchmark_all
         && !matches!(
             recommendation.fit_status,
@@ -1435,6 +1425,16 @@ fn benchmark_skip_reason(
             "fit status is {:?}; use --benchmark-all to force single-stage benchmark",
             recommendation.fit_status
         ));
+    }
+    if scenario == BenchmarkScenarioKind::SteadyDecode
+        && recommendation.estimated_decode_tokens_per_sec.is_none()
+    {
+        return Some("fit algorithm did not produce a decode tokens/sec estimate".into());
+    }
+    if scenario == BenchmarkScenarioKind::Prefill
+        && recommendation.estimated_prefill_tokens_per_sec.is_none()
+    {
+        return Some("fit algorithm did not produce a prefill tokens/sec estimate".into());
     }
     if !args.benchmark_all && recommendation.selected_backend == BackendKind::Cpu {
         return Some(

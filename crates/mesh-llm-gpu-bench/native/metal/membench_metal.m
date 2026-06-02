@@ -387,7 +387,11 @@ char *mesh_llm_gpu_bench_metal_json(char **error_out) {
             (NSUInteger)PREFILL_MATMUL_SIZE * PREFILL_UBATCH_TOKENS * half_bytes;
         id<MTLBuffer> ubatch_b = [device newBufferWithLength:ubatch_matrix_bytes options:MTLResourceStorageModeShared];
         id<MTLBuffer> ubatch_c = [device newBufferWithLength:ubatch_matrix_bytes options:MTLResourceStorageModeShared];
-        if (ubatch_b == nil || ubatch_c == nil) {
+        const NSUInteger decode_vector_row_bytes = half_bytes;
+        const NSUInteger decode_vector_bytes = (NSUInteger)PREFILL_MATMUL_SIZE * half_bytes;
+        id<MTLBuffer> decode_b = [device newBufferWithLength:decode_vector_bytes options:MTLResourceStorageModeShared];
+        id<MTLBuffer> decode_c = [device newBufferWithLength:decode_vector_bytes options:MTLResourceStorageModeShared];
+        if (ubatch_b == nil || ubatch_c == nil || decode_b == nil || decode_c == nil) {
             if (error_out != NULL) {
                 *error_out = copy_c_string(@"failed to allocate Metal ubatch matmul benchmark resources");
             }
@@ -395,6 +399,8 @@ char *mesh_llm_gpu_bench_metal_json(char **error_out) {
         }
         memset([ubatch_b contents], 1, ubatch_matrix_bytes);
         memset([ubatch_c contents], 0, ubatch_matrix_bytes);
+        memset([decode_b contents], 1, decode_vector_bytes);
+        memset([decode_c contents], 0, decode_vector_bytes);
         MPSMatrixDescriptor *ubatch_b_desc =
             [MPSMatrixDescriptor matrixDescriptorWithRows:PREFILL_MATMUL_SIZE
                                                   columns:PREFILL_UBATCH_TOKENS
@@ -407,12 +413,33 @@ char *mesh_llm_gpu_bench_metal_json(char **error_out) {
                                                  dataType:MPSDataTypeFloat16];
         MPSMatrix *ubatch_right = [[MPSMatrix alloc] initWithBuffer:ubatch_b descriptor:ubatch_b_desc];
         MPSMatrix *ubatch_result = [[MPSMatrix alloc] initWithBuffer:ubatch_c descriptor:ubatch_c_desc];
+        MPSMatrixDescriptor *decode_b_desc =
+            [MPSMatrixDescriptor matrixDescriptorWithRows:PREFILL_MATMUL_SIZE
+                                                  columns:1
+                                                 rowBytes:decode_vector_row_bytes
+                                                 dataType:MPSDataTypeFloat16];
+        MPSMatrixDescriptor *decode_c_desc =
+            [MPSMatrixDescriptor matrixDescriptorWithRows:PREFILL_MATMUL_SIZE
+                                                  columns:1
+                                                 rowBytes:decode_vector_row_bytes
+                                                 dataType:MPSDataTypeFloat16];
+        MPSMatrix *decode_right = [[MPSMatrix alloc] initWithBuffer:decode_b descriptor:decode_b_desc];
+        MPSMatrix *decode_result = [[MPSMatrix alloc] initWithBuffer:decode_c descriptor:decode_c_desc];
         MPSMatrixMultiplication *ubatch_gemm =
             [[MPSMatrixMultiplication alloc] initWithDevice:device
                                               transposeLeft:false
                                              transposeRight:false
                                                  resultRows:PREFILL_MATMUL_SIZE
                                               resultColumns:PREFILL_UBATCH_TOKENS
+                                            interiorColumns:PREFILL_MATMUL_SIZE
+                                                      alpha:1.0
+                                                       beta:0.0];
+        MPSMatrixMultiplication *decode_gemm =
+            [[MPSMatrixMultiplication alloc] initWithDevice:device
+                                              transposeLeft:false
+                                             transposeRight:false
+                                                 resultRows:PREFILL_MATMUL_SIZE
+                                              resultColumns:1
                                             interiorColumns:PREFILL_MATMUL_SIZE
                                                       alpha:1.0
                                                        beta:0.0];
@@ -475,6 +502,11 @@ char *mesh_llm_gpu_bench_metal_json(char **error_out) {
             * (double)PREFILL_MATMUL_SIZE
             * (double)PREFILL_UBATCH_TOKENS
             * (double)PREFILL_MATMUL_SIZE;
+        const double decode_matvec_flops = 2.0
+            * (double)PREFILL_MATMUL_SIZE
+            * (double)PREFILL_MATMUL_SIZE;
+        const double decode_matvec_bytes =
+            (double)dense_matrix_bytes + (double)decode_vector_bytes * 2.0;
         const double moe_flops = 2.0
             * (double)PREFILL_MOE_M
             * (double)PREFILL_MOE_N
@@ -497,6 +529,8 @@ char *mesh_llm_gpu_bench_metal_json(char **error_out) {
                                  dense_flops);
             (void)run_mps_matmul(queue, ubatch_gemm, dense_left, ubatch_right, ubatch_result,
                                  ubatch_flops);
+            (void)run_mps_matmul(queue, decode_gemm, dense_left, decode_right, decode_result,
+                                 decode_matvec_flops);
             (void)run_mps_moe_matmul(queue, moe_gemm, moe_left, moe_right, moe_result,
                                      moe_flops);
             (void)run_empty_dispatch_overhead_ms(queue, pso_empty, sink, empty_grid, empty_tpg, 1);
@@ -510,6 +544,8 @@ char *mesh_llm_gpu_bench_metal_json(char **error_out) {
         NSMutableArray<NSNumber *> *prefill_matmul_samples = [NSMutableArray arrayWithCapacity:runs];
         NSMutableArray<NSNumber *> *prefill_ubatch_matmul_samples = [NSMutableArray arrayWithCapacity:runs];
         NSMutableArray<NSNumber *> *prefill_moe_matmul_samples = [NSMutableArray arrayWithCapacity:runs];
+        NSMutableArray<NSNumber *> *decode_matvec_fp16_gbps_samples = [NSMutableArray arrayWithCapacity:runs];
+        NSMutableArray<NSNumber *> *decode_matvec_fp16_tflops_samples = [NSMutableArray arrayWithCapacity:runs];
         NSMutableArray<NSNumber *> *post_prefill_decode_samples = [NSMutableArray arrayWithCapacity:runs];
         NSMutableArray<NSNumber *> *decode_effective_samples = [NSMutableArray arrayWithCapacity:runs];
         NSMutableArray<NSNumber *> *fixed_overhead_samples = [NSMutableArray arrayWithCapacity:runs];
@@ -528,6 +564,15 @@ char *mesh_llm_gpu_bench_metal_json(char **error_out) {
                                                                       dense_left, ubatch_right,
                                                                       ubatch_result,
                                                                       ubatch_flops))];
+            double decode_matvec_tflops = run_mps_matmul(queue, decode_gemm,
+                                                         dense_left, decode_right,
+                                                         decode_result,
+                                                         decode_matvec_flops);
+            [decode_matvec_fp16_tflops_samples addObject:@(decode_matvec_tflops)];
+            [decode_matvec_fp16_gbps_samples addObject:@(decode_matvec_bytes
+                                                         / (decode_matvec_flops
+                                                            / (decode_matvec_tflops * 1e12))
+                                                         / 1e9)];
             [prefill_moe_matmul_samples addObject:@(run_mps_moe_matmul(queue, moe_gemm,
                                                                        moe_left, moe_right,
                                                                        moe_result,
@@ -560,6 +605,10 @@ char *mesh_llm_gpu_bench_metal_json(char **error_out) {
             percentile_value(prefill_ubatch_matmul_samples, (NSUInteger)((double)runs * 0.90) - 1);
         double prefill_moe_matmul_measured =
             percentile_value(prefill_moe_matmul_samples, (NSUInteger)((double)runs * 0.90) - 1);
+        double decode_matvec_fp16_gbps =
+            percentile_value(decode_matvec_fp16_gbps_samples, (NSUInteger)((double)runs * 0.90) - 1);
+        double decode_matvec_fp16_tflops =
+            percentile_value(decode_matvec_fp16_tflops_samples, (NSUInteger)((double)runs * 0.90) - 1);
         double post_prefill_decode_measured = percentile_value(post_prefill_decode_samples, runs / 2);
         double decode_effective = percentile_value(decode_effective_samples, (NSUInteger)((double)runs * 0.90) - 1);
         decode_effective = MIN(decode_effective, p90);
@@ -573,10 +622,13 @@ char *mesh_llm_gpu_bench_metal_json(char **error_out) {
         double efficiency = has_rated ? p90 / rated * 100.0 : 0.0;
 
         NSMutableString *json = [NSMutableString stringWithFormat:
-            @"[{\"device\":\"%@\",\"buffer_mb\":512,\"runs\":%d,\"p50_gbps\":%.2f,\"p90_gbps\":%.2f,\"noise_pct\":%.2f,\"runtime_s\":%.3f,\"decode_effective_gbps\":%.2f,\"decode_fixed_overhead_ms\":%.4f,\"post_prefill_decode_overhead_ms\":%.4f,\"compute_tflops_fp32\":%.2f,\"compute_tflops_fp16\":%.2f,\"prefill_matmul_tflops_fp16\":%.2f,\"prefill_ubatch_matmul_tflops_fp16\":%.2f,\"prefill_moe_matmul_tflops_fp16\":%.2f",
+            @"[{\"device\":\"%@\",\"buffer_mb\":512,\"runs\":%d,\"p50_gbps\":%.2f,\"p90_gbps\":%.2f,\"noise_pct\":%.2f,\"runtime_s\":%.3f,\"decode_effective_gbps\":%.2f,\"decode_fixed_overhead_ms\":%.4f,\"post_prefill_decode_overhead_ms\":%.4f,\"compute_tflops_fp32\":%.2f,\"compute_tflops_fp16\":%.2f,\"prefill_matmul_tflops_fp16\":%.2f,\"prefill_ubatch_matmul_tflops_fp16\":%.2f,\"prefill_moe_matmul_tflops_fp16\":%.2f,\"decode_kernel_probes\":[{\"name\":\"decode_weight_stream\",\"tensor_type\":\"mixed\",\"rows\":0,\"cols\":0,\"batch_tokens\":1,\"effective_gbps\":%.2f,\"tflops\":null,\"runs\":%d},{\"name\":\"decode_f16_matvec\",\"tensor_type\":\"f16\",\"rows\":%d,\"cols\":%d,\"batch_tokens\":1,\"effective_gbps\":%.2f,\"tflops\":%.4f,\"runs\":%d}]",
             device_name, runs, p50, p90, noise, runtime_secs, decode_effective, fixed_overhead,
             post_prefill_decode_measured, fp32_measured, fp16_measured, prefill_matmul_measured,
-            prefill_ubatch_matmul_measured, prefill_moe_matmul_measured];
+            prefill_ubatch_matmul_measured, prefill_moe_matmul_measured,
+            decode_effective, runs,
+            PREFILL_MATMUL_SIZE, PREFILL_MATMUL_SIZE, decode_matvec_fp16_gbps,
+            decode_matvec_fp16_tflops, runs];
         if (has_rated) {
             [json appendFormat:@",\"rated_gbps\":%.0f,\"rated_estimated\":%@", rated, estimated ? @"true" : @"false"];
             [json appendFormat:@",\"efficiency_pct\":%.2f", efficiency];

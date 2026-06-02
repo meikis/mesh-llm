@@ -5,6 +5,7 @@ use crate::{
     ModelRecommendation, Requirement, ScoreWeights, SelectionConfig, TensorGroupBytes,
     TensorMatmulGroupProfile, TensorTypeBytes, WeightCoverage, WorkloadTask,
 };
+use mesh_llm_gpu_bench::DecodeKernelProbe;
 use std::cmp::Ordering;
 
 const MIB: u64 = 1024 * 1024;
@@ -29,7 +30,7 @@ struct ExecutionBudget {
     prefill_moe_matmul_tflops_fp16: Option<f32>,
     sampler_history_us_per_token: Option<f32>,
     sampler_vocab_us_per_token: Option<f32>,
-    decode_kernel_probe_count: usize,
+    decode_kernel_probes: Vec<DecodeKernelProbe>,
     unified_memory: bool,
 }
 
@@ -83,7 +84,7 @@ pub fn score_model(
             prefill_moe_matmul_tflops_fp16: None,
             sampler_history_us_per_token: None,
             sampler_vocab_us_per_token: None,
-            decode_kernel_probe_count: 0,
+            decode_kernel_probes: Vec::new(),
             unified_memory: false,
         };
         return score_for_budget(model, config, &budget);
@@ -176,11 +177,15 @@ fn score_for_budget(
                 .into(),
         );
     }
-    if measured_gpu_budget(budget) && budget.decode_kernel_probe_count == 0 {
+    if measured_gpu_budget(budget) && budget.decode_kernel_probes.is_empty() {
         warnings.push(
             "measured GPU profile is missing llama-shaped decode kernel probes; tok/s confidence cannot be high"
                 .into(),
         );
+    } else if let Some(tensor_type) = missing_exact_decode_kernel_probe_tensor_type(model, budget) {
+        warnings.push(format!(
+            "measured GPU profile does not include a decode kernel probe for dominant tensor type {tensor_type}; tok/s confidence cannot be high"
+        ));
     }
     if budget.unified_memory {
         reasons.push("using unified-memory budget for model weights, KV cache, and scratch".into());
@@ -267,7 +272,7 @@ fn execution_budgets(hardware: &HardwareProfile, config: &SelectionConfig) -> Ve
             prefill_moe_matmul_tflops_fp16: hardware.cpu.prefill_moe_matmul_tflops_fp16,
             sampler_history_us_per_token: hardware.cpu.sampler_history_us_per_token,
             sampler_vocab_us_per_token: hardware.cpu.sampler_vocab_us_per_token,
-            decode_kernel_probe_count: 0,
+            decode_kernel_probes: Vec::new(),
             unified_memory: false,
         });
     }
@@ -344,7 +349,7 @@ fn accelerator_budget(
         prefill_moe_matmul_tflops_fp16: accelerator.prefill_moe_matmul_tflops_fp16,
         sampler_history_us_per_token: accelerator.sampler_history_us_per_token,
         sampler_vocab_us_per_token: accelerator.sampler_vocab_us_per_token,
-        decode_kernel_probe_count: accelerator.decode_kernel_probes.len(),
+        decode_kernel_probes: accelerator.decode_kernel_probes.clone(),
         unified_memory: accelerator.unified_memory,
     }
 }
@@ -801,7 +806,7 @@ fn decode_tokens_per_sec(
     if bytes == 0 {
         return None;
     }
-    let base_bandwidth = decode_base_bandwidth_bytes_per_sec(budget, config);
+    let base_bandwidth = decode_base_bandwidth_bytes_per_sec(model, budget, config);
     let architecture_factor = match model.architecture_class {
         ModelArchitectureClass::Unknown => 0.75,
         ModelArchitectureClass::RecurrentOrStateSpace => 0.85,
@@ -1073,8 +1078,15 @@ fn raw_memory_bandwidth_bytes_per_sec(budget: &ExecutionBudget) -> u64 {
         })
 }
 
-fn decode_base_bandwidth_bytes_per_sec(budget: &ExecutionBudget, config: &SelectionConfig) -> u64 {
+fn decode_base_bandwidth_bytes_per_sec(
+    model: &ModelProfile,
+    budget: &ExecutionBudget,
+    config: &SelectionConfig,
+) -> u64 {
     if measured_gpu_budget(budget) {
+        if let Some(probe) = selected_exact_decode_kernel_probe(model, budget) {
+            return (probe.effective_gbps * 1_000_000_000.0).round() as u64;
+        }
         return budget
             .decode_effective_bandwidth_bytes_per_sec
             .or(budget.memory_bandwidth_bytes_per_sec)
@@ -1082,6 +1094,87 @@ fn decode_base_bandwidth_bytes_per_sec(budget: &ExecutionBudget, config: &Select
     }
     (raw_memory_bandwidth_bytes_per_sec(budget) as f32
         * fallback_backend_efficiency(budget.backend, config)) as u64
+}
+
+fn selected_exact_decode_kernel_probe<'a>(
+    model: &ModelProfile,
+    budget: &'a ExecutionBudget,
+) -> Option<&'a DecodeKernelProbe> {
+    let tensor_type = dominant_decode_tensor_type(model)?;
+    budget.decode_kernel_probes.iter().find(|probe| {
+        probe.batch_tokens == 1
+            && probe.effective_gbps > 0.0
+            && is_llama_decode_kernel_probe(probe)
+            && probe.tensor_type.eq_ignore_ascii_case(tensor_type)
+    })
+}
+
+fn is_llama_decode_kernel_probe(probe: &DecodeKernelProbe) -> bool {
+    // A measured row is not automatically a model-fit decode row just because
+    // it has a tensor type. `mesh-llm gpus benchmark` can also report useful
+    // diagnostic probes from backend libraries such as cuBLAS or MPS. Those are
+    // hardware facts, but they are not the same kernels llama.cpp uses for
+    // GGML_OP_MUL_MAT decode on every backend. High-confidence tok/s prediction
+    // should only consume probes that explicitly identify themselves as GGML or
+    // llama decode kernels. This keeps diagnostic benchmark expansion from
+    // silently becoming a fitted estimator.
+    let name = probe.name.as_str();
+    name.starts_with("ggml_") || name.starts_with("llama_")
+}
+
+fn missing_exact_decode_kernel_probe_tensor_type(
+    model: &ModelProfile,
+    budget: &ExecutionBudget,
+) -> Option<&'static str> {
+    if !measured_gpu_budget(budget) || selected_exact_decode_kernel_probe(model, budget).is_some() {
+        return None;
+    }
+    dominant_decode_tensor_type(model)
+}
+
+fn dominant_decode_tensor_type(model: &ModelProfile) -> Option<&'static str> {
+    let bytes = aggregate_matmul_type_bytes(&model.tensor_matmul);
+    let candidates = [
+        ("f32", bytes.f32_bytes),
+        ("f16", bytes.f16_bytes),
+        ("bf16", bytes.bf16_bytes),
+        ("q4_0", bytes.q4_0_bytes),
+        ("q4_k", bytes.q4_k_bytes),
+        ("q5_k", bytes.q5_k_bytes),
+        ("q6_k", bytes.q6_k_bytes),
+        ("q8_0", bytes.q8_0_bytes),
+        ("iq", bytes.iq_bytes),
+        ("other_quantized", bytes.other_quantized_bytes),
+        ("unknown", bytes.unknown_bytes),
+    ];
+    candidates
+        .into_iter()
+        .max_by_key(|(_, bytes)| *bytes)
+        .and_then(|(kind, bytes)| (bytes > 0).then_some(kind))
+        .or_else(|| quantization_tensor_type(model.quantization.as_deref()))
+}
+
+fn quantization_tensor_type(quantization: Option<&str>) -> Option<&'static str> {
+    let quantization = quantization?.to_ascii_lowercase();
+    if quantization.contains("q4_k") {
+        Some("q4_k")
+    } else if quantization.contains("q5_k") {
+        Some("q5_k")
+    } else if quantization.contains("q6_k") {
+        Some("q6_k")
+    } else if quantization.contains("q8_0") || quantization.contains("q8") {
+        Some("q8_0")
+    } else if quantization.contains("q4_0") {
+        Some("q4_0")
+    } else if quantization.contains("f16") {
+        Some("f16")
+    } else if quantization.contains("bf16") {
+        Some("bf16")
+    } else if quantization.contains("f32") {
+        Some("f32")
+    } else {
+        None
+    }
 }
 
 fn prefill_tokens_per_sec(
@@ -1988,13 +2081,18 @@ fn add_decode_estimate_reason(
         );
     }
     let fixed_ms = fixed_decode_overhead_ms(budget, config);
-    if measured_gpu_budget(budget)
-        && let Some(bytes_per_sec) = budget.decode_effective_bandwidth_bytes_per_sec
-    {
-        reasons.push(format!(
-            "decode estimate uses measured decode-shaped bandwidth ({:.1} GB/s)",
-            bytes_per_sec as f32 / 1_000_000_000.0
-        ));
+    if measured_gpu_budget(budget) {
+        if let Some(probe) = selected_exact_decode_kernel_probe(model, budget) {
+            reasons.push(format!(
+                "decode estimate uses measured {} probe for {} tensors ({:.1} GB/s)",
+                probe.name, probe.tensor_type, probe.effective_gbps
+            ));
+        } else if let Some(bytes_per_sec) = budget.decode_effective_bandwidth_bytes_per_sec {
+            reasons.push(format!(
+                "decode estimate uses measured decode-shaped bandwidth ({:.1} GB/s)",
+                bytes_per_sec as f32 / 1_000_000_000.0
+            ));
+        }
     }
     let arch_ms = architecture_decode_overhead_ms(model, budget, config);
     let graph_ms = measured_decode_graph_overhead_ms(model, budget);
@@ -2081,7 +2179,7 @@ fn estimate_confidence(
         && model.hidden_size.is_some()
         && model.context_length.is_some()
         && measured_gpu_budget(budget)
-        && budget.decode_kernel_probe_count > 0
+        && selected_exact_decode_kernel_probe(model, budget).is_some()
     {
         EstimateConfidence::High
     } else {

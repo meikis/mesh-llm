@@ -1,4 +1,5 @@
 use crate::*;
+use mesh_llm_gpu_bench::DecodeKernelProbe;
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -832,6 +833,61 @@ fn q8_decode_uses_ggml_type_kernel_traffic() {
     assert!(
         q8_rec.estimated_decode_tokens_per_sec.unwrap()
             < q4_rec.estimated_decode_tokens_per_sec.unwrap()
+    );
+}
+
+#[test]
+fn ggml_decode_kernel_probe_is_required_for_high_confidence() {
+    let mut hardware = m1_ultra();
+    hardware.accelerators[0].decode_kernel_probes = vec![DecodeKernelProbe {
+        name: "decode_f16_matvec".into(),
+        tensor_type: "f16".into(),
+        rows: 4096,
+        cols: 4096,
+        batch_tokens: 1,
+        effective_gbps: 240.0,
+        tflops: Some(4.0),
+        runs: 20,
+    }];
+
+    let mut config = SelectionConfig {
+        workload: WorkloadProfile::chat(),
+        ..SelectionConfig::default()
+    };
+    config.weights = config.workload.default_weights();
+
+    let q4 = dense_model("q4", 8 * GIB, 32, 4096, 32_768);
+    let mut f16 = q4.clone();
+    f16.source.id = "f16".into();
+    f16.quantization = Some("F16".into());
+    f16.tensor_matmul.base_type_bytes.q4_k_bytes = 0;
+    f16.tensor_matmul.base_type_bytes.f16_bytes = f16.tensor_matmul.base_bytes;
+    for group in [
+        &mut f16.tensor_matmul.attention,
+        &mut f16.tensor_matmul.feed_forward,
+        &mut f16.tensor_matmul.output,
+    ] {
+        group.type_bytes.q4_k_bytes = 0;
+        group.type_bytes.f16_bytes = group.bytes;
+    }
+
+    let f16_rec = score_model(&hardware, &f16, &config);
+    let q4_rec = score_model(&hardware, &q4, &config);
+
+    assert_ne!(f16_rec.estimate_confidence, EstimateConfidence::High);
+    assert_ne!(q4_rec.estimate_confidence, EstimateConfidence::High);
+
+    hardware.accelerators[0].decode_kernel_probes[0].name = "ggml_decode_f16_matvec".into();
+    let f16_rec = score_model(&hardware, &f16, &config);
+    let q4_rec = score_model(&hardware, &q4, &config);
+
+    assert_eq!(f16_rec.estimate_confidence, EstimateConfidence::High);
+    assert_ne!(q4_rec.estimate_confidence, EstimateConfidence::High);
+    assert!(
+        q4_rec
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("dominant tensor type q4_k"))
     );
 }
 

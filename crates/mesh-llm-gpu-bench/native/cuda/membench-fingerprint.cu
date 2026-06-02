@@ -354,6 +354,74 @@ int main(int argc, char** argv) {
             return totalFlops / (ms / 1000.0) / 1e12;
         };
 
+        auto measure_decode_matvec_fp16 = [&]() -> double {
+            const float alpha = 1.0f;
+            const float beta = 0.0f;
+            check(cudaEventRecord(evStart), "eventRecord decode f16 matvec start");
+            check_cublas(
+                cublasGemmEx(cublas,
+                             CUBLAS_OP_N,
+                             CUBLAS_OP_N,
+                             PREFILL_MATMUL_SIZE,
+                             1,
+                             PREFILL_MATMUL_SIZE,
+                             &alpha,
+                             dMatmulA,
+                             CUDA_R_16F,
+                             PREFILL_MATMUL_SIZE,
+                             dMatmulB,
+                             CUDA_R_16F,
+                             PREFILL_MATMUL_SIZE,
+                             &beta,
+                             dMatmulC,
+                             CUDA_R_16F,
+                             PREFILL_MATMUL_SIZE,
+                             CUBLAS_COMPUTE_32F,
+                             CUBLAS_GEMM_DEFAULT_TENSOR_OP),
+                "cublasGemmEx decode f16 matvec");
+            check(cudaEventRecord(evStop), "eventRecord decode f16 matvec stop");
+            check(cudaEventSynchronize(evStop), "eventSync decode f16 matvec");
+            float ms = 0.0f;
+            check(cudaEventElapsedTime(&ms, evStart, evStop), "eventElapsed decode f16 matvec");
+            size_t vectorBytes = (size_t)PREFILL_MATMUL_SIZE * sizeof(__half);
+            double totalBytes = (double)matmulBytes + (double)vectorBytes * 2.0;
+            return totalBytes / (ms / 1000.0) / 1e9;
+        };
+
+        auto measure_decode_matvec_fp16_tflops = [&]() -> double {
+            const float alpha = 1.0f;
+            const float beta = 0.0f;
+            check(cudaEventRecord(evStart), "eventRecord decode f16 matvec tflops start");
+            check_cublas(
+                cublasGemmEx(cublas,
+                             CUBLAS_OP_N,
+                             CUBLAS_OP_N,
+                             PREFILL_MATMUL_SIZE,
+                             1,
+                             PREFILL_MATMUL_SIZE,
+                             &alpha,
+                             dMatmulA,
+                             CUDA_R_16F,
+                             PREFILL_MATMUL_SIZE,
+                             dMatmulB,
+                             CUDA_R_16F,
+                             PREFILL_MATMUL_SIZE,
+                             &beta,
+                             dMatmulC,
+                             CUDA_R_16F,
+                             PREFILL_MATMUL_SIZE,
+                             CUBLAS_COMPUTE_32F,
+                             CUBLAS_GEMM_DEFAULT_TENSOR_OP),
+                "cublasGemmEx decode f16 matvec tflops");
+            check(cudaEventRecord(evStop), "eventRecord decode f16 matvec tflops stop");
+            check(cudaEventSynchronize(evStop), "eventSync decode f16 matvec tflops");
+            float ms = 0.0f;
+            check(cudaEventElapsedTime(&ms, evStart, evStop), "eventElapsed decode f16 matvec tflops");
+            double n = (double)PREFILL_MATMUL_SIZE;
+            double totalFlops = 2.0 * n * n;
+            return totalFlops / (ms / 1000.0) / 1e12;
+        };
+
         auto measure_post_prefill_decode_overhead_ms = [&]() -> double {
             const float alpha = 1.0f;
             const float beta = 0.0f;
@@ -424,6 +492,8 @@ int main(int argc, char** argv) {
             (void)measure_prefill_matmul_fp16();
             (void)measure_prefill_ubatch_matmul_fp16();
             (void)measure_prefill_moe_matmul_fp16();
+            (void)measure_decode_matvec_fp16();
+            (void)measure_decode_matvec_fp16_tflops();
             (void)measure_post_prefill_decode_overhead_ms();
             (void)measure_decode_effective_gbps();
             (void)measure_fixed_overhead_ms();
@@ -437,6 +507,8 @@ int main(int argc, char** argv) {
         double prefillMatmulSamples[TIMED_RUNS];
         double prefillUbatchMatmulSamples[TIMED_RUNS];
         double prefillMoeMatmulSamples[TIMED_RUNS];
+        double decodeMatvecFp16Samples[TIMED_RUNS];
+        double decodeMatvecFp16TflopsSamples[TIMED_RUNS];
         double postPrefillDecodeSamples[TIMED_RUNS];
         double decodeEffectiveSamples[TIMED_RUNS];
         double fixedOverheadSamples[TIMED_RUNS];
@@ -447,6 +519,8 @@ int main(int argc, char** argv) {
             prefillMatmulSamples[i] = measure_prefill_matmul_fp16();
             prefillUbatchMatmulSamples[i] = measure_prefill_ubatch_matmul_fp16();
             prefillMoeMatmulSamples[i] = measure_prefill_moe_matmul_fp16();
+            decodeMatvecFp16Samples[i] = measure_decode_matvec_fp16();
+            decodeMatvecFp16TflopsSamples[i] = measure_decode_matvec_fp16_tflops();
             postPrefillDecodeSamples[i] = measure_post_prefill_decode_overhead_ms();
             decodeEffectiveSamples[i] = measure_decode_effective_gbps();
             fixedOverheadSamples[i] = measure_fixed_overhead_ms();
@@ -461,6 +535,8 @@ int main(int argc, char** argv) {
         qsort(prefillMatmulSamples, TIMED_RUNS, sizeof(double), cmp_double);
         qsort(prefillUbatchMatmulSamples, TIMED_RUNS, sizeof(double), cmp_double);
         qsort(prefillMoeMatmulSamples, TIMED_RUNS, sizeof(double), cmp_double);
+        qsort(decodeMatvecFp16Samples, TIMED_RUNS, sizeof(double), cmp_double);
+        qsort(decodeMatvecFp16TflopsSamples, TIMED_RUNS, sizeof(double), cmp_double);
         qsort(postPrefillDecodeSamples, TIMED_RUNS, sizeof(double), cmp_double);
         qsort(decodeEffectiveSamples, TIMED_RUNS, sizeof(double), cmp_double);
         qsort(fixedOverheadSamples, TIMED_RUNS, sizeof(double), cmp_double);
@@ -471,6 +547,8 @@ int main(int argc, char** argv) {
         double prefillMatmulP90 = prefillMatmulSamples[(int)(TIMED_RUNS * 0.90) - 1];
         double prefillUbatchMatmulP90 = prefillUbatchMatmulSamples[(int)(TIMED_RUNS * 0.90) - 1];
         double prefillMoeMatmulP90 = prefillMoeMatmulSamples[(int)(TIMED_RUNS * 0.90) - 1];
+        double decodeMatvecFp16P90 = decodeMatvecFp16Samples[(int)(TIMED_RUNS * 0.90) - 1];
+        double decodeMatvecFp16TflopsP90 = decodeMatvecFp16TflopsSamples[(int)(TIMED_RUNS * 0.90) - 1];
         double postPrefillDecodeP50 = postPrefillDecodeSamples[TIMED_RUNS / 2];
         double decodeEffectiveP90 = decodeEffectiveSamples[(int)(TIMED_RUNS * 0.90) - 1];
         decodeEffectiveP90 = std::min(decodeEffectiveP90, p90);
@@ -499,7 +577,11 @@ int main(int argc, char** argv) {
                    "\"compute_tflops_fp16\":%.2f,"
                    "\"prefill_matmul_tflops_fp16\":%.2f,"
                    "\"prefill_ubatch_matmul_tflops_fp16\":%.2f,"
-                   "\"prefill_moe_matmul_tflops_fp16\":%.2f}",
+                   "\"prefill_moe_matmul_tflops_fp16\":%.2f,"
+                   "\"decode_kernel_probes\":["
+                   "{\"name\":\"decode_weight_stream\",\"tensor_type\":\"mixed\",\"rows\":0,\"cols\":0,\"batch_tokens\":1,\"effective_gbps\":%.2f,\"tflops\":null,\"runs\":%d},"
+                   "{\"name\":\"decode_f16_matvec\",\"tensor_type\":\"f16\",\"rows\":%d,\"cols\":%d,\"batch_tokens\":1,\"effective_gbps\":%.2f,\"tflops\":%.4f,\"runs\":%d}"
+                   "]}",
                    props.name, TIMED_RUNS,
                    p50, p90, noisePct, runtimeSecs,
                    ratedGBps, effPct,
@@ -508,7 +590,10 @@ int main(int argc, char** argv) {
                    decodeEffectiveP90,
                    fixedOverheadP50,
                    postPrefillDecodeP50,
-                   tf32P90, tf16P90, prefillMatmulP90, prefillUbatchMatmulP90, prefillMoeMatmulP90);
+                   tf32P90, tf16P90, prefillMatmulP90, prefillUbatchMatmulP90, prefillMoeMatmulP90,
+                   decodeEffectiveP90, TIMED_RUNS,
+                   PREFILL_MATMUL_SIZE, PREFILL_MATMUL_SIZE, decodeMatvecFp16P90,
+                   decodeMatvecFp16TflopsP90, TIMED_RUNS);
             if (dev < deviceCount - 1) printf(",");
             else printf("]\n");
         } else {

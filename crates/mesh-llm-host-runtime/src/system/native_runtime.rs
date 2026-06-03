@@ -5,6 +5,10 @@ mod dynamic {
         HostRuntimeProfile, NativeRuntimeCache, NativeRuntimeReleaseManifest, RuntimeSelection,
         select_native_runtime,
     };
+    use mesh_llm_runtime_install::{
+        NativeRuntimeInstallOptions, NativeRuntimeInstallStatus, current_skippy_abi_version,
+        install_native_runtime,
+    };
     use std::path::PathBuf;
 
     #[derive(Clone, Debug)]
@@ -19,13 +23,11 @@ mod dynamic {
         }
         let cache = default_native_runtime_cache()?;
         let installed = cache.installed()?;
+        let skippy_abi = current_skippy_abi_version();
         let profile = host_runtime_profile();
         let manifest = NativeRuntimeReleaseManifest {
             mesh_version: crate::VERSION.to_string(),
-            skippy_abi: installed
-                .first()
-                .map(|runtime| runtime.manifest.runtime.skippy_abi.clone())
-                .unwrap_or_default(),
+            skippy_abi,
             artifacts: installed
                 .iter()
                 .map(|runtime| runtime.manifest.runtime.clone())
@@ -61,6 +63,44 @@ mod dynamic {
             native_runtime_id: plan.native_runtime_id,
             libraries: plan.libraries,
         }))
+    }
+
+    pub(crate) async fn ensure_native_runtime_installed_and_loaded()
+    -> Result<Option<LoadedNativeRuntime>> {
+        if let Some(runtime) = try_load_installed_native_runtime()? {
+            return Ok(Some(runtime));
+        }
+        if skippy_runtime::native_runtime_loaded() {
+            return Ok(None);
+        }
+
+        let outcome = install_native_runtime(NativeRuntimeInstallOptions::default())
+            .await
+            .context("install MeshLLM native runtime from release manifest")?;
+        match outcome.status {
+            NativeRuntimeInstallStatus::AlreadyInstalled => {
+                tracing::info!(
+                    native_runtime_id = %outcome.runtime.native_runtime_id,
+                    "MeshLLM native runtime was already installed"
+                );
+            }
+            NativeRuntimeInstallStatus::Installed => {
+                tracing::info!(
+                    native_runtime_id = %outcome.runtime.native_runtime_id,
+                    path = %outcome.runtime.path.display(),
+                    "Installed MeshLLM native runtime"
+                );
+            }
+        }
+
+        try_load_installed_native_runtime()?
+            .with_context(|| {
+                format!(
+                    "installed native runtime {} but could not load it",
+                    outcome.runtime.native_runtime_id
+                )
+            })
+            .map(Some)
     }
 
     fn default_native_runtime_cache() -> Result<NativeRuntimeCache> {

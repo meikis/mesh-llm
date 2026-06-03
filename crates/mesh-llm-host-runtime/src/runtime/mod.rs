@@ -3573,6 +3573,7 @@ async fn run_runtime_cli(
     let cli_has_explicit_models = cli_has_explicit_models(&options);
     let has_config_models = !config.models.is_empty();
     let has_startup_models = cli_has_explicit_models || has_config_models;
+    maybe_prepare_native_runtime(&options, has_startup_models).await?;
 
     // Acquire the per-instance runtime directory and flock. Plain --client still
     // skips this, but capture observers register so detached runs can be found
@@ -3950,6 +3951,30 @@ fn runtime_unix_secs() -> u64 {
 
 fn cli_has_explicit_models(options: &RuntimeOptions) -> bool {
     !options.model.is_empty() || !options.gguf.is_empty()
+}
+
+fn should_prepare_native_runtime(options: &RuntimeOptions, has_startup_models: bool) -> bool {
+    has_startup_models || !options.client
+}
+
+async fn maybe_prepare_native_runtime(
+    options: &RuntimeOptions,
+    has_startup_models: bool,
+) -> Result<()> {
+    if !should_prepare_native_runtime(options, has_startup_models) {
+        return Ok(());
+    }
+    #[cfg(feature = "dynamic-native-runtime")]
+    if let Some(runtime) =
+        crate::system::native_runtime::ensure_native_runtime_installed_and_loaded().await?
+    {
+        tracing::info!(
+            native_runtime_id = %runtime.native_runtime_id,
+            libraries = ?runtime.libraries,
+            "Loaded MeshLLM native runtime"
+        );
+    }
+    Ok(())
 }
 
 fn build_startup_model_specs(
@@ -11116,6 +11141,28 @@ mod tests {
 
         assert!(options.client);
         assert!(!swarm_capture_observer_requested(&options));
+    }
+
+    #[test]
+    fn client_without_local_models_skips_native_runtime_prepare() {
+        let options = make_runtime_cli(&["mesh-llm", "client", "--auto"]);
+
+        assert!(!should_prepare_native_runtime(&options, false));
+    }
+
+    #[test]
+    fn serving_runtime_prepares_native_runtime_without_startup_models() {
+        let options = make_runtime_cli(&["mesh-llm", "serve"]);
+
+        assert!(should_prepare_native_runtime(&options, false));
+    }
+
+    #[test]
+    fn client_with_startup_models_prepares_native_runtime() {
+        let options =
+            make_runtime_cli(&["mesh-llm", "client", "--model", "hf://org/model/model.gguf"]);
+
+        assert!(should_prepare_native_runtime(&options, true));
     }
 
     #[test]

@@ -401,10 +401,8 @@ try {
 
     Invoke-ReleaseAttestationStamp -BinaryPath $bundleBinary
     $versionedPath = Join-Path $resolvedOutputDir $versionedAsset
-    $stablePath = Join-Path $resolvedOutputDir $stableAsset
 
     New-ZipArchive -SourceDir $bundleDir -ArchivePath $versionedPath
-    New-ZipArchive -SourceDir $bundleDir -ArchivePath $stablePath
 
     Write-Host "Created release archives:"
     Get-ChildItem -Path $resolvedOutputDir -File | Sort-Object Name | ForEach-Object {

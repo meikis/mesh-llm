@@ -493,7 +493,6 @@ main() {
     stamp_bundle_binary "$bundle_binary"
 
     create_archive "$bundle_dir" "$output_dir/$versioned_asset" "$ARCHIVE_EXT"
-    create_archive "$bundle_dir" "$output_dir/$STABLE_ASSET" "$ARCHIVE_EXT"
 
     echo "Created release archives:"
     find "$output_dir" -maxdepth 1 -type f -print | sort

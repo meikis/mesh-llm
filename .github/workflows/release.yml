@@ -87,12 +87,14 @@ jobs:
             build_recipe: release-build
             bundle_recipe: release-bundle
             backend: metal
+            target: aarch64-apple-darwin
           - name: Linux x86_64 CPU
             os: ubuntu-24.04
             artifact_name: release-linux
             build_recipe: release-build
             bundle_recipe: release-bundle
             backend: cpu
+            target: x86_64-unknown-linux-gnu
     env:
       LLAMA_STAGE_BACKEND: ${{ matrix.backend }}
     steps:
@@ -142,6 +144,12 @@ jobs:
           printf '%s' "$RELEASE_ATTESTATION_PUBLIC_KEY" > "$MESH_RELEASE_ATTESTATION_PUBLIC_KEY_FILE"
           just --shell bash --shell-arg -c ${{ matrix.build_recipe }}
           just --shell bash --shell-arg -c ${{ matrix.bundle_recipe }} "$RELEASE_TAG" dist
+          scripts/package-native-runtime.sh \
+            --build \
+            --backend "${{ matrix.backend }}" \
+            --target "${{ matrix.target }}" \
+            --out dist
+          scripts/verify-native-runtime-package.sh dist/meshllm-native-runtime-*.tar.gz
 
       - name: Upload release bundle
         uses: actions/upload-artifact@v6
@@ -152,11 +160,13 @@ jobs:
 
       - name: Upload Linux smoke binary
         if: matrix.artifact_name == 'release-linux'
+        env:
+          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
         run: |
           set -euo pipefail
           tmp_dir="$(mktemp -d)"
           trap 'rm -rf "$tmp_dir"' EXIT
-          tar -xzf dist/mesh-llm-x86_64-unknown-linux-gnu.tar.gz -C "$tmp_dir"
+          tar -xzf "dist/mesh-llm-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz" -C "$tmp_dir"
           cp "$tmp_dir/mesh-bundle/mesh-llm" dist/mesh-llm
 
       - name: Upload Linux smoke binary artifact
@@ -243,68 +253,6 @@ jobs:
             dist/native-sdk/*.tar.gz
             dist/native-sdk/*.sha256
             dist/native-sdk-crates/*/target/package/*.crate
-          if-no-files-found: error
-
-  build_native_runtime:
-    name: Build native runtime ${{ matrix.name }}
-    needs: metadata
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: macOS aarch64 Metal
-            os: macos-15
-            backend: metal
-            target: aarch64-apple-darwin
-            artifact_suffix: darwin-aarch64-metal
-          - name: Linux x86_64 CPU
-            os: ubuntu-24.04
-            backend: cpu
-            target: x86_64-unknown-linux-gnu
-            artifact_suffix: linux-x86_64-cpu
-    env:
-      LLAMA_STAGE_BACKEND: ${{ matrix.backend }}
-      MESH_NATIVE_RUNTIME_TARGET: ${{ matrix.target }}
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: mozilla-actions/sccache-action@v0.0.9
-
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build pkg-config libssl-dev libdbus-1-dev curl lld
-
-      - name: Install macOS dependencies
-        if: runner.os == 'macOS'
-        run: brew install cmake ninja lld
-
-      - name: Prepare dispatched release version
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
-        run: scripts/release-version.sh "$RELEASE_TAG"
-
-      - name: Package native runtime
-        run: |
-          scripts/package-native-runtime.sh \
-            --build \
-            --backend "${{ matrix.backend }}" \
-            --target "${{ matrix.target }}" \
-            --out dist/native-runtimes
-
-      - name: Verify native runtime artifact
-        run: scripts/verify-native-runtime-package.sh dist/native-runtimes/*.tar.gz
-
-      - name: Upload native runtime
-        uses: actions/upload-artifact@v6
-        with:
-          name: release-native-runtime-${{ matrix.artifact_suffix }}
-          path: |
-            dist/native-runtimes/*.tar.gz
-            dist/native-runtimes/*.sha256
           if-no-files-found: error
 
   build_swift_sdk_artifact:
@@ -428,6 +376,12 @@ jobs:
           printf '%s' "$RELEASE_ATTESTATION_PUBLIC_KEY" > "$MESH_RELEASE_ATTESTATION_PUBLIC_KEY_FILE"
           just --shell bash --shell-arg -c release-build-aarch64
           just --shell bash --shell-arg -c release-bundle-aarch64 "$RELEASE_TAG" dist
+          scripts/package-native-runtime.sh \
+            --build \
+            --backend cpu \
+            --target aarch64-unknown-linux-gnu \
+            --out dist
+          scripts/verify-native-runtime-package.sh dist/meshllm-native-runtime-*.tar.gz
       - uses: actions/upload-artifact@v6
         with:
           name: release-linux-arm64
@@ -488,6 +442,14 @@ jobs:
         run: |
           just --shell bash --shell-arg -c release-build-aarch64-cuda
           just --shell bash --shell-arg -c release-bundle-aarch64-cuda "$RELEASE_TAG" dist
+          export MESH_LLM_CUDA_TOOLKIT_MAJOR="${MESH_CUDA_VERSION%%.*}"
+          export LLAMA_STAGE_CUDA_ARCHITECTURES="$(if [[ "${MESH_CUDA_VERSION:-}" == 13.* ]]; then echo '75;80;86;87;89;90;110'; else echo '75;80;86;87;89;90'; fi)"
+          scripts/package-native-runtime.sh \
+            --build \
+            --backend cuda \
+            --target aarch64-unknown-linux-gnu \
+            --out dist
+          scripts/verify-native-runtime-package.sh dist/meshllm-native-runtime-*.tar.gz
       - uses: actions/upload-artifact@v6
         with:
           name: release-linux-aarch64-cuda-${{ matrix.cuda_version }}
@@ -553,6 +515,14 @@ jobs:
           printf '%s' "$RELEASE_ATTESTATION_PUBLIC_KEY" > "$MESH_RELEASE_ATTESTATION_PUBLIC_KEY_FILE"
           just --shell bash --shell-arg -c release-build-cuda
           just --shell bash --shell-arg -c release-bundle-cuda "$RELEASE_TAG" dist
+          export MESH_LLM_CUDA_TOOLKIT_MAJOR="${MESH_CUDA_VERSION%%.*}"
+          export LLAMA_STAGE_CUDA_ARCHITECTURES="$(if [[ "${MESH_CUDA_VERSION:-}" == 13.* ]]; then echo '75;80;86;87;89;90;100;103;120;121'; else echo '75;80;86;87;89;90'; fi)"
+          scripts/package-native-runtime.sh \
+            --build \
+            --backend cuda \
+            --target x86_64-unknown-linux-gnu \
+            --out dist
+          scripts/verify-native-runtime-package.sh dist/meshllm-native-runtime-*.tar.gz
       - uses: actions/upload-artifact@v6
         with:
           name: release-linux-cuda-${{ matrix.cuda_version }}
@@ -615,6 +585,14 @@ jobs:
           printf '%s' "$RELEASE_ATTESTATION_PUBLIC_KEY" > "$MESH_RELEASE_ATTESTATION_PUBLIC_KEY_FILE"
           just --shell bash --shell-arg -c release-build-rocm
           just --shell bash --shell-arg -c release-bundle-rocm "$RELEASE_TAG" dist
+          export MESH_LLM_ROCM_VERSION=7.0
+          export LLAMA_STAGE_AMDGPU_TARGETS='gfx90a;gfx942;gfx1100;gfx1101;gfx1102;gfx1200;gfx1201'
+          scripts/package-native-runtime.sh \
+            --build \
+            --backend rocm \
+            --target x86_64-unknown-linux-gnu \
+            --out dist
+          scripts/verify-native-runtime-package.sh dist/meshllm-native-runtime-*.tar.gz
       - uses: actions/upload-artifact@v6
         with:
           name: release-linux-rocm
@@ -661,6 +639,12 @@ jobs:
           printf '%s' "$RELEASE_ATTESTATION_PUBLIC_KEY" > "$MESH_RELEASE_ATTESTATION_PUBLIC_KEY_FILE"
           just --shell bash --shell-arg -c release-build-vulkan
           just --shell bash --shell-arg -c release-bundle-vulkan "$RELEASE_TAG" dist
+          scripts/package-native-runtime.sh \
+            --build \
+            --backend vulkan \
+            --target x86_64-unknown-linux-gnu \
+            --out dist
+          scripts/verify-native-runtime-package.sh dist/meshllm-native-runtime-*.tar.gz
       - uses: actions/upload-artifact@v6
         with:
           name: release-linux-vulkan
@@ -708,6 +692,15 @@ jobs:
           Set-Content -Path $env:MESH_RELEASE_ATTESTATION_PUBLIC_KEY_FILE -Value $env:RELEASE_ATTESTATION_PUBLIC_KEY -NoNewline
           just release-build-windows
           just release-bundle-windows "$env:RELEASE_TAG" dist
+      - name: Package Windows CPU native runtime
+        shell: bash
+        run: |
+          scripts/package-native-runtime.sh \
+            --build \
+            --backend cpu \
+            --target x86_64-pc-windows-msvc \
+            --out dist
+          scripts/verify-native-runtime-package.sh dist/meshllm-native-runtime-*.tar.gz
       - uses: actions/upload-artifact@v6
         with:
           name: release-windows
@@ -814,6 +807,27 @@ jobs:
           Set-Content -Path $env:MESH_RELEASE_ATTESTATION_PUBLIC_KEY_FILE -Value $env:RELEASE_ATTESTATION_PUBLIC_KEY -NoNewline
           just ${{ matrix.build_recipe }}
           just ${{ matrix.bundle_recipe }} "$env:RELEASE_TAG" dist
+      - name: Package Windows native runtime
+        shell: bash
+        env:
+          BACKEND: ${{ matrix.backend }}
+        run: |
+          case "$BACKEND" in
+            cuda)
+              export MESH_LLM_CUDA_TOOLKIT_MAJOR="${WINDOWS_CUDA_VERSION%%.*}"
+              export LLAMA_STAGE_CUDA_ARCHITECTURES='75;80;86;87;89;90'
+              ;;
+            rocm)
+              export MESH_LLM_ROCM_VERSION=7.0
+              export LLAMA_STAGE_AMDGPU_TARGETS='gfx90a;gfx942;gfx1100;gfx1101;gfx1102;gfx1200;gfx1201'
+              ;;
+          esac
+          scripts/package-native-runtime.sh \
+            --build \
+            --backend "$BACKEND" \
+            --target x86_64-pc-windows-msvc \
+            --out dist
+          scripts/verify-native-runtime-package.sh dist/meshllm-native-runtime-*.tar.gz
       - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact_name }}
@@ -827,7 +841,6 @@ jobs:
       - build
       - inference_smoke_tests
       - build_native_sdk_runtime
-      - build_native_runtime
       - build_swift_sdk_artifact
       - build_linux_arm64
       - build_linux_aarch64_cuda
@@ -836,7 +849,7 @@ jobs:
       - build_linux_vulkan
       - build_windows_cpu
       - build_windows_gpu
-    if: ${{ always() && needs.metadata.result == 'success' && needs.metadata.outputs.canary != 'true' && needs.build.result == 'success' && needs.inference_smoke_tests.result == 'success' && needs.build_native_sdk_runtime.result == 'success' && needs.build_native_runtime.result == 'success' && needs.build_swift_sdk_artifact.result == 'success' && needs.build_linux_arm64.result == 'success' && (needs.build_linux_aarch64_cuda.result == 'success' || needs.build_linux_aarch64_cuda.result == 'skipped') && (needs.build_linux_cuda.result == 'success' || needs.build_linux_cuda.result == 'skipped') && (needs.build_linux_rocm.result == 'success' || needs.build_linux_rocm.result == 'skipped') && (needs.build_linux_vulkan.result == 'success' || needs.build_linux_vulkan.result == 'skipped') && needs.build_windows_cpu.result == 'success' && (needs.build_windows_gpu.result == 'success' || needs.build_windows_gpu.result == 'skipped') }}
+    if: ${{ always() && needs.metadata.result == 'success' && needs.metadata.outputs.canary != 'true' && needs.build.result == 'success' && needs.inference_smoke_tests.result == 'success' && needs.build_native_sdk_runtime.result == 'success' && needs.build_swift_sdk_artifact.result == 'success' && needs.build_linux_arm64.result == 'success' && (needs.build_linux_aarch64_cuda.result == 'success' || needs.build_linux_aarch64_cuda.result == 'skipped') && (needs.build_linux_cuda.result == 'success' || needs.build_linux_cuda.result == 'skipped') && (needs.build_linux_rocm.result == 'success' || needs.build_linux_rocm.result == 'skipped') && (needs.build_linux_vulkan.result == 'success' || needs.build_linux_vulkan.result == 'skipped') && needs.build_windows_cpu.result == 'success' && (needs.build_windows_gpu.result == 'success' || needs.build_windows_gpu.result == 'skipped') }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5

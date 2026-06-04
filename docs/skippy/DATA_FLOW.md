@@ -79,6 +79,8 @@ flowchart LR
 With the same four stages and 10 ms inter-stage delay, the no-spec decode hot
 path becomes `S0 -> S1 -> S2 -> S3 -> S0`: four hops, or about 40 ms before
 compute. That removes two serialized reply hops from every generated token.
+Tip-to-tip placement can remove the final network return hop as a follow-on
+topology optimization; see [`TIP_TO_TIP.md`](TIP_TO_TIP.md).
 
 ## Relative Sizes
 

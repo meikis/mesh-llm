@@ -1,6 +1,8 @@
 use anyhow::Result;
 
-use crate::cli::benchmark::{BenchmarkCommand, GpuBenchmarkBackend, PromptImportSource};
+use crate::cli::benchmark::{
+    BenchmarkCommand, GpuBenchmarkBackend, GpuBenchmarkProbeDepth, PromptImportSource,
+};
 use crate::system::benchmark;
 use crate::system::benchmark_prompts::{self, ImportPromptsArgs};
 
@@ -21,8 +23,14 @@ pub(crate) async fn dispatch_benchmark_command(command: &BenchmarkCommand) -> Re
             };
             benchmark_prompts::import_prompt_corpus(args).await
         }
-        BenchmarkCommand::RunGpu { backend } => {
-            let outputs = benchmark::run_backend_by_name(map_gpu_backend(*backend))?;
+        BenchmarkCommand::RunGpu {
+            backend,
+            probe_depth,
+        } => {
+            let outputs = benchmark::run_backend_by_name_with_probe_depth(
+                map_gpu_backend(*backend),
+                map_probe_depth(*probe_depth),
+            )?;
             println!("{}", serde_json::to_string(&outputs)?);
             Ok(())
         }
@@ -35,6 +43,13 @@ fn map_gpu_backend(backend: GpuBenchmarkBackend) -> &'static str {
         GpuBenchmarkBackend::Cuda => "cuda",
         GpuBenchmarkBackend::Hip => "hip",
         GpuBenchmarkBackend::Intel => "intel",
+    }
+}
+
+fn map_probe_depth(probe_depth: GpuBenchmarkProbeDepth) -> benchmark::ProbeDepth {
+    match probe_depth {
+        GpuBenchmarkProbeDepth::Standard => benchmark::ProbeDepth::Standard,
+        GpuBenchmarkProbeDepth::Deep => benchmark::ProbeDepth::Deep,
     }
 }
 

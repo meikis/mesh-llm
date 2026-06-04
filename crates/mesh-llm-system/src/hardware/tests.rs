@@ -10,6 +10,7 @@ fn synthetic_gpu(index: usize, stable_id: Option<&str>) -> GpuFacts {
         mem_bandwidth_gbps: None,
         decode_effective_gbps: None,
         decode_fixed_overhead_ms: None,
+        decode_runtime_overhead_ms: None,
         post_prefill_decode_overhead_ms: None,
         compute_tflops_fp32: None,
         compute_tflops_fp16: None,

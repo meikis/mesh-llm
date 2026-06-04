@@ -200,6 +200,33 @@ metrics-server-build:
 metrics-server-build:
     @just with-lld cargo build -p metrics-server
 
+# Build the model-fit validator/checker binaries used by local and remote
+# estimator validation runs. This intentionally does not require `with-lld`
+# because lab hosts may have CUDA toolchains without ld.lld installed.
+model-fit-release backend="" llama_build_dir="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    feature=""
+    case "{{ backend }}" in
+        "")
+            ;;
+        cuda|rocm|hip|intel)
+            feature="{{ backend }}"
+            ;;
+        *)
+            echo "unsupported model-fit backend '{{ backend }}' (expected cuda, rocm, hip, intel, or empty)" >&2
+            exit 2
+            ;;
+    esac
+    if [[ -n "{{ llama_build_dir }}" ]]; then
+        export LLAMA_STAGE_BUILD_DIR="{{ llama_build_dir }}"
+    fi
+    if [[ -n "$feature" ]]; then
+        cargo build --release --locked -p model-fit --bins --features "$feature"
+    else
+        cargo build --release --locked -p model-fit --bins
+    fi
+
 # Build the binaries copied into the Skippy WAN Docker lab image.
 [linux]
 skippy-wan-lab-build-bins:

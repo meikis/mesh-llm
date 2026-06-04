@@ -23,6 +23,8 @@ pub(crate) enum BenchmarkCommand {
     RunGpu {
         #[arg(long, value_enum)]
         backend: GpuBenchmarkBackend,
+        #[arg(long, value_enum, default_value_t = GpuBenchmarkProbeDepth::Standard)]
+        probe_depth: GpuBenchmarkProbeDepth,
     },
 }
 
@@ -32,6 +34,13 @@ pub(crate) enum GpuBenchmarkBackend {
     Cuda,
     Hip,
     Intel,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub(crate) enum GpuBenchmarkProbeDepth {
+    #[default]
+    Standard,
+    Deep,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

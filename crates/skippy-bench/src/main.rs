@@ -18,7 +18,8 @@ use crate::{
     distributed::{focused_runtime, run_distributed},
     local_single::local_single,
     local_split::{
-        local_split_binary, local_split_chain_binary, local_split_compare, local_split_inprocess,
+        local_prefill_compression, local_split_binary, local_split_chain_binary,
+        local_split_compare, local_split_inprocess,
     },
     token_lengths::token_lengths,
 };
@@ -31,6 +32,7 @@ fn main() -> Result<()> {
         CommandKind::LocalSplitBinary(args) => local_split_binary(args),
         CommandKind::LocalSplitCompare(args) => local_split_compare(args),
         CommandKind::LocalSplitChainBinary(args) => local_split_chain_binary(args),
+        CommandKind::LocalPrefillCompression(args) => local_prefill_compression(args),
         CommandKind::ChatCorpus(args) => chat_corpus(args),
         CommandKind::TokenLengths(args) => token_lengths(args),
         CommandKind::FocusedRuntime(args) => focused_runtime(args),

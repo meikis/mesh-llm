@@ -7222,6 +7222,7 @@ version = "0.68.0"
 dependencies = [
  "anyhow",
  "clap",
+ "lz4_flex",
  "model-artifact",
  "model-hf",
  "model-ref",

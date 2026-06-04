@@ -534,6 +534,8 @@ pub struct GgufTensorByteProfile {
     pub base_resident_bytes: u64,
     pub expert_tensor_bytes: u64,
     pub group_bytes: GgufTensorGroupByteProfile,
+    pub graph_features: GgufDenseGraphFeatures,
+    pub recurrent_attention: GgufRecurrentAttentionProfile,
     pub matmul: GgufTensorMatmulProfile,
     pub file_overhead_bytes: u64,
 }
@@ -544,9 +546,28 @@ pub struct GgufTensorGroupByteProfile {
     pub feed_forward_bytes: u64,
     pub expert_feed_forward_bytes: u64,
     pub embedding_bytes: u64,
+    pub embedding_type_bytes: GgufTensorTypeByteProfile,
     pub output_bytes: u64,
     pub normalization_bytes: u64,
     pub other_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GgufDenseGraphFeatures {
+    pub attention_q_norm: bool,
+    pub attention_k_norm: bool,
+    pub attention_post_norm: bool,
+    pub feed_forward_post_norm: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GgufRecurrentAttentionProfile {
+    pub recurrent_layer_count: u32,
+    pub qkv_projection: GgufMatmulGroupProfile,
+    pub gate_projection: GgufMatmulGroupProfile,
+    pub beta_projection: GgufMatmulGroupProfile,
+    pub alpha_projection: GgufMatmulGroupProfile,
+    pub output_projection: GgufMatmulGroupProfile,
 }
 
 #[derive(Clone, Debug)]
@@ -697,18 +718,26 @@ pub fn scan_gguf_compact_meta(path: &Path) -> Option<GgufCompactMeta> {
         }
     }
 
-    match meta.embedding_size.checked_div(meta.head_count.max(1)) {
-        Some(key_length) if meta.key_length == 0 && meta.head_count > 0 => {
-            meta.key_length = key_length;
+    // llama.cpp initializes both per-head K and V lengths as
+    // `n_embd / n_head` and only then applies optional GGUF overrides for
+    // `<arch>.attention.key_length` / `value_length`. The grouped KV cache
+    // width is computed later as `head_length * n_head_kv`. Do not derive a
+    // missing value length as `n_embd / n_head_kv`; that turns a per-head
+    // dimension into the already-grouped width and makes GQA models look like
+    // full-width attention.
+    let default_head_length = meta
+        .embedding_size
+        .checked_div(meta.head_count.max(1))
+        .filter(|_| meta.head_count > 0);
+    match default_head_length {
+        Some(head_length) if meta.key_length == 0 => {
+            meta.key_length = head_length;
         }
         _ => {}
     }
-    match meta
-        .effective_kv_head_count()
-        .and_then(|effective_kv| meta.embedding_size.checked_div(effective_kv))
-    {
-        Some(value_length) if meta.value_length == 0 => {
-            meta.value_length = value_length;
+    match default_head_length {
+        Some(head_length) if meta.value_length == 0 => {
+            meta.value_length = head_length;
         }
         _ => {}
     }
@@ -899,6 +928,26 @@ fn is_output_norm_tensor(name: &str) -> bool {
     matches!(name, "output_norm.weight" | "output_norm")
 }
 
+fn dense_graph_features_for_tensor(name: &str) -> GgufDenseGraphFeatures {
+    let lower = name.to_ascii_lowercase();
+    GgufDenseGraphFeatures {
+        attention_q_norm: lower.contains("attn_q_norm"),
+        attention_k_norm: lower.contains("attn_k_norm"),
+        attention_post_norm: lower.contains("post_attention_norm"),
+        feed_forward_post_norm: lower.contains("post_ffw_norm"),
+    }
+}
+
+fn add_dense_graph_features(
+    features: &mut GgufDenseGraphFeatures,
+    tensor_features: GgufDenseGraphFeatures,
+) {
+    features.attention_q_norm |= tensor_features.attention_q_norm;
+    features.attention_k_norm |= tensor_features.attention_k_norm;
+    features.attention_post_norm |= tensor_features.attention_post_norm;
+    features.feed_forward_post_norm |= tensor_features.feed_forward_post_norm;
+}
+
 fn classify_tensor_group(name: &str) -> TensorGroup {
     let lower = name.to_ascii_lowercase();
     if is_token_embedding_tensor(name)
@@ -915,6 +964,9 @@ fn classify_tensor_group(name: &str) -> TensorGroup {
     }
     if is_expert_partitioned_tensor(name) {
         return TensorGroup::ExpertFeedForward;
+    }
+    if is_recurrent_attention_projection_tensor(&lower) {
+        return TensorGroup::Attention;
     }
     if lower.contains("attn")
         || lower.contains(".wq")
@@ -936,6 +988,22 @@ fn classify_tensor_group(name: &str) -> TensorGroup {
     TensorGroup::Other
 }
 
+fn is_recurrent_attention_projection_tensor(lower_name: &str) -> bool {
+    // llama.cpp linear/recurrent attention graphs execute several projection
+    // tensors that are not named `attn_*`: for example Qwen3.5's
+    // `ssm_beta.weight`, `ssm_alpha.weight`, and `ssm_out.weight` are fed to
+    // `build_lora_mm()` in `llama_model_qwen35::graph::build_layer_attn_linear`.
+    // They are still attention-side decode matmuls, and leaving them in
+    // `other_bytes` makes metadata-only fit undercharge the recurrent layers.
+    //
+    // This is intentionally a tensor-role rule rather than a model-family rule.
+    // Any GGUF architecture that names source-visible recurrent attention
+    // projections this way should get the same accounting.
+    lower_name.contains(".ssm_beta.")
+        || lower_name.contains(".ssm_alpha.")
+        || lower_name.contains(".ssm_out.")
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TensorGroup {
     Attention,
@@ -950,6 +1018,7 @@ enum TensorGroup {
 fn add_tensor_group_bytes(
     group_bytes: &mut GgufTensorGroupByteProfile,
     group: TensorGroup,
+    tensor_type: u32,
     tensor_bytes: u64,
 ) {
     match group {
@@ -967,6 +1036,11 @@ fn add_tensor_group_bytes(
         }
         TensorGroup::Embedding => {
             group_bytes.embedding_bytes = group_bytes.embedding_bytes.saturating_add(tensor_bytes);
+            add_tensor_type_bytes(
+                &mut group_bytes.embedding_type_bytes,
+                tensor_type,
+                tensor_bytes,
+            );
         }
         TensorGroup::Output => {
             group_bytes.output_bytes = group_bytes.output_bytes.saturating_add(tensor_bytes);
@@ -1022,6 +1096,65 @@ fn add_matmul_profile(
             tensor_bytes,
         );
     }
+}
+
+fn add_recurrent_attention_profile(
+    profile: &mut GgufRecurrentAttentionProfile,
+    tensor: &GgufTensorInfo,
+    tensor_bytes: u64,
+) {
+    let lower = tensor.name.to_ascii_lowercase();
+    let Some(group_profile) = recurrent_attention_group_for_tensor(&lower, profile) else {
+        return;
+    };
+    add_matmul_group_profile(
+        group_profile,
+        tensor.tensor_type,
+        tensor,
+        tensor_bytes,
+        tensor_flops_per_token(tensor),
+    );
+}
+
+fn recurrent_attention_group_for_tensor<'a>(
+    lower_name: &str,
+    profile: &'a mut GgufRecurrentAttentionProfile,
+) -> Option<&'a mut GgufMatmulGroupProfile> {
+    if lower_name.contains(".attn_qkv.") {
+        return Some(&mut profile.qkv_projection);
+    }
+    if lower_name.contains(".attn_gate.") {
+        return Some(&mut profile.gate_projection);
+    }
+    if lower_name.contains(".ssm_beta.") {
+        return Some(&mut profile.beta_projection);
+    }
+    if lower_name.contains(".ssm_alpha.") {
+        return Some(&mut profile.alpha_projection);
+    }
+    if lower_name.contains(".ssm_out.") {
+        return Some(&mut profile.output_projection);
+    }
+    None
+}
+
+fn finalize_recurrent_attention_profile(
+    mut profile: GgufRecurrentAttentionProfile,
+) -> GgufRecurrentAttentionProfile {
+    let recurrent_layer_count = [
+        profile.qkv_projection.shape.tensor_count,
+        profile.gate_projection.shape.tensor_count,
+        profile.beta_projection.shape.tensor_count,
+        profile.alpha_projection.shape.tensor_count,
+        profile.output_projection.shape.tensor_count,
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or_default()
+    .try_into()
+    .unwrap_or(u32::MAX);
+    profile.recurrent_layer_count = recurrent_layer_count;
+    profile
 }
 
 fn add_matmul_group_profile(
@@ -1229,6 +1362,8 @@ pub fn scan_gguf_tensor_byte_profile(path: &Path) -> Option<GgufTensorByteProfil
             base_resident_bytes: 0,
             expert_tensor_bytes: 0,
             group_bytes: GgufTensorGroupByteProfile::default(),
+            graph_features: GgufDenseGraphFeatures::default(),
+            recurrent_attention: GgufRecurrentAttentionProfile::default(),
             matmul: GgufTensorMatmulProfile::default(),
             file_overhead_bytes: file_len,
         });
@@ -1249,6 +1384,8 @@ pub fn scan_gguf_tensor_byte_profile(path: &Path) -> Option<GgufTensorByteProfil
     let mut base_resident_bytes = 0u64;
     let mut expert_tensor_bytes = 0u64;
     let mut group_bytes = GgufTensorGroupByteProfile::default();
+    let mut graph_features = GgufDenseGraphFeatures::default();
+    let mut recurrent_attention = GgufRecurrentAttentionProfile::default();
     let mut matmul = GgufTensorMatmulProfile::default();
     let mut block_indices = std::collections::BTreeSet::new();
     let mut block_tensor_count = 0u64;
@@ -1265,7 +1402,17 @@ pub fn scan_gguf_tensor_byte_profile(path: &Path) -> Option<GgufTensorByteProfil
         }
         let tensor_bytes = next_offset - tensor.offset;
         let tensor_group = classify_tensor_group(&tensor.name);
-        add_tensor_group_bytes(&mut group_bytes, tensor_group, tensor_bytes);
+        add_tensor_group_bytes(
+            &mut group_bytes,
+            tensor_group,
+            tensor.tensor_type,
+            tensor_bytes,
+        );
+        add_dense_graph_features(
+            &mut graph_features,
+            dense_graph_features_for_tensor(&tensor.name),
+        );
+        add_recurrent_attention_profile(&mut recurrent_attention, tensor, tensor_bytes);
         add_matmul_profile(&mut matmul, tensor, tensor_group, tensor_bytes);
         if is_expert_partitioned_tensor(&tensor.name) {
             expert_tensor_bytes = expert_tensor_bytes.saturating_add(tensor_bytes);
@@ -1295,6 +1442,8 @@ pub fn scan_gguf_tensor_byte_profile(path: &Path) -> Option<GgufTensorByteProfil
         base_resident_bytes,
         expert_tensor_bytes,
         group_bytes,
+        graph_features,
+        recurrent_attention: finalize_recurrent_attention_profile(recurrent_attention),
         matmul,
         file_overhead_bytes,
     })
@@ -1416,7 +1565,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_gguf_compact_meta_derives_value_length_from_kv_heads_without_head_count() {
+    fn scan_gguf_compact_meta_does_not_derive_head_length_from_kv_heads_only() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"GGUF");
         bytes.extend_from_slice(&2u32.to_le_bytes());
@@ -1430,7 +1579,27 @@ mod tests {
         assert_eq!(meta.head_count, 0);
         assert_eq!(meta.kv_head_count, 8);
         assert_eq!(meta.key_length, 0);
-        assert_eq!(meta.value_length, 512);
+        assert_eq!(meta.value_length, 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scan_gguf_compact_meta_derives_missing_value_length_from_attention_heads() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"GGUF");
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&0i64.to_le_bytes());
+        bytes.extend_from_slice(&3i64.to_le_bytes());
+        push_u32_kv(&mut bytes, "llama.embedding_length", 4096);
+        push_u32_kv(&mut bytes, "llama.attention.head_count", 32);
+        push_u32_kv(&mut bytes, "llama.attention.head_count_kv", 8);
+
+        let path = write_bytes("model-artifact-gguf-head-length", &bytes);
+        let meta = scan_gguf_compact_meta(&path).expect("should parse GGUF");
+        assert_eq!(meta.head_count, 32);
+        assert_eq!(meta.kv_head_count, 8);
+        assert_eq!(meta.key_length, 128);
+        assert_eq!(meta.value_length, 128);
         let _ = std::fs::remove_file(path);
     }
 
@@ -1643,6 +1812,37 @@ mod tests {
         assert_eq!(shape.max_output_width, 16);
         assert_eq!(shape.weighted_avg_input_width, 10);
         assert_eq!(shape.weighted_avg_output_width, 10);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scan_gguf_tensor_byte_profile_counts_recurrent_attention_projections() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"GGUF");
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&3i64.to_le_bytes());
+        bytes.extend_from_slice(&1i64.to_le_bytes());
+
+        push_u32_kv(&mut bytes, "general.alignment", 32);
+        push_tensor_info_2d(&mut bytes, "blk.0.ssm_beta.weight", 4, 8, 0);
+        push_tensor_info_2d(&mut bytes, "blk.0.ssm_alpha.weight", 4, 8, 32);
+        push_tensor_info_2d(&mut bytes, "blk.0.ssm_out.weight", 8, 4, 64);
+
+        let data_start = align_offset(bytes.len() as u64, 32) as usize;
+        bytes.resize(data_start, 0);
+        bytes.resize(data_start + 96, 0);
+
+        let path = write_bytes("model-artifact-gguf-recurrent-attn", &bytes);
+        let profile = scan_gguf_tensor_byte_profile(&path).unwrap();
+        let attention = profile.matmul.attention;
+
+        assert_eq!(profile.group_bytes.attention_bytes, 96);
+        assert_eq!(profile.group_bytes.other_bytes, 0);
+        assert_eq!(attention.bytes, 96);
+        assert_eq!(attention.flops_per_token, 192);
+        assert_eq!(attention.shape.tensor_count, 3);
+        assert_eq!(attention.shape.logical_matrix_count, 3);
+        assert_eq!(attention.shape.total_elements, 96);
         let _ = std::fs::remove_file(path);
     }
 }

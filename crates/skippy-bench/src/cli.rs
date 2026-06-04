@@ -21,6 +21,8 @@ pub enum CommandKind {
     LocalSplitBinary(LocalSplitBinaryArgs),
     LocalSplitCompare(LocalSplitCompareArgs),
     LocalSplitChainBinary(LocalSplitChainBinaryArgs),
+    #[command(name = "local-prefill-compression")]
+    LocalPrefillCompression(LocalPrefillCompressionArgs),
     #[command(name = "chat-corpus")]
     ChatCorpus(ChatCorpusArgs),
     #[command(name = "token-lengths")]
@@ -107,6 +109,33 @@ pub struct TokenLengthsArgs {
     pub output_tsv: PathBuf,
     #[arg(long)]
     pub summary_json: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+pub struct LocalPrefillCompressionArgs {
+    #[arg(long)]
+    pub model_path: PathBuf,
+    #[arg(long, default_value = DEFAULT_LOCAL_MODEL_ID)]
+    pub model_id: String,
+    #[arg(long, default_value_t = 14)]
+    pub split_layer: u32,
+    #[arg(long, default_value_t = 40)]
+    pub layer_end: u32,
+    #[arg(long, default_value_t = 4096)]
+    pub ctx_size: u32,
+    #[arg(long, default_value_t = 0)]
+    pub n_gpu_layers: i32,
+    #[arg(
+        long,
+        default_value = "Explain how staged inference moves activations between hosts."
+    )]
+    pub prompt: String,
+    #[arg(long, default_value_t = 256)]
+    pub prefill_tokens: usize,
+    #[arg(long, default_value_t = 25)]
+    pub iterations: usize,
+    #[arg(long)]
+    pub payload_out: Option<PathBuf>,
 }
 
 #[derive(Parser)]

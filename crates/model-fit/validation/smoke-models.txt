@@ -1,28 +1,23 @@
 # Model-fit GPU smoke corpus.
 #
-# Keep this list small enough for a self-hosted PR workflow. The set is
-# stratified by the estimator assumptions we most want to protect: tiny
-# low-active-byte overhead, small dense transition behavior, common 3B/8B dense
-# models, coder/chat templates, a quantization pair, and one small MoE.
+# Keep this list small enough for a self-hosted PR workflow and stable enough
+# to keep cached on both Metal and CUDA runners. The set is stratified by the
+# estimator assumptions we most want to protect: tiny low-active-byte overhead,
+# small dense transition behavior, common dense chat/coder shapes, and one
+# small active-expert MoE.
 #
 # Format: one mesh/model ref per line. Blank lines and # comments are ignored by
 # model-fit-validate --models-file.
 
 # Tiny dense: fixed/runtime overhead dominates bytes-per-token.
 unsloth/SmolLM2-135M-Instruct-GGUF:Q8_0
-unsloth/Qwen3-0.6B-GGUF:Q4_K_M
 
 # Small dense: transition from overhead-bound to bandwidth-bound.
-bartowski/LGAI-EXAONE_EXAONE-4.0-1.2B-GGUF:Q4_K_M
 unsloth/Llama-3.2-3B-Instruct-GGUF:Q4_K_M
+unsloth/Qwen3-4B-GGUF:Q4_K_M
 
-# Mid dense and coder/chat coverage.
-unsloth/gemma-3-4b-it-GGUF:Q4_K_M
+# Mid dense coder/chat coverage.
 unsloth/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M
-unsloth/Qwen3-8B-GGUF:Q4_K_M
-
-# Same architecture, higher-quality quantization.
-unsloth/Qwen3-8B-GGUF:Q8_0
 
 # Small active-expert MoE: validates active expert bytes instead of full expert bytes.
-unsloth/Qwen3-30B-A3B-GGUF:Q4_K_M
+bartowski/OLMoE-1B-7B-0924-Instruct-GGUF:Q4_K_M

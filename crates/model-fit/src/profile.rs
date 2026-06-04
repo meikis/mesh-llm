@@ -1,7 +1,8 @@
 use crate::{
-    CapabilityEvidence, MatmulShapeProfile, ModelArchitectureClass, ModelProfile, ModelSource,
-    RopeProfile, TensorGroupBytes, TensorMatmulGroupProfile, TensorMatmulProfile, TensorTypeBytes,
-    TokenizerProfile, WeightCoverage,
+    CapabilityEvidence, DenseGraphFeatures, MatmulShapeProfile, ModelArchitectureClass,
+    ModelProfile, ModelSource, RecurrentAttentionProfile, RopeProfile, TensorGroupBytes,
+    TensorMatmulGroupProfile, TensorMatmulProfile, TensorTypeBytes, TokenizerProfile,
+    WeightCoverage,
 };
 use anyhow::{Context, Result};
 use model_artifact::gguf::{
@@ -45,10 +46,15 @@ pub fn profile_gguf_path(path: impl AsRef<Path>) -> Result<ModelProfile> {
             feed_forward_bytes: tensor_profile.group_bytes.feed_forward_bytes,
             expert_feed_forward_bytes: tensor_profile.group_bytes.expert_feed_forward_bytes,
             embedding_bytes: tensor_profile.group_bytes.embedding_bytes,
+            embedding_type_bytes: tensor_type_bytes(
+                tensor_profile.group_bytes.embedding_type_bytes,
+            ),
             output_bytes: tensor_profile.group_bytes.output_bytes,
             normalization_bytes: tensor_profile.group_bytes.normalization_bytes,
             other_bytes: tensor_profile.group_bytes.other_bytes,
         },
+        dense_graph_features: dense_graph_features(tensor_profile.graph_features),
+        recurrent_attention: recurrent_attention_profile(tensor_profile.recurrent_attention),
         tensor_matmul: TensorMatmulProfile {
             base_bytes: tensor_profile.matmul.base_bytes,
             expert_bytes: tensor_profile.matmul.expert_bytes,
@@ -90,6 +96,30 @@ pub fn profile_gguf_path(path: impl AsRef<Path>) -> Result<ModelProfile> {
         },
         capability_evidence,
     })
+}
+
+fn recurrent_attention_profile(
+    profile: model_artifact::gguf::GgufRecurrentAttentionProfile,
+) -> RecurrentAttentionProfile {
+    RecurrentAttentionProfile {
+        recurrent_layer_count: profile.recurrent_layer_count,
+        qkv_projection: tensor_matmul_group(profile.qkv_projection),
+        gate_projection: tensor_matmul_group(profile.gate_projection),
+        beta_projection: tensor_matmul_group(profile.beta_projection),
+        alpha_projection: tensor_matmul_group(profile.alpha_projection),
+        output_projection: tensor_matmul_group(profile.output_projection),
+    }
+}
+
+fn dense_graph_features(
+    features: model_artifact::gguf::GgufDenseGraphFeatures,
+) -> DenseGraphFeatures {
+    DenseGraphFeatures {
+        attention_q_norm: features.attention_q_norm,
+        attention_k_norm: features.attention_k_norm,
+        attention_post_norm: features.attention_post_norm,
+        feed_forward_post_norm: features.feed_forward_post_norm,
+    }
 }
 
 fn tensor_matmul_group(

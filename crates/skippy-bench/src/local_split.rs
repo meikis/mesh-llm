@@ -1,14 +1,15 @@
 use std::{
     fs,
     process::{Command, Stdio},
+    time::Instant,
 };
 
 use anyhow::{Context, Result, bail};
 use model_artifact::ModelIdentity;
 use serde_json::json;
 use skippy_protocol::binary::{
-    StageStateHeader, StageWireMessage, WireMessageKind, WireReplyKind, recv_reply,
-    write_stage_message,
+    StageStateHeader, StageWireMessage, WireActivationDType, WireMessageKind, WireReplyKind,
+    activation_state_flags_from_frame_flags, recv_reply, write_stage_message,
 };
 use skippy_runtime::{RuntimeConfig, RuntimeLoadMode, StageModel};
 use skippy_topology::{
@@ -18,8 +19,8 @@ use skippy_topology::{
 
 use crate::{
     cli::{
-        LocalSplitBinaryArgs, LocalSplitChainBinaryArgs, LocalSplitCompareArgs,
-        LocalSplitInprocessArgs,
+        LocalPrefillCompressionArgs, LocalSplitBinaryArgs, LocalSplitChainBinaryArgs,
+        LocalSplitCompareArgs, LocalSplitInprocessArgs,
     },
     model_identity::model_identity_for_path,
     support::{
@@ -53,6 +54,53 @@ struct BinaryChainResult {
     split_layer_1: u32,
     split_layer_2: u32,
     layer_end: u32,
+}
+
+struct CompressionTiming {
+    compressed_bytes: usize,
+    compress_ms: f64,
+    decompress_ms: f64,
+}
+
+struct WireRoundTripTiming {
+    wire_bytes: usize,
+    encode_ms: f64,
+    decode_ms: f64,
+    error: ActivationError,
+}
+
+struct TransformCompressionTiming {
+    compressed_bytes: usize,
+    encode_ms: f64,
+    decode_ms: f64,
+}
+
+#[derive(Clone, Copy)]
+struct ActivationError {
+    max_abs: f64,
+    mean_abs: f64,
+    rmse: f64,
+}
+
+#[derive(Clone, Copy)]
+enum LosslessTransform {
+    ByteShuffle,
+    XorWordDelta,
+    XorTokenDelta,
+    XorWordDeltaByteShuffle,
+    XorTokenDeltaByteShuffle,
+}
+
+impl LosslessTransform {
+    fn name(self) -> &'static str {
+        match self {
+            Self::ByteShuffle => "byte_shuffle_u32_lz4",
+            Self::XorWordDelta => "xor_word_delta_lz4",
+            Self::XorTokenDelta => "xor_token_delta_lz4",
+            Self::XorWordDeltaByteShuffle => "xor_word_delta_byte_shuffle_lz4",
+            Self::XorTokenDeltaByteShuffle => "xor_token_delta_byte_shuffle_lz4",
+        }
+    }
 }
 
 pub fn local_split_binary(args: LocalSplitBinaryArgs) -> Result<()> {
@@ -152,6 +200,578 @@ pub fn local_split_compare(args: LocalSplitCompareArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn local_prefill_compression(args: LocalPrefillCompressionArgs) -> Result<()> {
+    if args.split_layer == 0 || args.split_layer >= args.layer_end {
+        bail!("split_layer must be greater than zero and less than layer_end");
+    }
+    if args.prefill_tokens == 0 {
+        bail!("prefill_tokens must be greater than zero");
+    }
+    if args.iterations == 0 {
+        bail!("iterations must be greater than zero");
+    }
+
+    let model_identity = model_identity_for_path(&args.model_id, Some(&args.model_path))?;
+    let stage0_config = RuntimeConfig {
+        stage_index: 0,
+        layer_start: 0,
+        layer_end: args.split_layer,
+        ctx_size: args.ctx_size,
+        lane_count: 1,
+        n_batch: None,
+        n_ubatch: None,
+        n_threads: None,
+        n_threads_batch: None,
+        n_gpu_layers: args.n_gpu_layers,
+        selected_backend_device: None,
+        cache_type_k: skippy_runtime::GGML_TYPE_F16,
+        cache_type_v: skippy_runtime::GGML_TYPE_F16,
+        flash_attn_type: skippy_runtime::FlashAttentionType::Auto,
+        load_mode: RuntimeLoadMode::RuntimeSlice,
+        projector_path: None,
+        include_embeddings: true,
+        include_output: false,
+        filter_tensors_on_load: true,
+    };
+    let stage0 =
+        StageModel::open(&args.model_path, &stage0_config).context("failed to open stage 0")?;
+    let mut tokens = stage0
+        .tokenize(&args.prompt, true)
+        .context("failed to tokenize prompt")?;
+    if tokens.is_empty() {
+        bail!("prompt produced no tokens");
+    }
+    tokens.truncate(args.prefill_tokens);
+
+    let mut session0 = stage0
+        .create_session()
+        .context("failed to create stage 0 session")?;
+    let boundary = session0
+        .prefill_chunk_frame(&tokens, None, 0)
+        .context("stage 0 failed to produce prefill activation frame")?;
+    if boundary.payload.is_empty() {
+        bail!("stage 0 produced an empty prefill activation frame");
+    }
+    let activation_width = activation_width(&boundary)?;
+    if let Some(payload_out) = args.payload_out.as_ref() {
+        fs::write(payload_out, &boundary.payload)
+            .with_context(|| format!("failed to write {}", payload_out.display()))?;
+    }
+
+    let timings = measure_lz4_round_trip(&boundary.payload, args.iterations)?;
+    let f16_timings = measure_wire_round_trip(
+        WireActivationDType::F16,
+        &boundary.payload,
+        tokens.len(),
+        activation_width,
+        boundary.desc.flags,
+        args.iterations,
+    )?;
+    let q8_timings = measure_wire_round_trip(
+        WireActivationDType::Q8,
+        &boundary.payload,
+        tokens.len(),
+        activation_width,
+        boundary.desc.flags,
+        args.iterations,
+    )?;
+    let transform_timings = measure_lossless_transforms(
+        &boundary.payload,
+        tokens.len(),
+        activation_width,
+        args.iterations,
+    )?;
+    let best_compressed_bytes = timings
+        .iter()
+        .map(|timing| timing.compressed_bytes)
+        .min()
+        .context("compression timing set is empty")?;
+    let raw_activation_bytes = boundary.payload.len();
+    let best_ratio = best_compressed_bytes as f64 / raw_activation_bytes as f64;
+    let best_bytes_saved = raw_activation_bytes.saturating_sub(best_compressed_bytes);
+    let mean_compress_ms = mean_ms(timings.iter().map(|timing| timing.compress_ms));
+    let mean_decompress_ms = mean_ms(timings.iter().map(|timing| timing.decompress_ms));
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "mode": "local-prefill-compression",
+            "codec": "lz4_flex_block_prepend_size",
+            "model_identity": model_identity,
+            "layer_range": {
+                "start": 0,
+                "end": args.split_layer,
+                "model_layer_end": args.layer_end,
+            },
+            "prefill_tokens": tokens.len(),
+            "requested_prefill_tokens": args.prefill_tokens,
+            "activation_width": activation_width,
+            "raw_activation_bytes": raw_activation_bytes,
+            "best_compressed_bytes": best_compressed_bytes,
+            "best_ratio": best_ratio,
+            "best_bytes_saved": best_bytes_saved,
+            "mean_compress_ms": mean_compress_ms,
+            "mean_decompress_ms": mean_decompress_ms,
+            "mean_round_trip_ms": mean_compress_ms + mean_decompress_ms,
+            "wire_round_trips": [
+                summarize_wire_round_trip("f16", raw_activation_bytes, &f16_timings),
+                summarize_wire_round_trip("q8", raw_activation_bytes, &q8_timings),
+            ],
+            "lossless_transforms": transform_timings,
+            "iterations": args.iterations,
+        }))?
+    );
+
+    Ok(())
+}
+
+fn measure_lz4_round_trip(payload: &[u8], iterations: usize) -> Result<Vec<CompressionTiming>> {
+    let mut timings = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let compress_started = Instant::now();
+        let compressed = lz4_flex::compress_prepend_size(payload);
+        let compress_ms = compress_started.elapsed().as_secs_f64() * 1000.0;
+
+        let decompress_started = Instant::now();
+        let decompressed = lz4_flex::decompress_size_prepended(&compressed)
+            .context("failed to decompress lz4 prefill activation payload")?;
+        let decompress_ms = decompress_started.elapsed().as_secs_f64() * 1000.0;
+
+        if decompressed != payload {
+            bail!("lz4 prefill activation round trip changed payload bytes");
+        }
+
+        timings.push(CompressionTiming {
+            compressed_bytes: compressed.len(),
+            compress_ms,
+            decompress_ms,
+        });
+    }
+    Ok(timings)
+}
+
+fn measure_lossless_transforms(
+    payload: &[u8],
+    token_count: usize,
+    activation_width: i32,
+    iterations: usize,
+) -> Result<Vec<serde_json::Value>> {
+    let transforms = [
+        LosslessTransform::ByteShuffle,
+        LosslessTransform::XorWordDelta,
+        LosslessTransform::XorTokenDelta,
+        LosslessTransform::XorWordDeltaByteShuffle,
+        LosslessTransform::XorTokenDeltaByteShuffle,
+    ];
+    transforms
+        .into_iter()
+        .map(|transform| {
+            let timings = measure_transformed_lz4(
+                transform,
+                payload,
+                token_count,
+                activation_width,
+                iterations,
+            )?;
+            Ok(summarize_transform_compression(
+                transform,
+                payload.len(),
+                &timings,
+            ))
+        })
+        .collect()
+}
+
+fn measure_transformed_lz4(
+    transform: LosslessTransform,
+    payload: &[u8],
+    token_count: usize,
+    activation_width: i32,
+    iterations: usize,
+) -> Result<Vec<TransformCompressionTiming>> {
+    let mut timings = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let encode_started = Instant::now();
+        let transformed =
+            apply_lossless_transform(transform, payload, token_count, activation_width)?;
+        let compressed = lz4_flex::compress_prepend_size(&transformed);
+        let encode_ms = encode_started.elapsed().as_secs_f64() * 1000.0;
+
+        let decode_started = Instant::now();
+        let decompressed = lz4_flex::decompress_size_prepended(&compressed)
+            .context("failed to decompress transformed activation payload")?;
+        let restored =
+            invert_lossless_transform(transform, &decompressed, token_count, activation_width)?;
+        let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
+
+        if restored != payload {
+            bail!(
+                "{} transformed activation round trip changed payload bytes",
+                transform.name()
+            );
+        }
+
+        timings.push(TransformCompressionTiming {
+            compressed_bytes: compressed.len(),
+            encode_ms,
+            decode_ms,
+        });
+    }
+    Ok(timings)
+}
+
+fn summarize_transform_compression(
+    transform: LosslessTransform,
+    raw_activation_bytes: usize,
+    timings: &[TransformCompressionTiming],
+) -> serde_json::Value {
+    let best_compressed_bytes = timings
+        .iter()
+        .map(|timing| timing.compressed_bytes)
+        .min()
+        .unwrap_or_default();
+    json!({
+        "codec": transform.name(),
+        "best_compressed_bytes": best_compressed_bytes,
+        "best_ratio": if raw_activation_bytes == 0 {
+            0.0
+        } else {
+            best_compressed_bytes as f64 / raw_activation_bytes as f64
+        },
+        "best_bytes_saved": raw_activation_bytes.saturating_sub(best_compressed_bytes),
+        "mean_encode_ms": mean_ms(timings.iter().map(|timing| timing.encode_ms)),
+        "mean_decode_ms": mean_ms(timings.iter().map(|timing| timing.decode_ms)),
+        "mean_round_trip_ms": mean_ms(timings.iter().map(|timing| {
+            timing.encode_ms + timing.decode_ms
+        })),
+    })
+}
+
+fn apply_lossless_transform(
+    transform: LosslessTransform,
+    payload: &[u8],
+    token_count: usize,
+    activation_width: i32,
+) -> Result<Vec<u8>> {
+    match transform {
+        LosslessTransform::ByteShuffle => byte_shuffle_u32(payload),
+        LosslessTransform::XorWordDelta => xor_word_delta(payload),
+        LosslessTransform::XorTokenDelta => xor_token_delta(payload, token_count, activation_width),
+        LosslessTransform::XorWordDeltaByteShuffle => byte_shuffle_u32(&xor_word_delta(payload)?),
+        LosslessTransform::XorTokenDeltaByteShuffle => {
+            byte_shuffle_u32(&xor_token_delta(payload, token_count, activation_width)?)
+        }
+    }
+}
+
+fn invert_lossless_transform(
+    transform: LosslessTransform,
+    payload: &[u8],
+    token_count: usize,
+    activation_width: i32,
+) -> Result<Vec<u8>> {
+    match transform {
+        LosslessTransform::ByteShuffle => byte_unshuffle_u32(payload),
+        LosslessTransform::XorWordDelta => inverse_xor_word_delta(payload),
+        LosslessTransform::XorTokenDelta => {
+            inverse_xor_token_delta(payload, token_count, activation_width)
+        }
+        LosslessTransform::XorWordDeltaByteShuffle => {
+            inverse_xor_word_delta(&byte_unshuffle_u32(payload)?)
+        }
+        LosslessTransform::XorTokenDeltaByteShuffle => {
+            inverse_xor_token_delta(&byte_unshuffle_u32(payload)?, token_count, activation_width)
+        }
+    }
+}
+
+fn byte_shuffle_u32(payload: &[u8]) -> Result<Vec<u8>> {
+    ensure_f32_payload(payload)?;
+    let word_count = payload.len() / 4;
+    let mut out = vec![0_u8; payload.len()];
+    for (word_index, word) in payload.chunks_exact(4).enumerate() {
+        for byte_index in 0..4 {
+            out[byte_index * word_count + word_index] = word[byte_index];
+        }
+    }
+    Ok(out)
+}
+
+fn byte_unshuffle_u32(payload: &[u8]) -> Result<Vec<u8>> {
+    ensure_f32_payload(payload)?;
+    let word_count = payload.len() / 4;
+    let mut out = vec![0_u8; payload.len()];
+    for word_index in 0..word_count {
+        for byte_index in 0..4 {
+            out[word_index * 4 + byte_index] = payload[byte_index * word_count + word_index];
+        }
+    }
+    Ok(out)
+}
+
+fn xor_word_delta(payload: &[u8]) -> Result<Vec<u8>> {
+    ensure_f32_payload(payload)?;
+    let mut out = Vec::with_capacity(payload.len());
+    let mut previous = 0_u32;
+    for word in payload.chunks_exact(4) {
+        let value = u32::from_le_bytes(word.try_into().expect("chunks_exact returns 4 bytes"));
+        out.extend_from_slice(&(value ^ previous).to_le_bytes());
+        previous = value;
+    }
+    Ok(out)
+}
+
+fn inverse_xor_word_delta(payload: &[u8]) -> Result<Vec<u8>> {
+    ensure_f32_payload(payload)?;
+    let mut out = Vec::with_capacity(payload.len());
+    let mut previous = 0_u32;
+    for word in payload.chunks_exact(4) {
+        let delta = u32::from_le_bytes(word.try_into().expect("chunks_exact returns 4 bytes"));
+        let value = delta ^ previous;
+        out.extend_from_slice(&value.to_le_bytes());
+        previous = value;
+    }
+    Ok(out)
+}
+
+fn xor_token_delta(payload: &[u8], token_count: usize, activation_width: i32) -> Result<Vec<u8>> {
+    let layout = activation_layout(payload, token_count, activation_width)?;
+    let mut out = Vec::with_capacity(payload.len());
+    for row_index in 0..layout.row_count {
+        for column_index in 0..layout.width {
+            let value = f32_word_at(payload, layout.width, row_index, column_index);
+            let previous = if row_index == 0 {
+                0
+            } else {
+                f32_word_at(payload, layout.width, row_index - 1, column_index)
+            };
+            out.extend_from_slice(&(value ^ previous).to_le_bytes());
+        }
+    }
+    Ok(out)
+}
+
+fn inverse_xor_token_delta(
+    payload: &[u8],
+    token_count: usize,
+    activation_width: i32,
+) -> Result<Vec<u8>> {
+    let layout = activation_layout(payload, token_count, activation_width)?;
+    let mut restored = vec![0_u32; layout.row_count * layout.width];
+    for row_index in 0..layout.row_count {
+        for column_index in 0..layout.width {
+            let delta = f32_word_at(payload, layout.width, row_index, column_index);
+            let previous = if row_index == 0 {
+                0
+            } else {
+                restored[(row_index - 1) * layout.width + column_index]
+            };
+            restored[row_index * layout.width + column_index] = delta ^ previous;
+        }
+    }
+    let mut out = Vec::with_capacity(payload.len());
+    for word in restored {
+        out.extend_from_slice(&word.to_le_bytes());
+    }
+    Ok(out)
+}
+
+struct ActivationLayout {
+    row_count: usize,
+    width: usize,
+}
+
+fn activation_layout(
+    payload: &[u8],
+    token_count: usize,
+    activation_width: i32,
+) -> Result<ActivationLayout> {
+    ensure_f32_payload(payload)?;
+    if activation_width <= 0 {
+        bail!("activation_width must be positive");
+    }
+    let width = activation_width as usize;
+    let elements = payload.len() / 4;
+    if elements % width != 0 {
+        bail!("activation payload is not a whole number of activation rows");
+    }
+    let row_count = elements / width;
+    if row_count < token_count {
+        bail!("activation payload row count is smaller than token count");
+    }
+    Ok(ActivationLayout { row_count, width })
+}
+
+fn f32_word_at(payload: &[u8], width: usize, row_index: usize, column_index: usize) -> u32 {
+    let offset = (row_index * width + column_index) * 4;
+    u32::from_le_bytes(
+        payload[offset..offset + 4]
+            .try_into()
+            .expect("slice has 4 bytes"),
+    )
+}
+
+fn ensure_f32_payload(payload: &[u8]) -> Result<()> {
+    if payload.len() & 3 != 0 {
+        bail!("activation payload is not f32 aligned");
+    }
+    Ok(())
+}
+
+fn measure_wire_round_trip(
+    dtype: WireActivationDType,
+    payload: &[u8],
+    token_count: usize,
+    activation_width: i32,
+    frame_flags: u64,
+    iterations: usize,
+) -> Result<Vec<WireRoundTripTiming>> {
+    let token_count_i32 = i32::try_from(token_count).context("token count exceeds i32")?;
+    let state_flags = activation_state_flags_from_frame_flags(frame_flags);
+    let mut timings = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let encode_started = Instant::now();
+        let activation = skippy_protocol::binary::encode_f32_activation_payload_with_state_flags(
+            dtype,
+            token_count_i32,
+            activation_width,
+            payload,
+            state_flags,
+        )
+        .context("failed to encode activation wire payload")?;
+        let encode_ms = encode_started.elapsed().as_secs_f64() * 1000.0;
+
+        let mut state = StageStateHeader::new(WireMessageKind::PrefillEmbd, dtype);
+        state.flags = state_flags;
+        let message = StageWireMessage {
+            kind: WireMessageKind::PrefillEmbd,
+            pos_start: 0,
+            token_count: token_count_i32,
+            state,
+            request_id: 0,
+            session_id: 0,
+            sampling: None,
+            chat_sampling_metadata: None,
+            tokens: Vec::new(),
+            positions: Vec::new(),
+            activation,
+            raw_bytes: Vec::new(),
+        };
+
+        let decode_started = Instant::now();
+        let decoded = message
+            .activation_f32_payload(activation_width)
+            .context("failed to decode activation wire payload")?;
+        let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
+        let error = activation_error(payload, &decoded)?;
+
+        timings.push(WireRoundTripTiming {
+            wire_bytes: message.activation.len(),
+            encode_ms,
+            decode_ms,
+            error,
+        });
+    }
+    Ok(timings)
+}
+
+fn summarize_wire_round_trip(
+    dtype: &str,
+    raw_activation_bytes: usize,
+    timings: &[WireRoundTripTiming],
+) -> serde_json::Value {
+    let best_wire_bytes = timings
+        .iter()
+        .map(|timing| timing.wire_bytes)
+        .min()
+        .unwrap_or_default();
+    let first_error = timings
+        .first()
+        .map(|timing| timing.error)
+        .unwrap_or(ActivationError {
+            max_abs: 0.0,
+            mean_abs: 0.0,
+            rmse: 0.0,
+        });
+    json!({
+        "dtype": dtype,
+        "best_wire_bytes": best_wire_bytes,
+        "best_ratio": if raw_activation_bytes == 0 {
+            0.0
+        } else {
+            best_wire_bytes as f64 / raw_activation_bytes as f64
+        },
+        "best_bytes_saved": raw_activation_bytes.saturating_sub(best_wire_bytes),
+        "mean_encode_ms": mean_ms(timings.iter().map(|timing| timing.encode_ms)),
+        "mean_decode_ms": mean_ms(timings.iter().map(|timing| timing.decode_ms)),
+        "mean_round_trip_ms": mean_ms(timings.iter().map(|timing| {
+            timing.encode_ms + timing.decode_ms
+        })),
+        "error": {
+            "max_abs": first_error.max_abs,
+            "mean_abs": first_error.mean_abs,
+            "rmse": first_error.rmse,
+        }
+    })
+}
+
+fn activation_error(original: &[u8], decoded: &[u8]) -> Result<ActivationError> {
+    if original.len() != decoded.len() || original.len() & 3 != 0 {
+        bail!("activation error inputs have incompatible f32 byte lengths");
+    }
+
+    let mut max_abs = 0.0_f64;
+    let mut sum_abs = 0.0_f64;
+    let mut sum_squared = 0.0_f64;
+    let mut count = 0usize;
+
+    for (original_chunk, decoded_chunk) in original.chunks_exact(4).zip(decoded.chunks_exact(4)) {
+        let original_value = f32::from_le_bytes(
+            original_chunk
+                .try_into()
+                .expect("chunks_exact returns 4 bytes"),
+        );
+        let decoded_value = f32::from_le_bytes(
+            decoded_chunk
+                .try_into()
+                .expect("chunks_exact returns 4 bytes"),
+        );
+        let abs_error = (original_value - decoded_value).abs() as f64;
+        max_abs = max_abs.max(abs_error);
+        sum_abs += abs_error;
+        sum_squared += abs_error * abs_error;
+        count += 1;
+    }
+
+    if count == 0 {
+        return Ok(ActivationError {
+            max_abs: 0.0,
+            mean_abs: 0.0,
+            rmse: 0.0,
+        });
+    }
+
+    Ok(ActivationError {
+        max_abs,
+        mean_abs: sum_abs / count as f64,
+        rmse: (sum_squared / count as f64).sqrt(),
+    })
+}
+
+fn mean_ms(values: impl Iterator<Item = f64>) -> f64 {
+    let mut count = 0usize;
+    let mut total = 0.0;
+    for value in values {
+        count += 1;
+        total += value;
+    }
+    if count == 0 {
+        0.0
+    } else {
+        total / count as f64
+    }
 }
 
 pub fn local_split_chain_binary(args: LocalSplitChainBinaryArgs) -> Result<()> {

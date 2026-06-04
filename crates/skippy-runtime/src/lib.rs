@@ -1319,13 +1319,69 @@ pub struct ChatTemplateJsonResult {
     pub metadata_json: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphInventoryBucket {
+    pub family: String,
+    pub ggml_op: i32,
+    pub ggml_type: u32,
+    pub node_count: u32,
+    pub element_count: u64,
+    pub output_bytes: u64,
+    pub src0_bytes: u64,
+    pub src1_bytes: u64,
+    pub ne: [i64; 4],
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct DecodeBenchmarkResult {
     pub warmup_tokens: u32,
     pub measured_tokens: u32,
     pub elapsed_ms: f64,
     pub tokens_per_second: f64,
     pub final_token: i32,
+    pub llama_eval_count: u32,
+    pub llama_graph_reuse_count: i32,
+    pub llama_eval_ms: f64,
+    pub llama_eval_tokens_per_second: f64,
+    pub non_eval_overhead_ms: f64,
+    pub decode_call_ms: f64,
+    pub decode_call_tokens_per_second: f64,
+    pub sampling_ms: f64,
+    pub sampling_tokens_per_second: f64,
+    pub graph_node_count: u32,
+    pub graph_inventory_bucket_overflow_count: u32,
+    pub graph_inventory: Vec<GraphInventoryBucket>,
+}
+
+fn decode_graph_inventory(raw: &skippy_ffi::DecodeBenchmarkResult) -> Vec<GraphInventoryBucket> {
+    let bucket_count = usize::try_from(raw.graph_inventory_bucket_count)
+        .unwrap_or(skippy_ffi::MAX_GRAPH_INVENTORY_BUCKETS)
+        .min(skippy_ffi::MAX_GRAPH_INVENTORY_BUCKETS);
+    raw.graph_inventory
+        .iter()
+        .take(bucket_count)
+        .map(|bucket| GraphInventoryBucket {
+            family: graph_inventory_family(&bucket.family),
+            ggml_op: bucket.ggml_op,
+            ggml_type: bucket.ggml_type,
+            node_count: bucket.node_count,
+            element_count: bucket.element_count,
+            output_bytes: bucket.output_bytes,
+            src0_bytes: bucket.src0_bytes,
+            src1_bytes: bucket.src1_bytes,
+            ne: bucket.ne,
+        })
+        .collect()
+}
+
+fn graph_inventory_family(raw: &[c_char; skippy_ffi::GRAPH_INVENTORY_FAMILY_BYTES]) -> String {
+    let bytes = raw
+        .iter()
+        .copied()
+        .take_while(|byte| *byte != 0)
+        .map(|byte| byte as u8)
+        .collect::<Vec<_>>();
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 // The experimental C ABI owns synchronization internally for model/session use.
@@ -2545,6 +2601,18 @@ impl StageSession {
             elapsed_ms: raw.elapsed_ms,
             tokens_per_second: raw.tokens_per_second,
             final_token: raw.final_token,
+            llama_eval_count: raw.llama_eval_count,
+            llama_graph_reuse_count: raw.llama_graph_reuse_count,
+            llama_eval_ms: raw.llama_eval_ms,
+            llama_eval_tokens_per_second: raw.llama_eval_tokens_per_second,
+            non_eval_overhead_ms: raw.non_eval_overhead_ms,
+            decode_call_ms: raw.decode_call_ms,
+            decode_call_tokens_per_second: raw.decode_call_tokens_per_second,
+            sampling_ms: raw.sampling_ms,
+            sampling_tokens_per_second: raw.sampling_tokens_per_second,
+            graph_node_count: raw.graph_node_count,
+            graph_inventory_bucket_overflow_count: raw.graph_inventory_bucket_overflow_count,
+            graph_inventory: decode_graph_inventory(&raw),
         })
     }
 

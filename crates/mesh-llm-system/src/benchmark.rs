@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-pub use mesh_llm_gpu_bench::{BenchmarkOutput, DecodeKernelProbe};
+pub use mesh_llm_gpu_bench::{BenchmarkOutput, DecodeKernelProbe, ProbeDepth};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -21,6 +21,8 @@ pub struct GpuBandwidth {
     pub decode_effective_gbps: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decode_fixed_overhead_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_runtime_overhead_ms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_prefill_decode_overhead_ms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,6 +55,7 @@ pub struct BenchmarkResult {
     pub mem_bandwidth_gbps: Vec<f64>,
     pub decode_effective_gbps: Option<Vec<f64>>,
     pub decode_fixed_overhead_ms: Option<Vec<f64>>,
+    pub decode_runtime_overhead_ms: Option<Vec<f64>>,
     pub post_prefill_decode_overhead_ms: Option<Vec<f64>>,
     pub compute_tflops_fp32: Option<Vec<f64>>,
     pub compute_tflops_fp16: Option<Vec<f64>>,
@@ -70,7 +73,13 @@ pub struct SavedBenchmark {
     pub result: BenchmarkResult,
 }
 
-pub const BENCHMARK_TIMEOUT: Duration = Duration::from_secs(25);
+// `mesh-llm gpus benchmark` now includes GGML decode probes that compile and
+// run real llama-shaped graphs, including a routed MoE `GGML_OP_MUL_MAT_ID`
+// path where the backend supports it. First-run Metal/CUDA pipeline compilation
+// can take longer than the old streaming-memory-only benchmark, so keep the
+// subprocess timeout comfortably above normal probe time. This timeout is only
+// an operational guardrail; it is not a model-fit scoring constant.
+pub const BENCHMARK_TIMEOUT: Duration = Duration::from_secs(180);
 
 const BENCHMARK_CHILD_ENV: &str = "MESH_LLM_BENCHMARK_CHILD";
 
@@ -174,11 +183,19 @@ fn run_benchmark_subprocess(binary: &Path, timeout: Duration) -> Result<Vec<Benc
 }
 
 pub fn run_backend_by_name(backend: &str) -> Result<Vec<BenchmarkOutput>> {
+    run_backend_by_name_with_probe_depth(backend, mesh_llm_gpu_bench::ProbeDepth::Standard)
+}
+
+pub fn run_backend_by_name_with_probe_depth(
+    backend: &str,
+    probe_depth: mesh_llm_gpu_bench::ProbeDepth,
+) -> Result<Vec<BenchmarkOutput>> {
     let backend = parse_benchmark_backend(backend)
         .with_context(|| format!("unsupported benchmark backend {backend}"))?;
-    mesh_llm_gpu_bench::run_benchmark(
+    mesh_llm_gpu_bench::run_benchmark_with_options(
         mesh_llm_gpu_bench::BenchmarkRunner { backend },
         BENCHMARK_TIMEOUT,
+        mesh_llm_gpu_bench::BenchmarkOptions { probe_depth },
     )
 }
 
@@ -410,10 +427,16 @@ pub fn run_or_load(
                 .iter()
                 .map(|g| g.post_prefill_decode_overhead_ms)
                 .collect::<Option<Vec<f64>>>();
+            let decode_runtime_overhead_ms = cached
+                .gpus
+                .iter()
+                .map(|g| g.decode_runtime_overhead_ms)
+                .collect::<Option<Vec<f64>>>();
             let result = BenchmarkResult {
                 mem_bandwidth_gbps: mem_bandwidth,
                 decode_effective_gbps,
                 decode_fixed_overhead_ms,
+                decode_runtime_overhead_ms,
                 post_prefill_decode_overhead_ms,
                 compute_tflops_fp32,
                 compute_tflops_fp16,
@@ -542,6 +565,7 @@ fn build_benchmark_result(
             p90_gbps: outputs[i].p90_gbps,
             decode_effective_gbps: outputs[i].decode_effective_gbps,
             decode_fixed_overhead_ms: outputs[i].decode_fixed_overhead_ms,
+            decode_runtime_overhead_ms: outputs[i].decode_runtime_overhead_ms,
             post_prefill_decode_overhead_ms: outputs[i].post_prefill_decode_overhead_ms,
             compute_tflops_fp32: outputs[i].compute_tflops_fp32,
             compute_tflops_fp16: outputs[i].compute_tflops_fp16,
@@ -566,6 +590,10 @@ fn build_benchmark_result(
     let post_prefill_decode_overhead_ms = gpus
         .iter()
         .map(|g| g.post_prefill_decode_overhead_ms)
+        .collect::<Option<Vec<f64>>>();
+    let decode_runtime_overhead_ms = gpus
+        .iter()
+        .map(|g| g.decode_runtime_overhead_ms)
         .collect::<Option<Vec<f64>>>();
     let compute_tflops_fp32 = gpus
         .iter()
@@ -610,6 +638,7 @@ fn build_benchmark_result(
             mem_bandwidth_gbps,
             decode_effective_gbps,
             decode_fixed_overhead_ms,
+            decode_runtime_overhead_ms,
             post_prefill_decode_overhead_ms,
             compute_tflops_fp32,
             compute_tflops_fp16,
@@ -663,6 +692,7 @@ mod tests {
             p90_gbps: 2.0,
             decode_effective_gbps: None,
             decode_fixed_overhead_ms: None,
+            decode_runtime_overhead_ms: None,
             post_prefill_decode_overhead_ms: None,
             compute_tflops_fp32: fp32,
             compute_tflops_fp16: fp16,
@@ -727,6 +757,7 @@ mod tests {
                 mem_bandwidth_gbps: None,
                 decode_effective_gbps: None,
                 decode_fixed_overhead_ms: None,
+                decode_runtime_overhead_ms: None,
                 post_prefill_decode_overhead_ms: None,
                 compute_tflops_fp32: None,
                 compute_tflops_fp16: None,
@@ -759,6 +790,7 @@ mod tests {
                 p90_gbps: 1948.7,
                 decode_effective_gbps: None,
                 decode_fixed_overhead_ms: None,
+                decode_runtime_overhead_ms: None,
                 post_prefill_decode_overhead_ms: None,
                 compute_tflops_fp32: None,
                 compute_tflops_fp16: None,
@@ -786,6 +818,7 @@ mod tests {
                 p90_gbps: 1948.7,
                 decode_effective_gbps: None,
                 decode_fixed_overhead_ms: None,
+                decode_runtime_overhead_ms: None,
                 post_prefill_decode_overhead_ms: None,
                 compute_tflops_fp32: None,
                 compute_tflops_fp16: None,
@@ -818,6 +851,7 @@ mod tests {
                 p90_gbps: 1948.7,
                 decode_effective_gbps: None,
                 decode_fixed_overhead_ms: None,
+                decode_runtime_overhead_ms: None,
                 post_prefill_decode_overhead_ms: None,
                 compute_tflops_fp32: None,
                 compute_tflops_fp16: None,
@@ -997,6 +1031,7 @@ mod tests {
                 p90_gbps: 1948.7,
                 decode_effective_gbps: None,
                 decode_fixed_overhead_ms: None,
+                decode_runtime_overhead_ms: None,
                 post_prefill_decode_overhead_ms: None,
                 compute_tflops_fp32: None,
                 compute_tflops_fp16: None,
@@ -1027,6 +1062,7 @@ mod tests {
                 p90_gbps: 1948.7,
                 decode_effective_gbps: Some(780.0),
                 decode_fixed_overhead_ms: Some(1.25),
+                decode_runtime_overhead_ms: None,
                 post_prefill_decode_overhead_ms: Some(1.5),
                 compute_tflops_fp32: Some(19.5),
                 compute_tflops_fp16: Some(312.0),
@@ -1063,6 +1099,7 @@ mod tests {
                 p90_gbps: 1948.7,
                 decode_effective_gbps: Some(780.0),
                 decode_fixed_overhead_ms: Some(1.25),
+                decode_runtime_overhead_ms: None,
                 post_prefill_decode_overhead_ms: Some(1.5),
                 compute_tflops_fp32: Some(19.5),
                 compute_tflops_fp16: Some(312.0),
@@ -1104,6 +1141,7 @@ mod tests {
                 p90_gbps: 2.0,
                 decode_effective_gbps: None,
                 decode_fixed_overhead_ms: None,
+                decode_runtime_overhead_ms: None,
                 post_prefill_decode_overhead_ms: None,
                 compute_tflops_fp32: None,
                 compute_tflops_fp16: None,
@@ -1137,6 +1175,7 @@ mod tests {
                 p90_gbps: 222.0,
                 decode_effective_gbps: Some(88.0),
                 decode_fixed_overhead_ms: Some(1.5),
+                decode_runtime_overhead_ms: None,
                 post_prefill_decode_overhead_ms: Some(2.5),
                 compute_tflops_fp32: None,
                 compute_tflops_fp16: None,
@@ -1304,6 +1343,7 @@ mod tests {
             p90_gbps: 1948.7,
             decode_effective_gbps: Some(780.0),
             decode_fixed_overhead_ms: Some(1.25),
+            decode_runtime_overhead_ms: None,
             post_prefill_decode_overhead_ms: Some(1.5),
             compute_tflops_fp32: Some(19.5),
             compute_tflops_fp16: Some(312.0),
@@ -1330,6 +1370,7 @@ mod tests {
             p90_gbps: 1948.7,
             decode_effective_gbps: None,
             decode_fixed_overhead_ms: None,
+            decode_runtime_overhead_ms: None,
             post_prefill_decode_overhead_ms: None,
             compute_tflops_fp32: None,
             compute_tflops_fp16: None,
@@ -1399,6 +1440,7 @@ mod tests {
                 p90_gbps: 110.0,
                 decode_effective_gbps: None,
                 decode_fixed_overhead_ms: None,
+                decode_runtime_overhead_ms: None,
                 post_prefill_decode_overhead_ms: None,
                 compute_tflops_fp32: None,
                 compute_tflops_fp16: None,
@@ -1426,6 +1468,7 @@ mod tests {
                 p90_gbps: 130.0,
                 decode_effective_gbps: None,
                 decode_fixed_overhead_ms: None,
+                decode_runtime_overhead_ms: None,
                 post_prefill_decode_overhead_ms: None,
                 compute_tflops_fp32: None,
                 compute_tflops_fp16: None,

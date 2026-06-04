@@ -348,6 +348,7 @@ fn build_ggml_probe() {
         println!("cargo:rustc-link-lib=dylib=m");
         println!("cargo:rustc-link-lib=dylib=dl");
         println!("cargo:rustc-link-lib=dylib=pthread");
+        link_linux_openmp_libs(&build_dir.join("CMakeCache.txt"));
         if has_cuda {
             link_linux_cuda_libs(&build_dir.join("CMakeCache.txt"));
         }
@@ -355,6 +356,58 @@ fn build_ggml_probe() {
             link_linux_hip_libs();
         }
     }
+}
+
+fn link_linux_openmp_libs(cmake_cache: &std::path::Path) {
+    let Ok(contents) = std::fs::read_to_string(cmake_cache) else {
+        return;
+    };
+    if !cmake_bool_enabled(&contents, "GGML_OPENMP")
+        && !cmake_bool_enabled(&contents, "GGML_OPENMP_ENABLED")
+    {
+        return;
+    }
+
+    for lib in openmp_lib_names(&contents) {
+        if let Some(path) = cmake_cache_value(&contents, &format!("OpenMP_{lib}_LIBRARY")) {
+            let path = std::path::PathBuf::from(path);
+            if let Some(parent) = path.parent()
+                && parent.is_dir()
+            {
+                println!("cargo:rustc-link-search=native={}", parent.display());
+            }
+        }
+        if lib != "pthread" {
+            println!("cargo:rustc-link-lib=dylib={lib}");
+        }
+    }
+}
+
+fn cmake_bool_enabled(contents: &str, key: &str) -> bool {
+    cmake_cache_value(contents, key).is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_uppercase().as_str(),
+            "ON" | "TRUE" | "YES" | "1"
+        )
+    })
+}
+
+fn openmp_lib_names(contents: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for key in ["OpenMP_C_LIB_NAMES", "OpenMP_CXX_LIB_NAMES"] {
+        if let Some(value) = cmake_cache_value(contents, key) {
+            for name in value
+                .split(';')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            {
+                if !names.iter().any(|existing| existing == name) {
+                    names.push(name.to_string());
+                }
+            }
+        }
+    }
+    names
 }
 
 fn compile_ggml_probe_object(

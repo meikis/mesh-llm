@@ -1,6 +1,6 @@
 pub const ABI_VERSION_MAJOR: u32 = 0;
 pub const ABI_VERSION_MINOR: u32 = 1;
-pub const ABI_VERSION_PATCH: u32 = 25;
+pub const ABI_VERSION_PATCH: u32 = 27;
 
 use std::ffi::{c_char, c_int, c_void};
 
@@ -71,6 +71,8 @@ pub const BACKEND_DEVICE_CAP_HOST_BUFFER: u64 = 1 << 1;
 pub const BACKEND_DEVICE_CAP_BUFFER_FROM_HOST_PTR: u64 = 1 << 2;
 pub const BACKEND_DEVICE_CAP_EVENTS: u64 = 1 << 3;
 pub const FEATURE_DECODE_BENCHMARK: u64 = 1 << 24;
+pub const MAX_GRAPH_INVENTORY_BUCKETS: usize = 96;
+pub const GRAPH_INVENTORY_FAMILY_BYTES: usize = 32;
 
 #[repr(C)]
 pub struct Error {
@@ -211,6 +213,21 @@ pub struct TensorInfo {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
+pub struct GraphInventoryBucket {
+    pub version: u32,
+    pub ggml_op: i32,
+    pub ggml_type: u32,
+    pub node_count: u32,
+    pub element_count: u64,
+    pub output_bytes: u64,
+    pub src0_bytes: u64,
+    pub src1_bytes: u64,
+    pub ne: [i64; 4],
+    pub family: [c_char; GRAPH_INVENTORY_FAMILY_BYTES],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 pub struct DecodeBenchmarkResult {
     pub version: u32,
     pub warmup_tokens: u32,
@@ -218,6 +235,45 @@ pub struct DecodeBenchmarkResult {
     pub elapsed_ms: f64,
     pub tokens_per_second: f64,
     pub final_token: i32,
+    pub llama_eval_count: u32,
+    pub llama_graph_reuse_count: i32,
+    pub llama_eval_ms: f64,
+    pub llama_eval_tokens_per_second: f64,
+    pub non_eval_overhead_ms: f64,
+    pub decode_call_ms: f64,
+    pub decode_call_tokens_per_second: f64,
+    pub sampling_ms: f64,
+    pub sampling_tokens_per_second: f64,
+    pub graph_node_count: u32,
+    pub graph_inventory_bucket_count: u32,
+    pub graph_inventory_bucket_overflow_count: u32,
+    pub graph_inventory: [GraphInventoryBucket; MAX_GRAPH_INVENTORY_BUCKETS],
+}
+
+impl Default for DecodeBenchmarkResult {
+    fn default() -> Self {
+        Self {
+            version: 0,
+            warmup_tokens: 0,
+            measured_tokens: 0,
+            elapsed_ms: 0.0,
+            tokens_per_second: 0.0,
+            final_token: 0,
+            llama_eval_count: 0,
+            llama_graph_reuse_count: 0,
+            llama_eval_ms: 0.0,
+            llama_eval_tokens_per_second: 0.0,
+            non_eval_overhead_ms: 0.0,
+            decode_call_ms: 0.0,
+            decode_call_tokens_per_second: 0.0,
+            sampling_ms: 0.0,
+            sampling_tokens_per_second: 0.0,
+            graph_node_count: 0,
+            graph_inventory_bucket_count: 0,
+            graph_inventory_bucket_overflow_count: 0,
+            graph_inventory: [GraphInventoryBucket::default(); MAX_GRAPH_INVENTORY_BUCKETS],
+        }
+    }
 }
 
 #[repr(C)]

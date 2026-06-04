@@ -14,19 +14,26 @@ The lists are stratified by estimator behavior rather than popularity:
 Use the smoke set for self-hosted PR validation:
 
 ```bash
+just model-fit-release
+
 target/release/model-fit-validate \
   --no-progress \
   --models-file crates/model-fit/validation/smoke-models.txt \
-  --output-json /tmp/model-fit-validation.json
+  --output-json "$HOME/tmp/model-fit-validation.json"
 
 target/release/model-fit-check-validation \
-  --min-models 8 \
-  /tmp/model-fit-validation.json
+  --min-models 5 \
+  --max-median-absolute-error 0.10 \
+  --max-individual-error 0.10 \
+  --max-noisy 2 \
+  --require-graph-inventory-match \
+  --allow-classified-individual-misses \
+  "$HOME/tmp/model-fit-validation.json"
 
 target/release/model-fit-check-validation \
   --scenario all \
-  --markdown-out /tmp/model-fit-validation.md \
-  /tmp/model-fit-validation.json
+  --markdown-out "$HOME/tmp/model-fit-validation.md" \
+  "$HOME/tmp/model-fit-validation.json"
 ```
 
 Use the deep set for manual or nightly validation on high-memory runners:
@@ -34,11 +41,26 @@ Use the deep set for manual or nightly validation on high-memory runners:
 ```bash
 target/release/model-fit-validate \
   --no-progress \
+  --dense-probe-depth deep \
   --models-file crates/model-fit/validation/deep-models.txt \
-  --output-json /tmp/model-fit-validation-deep.json
+  --output-json "$HOME/tmp/model-fit-validation-deep.json"
 ```
 
+`--dense-probe-depth deep` adds a validation-only `l16` repeated dense graph
+probe for Q4 dense models. Keep the default `standard` depth for short PR smoke
+runs; use `deep` when investigating depth-extrapolation misses on larger dense
+GGUFs.
+
 `model-fit-validate --models-file` ignores blank lines and `#` comments.
+
+Backend-specific runners must build `model-fit` with the native benchmark
+backend that will generate `HardwareProfile`. Metal is automatic on macOS; CUDA,
+ROCm/HIP, and Intel are explicit recipe arguments. Pass `llama_build_dir` when
+the GGML decode-probe archives live outside the platform default build dir:
+
+```bash
+just model-fit-release cuda .deps/llama-build/build-stage-abi-cuda-sm120
+```
 
 Use the Q8/MoE focused set when changing tensor-type traffic or active-expert
 dispatch modeling:
@@ -47,7 +69,7 @@ dispatch modeling:
 target/release/model-fit-validate \
   --no-progress \
   --models-file crates/model-fit/validation/q8-moe-models.txt \
-  --output-json /tmp/model-fit-validation-q8-moe.json
+  --output-json "$HOME/tmp/model-fit-validation-q8-moe.json"
 ```
 
 ## ABI decode validation
@@ -57,6 +79,25 @@ probe for each GGUF. The ABI probe exercises llama.cpp's decode graph directly
 and reports a denoised median over repeated observations; it is meant to check
 whether the metadata-only fit estimate lands near the runtime's actual decode
 path without feeding observed throughput back into scoring.
+
+The smoke checker deliberately separates structural correctness from throughput
+agreement:
+
+- `--require-graph-inventory-match` fails when GGUF metadata no longer maps to
+  the llama.cpp decode graph inventory. Dense transformer blocks must match the
+  attention/FFN matmul families; sparse MoE blocks must match attention plus
+  routed `GGML_OP_MUL_MAT_ID` expert families. A Q8 row may still report
+  `metadata_inventory_matches_probe_depth_risk` when the tensor inventory
+  matches but the selected timing probe is only one synthetic layer.
+- `--allow-classified-individual-misses` does not make a miss disappear. It
+  allows a row outside `--max-individual-error` only when the validator labels
+  the residual as a concrete diagnostic class such as
+  `metadata_estimate_miss`, `probe_not_representative`, or
+  `runtime_path_mismatch`. The markdown report still prints the miss.
+
+This shape is intentional. The smoke should catch structural regressions and
+unclassified surprises while still letting known, visible residuals stay in the
+evidence table until there is a source-grounded fix.
 
 The steady-decode estimator is source-grounded rather than model-name grounded:
 

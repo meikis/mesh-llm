@@ -7,6 +7,7 @@ version.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+lz4_flex = "0.13"
 skippy-protocol = { path = "../skippy-protocol" }
 skippy-runtime = { path = "../skippy-runtime" }
 skippy-topology = { path = "../skippy-topology" }

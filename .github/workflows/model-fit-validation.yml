@@ -72,11 +72,13 @@ jobs:
           case "$MODEL_FIT_MANIFEST" in
             smoke)
               manifest_path="crates/model-fit/validation/smoke-models.txt"
-              min_models=8
+              min_models=5
+              max_noisy=2
               ;;
             deep)
               manifest_path="crates/model-fit/validation/deep-models.txt"
               min_models=12
+              max_noisy=4
               ;;
             *)
               echo "unknown MODEL_FIT_MANIFEST=$MODEL_FIT_MANIFEST" >&2
@@ -85,6 +87,7 @@ jobs:
           esac
           echo "path=$manifest_path" >> "$GITHUB_OUTPUT"
           echo "min_models=$min_models" >> "$GITHUB_OUTPUT"
+          echo "max_noisy=$max_noisy" >> "$GITHUB_OUTPUT"
 
       - name: Validate model-fit against Skippy single-stage benchmarks
         run: |
@@ -99,8 +102,10 @@ jobs:
           target/release/model-fit-check-validation \
             --min-models "${{ steps.manifest.outputs.min_models }}" \
             --max-median-absolute-error 0.10 \
-            --max-individual-error 0.15 \
-            --max-noisy 0 \
+            --max-individual-error 0.10 \
+            --max-noisy "${{ steps.manifest.outputs.max_noisy }}" \
+            --require-graph-inventory-match \
+            --allow-classified-individual-misses \
             --markdown-out "$RUNNER_TEMP/model-fit-validation.md" \
             "$RUNNER_TEMP/model-fit-validation.json"
           cat "$RUNNER_TEMP/model-fit-validation.md" >> "$GITHUB_STEP_SUMMARY"

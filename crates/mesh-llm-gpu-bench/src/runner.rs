@@ -7,11 +7,13 @@ use anyhow::Result;
     not(feature = "intel")
 ))]
 use anyhow::anyhow;
-use std::{hint::black_box, time::Duration};
+use std::{hint::black_box, sync::mpsc, thread, time::Duration};
 
 const SAMPLER_PROBE_PROMPT_TOKENS: usize = 4096;
 const SAMPLER_PROBE_VOCAB_TOKENS: usize = 131_072;
 const SAMPLER_PROBE_RUNS: usize = 9;
+const RUNTIME_DECODE_OVERHEAD_TOKENS: usize = 4096;
+const RUNTIME_DECODE_OVERHEAD_RUNS: usize = 7;
 
 #[derive(Clone, Copy)]
 struct SamplerProbe {
@@ -30,6 +32,68 @@ pub enum BenchmarkBackend {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BenchmarkRunner {
     pub backend: BenchmarkBackend,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProbeDepth {
+    HardwareOnly,
+    #[default]
+    Standard,
+    Deep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BenchmarkOptions {
+    pub probe_depth: ProbeDepth,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoeBlockGraphProbeShape {
+    pub expert_count: u32,
+    pub experts_used: u32,
+    pub expert_width: u32,
+    pub hidden: u32,
+    pub kv_width: u32,
+    pub repeat_layers: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DenseGraphProbeShape {
+    pub hidden: u32,
+    pub kv_width: u32,
+    pub ffn: u32,
+    pub repeat_layers: u32,
+    pub graph_features: u32,
+    pub norm_head_width: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinearAttentionGraphProbeShape {
+    pub hidden: u32,
+    pub qkv_width: u32,
+    pub gate_width: u32,
+    pub state_width: u32,
+    pub output_input_width: u32,
+    pub ffn: u32,
+    pub recurrent_layers: u32,
+    pub full_attention_layers: u32,
+    pub kv_width: u32,
+    pub graph_features: u32,
+    pub norm_head_width: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputProjectionProbeShape {
+    pub hidden: u32,
+    pub vocab: u32,
+}
+
+impl Default for BenchmarkOptions {
+    fn default() -> Self {
+        Self {
+            probe_depth: ProbeDepth::Standard,
+        }
+    }
 }
 
 pub fn runner_for(
@@ -112,20 +176,89 @@ pub fn parse_benchmark_output(stdout: &[u8]) -> Option<Vec<BenchmarkOutput>> {
     }
 }
 
-pub fn run_benchmark(runner: BenchmarkRunner, _timeout: Duration) -> Result<Vec<BenchmarkOutput>> {
+pub fn run_benchmark(runner: BenchmarkRunner, timeout: Duration) -> Result<Vec<BenchmarkOutput>> {
+    run_benchmark_with_options(runner, timeout, BenchmarkOptions::default())
+}
+
+pub fn run_benchmark_with_options(
+    runner: BenchmarkRunner,
+    _timeout: Duration,
+    options: BenchmarkOptions,
+) -> Result<Vec<BenchmarkOutput>> {
     let mut outputs = match runner.backend {
         BenchmarkBackend::Metal => run_metal_benchmark(),
         BenchmarkBackend::Cuda => run_cuda_benchmark(),
         BenchmarkBackend::Hip => run_hip_benchmark(),
         BenchmarkBackend::Intel => run_intel_benchmark(),
     }?;
-    attach_ggml_decode_probes(runner.backend, &mut outputs);
+    attach_ggml_decode_probes(runner.backend, options.probe_depth, &mut outputs);
     attach_sampler_probe(&mut outputs);
+    attach_decode_runtime_overhead_probe(&mut outputs);
     Ok(outputs)
 }
 
-fn attach_ggml_decode_probes(backend: BenchmarkBackend, outputs: &mut [BenchmarkOutput]) {
-    let probes = run_ggml_decode_probes(backend);
+pub fn run_model_moe_graph_probe(
+    backend: BenchmarkBackend,
+    tensor_type: &str,
+    expert_count: u32,
+    experts_used: u32,
+    expert_width: u32,
+    hidden: u32,
+    repeat_layers: u32,
+) -> Result<Vec<crate::DecodeKernelProbe>> {
+    run_model_moe_graph_probe_impl(
+        backend,
+        tensor_type,
+        expert_count,
+        experts_used,
+        expert_width,
+        hidden,
+        repeat_layers,
+    )
+}
+
+pub fn run_model_moe_block_graph_probe(
+    backend: BenchmarkBackend,
+    tensor_type: &str,
+    shape: MoeBlockGraphProbeShape,
+) -> Result<Vec<crate::DecodeKernelProbe>> {
+    run_model_moe_block_graph_probe_impl(backend, tensor_type, shape)
+}
+
+pub fn run_model_dense_graph_probe(
+    backend: BenchmarkBackend,
+    tensor_type: &str,
+    shape: DenseGraphProbeShape,
+) -> Result<Vec<crate::DecodeKernelProbe>> {
+    run_model_dense_graph_probe_impl(backend, tensor_type, shape)
+}
+
+pub fn run_model_linear_attention_graph_probe(
+    backend: BenchmarkBackend,
+    tensor_type: &str,
+    shape: LinearAttentionGraphProbeShape,
+) -> Result<Vec<crate::DecodeKernelProbe>> {
+    run_model_linear_attention_graph_probe_impl(backend, tensor_type, shape)
+}
+
+pub fn run_model_output_projection_probe(
+    backend: BenchmarkBackend,
+    tensor_type: &str,
+    shape: OutputProjectionProbeShape,
+) -> Result<Vec<crate::DecodeKernelProbe>> {
+    run_model_output_projection_probe_impl(backend, tensor_type, shape)
+}
+
+fn attach_ggml_decode_probes(
+    backend: BenchmarkBackend,
+    probe_depth: ProbeDepth,
+    outputs: &mut [BenchmarkOutput],
+) {
+    if probe_depth == ProbeDepth::HardwareOnly {
+        return;
+    }
+
+    let probes = run_ggml_decode_probes(backend, probe_depth);
     if probes.is_empty() {
         return;
     }
@@ -135,8 +268,11 @@ fn attach_ggml_decode_probes(backend: BenchmarkBackend, outputs: &mut [Benchmark
 }
 
 #[cfg(all(feature = "ggml-probe", mesh_llm_gpu_bench_has_ggml_probe))]
-fn run_ggml_decode_probes(backend: BenchmarkBackend) -> Vec<crate::DecodeKernelProbe> {
-    match crate::ggml_probe::run(backend) {
+fn run_ggml_decode_probes(
+    backend: BenchmarkBackend,
+    probe_depth: ProbeDepth,
+) -> Vec<crate::DecodeKernelProbe> {
+    match crate::ggml_probe::run(backend, probe_depth) {
         Ok(probes) => probes,
         Err(error) => {
             tracing::warn!("GGML decode kernel probe failed: {error:#}");
@@ -146,8 +282,117 @@ fn run_ggml_decode_probes(backend: BenchmarkBackend) -> Vec<crate::DecodeKernelP
 }
 
 #[cfg(not(all(feature = "ggml-probe", mesh_llm_gpu_bench_has_ggml_probe)))]
-fn run_ggml_decode_probes(_backend: BenchmarkBackend) -> Vec<crate::DecodeKernelProbe> {
+fn run_ggml_decode_probes(
+    _backend: BenchmarkBackend,
+    _probe_depth: ProbeDepth,
+) -> Vec<crate::DecodeKernelProbe> {
     Vec::new()
+}
+
+#[cfg(all(feature = "ggml-probe", mesh_llm_gpu_bench_has_ggml_probe))]
+fn run_model_moe_graph_probe_impl(
+    backend: BenchmarkBackend,
+    tensor_type: &str,
+    expert_count: u32,
+    experts_used: u32,
+    expert_width: u32,
+    hidden: u32,
+    repeat_layers: u32,
+) -> Result<Vec<crate::DecodeKernelProbe>> {
+    crate::ggml_probe::run_moe_graph_probe(
+        backend,
+        tensor_type,
+        expert_count,
+        experts_used,
+        expert_width,
+        hidden,
+        repeat_layers,
+    )
+}
+
+#[cfg(all(feature = "ggml-probe", mesh_llm_gpu_bench_has_ggml_probe))]
+fn run_model_moe_block_graph_probe_impl(
+    backend: BenchmarkBackend,
+    tensor_type: &str,
+    shape: MoeBlockGraphProbeShape,
+) -> Result<Vec<crate::DecodeKernelProbe>> {
+    crate::ggml_probe::run_moe_block_graph_probe(backend, tensor_type, shape)
+}
+
+#[cfg(all(feature = "ggml-probe", mesh_llm_gpu_bench_has_ggml_probe))]
+fn run_model_dense_graph_probe_impl(
+    backend: BenchmarkBackend,
+    tensor_type: &str,
+    shape: DenseGraphProbeShape,
+) -> Result<Vec<crate::DecodeKernelProbe>> {
+    crate::ggml_probe::run_dense_graph_probe(backend, tensor_type, shape)
+}
+
+#[cfg(all(feature = "ggml-probe", mesh_llm_gpu_bench_has_ggml_probe))]
+fn run_model_linear_attention_graph_probe_impl(
+    backend: BenchmarkBackend,
+    tensor_type: &str,
+    shape: LinearAttentionGraphProbeShape,
+) -> Result<Vec<crate::DecodeKernelProbe>> {
+    crate::ggml_probe::run_linear_attention_graph_probe(backend, tensor_type, shape)
+}
+
+#[cfg(all(feature = "ggml-probe", mesh_llm_gpu_bench_has_ggml_probe))]
+fn run_model_output_projection_probe_impl(
+    backend: BenchmarkBackend,
+    tensor_type: &str,
+    shape: OutputProjectionProbeShape,
+) -> Result<Vec<crate::DecodeKernelProbe>> {
+    crate::ggml_probe::run_output_projection_probe(backend, tensor_type, shape)
+}
+
+#[cfg(not(all(feature = "ggml-probe", mesh_llm_gpu_bench_has_ggml_probe)))]
+fn run_model_moe_graph_probe_impl(
+    _backend: BenchmarkBackend,
+    _tensor_type: &str,
+    _expert_count: u32,
+    _experts_used: u32,
+    _expert_width: u32,
+    _hidden: u32,
+    _repeat_layers: u32,
+) -> Result<Vec<crate::DecodeKernelProbe>> {
+    Ok(Vec::new())
+}
+
+#[cfg(not(all(feature = "ggml-probe", mesh_llm_gpu_bench_has_ggml_probe)))]
+fn run_model_moe_block_graph_probe_impl(
+    _backend: BenchmarkBackend,
+    _tensor_type: &str,
+    _shape: MoeBlockGraphProbeShape,
+) -> Result<Vec<crate::DecodeKernelProbe>> {
+    Ok(Vec::new())
+}
+
+#[cfg(not(all(feature = "ggml-probe", mesh_llm_gpu_bench_has_ggml_probe)))]
+fn run_model_dense_graph_probe_impl(
+    _backend: BenchmarkBackend,
+    _tensor_type: &str,
+    _shape: DenseGraphProbeShape,
+) -> Result<Vec<crate::DecodeKernelProbe>> {
+    Ok(Vec::new())
+}
+
+#[cfg(not(all(feature = "ggml-probe", mesh_llm_gpu_bench_has_ggml_probe)))]
+fn run_model_linear_attention_graph_probe_impl(
+    _backend: BenchmarkBackend,
+    _tensor_type: &str,
+    _shape: LinearAttentionGraphProbeShape,
+) -> Result<Vec<crate::DecodeKernelProbe>> {
+    Ok(Vec::new())
+}
+
+#[cfg(not(all(feature = "ggml-probe", mesh_llm_gpu_bench_has_ggml_probe)))]
+fn run_model_output_projection_probe_impl(
+    _backend: BenchmarkBackend,
+    _tensor_type: &str,
+    _shape: OutputProjectionProbeShape,
+) -> Result<Vec<crate::DecodeKernelProbe>> {
+    Ok(Vec::new())
 }
 
 fn attach_sampler_probe(outputs: &mut [BenchmarkOutput]) {
@@ -156,6 +401,64 @@ fn attach_sampler_probe(outputs: &mut [BenchmarkOutput]) {
         output.sampler_history_us_per_token = Some(probe.history_us_per_token);
         output.sampler_vocab_us_per_token = Some(probe.vocab_us_per_token);
     }
+}
+
+fn attach_decode_runtime_overhead_probe(outputs: &mut [BenchmarkOutput]) {
+    let overhead_ms = measure_decode_runtime_overhead_ms();
+    for output in outputs {
+        output.decode_runtime_overhead_ms = Some(overhead_ms);
+    }
+}
+
+fn measure_decode_runtime_overhead_ms() -> f64 {
+    let mut samples = Vec::with_capacity(RUNTIME_DECODE_OVERHEAD_RUNS);
+    for _ in 0..RUNTIME_DECODE_OVERHEAD_RUNS {
+        samples.push(measure_decode_runtime_overhead_once_ms());
+    }
+    samples.sort_by(|left, right| left.total_cmp(right));
+    samples[RUNTIME_DECODE_OVERHEAD_RUNS / 2]
+}
+
+fn measure_decode_runtime_overhead_once_ms() -> f64 {
+    // This probe is deliberately host/runtime-shaped, not backend-shaped. The
+    // native benchmark already measures empty GPU dispatch overhead; local
+    // serving also pays CPU-side per-token control work around decode: a token
+    // request crosses a runtime boundary, updates session-visible state, and
+    // hands a result back to the caller before the next sampled token can be
+    // accepted. A two-channel handoff with tiny state updates is a portable
+    // lower-bound for that control path. It is not calibrated from any GGUF
+    // benchmark result and it is intentionally reported separately so residual
+    // model/runtime misses stay visible.
+    let (token_tx, token_rx) = mpsc::sync_channel::<u64>(1);
+    let (ack_tx, ack_rx) = mpsc::sync_channel::<u64>(1);
+    let worker = thread::spawn(move || {
+        let mut state = 0u64;
+        while let Ok(token) = token_rx.recv() {
+            state = state
+                .wrapping_mul(1_099_511_628_211)
+                .wrapping_add(token)
+                .rotate_left(7);
+            if ack_tx.send(state).is_err() {
+                break;
+            }
+        }
+        state
+    });
+
+    let started = std::time::Instant::now();
+    let mut observed = 0u64;
+    for token in 0..RUNTIME_DECODE_OVERHEAD_TOKENS as u64 {
+        token_tx
+            .send(token)
+            .expect("runtime overhead worker should receive token");
+        observed ^= ack_rx
+            .recv()
+            .expect("runtime overhead worker should return token");
+    }
+    drop(token_tx);
+    let worker_state = worker.join().unwrap_or_default();
+    black_box((observed, worker_state));
+    started.elapsed().as_secs_f64() * 1000.0 / RUNTIME_DECODE_OVERHEAD_TOKENS as f64
 }
 
 fn measure_sampler_probe() -> SamplerProbe {

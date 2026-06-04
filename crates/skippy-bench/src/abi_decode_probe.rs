@@ -69,6 +69,28 @@ pub fn abi_decode_probe(args: AbiDecodeProbeArgs) -> Result<()> {
             "elapsed_ms": result.elapsed_ms,
             "tokens_per_second": result.tokens_per_second,
             "final_token": result.final_token,
+            "llama_eval_count": result.llama_eval_count,
+            "llama_graph_reuse_count": result.llama_graph_reuse_count,
+            "llama_eval_ms": result.llama_eval_ms,
+            "llama_eval_tokens_per_second": result.llama_eval_tokens_per_second,
+            "non_eval_overhead_ms": result.non_eval_overhead_ms,
+            "decode_call_ms": result.decode_call_ms,
+            "decode_call_tokens_per_second": result.decode_call_tokens_per_second,
+            "sampling_ms": result.sampling_ms,
+            "sampling_tokens_per_second": result.sampling_tokens_per_second,
+            "graph_node_count": result.graph_node_count,
+            "graph_inventory_bucket_overflow_count": result.graph_inventory_bucket_overflow_count,
+            "graph_inventory": result.graph_inventory.iter().map(|bucket| json!({
+                "family": bucket.family,
+                "ggml_op": bucket.ggml_op,
+                "ggml_type": bucket.ggml_type,
+                "node_count": bucket.node_count,
+                "element_count": bucket.element_count,
+                "output_bytes": bucket.output_bytes,
+                "src0_bytes": bucket.src0_bytes,
+                "src1_bytes": bucket.src1_bytes,
+                "ne": bucket.ne,
+            })).collect::<Vec<_>>(),
         }))?
     );
     Ok(())

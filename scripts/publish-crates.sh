@@ -331,7 +331,26 @@ unpublished_registry_deps() {
             ;;
         model-fit)
             printf '%s\n' \
-                model-artifact
+                mesh-llm-gpu-bench \
+                mesh-llm-system \
+                model-artifact \
+                model-hf \
+                model-ref \
+                model-resolver
+            ;;
+        model-resolver)
+            printf '%s\n' \
+                model-artifact \
+                model-ref
+            ;;
+        mesh-llm-system)
+            printf '%s\n' \
+                mesh-llm-gpu-bench \
+                skippy-runtime
+            ;;
+        skippy-runtime)
+            printf '%s\n' \
+                skippy-ffi
             ;;
         model-hf)
             printf '%s\n' \
@@ -385,8 +404,13 @@ publish_crates=(
     mesh-llm-routing
     mesh-llm-types
     model-artifact
-    model-fit
     model-hf
+    model-resolver
+    mesh-llm-gpu-bench
+    skippy-ffi
+    skippy-runtime
+    mesh-llm-system
+    model-fit
     mesh-llm-client
     mesh-llm-api-client
     mesh-llm-node

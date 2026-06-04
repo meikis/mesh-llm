@@ -48,6 +48,18 @@ pub struct AcceleratorProfile {
     /// equation and reports that the decode calibration is incomplete.
     #[serde(default)]
     pub decode_fixed_overhead_ms: Option<f32>,
+    /// Host/runtime overhead measured once per generated token.
+    ///
+    /// This is intentionally separate from GPU dispatch overhead. Native GPU
+    /// benchmarks can measure an empty backend submission, but local serving
+    /// also has source-visible host work around every sampled decode step:
+    /// runtime loop bookkeeping, request/session handoff, status accounting,
+    /// and other CPU-side control-path costs. `model-fit` only consumes this
+    /// field when it is emitted by benchmark code; it must not be replaced by a
+    /// backend-specific constant or inferred from the model currently being
+    /// validated.
+    #[serde(default)]
+    pub decode_runtime_overhead_ms: Option<f32>,
     /// Lower-bound cost of issuing the first decode-shaped command after a
     /// prefill-shaped matmul.
     ///
@@ -217,6 +229,10 @@ pub struct ModelProfile {
     pub base_resident_bytes: Option<u64>,
     pub expert_tensor_bytes: Option<u64>,
     pub tensor_group_bytes: TensorGroupBytes,
+    #[serde(default)]
+    pub dense_graph_features: DenseGraphFeatures,
+    #[serde(default)]
+    pub recurrent_attention: RecurrentAttentionProfile,
     pub tensor_matmul: TensorMatmulProfile,
     pub parameter_count: Option<u64>,
     pub quantization: Option<String>,
@@ -236,11 +252,31 @@ pub struct ModelProfile {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DenseGraphFeatures {
+    pub attention_q_norm: bool,
+    pub attention_k_norm: bool,
+    pub attention_post_norm: bool,
+    pub feed_forward_post_norm: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RecurrentAttentionProfile {
+    pub recurrent_layer_count: u32,
+    pub qkv_projection: TensorMatmulGroupProfile,
+    pub gate_projection: TensorMatmulGroupProfile,
+    pub beta_projection: TensorMatmulGroupProfile,
+    pub alpha_projection: TensorMatmulGroupProfile,
+    pub output_projection: TensorMatmulGroupProfile,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TensorGroupBytes {
     pub attention_bytes: u64,
     pub feed_forward_bytes: u64,
     pub expert_feed_forward_bytes: u64,
     pub embedding_bytes: u64,
+    #[serde(default)]
+    pub embedding_type_bytes: TensorTypeBytes,
     pub output_bytes: u64,
     pub normalization_bytes: u64,
     pub other_bytes: u64,
@@ -568,6 +604,8 @@ pub struct ModelRecommendation {
     pub estimated_active_decode_bytes_per_token: Option<u64>,
     pub estimated_decode_tokens_per_sec: Option<f32>,
     pub estimated_decode_tokens_per_sec_range: Option<DecodeEstimateRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_cost_breakdown: Option<DecodeCostBreakdown>,
     pub estimated_prefill_tokens_per_sec: Option<f32>,
     pub estimated_first_token_prefill_ms: Option<f32>,
     pub estimated_first_token_decode_ms: Option<f32>,
@@ -578,6 +616,43 @@ pub struct ModelRecommendation {
     pub capability_evidence: Vec<CapabilityEvidence>,
     pub reasons: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DecodeCostBreakdown {
+    pub bandwidth_ms: f32,
+    pub compute_ms: f32,
+    pub fixed_overhead_ms: f32,
+    #[serde(default)]
+    pub runtime_overhead_ms: f32,
+    pub measured_graph_overhead_ms: f32,
+    pub architecture_overhead_ms: f32,
+    pub sampled_decode_sampler_ms: f32,
+    pub selected_time_ms: f32,
+    pub estimated_tokens_per_sec: f32,
+    pub probed_bytes: u64,
+    pub fallback_bytes: u64,
+    pub groups: Vec<DecodeCostGroupBreakdown>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DecodeCostGroupBreakdown {
+    pub group: String,
+    pub tensor_type: String,
+    pub resident_bytes: u64,
+    pub traffic_bytes: u64,
+    pub expert_scaled: bool,
+    pub shape_input_width: u64,
+    pub shape_output_width: u64,
+    pub source: String,
+    pub bandwidth_bytes_per_sec: u64,
+    pub bandwidth_ms: f32,
+    pub probe_name: Option<String>,
+    pub probe_rows: Option<u32>,
+    pub probe_cols: Option<u32>,
+    pub probe_batch_tokens: Option<u32>,
+    pub probe_effective_gbps: Option<f64>,
+    pub probe_shape_distance: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -616,7 +691,16 @@ impl Default for SelectionConfig {
             decode_overhead: DecodeOverheadConfig::default(),
             weights: workload.default_weights(),
             workload,
-            kv_read_scale: 0.25,
+            // During one-token decode llama.cpp builds attention from the
+            // cached K/V tensors: KQ reads the cached keys, KQV reads the cached
+            // values, and the new token's K/V rows are copied into the cache.
+            // Earlier revisions used 0.25 here as a broad "cache locality"
+            // discount. That made the equation look nicer on some rows, but it
+            // was not grounded in the llama.cpp graph: the source-visible work
+            // is a full K/V pass over the active attention window. Keep the
+            // default at 1.0 and let measured bandwidth/probes, workload prompt
+            // length, and KV dtype determine how expensive that pass is.
+            kv_read_scale: 1.0,
         }
     }
 }

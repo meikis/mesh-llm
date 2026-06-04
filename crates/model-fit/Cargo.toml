@@ -7,6 +7,26 @@ description = "Explainable hardware fit scoring for GGUF model artifacts"
 repository = "https://github.com/Mesh-LLM/mesh-llm"
 homepage = "https://github.com/Mesh-LLM/mesh-llm"
 
+[features]
+default = ["ggml-probe"]
+ggml-probe = [
+    "mesh-llm-gpu-bench/ggml-probe",
+    "mesh-llm-system/gpu-bench-ggml",
+]
+cuda = [
+    "mesh-llm-gpu-bench/cuda",
+    "mesh-llm-system/gpu-bench-cuda",
+]
+rocm = [
+    "mesh-llm-gpu-bench/hip",
+    "mesh-llm-system/gpu-bench-hip",
+]
+hip = ["rocm"]
+intel = [
+    "mesh-llm-gpu-bench/intel",
+    "mesh-llm-system/gpu-bench-intel",
+]
+
 [dependencies]
 anyhow.workspace = true
 mesh-llm-gpu-bench = { path = "../mesh-llm-gpu-bench", version = "0.68.0" }

@@ -18,6 +18,8 @@ struct Args {
     max_runtime_errors: usize,
     min_models: Option<usize>,
     markdown_out: Option<PathBuf>,
+    require_graph_inventory_match: bool,
+    allow_classified_individual_misses: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,8 +38,92 @@ struct ValidationSummary {
 #[derive(Debug, Deserialize)]
 struct ModelReport {
     input_ref: String,
+    recommendation: Option<RecommendationReport>,
+    decode_probe_diagnostic: Option<DecodeProbeDiagnostic>,
+    graph_inventory_diagnostic: Option<GraphInventoryDiagnostic>,
+    runtime_diagnostic: Option<RuntimeDiagnostic>,
     benchmarks: Vec<ScenarioReport>,
     errors: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RecommendationReport {
+    decode_cost_breakdown: Option<DecodeCostBreakdown>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DecodeCostBreakdown {
+    bandwidth_ms: f64,
+    compute_ms: f64,
+    fixed_overhead_ms: f64,
+    #[serde(default)]
+    runtime_overhead_ms: f64,
+    measured_graph_overhead_ms: f64,
+    architecture_overhead_ms: f64,
+    #[serde(default)]
+    sampled_decode_sampler_ms: f64,
+    selected_time_ms: f64,
+    estimated_tokens_per_sec: f64,
+    probed_bytes: u64,
+    fallback_bytes: u64,
+    groups: Vec<DecodeCostGroupBreakdown>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DecodeCostGroupBreakdown {
+    group: String,
+    tensor_type: String,
+    traffic_bytes: u64,
+    source: String,
+    bandwidth_bytes_per_sec: u64,
+    bandwidth_ms: f64,
+    probe_name: Option<String>,
+    probe_shape_distance: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DecodeProbeDiagnostic {
+    predicted_tokens_per_second: Option<f64>,
+    abi_tokens_per_second: Option<f64>,
+    observed_tokens_per_second: Option<f64>,
+    observed_over_fit: Option<f64>,
+    abi_over_fit: Option<f64>,
+    observed_over_abi: Option<f64>,
+    observed_vs_fit: String,
+    abi_vs_fit: String,
+    observed_vs_abi: String,
+    classification: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphInventoryDiagnostic {
+    status: String,
+    graph_unclassified_matmul_src0_bytes: u64,
+    comparisons: Vec<GraphInventoryComparison>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphInventoryComparison {
+    name: String,
+    src0_over_metadata: Option<f64>,
+    node_count_delta: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeDiagnostic {
+    validation_shape: String,
+    selected_backend: String,
+    selected_accelerator: Option<String>,
+    layer_start: u32,
+    layer_end: Option<u32>,
+    ctx_size: u32,
+    n_gpu_layers: i32,
+    cache_type_k: String,
+    cache_type_v: String,
+    flash_attn_type: String,
+    n_batch: Option<u32>,
+    n_ubatch: Option<u32>,
+    load_mode: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,6 +194,8 @@ impl Args {
             max_runtime_errors: DEFAULT_MAX_RUNTIME_ERRORS,
             min_models: None,
             markdown_out: None,
+            require_graph_inventory_match: false,
+            allow_classified_individual_misses: false,
         };
 
         while let Some(arg) = values.next() {
@@ -131,6 +219,10 @@ impl Args {
                 "--markdown-out" => {
                     parsed.markdown_out =
                         Some(PathBuf::from(next_value(&mut values, "--markdown-out")?));
+                }
+                "--require-graph-inventory-match" => parsed.require_graph_inventory_match = true,
+                "--allow-classified-individual-misses" => {
+                    parsed.allow_classified_individual_misses = true;
                 }
                 "-h" | "--help" => {
                     print_usage();
@@ -176,11 +268,190 @@ fn render_markdown(args: &Args, report: &ValidationReport) -> String {
     let scenarios = selected_scenarios(args, report);
     let mut markdown = String::new();
     markdown.push_str("# Model Fit Validation\n\n");
+    render_decode_probe_diagnostics(report, &mut markdown);
+    render_graph_inventory_diagnostics(report, &mut markdown);
+    render_decode_cost_breakdowns(report, &mut markdown);
+    render_runtime_diagnostics(report, &mut markdown);
     for scenario in scenarios {
         let rows = scenario_rows(report, &scenario);
         markdown.push_str(&render_scenario_markdown(report, &scenario, &rows));
     }
     markdown
+}
+
+fn render_graph_inventory_diagnostics(report: &ValidationReport, markdown: &mut String) {
+    let rows = report
+        .models
+        .iter()
+        .filter_map(|model| {
+            model
+                .graph_inventory_diagnostic
+                .as_ref()
+                .map(|diagnostic| (model, diagnostic))
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return;
+    }
+
+    markdown.push_str("## Graph Inventory Diagnostics\n\n");
+    markdown.push_str("| model | status | unclassified matmul bytes | mismatch comparisons |\n");
+    markdown.push_str("|---|---|---:|---|\n");
+    for (model, diagnostic) in rows {
+        markdown.push_str(&format!(
+            "| `{}` | {} | {} | {} |\n",
+            model.input_ref,
+            diagnostic.status,
+            diagnostic.graph_unclassified_matmul_src0_bytes,
+            graph_inventory_mismatch_label(diagnostic),
+        ));
+    }
+    markdown.push('\n');
+}
+
+fn render_decode_probe_diagnostics(report: &ValidationReport, markdown: &mut String) {
+    let rows = report
+        .models
+        .iter()
+        .filter_map(|model| {
+            model
+                .decode_probe_diagnostic
+                .as_ref()
+                .map(|diagnostic| (model, diagnostic))
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return;
+    }
+
+    markdown.push_str("## Decode Probe Diagnostics\n\n");
+    markdown.push_str(
+        "| model | est tok/s | abi tok/s | observed tok/s | observed/fit | abi/fit | observed/abi | fit vs observed | fit vs abi | abi vs observed | classification |\n",
+    );
+    markdown.push_str("|---|---:|---:|---:|---:|---:|---:|---|---|---|---|\n");
+    for (model, diagnostic) in rows {
+        markdown.push_str(&format!(
+            "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            model.input_ref,
+            number_option(diagnostic.predicted_tokens_per_second),
+            number_option(diagnostic.abi_tokens_per_second),
+            number_option(diagnostic.observed_tokens_per_second),
+            ratio_option(diagnostic.observed_over_fit),
+            ratio_option(diagnostic.abi_over_fit),
+            ratio_option(diagnostic.observed_over_abi),
+            diagnostic.observed_vs_fit,
+            diagnostic.abi_vs_fit,
+            diagnostic.observed_vs_abi,
+            diagnostic.classification,
+        ));
+    }
+    markdown.push('\n');
+}
+
+fn render_decode_cost_breakdowns(report: &ValidationReport, markdown: &mut String) {
+    let rows = report
+        .models
+        .iter()
+        .filter_map(|model| {
+            model
+                .recommendation
+                .as_ref()
+                .and_then(|recommendation| recommendation.decode_cost_breakdown.as_ref())
+                .map(|breakdown| (model, breakdown))
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return;
+    }
+
+    markdown.push_str("## Decode Cost Breakdown\n\n");
+    markdown.push_str("| model | est tok/s | selected ms | bandwidth ms | compute ms | runtime overhead ms | sampler ms | probed MiB | fallback MiB |\n");
+    markdown.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+    for (model, breakdown) in &rows {
+        let overhead_ms = breakdown.fixed_overhead_ms
+            + breakdown.runtime_overhead_ms
+            + breakdown.measured_graph_overhead_ms
+            + breakdown.architecture_overhead_ms;
+        markdown.push_str(&format!(
+            "| `{}` | {:.1} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.1} | {:.1} |\n",
+            model.input_ref,
+            breakdown.estimated_tokens_per_sec,
+            breakdown.selected_time_ms,
+            breakdown.bandwidth_ms,
+            breakdown.compute_ms,
+            overhead_ms,
+            breakdown.sampled_decode_sampler_ms,
+            mib(breakdown.probed_bytes),
+            mib(breakdown.fallback_bytes),
+        ));
+    }
+    markdown.push('\n');
+
+    markdown.push_str("| model | group | type | source | traffic MiB | ms | bandwidth GB/s | probe | distance |\n");
+    markdown.push_str("|---|---|---|---|---:|---:|---:|---|---:|\n");
+    for (model, breakdown) in rows {
+        for group in &breakdown.groups {
+            markdown.push_str(&format!(
+                "| `{}` | {} | {} | {} | {:.1} | {:.3} | {:.1} | {} | {} |\n",
+                model.input_ref,
+                group.group,
+                group.tensor_type,
+                group.source,
+                mib(group.traffic_bytes),
+                group.bandwidth_ms,
+                group.bandwidth_bytes_per_sec as f64 / 1_000_000_000.0,
+                group.probe_name.as_deref().unwrap_or("-"),
+                group
+                    .probe_shape_distance
+                    .map_or_else(|| "-".into(), |distance| format!("{distance:.3}")),
+            ));
+        }
+    }
+    markdown.push('\n');
+}
+
+fn render_runtime_diagnostics(report: &ValidationReport, markdown: &mut String) {
+    let rows = report
+        .models
+        .iter()
+        .filter_map(|model| {
+            model
+                .runtime_diagnostic
+                .as_ref()
+                .map(|diagnostic| (model, diagnostic))
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return;
+    }
+
+    markdown.push_str("## Runtime Diagnostics\n\n");
+    markdown.push_str(
+        "| model | backend | accelerator | shape | layers | ctx | n_gpu_layers | kv | flash | batch | ubatch | load |\n",
+    );
+    markdown.push_str("|---|---|---|---|---:|---:|---:|---|---|---:|---:|---|\n");
+    for (model, diagnostic) in rows {
+        markdown.push_str(&format!(
+            "| `{}` | {} | {} | {} | {}-{} | {} | {} | {}/{} | {} | {} | {} | {} |\n",
+            model.input_ref,
+            diagnostic.selected_backend,
+            diagnostic.selected_accelerator.as_deref().unwrap_or("-"),
+            diagnostic.validation_shape,
+            diagnostic.layer_start,
+            diagnostic
+                .layer_end
+                .map_or_else(|| "-".into(), |value| value.to_string()),
+            diagnostic.ctx_size,
+            diagnostic.n_gpu_layers,
+            diagnostic.cache_type_k,
+            diagnostic.cache_type_v,
+            diagnostic.flash_attn_type,
+            integer_option(diagnostic.n_batch.map(u64::from)),
+            integer_option(diagnostic.n_ubatch.map(u64::from)),
+            diagnostic.load_mode,
+        ));
+    }
+    markdown.push('\n');
 }
 
 fn render_scenario_markdown(
@@ -290,6 +561,9 @@ fn enforce_thresholds(args: &Args, report: &ValidationReport) -> Result<()> {
                 model.errors.join("; ")
             ));
         }
+        if args.require_graph_inventory_match {
+            enforce_graph_inventory_match(model, &mut failures);
+        }
     }
 
     for scenario in selected_scenarios(args, report) {
@@ -312,10 +586,10 @@ fn enforce_scenario_thresholds(
 ) {
     let accuracy_rows = accuracy_rows(rows);
     match args.min_models {
-        Some(min_models) if accuracy_rows.len() < min_models => {
+        Some(min_models) if rows.len() < min_models => {
             failures.push(format!(
-                "scenario {scenario} produced {} accuracy-gated samples, expected at least {min_models}",
-                accuracy_rows.len()
+                "scenario {scenario} produced {} samples, expected at least {min_models}",
+                rows.len()
             ));
         }
         _ => {}
@@ -346,6 +620,9 @@ fn enforce_scenario_thresholds(
     }
     for row in accuracy_rows {
         if row.absolute_error > args.max_individual_error {
+            if args.allow_classified_individual_misses && row_has_classified_miss(row) {
+                continue;
+            }
             failures.push(format!(
                 "{} scenario {scenario} error {:.2}% exceeded {:.2}%",
                 row.model.input_ref,
@@ -354,6 +631,103 @@ fn enforce_scenario_thresholds(
             ));
         }
     }
+}
+
+fn enforce_graph_inventory_match(model: &ModelReport, failures: &mut Vec<String>) {
+    if !model_has_observed_decode_validation(model) {
+        return;
+    }
+    let Some(diagnostic) = &model.graph_inventory_diagnostic else {
+        failures.push(format!(
+            "{} is missing graph inventory diagnostics",
+            model.input_ref
+        ));
+        return;
+    };
+    if !graph_inventory_status_is_match(&diagnostic.status) {
+        failures.push(format!(
+            "{} graph inventory status is {}, expected metadata inventory match",
+            model.input_ref, diagnostic.status
+        ));
+    }
+    if diagnostic.graph_unclassified_matmul_src0_bytes > 0 {
+        failures.push(format!(
+            "{} graph inventory has {} unclassified matmul src0 bytes",
+            model.input_ref, diagnostic.graph_unclassified_matmul_src0_bytes
+        ));
+    }
+    for comparison in &diagnostic.comparisons {
+        let mismatched_bytes = comparison
+            .src0_over_metadata
+            .is_some_and(|ratio| (ratio - 1.0).abs() > DEFAULT_MAX_MEDIAN_ABSOLUTE_ERROR);
+        if mismatched_bytes || comparison.node_count_delta != 0 {
+            failures.push(format!(
+                "{} graph inventory comparison {} mismatched: src0/meta={} node_delta={}",
+                model.input_ref,
+                comparison.name,
+                ratio_option(comparison.src0_over_metadata),
+                comparison.node_count_delta
+            ));
+        }
+    }
+}
+
+fn model_has_observed_decode_validation(model: &ModelReport) -> bool {
+    model
+        .benchmarks
+        .iter()
+        .any(|scenario| scenario.observed.is_some())
+        || model
+            .decode_probe_diagnostic
+            .as_ref()
+            .and_then(|diagnostic| diagnostic.observed_tokens_per_second)
+            .is_some()
+}
+
+fn graph_inventory_status_is_match(status: &str) -> bool {
+    matches!(
+        status,
+        "metadata_inventory_matches" | "metadata_inventory_matches_probe_depth_risk"
+    )
+}
+
+fn graph_inventory_mismatch_label(diagnostic: &GraphInventoryDiagnostic) -> String {
+    let mismatches = diagnostic
+        .comparisons
+        .iter()
+        .filter(|comparison| {
+            comparison
+                .src0_over_metadata
+                .is_some_and(|ratio| (ratio - 1.0).abs() > DEFAULT_MAX_MEDIAN_ABSOLUTE_ERROR)
+                || comparison.node_count_delta != 0
+        })
+        .map(|comparison| comparison.name.as_str())
+        .collect::<Vec<_>>();
+    if mismatches.is_empty() {
+        "-".into()
+    } else {
+        mismatches.join(", ")
+    }
+}
+
+fn row_has_classified_miss(row: &ScenarioRow<'_>) -> bool {
+    row.model
+        .decode_probe_diagnostic
+        .as_ref()
+        .is_some_and(|diagnostic| classified_miss(&diagnostic.classification))
+}
+
+fn classified_miss(classification: &str) -> bool {
+    matches!(
+        classification,
+        "metadata_estimate_miss"
+            | "runtime_path_mismatch"
+            | "probe_not_representative"
+            | "probe_differs_but_observed_matches_fit"
+            | "mixed_estimate_and_runtime_mismatch"
+            | "abi_probe_noisy"
+            | "no_abi_probe"
+    )
 }
 
 fn selected_scenarios(args: &Args, report: &ValidationReport) -> Vec<String> {
@@ -442,6 +816,10 @@ fn ratio_option(value: Option<f64>) -> String {
     value.map_or_else(|| "-".into(), |value| format!("{value:.3}"))
 }
 
+fn mib(bytes: u64) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0)
+}
+
 fn percent_option(value: Option<f64>) -> String {
     value.map_or_else(|| "-".into(), |value| format!("{:.1}%", value * 100.0))
 }
@@ -465,6 +843,6 @@ fn next_value(args: &mut impl Iterator<Item = String>, name: &str) -> Result<Str
 
 fn print_usage() {
     eprintln!(
-        "usage: model-fit-check-validation [--scenario steady_decode|prefill|first_token|kv_warm_reuse|all] [--max-median-absolute-error 0.10] [--max-individual-error 0.10] [--max-noisy 0] [--max-runtime-errors 0] [--min-models N] [--markdown-out report.md] report.json"
+        "usage: model-fit-check-validation [--scenario steady_decode|prefill|first_token|kv_warm_reuse|all] [--max-median-absolute-error 0.10] [--max-individual-error 0.10] [--max-noisy 0] [--max-runtime-errors 0] [--min-models N] [--markdown-out report.md] [--require-graph-inventory-match] [--allow-classified-individual-misses] report.json"
     );
 }

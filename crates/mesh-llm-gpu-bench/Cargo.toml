@@ -2,6 +2,10 @@
 name = "mesh-llm-gpu-bench"
 version.workspace = true
 edition = "2024"
+license.workspace = true
+description = "GPU benchmark primitives used by mesh-llm hardware profiling"
+repository = "https://github.com/Mesh-LLM/mesh-llm"
+homepage = "https://github.com/Mesh-LLM/mesh-llm"
 build = "build.rs"
 
 [dependencies]

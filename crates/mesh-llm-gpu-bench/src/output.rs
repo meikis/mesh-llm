@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+pub const GRAPH_FEATURE_ATTENTION_Q_NORM: u32 = 1 << 0;
+pub const GRAPH_FEATURE_ATTENTION_K_NORM: u32 = 1 << 1;
+pub const GRAPH_FEATURE_ATTENTION_POST_NORM: u32 = 1 << 2;
+pub const GRAPH_FEATURE_FFN_POST_NORM: u32 = 1 << 3;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct BenchmarkOutput {
     pub device: String,
@@ -11,6 +16,8 @@ pub struct BenchmarkOutput {
     pub decode_effective_gbps: Option<f64>,
     #[serde(default)]
     pub decode_fixed_overhead_ms: Option<f64>,
+    #[serde(default)]
+    pub decode_runtime_overhead_ms: Option<f64>,
     #[serde(default)]
     pub post_prefill_decode_overhead_ms: Option<f64>,
     pub compute_tflops_fp32: Option<f64>,
@@ -45,7 +52,11 @@ pub struct DecodeKernelProbe {
     pub rows: u32,
     pub cols: u32,
     pub batch_tokens: u32,
+    #[serde(default)]
+    pub graph_features: u32,
     pub effective_gbps: f64,
     pub tflops: Option<f64>,
+    #[serde(default)]
+    pub elapsed_ms: Option<f64>,
     pub runs: u32,
 }

@@ -1,0 +1,307 @@
+From 2bf494992873d05661ec3fde4ae441803ce1593f Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Thu, 4 Jun 2026 12:35:30 +1000
+Subject: [PATCH] Expose skippy decode benchmark timings and graph inventory
+
+---
+ include/skippy.h        |  28 +++++++
+ include/skippy/common.h |   2 +-
+ src/skippy.cpp          | 175 +++++++++++++++++++++++++++++++++++++++-
+ 3 files changed, 202 insertions(+), 3 deletions(-)
+
+diff --git a/include/skippy.h b/include/skippy.h
+index 8dd982b34..5ca162d52 100644
+--- a/include/skippy.h
++++ b/include/skippy.h
+@@ -8,6 +8,8 @@ extern "C" {
+ #endif
+ 
+ #define SKIPPY_MAX_LOGIT_BIAS 256
++#define SKIPPY_MAX_GRAPH_INVENTORY_BUCKETS 96
++#define SKIPPY_GRAPH_INVENTORY_FAMILY_BYTES 32
+ 
+ enum skippy_kv_page_flag {
+     SKIPPY_KV_PAGE_FLAG_V_TRANSPOSED      = 1 << 0,
+@@ -131,6 +133,19 @@ struct skippy_kv_page_desc {
+     uint64_t flags;
+ };
+ 
++struct skippy_graph_inventory_bucket {
++    uint32_t version;
++    int32_t ggml_op;
++    uint32_t ggml_type;
++    uint32_t node_count;
++    uint64_t element_count;
++    uint64_t output_bytes;
++    uint64_t src0_bytes;
++    uint64_t src1_bytes;
++    int64_t ne[4];
++    char family[SKIPPY_GRAPH_INVENTORY_FAMILY_BYTES];
++};
++
+ struct skippy_decode_benchmark_result {
+     uint32_t version;
+     uint32_t warmup_tokens;
+@@ -138,6 +153,19 @@ struct skippy_decode_benchmark_result {
+     double elapsed_ms;
+     double tokens_per_second;
+     llama_token final_token;
++    uint32_t llama_eval_count;
++    int32_t llama_graph_reuse_count;
++    double llama_eval_ms;
++    double llama_eval_tokens_per_second;
++    double non_eval_overhead_ms;
++    double decode_call_ms;
++    double decode_call_tokens_per_second;
++    double sampling_ms;
++    double sampling_tokens_per_second;
++    uint32_t graph_node_count;
++    uint32_t graph_inventory_bucket_count;
++    uint32_t graph_inventory_bucket_overflow_count;
++    struct skippy_graph_inventory_bucket graph_inventory[SKIPPY_MAX_GRAPH_INVENTORY_BUCKETS];
+ };
+ 
+ LLAMA_API enum skippy_status skippy_model_open(
+diff --git a/include/skippy/common.h b/include/skippy/common.h
+index 9e9e056f4..6e0dfb5b9 100644
+--- a/include/skippy/common.h
++++ b/include/skippy/common.h
+@@ -26,7 +26,7 @@ extern "C" {
+ 
+ #define SKIPPY_ABI_VERSION_MAJOR 0
+ #define SKIPPY_ABI_VERSION_MINOR 1
+-#define SKIPPY_ABI_VERSION_PATCH 25
++#define SKIPPY_ABI_VERSION_PATCH 27
+ 
+ enum skippy_feature {
+     SKIPPY_FEATURE_RUNTIME_SLICE          = 1 << 0,
+diff --git a/src/skippy.cpp b/src/skippy.cpp
+index 89188bf3d..f4dd3ff7d 100644
+--- a/src/skippy.cpp
++++ b/src/skippy.cpp
+@@ -120,6 +120,170 @@ struct skippy_model_info {
+     std::vector<skippy_tensor_meta> tensors;
+ };
+ 
++static bool skippy_name_contains(const char * name, const char * needle) {
++    return name != nullptr && std::strstr(name, needle) != nullptr;
++}
++
++static bool skippy_name_equals(const char * name, const char * expected) {
++    return name != nullptr && std::strcmp(name, expected) == 0;
++}
++
++static bool skippy_is_linear_attention_matmul_name(const char * name) {
++    return skippy_name_contains(name, "linear_attn") || skippy_name_contains(name, "qkv_mixed") ||
++            skippy_name_equals(name, "z") || skippy_name_equals(name, "beta") ||
++            skippy_name_equals(name, "alpha");
++}
++
++static bool skippy_is_linear_attention_weight_name(const char * name) {
++    return skippy_name_contains(name, ".attn_qkv") || skippy_name_contains(name, ".attn_gate") ||
++            skippy_name_contains(name, ".ssm_beta") || skippy_name_contains(name, ".ssm_alpha") ||
++            skippy_name_contains(name, ".ssm_ba") || skippy_name_contains(name, ".ssm_out");
++}
++
++static bool skippy_is_attention_weight_name(const char * name) {
++    return skippy_name_contains(name, ".attn_q.") || skippy_name_contains(name, ".attn_k.") ||
++            skippy_name_contains(name, ".attn_v.") ||
++            skippy_name_contains(name, ".attn_output.") ||
++            skippy_is_linear_attention_weight_name(name);
++}
++
++static bool skippy_is_feed_forward_weight_name(const char * name) {
++    return skippy_name_contains(name, ".ffn_gate.") || skippy_name_contains(name, ".ffn_up.") ||
++            skippy_name_contains(name, ".ffn_down.") ||
++            skippy_name_contains(name, ".ffn_gate_exps.") ||
++            skippy_name_contains(name, ".ffn_up_exps.") ||
++            skippy_name_contains(name, ".ffn_down_exps.");
++}
++
++static const char * skippy_graph_family(const ggml_tensor * node) {
++    if (node == nullptr) {
++        return "unknown";
++    }
++    const char * name = node->name;
++    const char * src0_name = node->src[0] != nullptr ? node->src[0]->name : nullptr;
++    if (node->op == GGML_OP_MUL_MAT_ID) {
++        return "moe_matmul_id";
++    }
++    if (skippy_name_contains(name, "ffn_moe") || skippy_name_contains(name, "expert")) {
++        return "moe_runtime";
++    }
++    if (node->op == GGML_OP_MUL_MAT) {
++        if (skippy_name_contains(name, "Qcur") || skippy_name_contains(name, "Kcur") ||
++                skippy_name_contains(name, "Vcur") || skippy_name_contains(name, "wqkv") ||
++                skippy_name_contains(name, "kqv") || skippy_name_contains(name, "attn") ||
++                skippy_is_linear_attention_matmul_name(name) ||
++                skippy_is_attention_weight_name(src0_name)) {
++            return "attention_matmul";
++        }
++        if (skippy_name_contains(name, "ffn_") || skippy_is_feed_forward_weight_name(src0_name)) {
++            return "ffn_matmul";
++        }
++        if (skippy_name_contains(name, "result_output") || skippy_name_contains(name, "output")) {
++            return "output_matmul";
++        }
++        return "matmul";
++    }
++    if (skippy_name_contains(name, "kq") || skippy_name_contains(name, "fattn") ||
++            node->op == GGML_OP_FLASH_ATTN_EXT || node->op == GGML_OP_SOFT_MAX) {
++        return "attention_runtime";
++    }
++    if (skippy_name_contains(name, "cache") || skippy_name_contains(name, "kv") ||
++            skippy_name_contains(name, "k_idxs") || skippy_name_contains(name, "v_idxs")) {
++        return "kv_cache";
++    }
++    if (skippy_name_contains(name, "ffn_")) {
++        return "ffn_runtime";
++    }
++    if (skippy_name_contains(name, "norm") || node->op == GGML_OP_RMS_NORM ||
++            node->op == GGML_OP_NORM) {
++        return "normalization";
++    }
++    if (skippy_name_contains(name, "result_output") || skippy_name_contains(name, "logits")) {
++        return "output_runtime";
++    }
++    return "other";
++}
++
++static void skippy_graph_inventory_family_copy(char * dst, const char * family) {
++    if (dst == nullptr) {
++        return;
++    }
++    std::memset(dst, 0, SKIPPY_GRAPH_INVENTORY_FAMILY_BYTES);
++    if (family == nullptr) {
++        return;
++    }
++    std::strncpy(dst, family, SKIPPY_GRAPH_INVENTORY_FAMILY_BYTES - 1);
++}
++
++static bool skippy_graph_inventory_same_bucket(
++        const skippy_graph_inventory_bucket & bucket,
++        const ggml_tensor * node,
++        const char * family) {
++    return bucket.ggml_op == static_cast<int32_t>(node->op) &&
++        bucket.ggml_type == static_cast<uint32_t>(node->type) &&
++        std::strncmp(bucket.family, family, SKIPPY_GRAPH_INVENTORY_FAMILY_BYTES) == 0;
++}
++
++static void skippy_graph_inventory_add_node(
++        skippy_decode_benchmark_result * out_result,
++        const ggml_tensor * node) {
++    if (out_result == nullptr || node == nullptr) {
++        return;
++    }
++    const char * family = skippy_graph_family(node);
++    skippy_graph_inventory_bucket * bucket = nullptr;
++    for (uint32_t i = 0; i < out_result->graph_inventory_bucket_count; ++i) {
++        if (skippy_graph_inventory_same_bucket(out_result->graph_inventory[i], node, family)) {
++            bucket = &out_result->graph_inventory[i];
++            break;
++        }
++    }
++    if (bucket == nullptr) {
++        if (out_result->graph_inventory_bucket_count >= SKIPPY_MAX_GRAPH_INVENTORY_BUCKETS) {
++            out_result->graph_inventory_bucket_overflow_count++;
++            return;
++        }
++        bucket = &out_result->graph_inventory[out_result->graph_inventory_bucket_count++];
++        std::memset(bucket, 0, sizeof(*bucket));
++        bucket->version = 1;
++        bucket->ggml_op = static_cast<int32_t>(node->op);
++        bucket->ggml_type = static_cast<uint32_t>(node->type);
++        skippy_graph_inventory_family_copy(bucket->family, family);
++        for (int i = 0; i < 4; ++i) {
++            bucket->ne[i] = node->ne[i];
++        }
++    }
++    bucket->node_count++;
++    bucket->element_count += static_cast<uint64_t>(std::max<int64_t>(0, ggml_nelements(node)));
++    bucket->output_bytes += static_cast<uint64_t>(ggml_nbytes(node));
++    if (node->src[0] != nullptr) {
++        bucket->src0_bytes += static_cast<uint64_t>(ggml_nbytes(node->src[0]));
++    }
++    if (node->src[1] != nullptr) {
++        bucket->src1_bytes += static_cast<uint64_t>(ggml_nbytes(node->src[1]));
++    }
++}
++
++static void skippy_graph_inventory_collect(
++        llama_context * ctx,
++        skippy_decode_benchmark_result * out_result) {
++    if (ctx == nullptr || out_result == nullptr) {
++        return;
++    }
++    llm_graph_result * graph_result = ctx->get_gf_res_prev();
++    if (graph_result == nullptr) {
++        return;
++    }
++    ggml_cgraph * graph = graph_result->get_gf();
++    if (graph == nullptr) {
++        return;
++    }
++    out_result->graph_node_count = static_cast<uint32_t>(std::max(0, ggml_graph_n_nodes(graph)));
++    for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
++        skippy_graph_inventory_add_node(out_result, ggml_graph_node(graph, i));
++    }
++}
++
+ static skippy_error * skippy_make_error(enum skippy_status status, const char * message) {
+     skippy_error * error = new skippy_error{};
+     error->status = status;
+@@ -2604,23 +2753,50 @@ enum skippy_status skippy_session_benchmark_decode(
+         token = skippy_greedy_sample(session);
+     }
+ 
++    llama_perf_context_reset(session->ctx);
++    double decode_call_elapsed_ms = 0.0;
++    double sampling_elapsed_ms = 0.0;
+     const auto started = std::chrono::steady_clock::now();
+     for (uint32_t i = 0; i < measured_tokens; ++i) {
++        const auto decode_started = std::chrono::steady_clock::now();
+         enum skippy_status status = skippy_decode_tokens(session, &token, 1, true, out_error);
++        decode_call_elapsed_ms += std::chrono::duration<double, std::milli>(
++                std::chrono::steady_clock::now() - decode_started).count();
+         if (status != SKIPPY_STATUS_OK) {
+             return status;
+         }
++        const auto sampling_started = std::chrono::steady_clock::now();
+         token = skippy_greedy_sample(session);
++        sampling_elapsed_ms += std::chrono::duration<double, std::milli>(
++                std::chrono::steady_clock::now() - sampling_started).count();
+     }
+     const auto elapsed = std::chrono::duration<double, std::milli>(
+             std::chrono::steady_clock::now() - started).count();
+-
+-    out_result->version = 1;
++    const auto perf = llama_perf_context(session->ctx);
++    const double llama_eval_tokens_per_second =
++            perf.t_eval_ms > 0.0 ? (static_cast<double>(perf.n_eval) * 1000.0 / perf.t_eval_ms) : 0.0;
++    const double decode_call_tokens_per_second =
++            decode_call_elapsed_ms > 0.0 ? (static_cast<double>(measured_tokens) * 1000.0 / decode_call_elapsed_ms) : 0.0;
++    const double sampling_tokens_per_second =
++            sampling_elapsed_ms > 0.0 ? (static_cast<double>(measured_tokens) * 1000.0 / sampling_elapsed_ms) : 0.0;
++
++    std::memset(out_result, 0, sizeof(*out_result));
++    out_result->version = 3;
+     out_result->warmup_tokens = warmup_tokens;
+     out_result->measured_tokens = measured_tokens;
+     out_result->elapsed_ms = elapsed;
+     out_result->tokens_per_second = elapsed > 0.0 ? (static_cast<double>(measured_tokens) * 1000.0 / elapsed) : 0.0;
+     out_result->final_token = token;
++    out_result->llama_eval_count = static_cast<uint32_t>(std::max(0, perf.n_eval));
++    out_result->llama_graph_reuse_count = perf.n_reused;
++    out_result->llama_eval_ms = perf.t_eval_ms;
++    out_result->llama_eval_tokens_per_second = llama_eval_tokens_per_second;
++    out_result->non_eval_overhead_ms = std::max(0.0, elapsed - decode_call_elapsed_ms - sampling_elapsed_ms);
++    out_result->decode_call_ms = decode_call_elapsed_ms;
++    out_result->decode_call_tokens_per_second = decode_call_tokens_per_second;
++    out_result->sampling_ms = sampling_elapsed_ms;
++    out_result->sampling_tokens_per_second = sampling_tokens_per_second;
++    skippy_graph_inventory_collect(session->ctx, out_result);
+     return skippy_success(out_error);
+ }
+ 
+-- 
+2.50.1 (Apple Git-155)

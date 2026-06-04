@@ -29,21 +29,43 @@ The crate includes two validation manifests:
 Run a local validation pass:
 
 ```bash
+just model-fit-release
+
 target/release/model-fit-validate \
   --no-progress \
   --models-file crates/model-fit/validation/smoke-models.txt \
-  --output-json /tmp/model-fit-validation.json
+  --output-json "$HOME/tmp/model-fit-validation.json"
 
 target/release/model-fit-check-validation \
   --min-models 8 \
-  /tmp/model-fit-validation.json
+  "$HOME/tmp/model-fit-validation.json"
 
 target/release/model-fit-check-validation \
   --scenario all \
-  --markdown-out /tmp/model-fit-validation.md \
-  /tmp/model-fit-validation.json
+  --markdown-out "$HOME/tmp/model-fit-validation.md" \
+  "$HOME/tmp/model-fit-validation.json"
 ```
 
 The validation report is JSON so later agents can analyze hardware facts, model
 profiles, recommendations, benchmark observations, the estimator input
 contract, and scenario-level agreement.
+
+For manual dense-depth investigations, add `--dense-probe-depth deep`. That
+keeps regular smoke runs short while allowing an extra `l16` source-shaped dense
+graph probe when a larger dense model looks depth-extrapolation limited.
+
+Backend validation builds should compile the native benchmark backend that will
+produce the `HardwareProfile`. Metal is built automatically on macOS. CUDA,
+ROCm/HIP, and Intel backends are explicit feature selections:
+
+```bash
+# CUDA example after scripts/build-llama.sh produced the matching GGML archive.
+just model-fit-release cuda .deps/llama-build/build-stage-abi-cuda-sm120
+
+# ROCm/HIP and Intel use the same recipe shape.
+just model-fit-release rocm .deps/llama-build/build-stage-abi-hip
+just model-fit-release intel
+```
+
+The `llama_build_dir` argument is only needed when the GGML decode probe archive
+is not in the platform default location.

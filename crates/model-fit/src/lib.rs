@@ -17,10 +17,11 @@ pub use scoring::{
 };
 pub use types::{
     AcceleratorKind, AcceleratorProfile, BackendEfficiencyConfig, BackendKind, CapabilityEvidence,
-    CapabilityRequirements, CpuProfile, DecodeEstimateRange, DecodeOverheadConfig,
-    EstimateConfidence, FirstTokenEstimateRange, FitStatus, HardwareProfile, InteractionProfile,
-    KvCacheKind, KvCacheType, MatmulShapeProfile, MeasurementSource, MemoryProfile,
-    ModelArchitectureClass, ModelProfile, ModelRecommendation, ModelSource, Requirement,
+    CapabilityRequirements, CpuProfile, DecodeCostBreakdown, DecodeCostGroupBreakdown,
+    DecodeEstimateRange, DecodeOverheadConfig, DenseGraphFeatures, EstimateConfidence,
+    FirstTokenEstimateRange, FitStatus, HardwareProfile, InteractionProfile, KvCacheKind,
+    KvCacheType, MatmulShapeProfile, MeasurementSource, MemoryProfile, ModelArchitectureClass,
+    ModelProfile, ModelRecommendation, ModelSource, RecurrentAttentionProfile, Requirement,
     RopeProfile, ScoreWeights, SelectionConfig, TensorGroupBytes, TensorMatmulGroupProfile,
     TensorMatmulProfile, TensorTypeBytes, TokenizerProfile, WeightCoverage, WorkloadPreferences,
     WorkloadProfile, WorkloadTask,

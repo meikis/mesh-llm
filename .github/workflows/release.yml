@@ -652,8 +652,8 @@ jobs:
       # `choco install cuda` (used previously via install-windows-sdk.ps1)
       # pulls latest = CUDA 13.2, which deterministically crashes sccache
       # on nvcc output (see mozilla/sccache#2470). CI pins to the same
-      # version via Jimver/cuda-toolkit; mirror that here.
-      WINDOWS_CUDA_VERSION: ${{ vars.CUDA_VERSION || '12.9.2' }}
+      # version via Jimver/cuda-toolkit; use a version available in that action.
+      WINDOWS_CUDA_VERSION: ${{ vars.WINDOWS_CUDA_VERSION || '12.9.1' }}
     strategy:
       fail-fast: false
       matrix:

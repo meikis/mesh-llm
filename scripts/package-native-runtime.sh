@@ -171,8 +171,10 @@ sha256_file() {
         shasum -a 256 "$1" | awk '{print $1}'
     elif command -v sha256sum >/dev/null 2>&1; then
         sha256sum "$1" | awk '{print $1}'
+    elif command -v certutil >/dev/null 2>&1; then
+        certutil -hashfile "$1" SHA256 | awk 'NR == 2 { gsub(/[[:space:]]/, ""); print tolower($0) }'
     else
-        echo "shasum or sha256sum is required" >&2
+        echo "shasum, sha256sum, or certutil is required" >&2
         exit 1
     fi
 }
@@ -224,7 +226,7 @@ library_pattern() {
 primary_library_name() {
     case "$TARGET_TRIPLE" in
         *apple-darwin) printf 'libllama.dylib\n' ;;
-        *windows*) printf 'llama.dll\n' ;;
+        *windows*) printf 'libllama.dll\n' ;;
         *) printf 'libllama.so\n' ;;
     esac
 }

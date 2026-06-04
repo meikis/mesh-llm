@@ -68,6 +68,33 @@ git_retry() {
   done
 }
 
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v certutil >/dev/null 2>&1; then
+    certutil -hashfile "$1" SHA256 | awk 'NR == 2 { gsub(/[[:space:]]/, ""); print tolower($0) }'
+  else
+    echo "shasum, sha256sum, or certutil is required" >&2
+    exit 1
+  fi
+}
+
+sha256_stdin() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    local tmp
+    tmp="$(mktemp)"
+    cat > "$tmp"
+    sha256_file "$tmp"
+    rm -f "$tmp"
+  fi
+}
+
 clone_llama_workdir() {
   local attempt=1
   local max_attempts="${LLAMA_GIT_MAX_ATTEMPTS:-4}"
@@ -129,11 +156,11 @@ compute_patch_digest() {
   (
     for patch in "${PATCHES[@]}"; do
       rel="${patch#$PATCH_DIR/}"
-      checksum="$(shasum -a 256 "$patch" | awk '{print $1}')"
+      checksum="$(sha256_file "$patch")"
       printf '%s\n' "$rel"
       printf '%s\n' "$checksum"
     done
-  ) | shasum -a 256 | awk '{print $1}'
+  ) | sha256_stdin
 }
 
 PATCH_DIGEST="$(compute_patch_digest)"

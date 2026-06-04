@@ -113,9 +113,11 @@ Windows is supported through the same N-API addon shape:
 - addon: `mesh_llm_nodejs.node`
 - native runtime library: `meshllm_ffi.dll`
 - target triple: `x86_64-pc-windows-msvc`
-- runtime artifact names: `meshllm-native-windows-x86_64-cpu`,
-  `meshllm-native-windows-x86_64-cuda`, `meshllm-native-windows-x86_64-rocm`,
-  or `meshllm-native-windows-x86_64-vulkan`
+- runtime artifact names: `meshllm-native-runtime-windows-x86_64-cpu`,
+  `meshllm-native-runtime-windows-x86_64-cuda12`,
+  `meshllm-native-runtime-windows-x86_64-cuda13`,
+  `meshllm-native-runtime-windows-x86_64-rocm`, or
+  `meshllm-native-runtime-windows-x86_64-vulkan`
 
 The Windows release pipeline already builds CPU, CUDA, ROCm, and Vulkan runtime
 bundles. The Node SDK should publish matching prebuilt addon/runtime packages

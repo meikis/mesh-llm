@@ -33,42 +33,23 @@ scripts/check-sdk-contract.sh
 scripts/package-sdk-console-assets.sh --sdk kotlin
 scripts/verify-sdk-console-assets.sh --sdk kotlin
 
-scripts/prepare-llama.sh "${MESH_LLM_LLAMA_PIN_SHA:-pinned}"
-LLAMA_STAGE_BACKEND=cpu \
-LLAMA_STAGE_BUILD_DIR="$REPO_ROOT/.deps/llama-build/build-stage-abi-ci-kotlin-cpu" \
-LLAMA_BUILD_DIR="$REPO_ROOT/.deps/llama-build/build-stage-abi-ci-kotlin-cpu" \
-    scripts/build-llama.sh
-
-LLAMA_STAGE_BACKEND=cpu \
-LLAMA_STAGE_BUILD_DIR="$REPO_ROOT/.deps/llama-build/build-stage-abi-ci-kotlin-cpu" \
-    retry_transient cargo build -p mesh-llm-ffi --no-default-features --features host,embedded-runtime
-
-native_sdk_out="$REPO_ROOT/target/kotlin-native-sdk"
-LLAMA_STAGE_BACKEND=cpu \
-LLAMA_STAGE_BUILD_DIR="$REPO_ROOT/.deps/llama-build/build-stage-abi-ci-kotlin-cpu" \
-    retry_transient scripts/package-native-sdk.sh \
-        --backend cpu \
-        --profile debug \
-        --out "$native_sdk_out"
-scripts/verify-native-sdk-package.sh "$native_sdk_out"/meshllm-native-*.tar.gz
-native_sdk_artifact_dir="$(find "$native_sdk_out" -mindepth 1 -maxdepth 1 -type d -name 'meshllm-native-*' -print -quit)"
-if [[ -z "$native_sdk_artifact_dir" ]]; then
-    echo "native SDK artifact directory not found under $native_sdk_out" >&2
-    exit 1
-fi
-native_sdk_uniffi_library="$(
-    python3 - "$native_sdk_artifact_dir/manifest.json" <<'PY'
+native_runtime_dir="$(
+    MESH_NATIVE_RUNTIME_PROFILE=debug \
+        retry_transient scripts/ci-prepare-native-runtime.sh "$REPO_ROOT/target/kotlin-native-runtime" cpu
+)"
+native_runtime_uniffi_library="$(
+    python3 - "$native_runtime_dir/manifest.json" <<'PY'
 import json
 import os
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as fh:
     manifest = json.load(fh)
-print(os.path.dirname(manifest.get("uniffi_library") or manifest["library"]))
+sdk = manifest["runtime"]["sdk"]
+print(os.path.dirname(sdk.get("uniffi_library") or sdk["library"]))
 PY
 )"
-export MESHLLM_KOTLIN_JNA_LIBRARY_PATH="$native_sdk_artifact_dir/$native_sdk_uniffi_library"
-native_runtime_dir="$(scripts/ci-prepare-native-runtime.sh "$REPO_ROOT/target/kotlin-native-runtime" cpu)"
+export MESHLLM_KOTLIN_JNA_LIBRARY_PATH="$native_runtime_dir/$native_runtime_uniffi_library"
 export MESHLLM_NATIVE_RUNTIME_ARTIFACT_DIR="$native_runtime_dir"
 
 scripts/ci-sdk-fixture.sh "$1" "$2" "$3" -- \

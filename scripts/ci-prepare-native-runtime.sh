@@ -10,6 +10,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="$1"
 BACKEND="${2:-cpu}"
 BUILD_DIR="$REPO_ROOT/.deps/llama-build/build-stage-abi-ci-runtime-${BACKEND}"
+PROFILE="${MESH_NATIVE_RUNTIME_PROFILE:-release}"
 
 cd "$REPO_ROOT"
 
@@ -21,6 +22,7 @@ LLAMA_BUILD_DIR="$BUILD_DIR" \
     scripts/package-native-runtime.sh \
         --build \
         --backend "$BACKEND" \
+        --profile "$PROFILE" \
         --out "$OUT_DIR" >&2
 
 scripts/verify-native-runtime-package.sh "$OUT_DIR"/meshllm-native-runtime-*.tar.gz >&2

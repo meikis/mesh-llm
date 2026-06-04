@@ -46,6 +46,8 @@ The artifact manifest should include at least:
 - `platform`
 - `backend`
 - `libraries`
+- `sdk`, with the SDK FFI library and UniFFI alias when the artifact is used by
+  SDK consumers
 - checksums
 - signature or attestation metadata
 - release URL

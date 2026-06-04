@@ -20,7 +20,7 @@ fun main(args: Array<String>) = runBlocking {
     val inviteToken = args.firstOrNull { !it.startsWith("--") } ?: modelRef?.let { "local-kotlin-example" } ?: run {
         System.err.println("Usage: ExampleMain <invite_token>")
         System.err.println("Or set MESH_SDK_MODEL_REF to run local serving.")
-        System.err.println("Set MESHLLM_NATIVE_RUNTIME_ARTIFACT_DIR to a verified meshllm-native-* artifact.")
+        System.err.println("Set MESHLLM_NATIVE_RUNTIME_ARTIFACT_DIR to a verified meshllm-native-runtime-* artifact.")
         return@runBlocking
     }
 

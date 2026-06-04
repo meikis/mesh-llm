@@ -48,7 +48,13 @@ Each packaged runtime directory contains `manifest.json`:
       }
     },
     "rank": 0,
-    "libraries": ["lib/libllama.so"]
+    "libraries": ["lib/libllama.so"],
+    "sdk": {
+      "library": "lib/libmeshllm_ffi.so",
+      "library_paths": ["lib/libmeshllm_ffi.so"],
+      "uniffi_library": "lib/libuniffi_mesh_ffi.so",
+      "library_sha256": "2f1c..."
+    }
   }
 }
 ```
@@ -79,6 +85,7 @@ Important fields:
 - `backend`: structured backend requirements.
 - `rank`: optional rank adjustment. Higher compatible ranks win.
 - `libraries`: runtime-relative load-order library paths.
+- `sdk`: optional SDK FFI library metadata packaged in the same artifact.
 - `url` and `sha256`: populated in release manifests for downloads.
 
 ## Release Manifest

@@ -504,6 +504,7 @@ mod tests {
             backend: NativeRuntimeBackend::cpu(),
             rank: 0,
             libraries: vec!["lib/libllama.so".to_string()],
+            sdk: None,
             url: Some("https://example.invalid/runtime.tar.gz".to_string()),
             sha256: Some("a".repeat(64)),
             signature: signature.map(str::to_string),

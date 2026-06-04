@@ -1514,7 +1514,6 @@ fn check_docs_and_workflow_invariants(repo_root: &Path) -> DynResult<()> {
 fn check_release_dispatch_version_preparation(release_workflow: &str) -> DynResult<()> {
     const DISPATCH_RELEASE_JOBS: &[&str] = &[
         "build",
-        "build_native_sdk_runtime",
         "build_swift_sdk_artifact",
         "build_linux_arm64",
         "build_linux_aarch64_cuda",

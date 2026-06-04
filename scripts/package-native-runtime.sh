@@ -8,6 +8,7 @@ BUILD=0
 OUT_DIR="$REPO_ROOT/dist/native-runtimes"
 BACKEND="${LLAMA_STAGE_BACKEND:-${SKIPPY_LLAMA_BACKEND:-cpu}}"
 TARGET_TRIPLE="${MESH_NATIVE_RUNTIME_TARGET:-}"
+PROFILE="${MESH_NATIVE_RUNTIME_PROFILE:-release}"
 LLAMA_WORKDIR="${LLAMA_WORKDIR:-$REPO_ROOT/.deps/llama.cpp}"
 LLAMA_BUILD_ROOT="${MESH_LLM_LLAMA_BUILD_ROOT:-$REPO_ROOT/.deps/llama-build}"
 
@@ -16,12 +17,14 @@ usage() {
 Usage: scripts/package-native-runtime.sh [options]
 
 Package a MeshLLM native runtime artifact containing the patched llama/Skippy
-shared libraries selected by `mesh-llm runtime install`.
+shared libraries selected by `mesh-llm runtime install` and the MeshLLM FFI
+library consumed by SDKs.
 
 Options:
   --build             Build patched llama.cpp shared libraries before packaging.
   --backend NAME      cpu, metal, cuda, rocm, hip, vulkan, or cuda-blackwell.
   --target TRIPLE     Runtime target triple. Defaults to the host target.
+  --profile PROFILE   Cargo profile to package: release or debug. Defaults to release.
   --out DIR           Output directory. Defaults to dist/native-runtimes.
   -h, --help          Show this help.
 
@@ -30,6 +33,7 @@ Environment:
   LLAMA_STAGE_AMDGPU_TARGETS / SKIPPY_AMDGPU_TARGETS
   LLAMA_STAGE_BUILD_DIR
   MESH_NATIVE_RUNTIME_TARGET
+  MESH_NATIVE_RUNTIME_PROFILE
   MESH_LLM_LLAMA_PIN_SHA
 EOF
 }
@@ -46,6 +50,10 @@ while [[ "$#" -gt 0 ]]; do
             ;;
         --target)
             TARGET_TRIPLE="${2:?missing target triple}"
+            shift 2
+            ;;
+        --profile)
+            PROFILE="${2:?missing cargo profile}"
             shift 2
             ;;
         --out)
@@ -68,6 +76,14 @@ case "$BACKEND" in
     cpu|metal|cuda|cuda-blackwell|rocm|hip|vulkan) ;;
     *)
         echo "unsupported native runtime backend: $BACKEND" >&2
+        exit 1
+        ;;
+esac
+
+case "$PROFILE" in
+    release|debug) ;;
+    *)
+        echo "unsupported native runtime cargo profile: $PROFILE" >&2
         exit 1
         ;;
 esac
@@ -213,6 +229,54 @@ primary_library_name() {
     esac
 }
 
+library_extension() {
+    case "$1" in
+        *apple-darwin) printf 'dylib\n' ;;
+        *linux*) printf 'so\n' ;;
+        *windows*) printf 'dll\n' ;;
+        *) echo "cannot infer dynamic library extension for target: $1" >&2; exit 1 ;;
+    esac
+}
+
+ffi_library_basename() {
+    case "$1" in
+        dll) printf 'meshllm_ffi.dll\n' ;;
+        *) printf 'libmeshllm_ffi.%s\n' "$1" ;;
+    esac
+}
+
+uniffi_library_basename() {
+    case "$1" in
+        dll) printf 'uniffi_mesh_ffi.dll\n' ;;
+        *) printf 'libuniffi_mesh_ffi.%s\n' "$1" ;;
+    esac
+}
+
+target_cargo_dir() {
+    if [[ "$TARGET_TRIPLE" != "$(default_target_triple)" ]]; then
+        printf '%s\n' "$REPO_ROOT/target/$TARGET_TRIPLE/$PROFILE"
+    else
+        printf '%s\n' "$REPO_ROOT/target/$PROFILE"
+    fi
+}
+
+find_ffi_library() {
+    local name="$1"
+    local cargo_dir="$2"
+    local path
+    for path in \
+        "$cargo_dir/$name" \
+        "$cargo_dir/deps/$name" \
+        "$REPO_ROOT/target/$TARGET_TRIPLE/$PROFILE/$name" \
+        "$REPO_ROOT/target/$TARGET_TRIPLE/$PROFILE/deps/$name"; do
+        if [[ -f "$path" ]]; then
+            printf '%s\n' "$path"
+            return 0
+        fi
+    done
+    return 1
+}
+
 collect_runtime_libraries() {
     local pattern primary
     pattern="$(library_pattern)"
@@ -256,6 +320,18 @@ if [[ "$BUILD" == "1" ]]; then
         LLAMA_BUILD_DIR="$LLAMA_STAGE_BUILD_DIR" \
         LLAMA_STAGE_BUILD_DIR="$LLAMA_STAGE_BUILD_DIR" \
         "$SCRIPT_DIR/build-llama.sh"
+
+    cargo_args=(build -p mesh-llm-ffi --no-default-features --features host,embedded-runtime)
+    if [[ "$PROFILE" == "release" ]]; then
+        cargo_args+=(--release)
+    fi
+    if [[ "$TARGET_TRIPLE" != "$(default_target_triple)" ]]; then
+        cargo_args+=(--target "$TARGET_TRIPLE")
+    fi
+    LLAMA_STAGE_LINK_MODE=dynamic \
+        LLAMA_STAGE_BACKEND="$(build_backend)" \
+        LLAMA_STAGE_BUILD_DIR="$LLAMA_STAGE_BUILD_DIR" \
+        cargo "${cargo_args[@]}"
 fi
 
 platform="$(target_platform "$TARGET_TRIPLE")"
@@ -264,6 +340,17 @@ runtime_arch="$(target_runtime_arch "$TARGET_TRIPLE")"
 flavor="$(backend_flavor)"
 artifact_id="meshllm-native-runtime-${platform}-${flavor}"
 stage_dir="$OUT_DIR/$artifact_id"
+lib_ext="$(library_extension "$TARGET_TRIPLE")"
+ffi_lib_name="$(ffi_library_basename "$lib_ext")"
+uniffi_lib_name="$(uniffi_library_basename "$lib_ext")"
+cargo_dir="$(target_cargo_dir)"
+ffi_lib_path="$(find_ffi_library "$ffi_lib_name" "$cargo_dir" || true)"
+if [[ -z "$ffi_lib_path" ]]; then
+    echo "native SDK FFI library not found: $ffi_lib_name" >&2
+    echo "looked in: $cargo_dir and $cargo_dir/deps" >&2
+    echo "rerun with --build or build mesh-llm-ffi first" >&2
+    exit 1
+fi
 
 runtime_libraries=()
 while IFS= read -r library; do
@@ -291,9 +378,14 @@ for library in "${runtime_libraries[@]}"; do
     cp "$library" "$stage_dir/lib/$name"
     library_paths+=("lib/$name")
 done
+cp "$ffi_lib_path" "$stage_dir/lib/$ffi_lib_name"
+cp "$ffi_lib_path" "$stage_dir/lib/$uniffi_lib_name"
 
 primary_library="lib/$primary_name"
 primary_sha="$(sha256_file "$stage_dir/$primary_library")"
+ffi_library="lib/$ffi_lib_name"
+uniffi_library="lib/$uniffi_lib_name"
+ffi_sha="$(sha256_file "$stage_dir/$ffi_library")"
 mesh_version="$(workspace_version)"
 abi_version="$(skippy_abi_version)"
 
@@ -373,6 +465,20 @@ manifest = {
         "backend": backend_manifest,
         "rank": int(os.environ.get("MESH_LLM_NATIVE_RUNTIME_RANK") or 0),
         "libraries": library_paths,
+        "sdk": {
+            "library": "$ffi_library",
+            "library_paths": ["$ffi_library"],
+            "uniffi_library": "$uniffi_library",
+            "library_sha256": "$ffi_sha",
+            "cargo_profile": "$PROFILE",
+            "features": [
+                "mesh-inference",
+                "model-management",
+                "local-serving",
+                "chat",
+                "responses",
+            ],
+        },
         "url": None,
         "sha256": None,
         "signature": None,
@@ -382,6 +488,8 @@ manifest = {
         "backend": "$BACKEND",
         "primary_library": primary_library,
         "library_sha256": "$primary_sha",
+        "ffi_library": "$ffi_library",
+        "ffi_library_sha256": "$ffi_sha",
         "llama_upstream_sha": "$upstream_sha" or None,
         "llama_patched_sha": "$patched_sha" or None,
         "llama_patch_digest": "$patch_digest" or None,
@@ -396,7 +504,8 @@ PY
 cat > "$stage_dir/README.md" <<EOF
 # $artifact_id
 
-This artifact contains MeshLLM native runtime shared libraries for:
+This artifact contains MeshLLM native runtime shared libraries and the MeshLLM
+SDK FFI library for:
 
 - target: \`$TARGET_TRIPLE\`
 - backend: \`$BACKEND\`
@@ -407,6 +516,10 @@ This artifact contains MeshLLM native runtime shared libraries for:
 \`mesh-llm runtime install\` reads \`manifest.json\`, verifies the archive
 checksum from \`native-runtimes.json\`, installs the artifact into the
 versioned native runtime cache, and loads these libraries before Skippy starts.
+
+SDK loaders read \`runtime.sdk\` from \`manifest.json\` and load \`$ffi_lib_name\`.
+Kotlin/JVM UniFFI consumers can load \`$uniffi_lib_name\`, an alias of the same
+library kept for UniFFI's generated JNA lookup name.
 EOF
 
 mkdir -p "$OUT_DIR"
@@ -418,4 +531,5 @@ printf '%s  %s\n' "$archive_sha" "$(basename "$archive")" > "$archive.sha256"
 echo "packaged native runtime:"
 echo "  artifact: $artifact_id"
 echo "  primary:  $stage_dir/$primary_library"
+echo "  ffi:      $stage_dir/$ffi_library"
 echo "  archive:  $archive"

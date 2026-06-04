@@ -229,13 +229,15 @@ meshllm-native-runtime-<platform>-<backend-lane>/
   lib/
     libllama.{dylib|so|dll}
     libggml*.{dylib|so|dll}
+    libmeshllm_ffi.{dylib|so} or meshllm_ffi.dll
+    libuniffi_mesh_ffi.{dylib|so} or uniffi_mesh_ffi.dll
 ```
 
 The manifest records the MeshLLM version, exact Skippy ABI, platform,
-structured backend requirements, load-order library paths, release URL,
-checksum, and optional signature metadata. Runtime compatibility is exact
-Skippy ABI plus platform/backend requirements; MeshLLM version remains part of
-cache layout and pruning.
+structured backend requirements, load-order runtime library paths, SDK FFI
+library paths, release URL, checksum, and optional signature metadata. Runtime
+compatibility is exact Skippy ABI plus platform/backend requirements; MeshLLM
+version remains part of cache layout and pruning.
 
 Baseline artifact names:
 

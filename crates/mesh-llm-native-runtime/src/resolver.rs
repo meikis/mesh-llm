@@ -429,6 +429,7 @@ mod tests {
             backend,
             rank: 0,
             libraries: vec!["lib/libllama.so".to_string()],
+            sdk: None,
             url: None,
             sha256: None,
             signature: None,

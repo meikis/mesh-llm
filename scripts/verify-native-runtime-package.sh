@@ -12,6 +12,7 @@ Verifies MeshLLM native runtime artifacts:
   - manifest schema and resolver fields
   - artifact directory name matches runtime.id
   - all runtime.libraries exist
+  - runtime.sdk libraries exist when SDK metadata is present
   - library_sha256 matches the primary library
   - archive checksum sidecar when present
 EOF
@@ -123,6 +124,32 @@ for rel_path in runtime["libraries"]:
     path = os.path.join(artifact_dir, rel_path)
     if not os.path.isfile(path):
         raise SystemExit(f"missing library: {path}")
+
+sdk = runtime.get("sdk")
+if sdk is not None:
+    if not isinstance(sdk, dict):
+        raise SystemExit("runtime sdk metadata must be an object")
+    for key in ("library", "library_paths", "uniffi_library", "library_sha256"):
+        if not sdk.get(key):
+            raise SystemExit(f"runtime sdk metadata must declare {key}")
+    if not isinstance(sdk["library_paths"], list) or not sdk["library_paths"]:
+        raise SystemExit("runtime sdk library_paths must be a non-empty list")
+    sdk_paths = list(sdk["library_paths"])
+    sdk_paths.append(sdk["uniffi_library"])
+    for rel_path in sdk_paths:
+        if os.path.isabs(rel_path) or ".." in rel_path.split(os.sep):
+            raise SystemExit(f"sdk library path must be relative inside the artifact: {rel_path}")
+        path = os.path.join(artifact_dir, rel_path)
+        if not os.path.isfile(path):
+            raise SystemExit(f"missing SDK library: {path}")
+    sdk_library = os.path.join(artifact_dir, sdk["library"])
+    with open(sdk_library, "rb") as fh:
+        actual = hashlib.sha256(fh.read()).hexdigest()
+    if actual != sdk["library_sha256"]:
+        raise SystemExit(
+            f"sdk library_sha256 mismatch for {sdk['library']}: "
+            f"{actual} != {sdk['library_sha256']}"
+        )
 
 build = manifest.get("build") or {}
 library_sha256 = build.get("library_sha256")

@@ -14,6 +14,21 @@ pub struct NativeRuntimePlatform {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NativeRuntimeSdk {
+    pub library: String,
+    #[serde(default)]
+    pub library_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uniffi_library: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cargo_profile: Option<String>,
+    #[serde(default)]
+    pub features: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct NativeRuntimeArtifact {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -24,6 +39,8 @@ pub struct NativeRuntimeArtifact {
     #[serde(default)]
     pub rank: i64,
     pub libraries: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdk: Option<NativeRuntimeSdk>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -139,6 +156,20 @@ fn validate_artifact(artifact: &NativeRuntimeArtifact) -> Result<()> {
             artifact.id
         );
     }
+    if let Some(sdk) = &artifact.sdk {
+        if sdk.library.trim().is_empty() {
+            bail!(
+                "native runtime artifact {} sdk library is empty",
+                artifact.id
+            );
+        }
+        if sdk.library_paths.is_empty() {
+            bail!(
+                "native runtime artifact {} sdk library_paths is empty",
+                artifact.id
+            );
+        }
+    }
     Ok(())
 }
 
@@ -170,7 +201,15 @@ mod tests {
       }
     },
     "rank": 650,
-    "libraries": ["lib/libllama.so"]
+    "libraries": ["lib/libllama.so"],
+    "sdk": {
+      "library": "lib/libmeshllm_ffi.so",
+      "library_paths": ["lib/libmeshllm_ffi.so"],
+      "uniffi_library": "lib/libuniffi_mesh_ffi.so",
+      "library_sha256": "abc123",
+      "cargo_profile": "release",
+      "features": ["local-serving"]
+    }
   }
 }"#,
         )
@@ -181,6 +220,10 @@ mod tests {
         assert_eq!(manifest.runtime.id, "meshllm-runtime-linux-x86_64-cuda12");
         assert_eq!(manifest.runtime.skippy_abi, "0.1.25");
         assert_eq!(manifest.runtime.backend.kind.as_str(), "cuda");
+        assert_eq!(
+            manifest.runtime.sdk.as_ref().unwrap().library,
+            "lib/libmeshllm_ffi.so"
+        );
     }
 
     #[test]
@@ -197,7 +240,12 @@ mod tests {
       "platform": { "os": "linux", "arch": "x86_64" },
       "backend": { "kind": "cpu" },
       "rank": 100,
-      "libraries": ["lib/libllama.so"]
+      "libraries": ["lib/libllama.so"],
+      "sdk": {
+        "library": "lib/libmeshllm_ffi.so",
+        "library_paths": ["lib/libmeshllm_ffi.so"],
+        "uniffi_library": "lib/libuniffi_mesh_ffi.so"
+      }
     }
   ]
 }"#,
@@ -206,5 +254,6 @@ mod tests {
 
         assert_eq!(manifest.artifacts.len(), 1);
         assert_eq!(manifest.artifacts[0].backend, NativeRuntimeBackend::cpu());
+        assert!(manifest.artifacts[0].sdk.is_some());
     }
 }

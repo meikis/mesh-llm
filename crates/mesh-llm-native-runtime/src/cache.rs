@@ -241,6 +241,7 @@ mod tests {
                 backend: NativeRuntimeBackend::cpu(),
                 rank: 0,
                 libraries: vec!["lib/libmeshllm_ffi.so".to_string()],
+                sdk: None,
                 url: None,
                 sha256: None,
                 signature: None,
@@ -253,13 +254,17 @@ mod tests {
     fn installs_bundle_runtime_into_versioned_cache() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
-        write_runtime(&source, "0.68.0", "meshllm-native-linux-x86_64-cpu");
+        write_runtime(&source, "0.68.0", "meshllm-native-runtime-linux-x86_64-cpu");
 
         let cache = NativeRuntimeCache::new(temp.path().join("cache"));
         let installed = cache.install_from_dir(&source).unwrap();
 
         assert_eq!(installed.mesh_version, "0.68.0");
-        assert!(installed.path.ends_with("meshllm-native-linux-x86_64-cpu"));
+        assert!(
+            installed
+                .path
+                .ends_with("meshllm-native-runtime-linux-x86_64-cpu")
+        );
     }
 
     #[test]
@@ -268,9 +273,9 @@ mod tests {
         let cache = NativeRuntimeCache::new(temp.path().join("cache"));
         for version in ["0.67.0", "0.68.0", "0.69.0"] {
             write_runtime(
-                &cache.runtime_dir(version, "meshllm-native-linux-x86_64-cpu"),
+                &cache.runtime_dir(version, "meshllm-native-runtime-linux-x86_64-cpu"),
                 version,
-                "meshllm-native-linux-x86_64-cpu",
+                "meshllm-native-runtime-linux-x86_64-cpu",
             );
         }
 
@@ -285,18 +290,21 @@ mod tests {
     fn installed_runtime_exposes_load_plan() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
-        write_runtime(&source, "0.68.0", "meshllm-native-linux-x86_64-cpu");
+        write_runtime(&source, "0.68.0", "meshllm-native-runtime-linux-x86_64-cpu");
 
         let cache = NativeRuntimeCache::new(temp.path().join("cache"));
         let installed = cache.install_from_dir(&source).unwrap();
         let plan = installed.load_plan().unwrap();
 
-        assert_eq!(plan.native_runtime_id, "meshllm-native-linux-x86_64-cpu");
+        assert_eq!(
+            plan.native_runtime_id,
+            "meshllm-native-runtime-linux-x86_64-cpu"
+        );
         assert_eq!(
             plan.libraries,
             vec![
                 cache
-                    .runtime_dir("0.68.0", "meshllm-native-linux-x86_64-cpu")
+                    .runtime_dir("0.68.0", "meshllm-native-runtime-linux-x86_64-cpu")
                     .join("lib/libmeshllm_ffi.so")
             ]
         );

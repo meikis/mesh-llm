@@ -21,7 +21,7 @@ pub use host::{
 pub use load_plan::NativeRuntimeLoadPlan;
 pub use manifest::{
     NATIVE_RUNTIME_MANIFEST_FILE, NativeRuntimeArtifact, NativeRuntimeManifest,
-    NativeRuntimePlatform, NativeRuntimeReleaseManifest,
+    NativeRuntimePlatform, NativeRuntimeReleaseManifest, NativeRuntimeSdk,
 };
 pub use resolver::{
     CandidateEvaluation, CandidateRejection, NativeRuntimeResolution, NativeRuntimeResolver,

@@ -249,6 +249,15 @@ struct PromptDriverSummary {
     decode_elapsed_ms_p50: u128,
     decode_elapsed_ms_p95: u128,
     decode_elapsed_ms_p99: u128,
+    decode_step_write_us_mean: f64,
+    decode_step_write_us_p50: u128,
+    decode_step_write_us_p95: u128,
+    decode_step_return_wait_us_mean: f64,
+    decode_step_return_wait_us_p50: u128,
+    decode_step_return_wait_us_p95: u128,
+    decode_step_elapsed_us_mean: f64,
+    decode_step_elapsed_us_p50: u128,
+    decode_step_elapsed_us_p95: u128,
     total_tokens_per_second: f64,
     generated_tokens_per_second: f64,
 }
@@ -269,6 +278,16 @@ struct PromptDriverResult {
     prefill_elapsed_ms: u128,
     ttft_ms: u128,
     decode_elapsed_ms: u128,
+    decode_steps: Vec<DecodeStepTiming>,
+}
+
+#[derive(Debug, Serialize)]
+struct DecodeStepTiming {
+    decode_step: usize,
+    write_us: u128,
+    return_wait_us: u128,
+    elapsed_us: u128,
+    predicted_token: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -1661,6 +1680,23 @@ fn prompt_driver_summary(results: &[PromptDriverResult]) -> PromptDriverSummary 
         decode_elapsed_ms_p50: percentile_ms_by(results, 0.50, |result| result.decode_elapsed_ms),
         decode_elapsed_ms_p95: percentile_ms_by(results, 0.95, |result| result.decode_elapsed_ms),
         decode_elapsed_ms_p99: percentile_ms_by(results, 0.99, |result| result.decode_elapsed_ms),
+        decode_step_write_us_mean: mean_decode_step_us(results, |step| step.write_us),
+        decode_step_write_us_p50: percentile_decode_step_us(results, 0.50, |step| step.write_us),
+        decode_step_write_us_p95: percentile_decode_step_us(results, 0.95, |step| step.write_us),
+        decode_step_return_wait_us_mean: mean_decode_step_us(results, |step| step.return_wait_us),
+        decode_step_return_wait_us_p50: percentile_decode_step_us(results, 0.50, |step| {
+            step.return_wait_us
+        }),
+        decode_step_return_wait_us_p95: percentile_decode_step_us(results, 0.95, |step| {
+            step.return_wait_us
+        }),
+        decode_step_elapsed_us_mean: mean_decode_step_us(results, |step| step.elapsed_us),
+        decode_step_elapsed_us_p50: percentile_decode_step_us(results, 0.50, |step| {
+            step.elapsed_us
+        }),
+        decode_step_elapsed_us_p95: percentile_decode_step_us(results, 0.95, |step| {
+            step.elapsed_us
+        }),
         total_tokens_per_second: if elapsed_seconds > 0.0 {
             (prompt_tokens_total + generated_tokens_total) as f64 / elapsed_seconds
         } else {
@@ -1697,6 +1733,45 @@ fn mean_ms(results: &[PromptDriverResult], value: impl Fn(&PromptDriverResult) -
         return 0.0;
     }
     results.iter().map(value).sum::<u128>() as f64 / results.len() as f64
+}
+
+fn elapsed_us(started: Instant) -> u128 {
+    started.elapsed().as_micros()
+}
+
+fn percentile_decode_step_us(
+    results: &[PromptDriverResult],
+    percentile: f64,
+    value: impl Fn(&DecodeStepTiming) -> u128,
+) -> u128 {
+    let mut values = results
+        .iter()
+        .flat_map(|result| result.decode_steps.iter())
+        .map(value)
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    let rank = ((values.len() - 1) as f64 * percentile).ceil() as usize;
+    values[rank.min(values.len() - 1)]
+}
+
+fn mean_decode_step_us(
+    results: &[PromptDriverResult],
+    value: impl Fn(&DecodeStepTiming) -> u128,
+) -> f64 {
+    let mut count = 0usize;
+    let mut total = 0u128;
+    for step in results.iter().flat_map(|result| result.decode_steps.iter()) {
+        count += 1;
+        total += value(step);
+    }
+    if count == 0 {
+        0.0
+    } else {
+        total as f64 / count as f64
+    }
 }
 
 fn run_remote_prompt_case(
@@ -1763,10 +1838,12 @@ fn run_remote_prompt_case(
 
     let max_new_tokens = effective_run_max_new_tokens(args);
     let mut predicted_tokens = Vec::with_capacity(max_new_tokens);
+    let mut decode_steps = Vec::with_capacity(max_new_tokens);
     let mut current = *token_ids.last().expect("checked non-empty tokens");
     let decode_started = Instant::now();
     let mut ttft_ms = 0;
     for decode_step in 0..max_new_tokens {
+        let step_started = Instant::now();
         let mut state = StageStateHeader::new(WireMessageKind::DecodeEmbd, wire_dtype);
         state.seq_id = i32::try_from(prompt_index).context("prompt index exceeds i32")?;
         state.prompt_token_count =
@@ -1790,19 +1867,30 @@ fn run_remote_prompt_case(
             activation: Vec::new(),
             raw_bytes: Vec::new(),
         };
+        let write_started = Instant::now();
         write_stage_message(&mut stream, &message, wire_dtype).with_context(|| {
             format!("send remote decode step {decode_step} for prompt {prompt_index}")
         })?;
+        let write_us = elapsed_us(write_started);
+        let return_wait_started = Instant::now();
         let reply = direct_return
             .recv_expected(WireReplyKind::PredictedToken)
             .with_context(|| {
                 format!("receive direct decode step {decode_step} reply for prompt {prompt_index}")
             })?;
+        let return_wait_us = elapsed_us(return_wait_started);
         if decode_step == 0 {
             ttft_ms = wire_started.elapsed().as_millis();
         }
         current = reply.predicted;
         predicted_tokens.push(reply.predicted);
+        decode_steps.push(DecodeStepTiming {
+            decode_step,
+            write_us,
+            return_wait_us,
+            elapsed_us: elapsed_us(step_started),
+            predicted_token: reply.predicted,
+        });
     }
     let decode_elapsed_ms = decode_started.elapsed().as_millis();
 
@@ -1829,6 +1917,7 @@ fn run_remote_prompt_case(
         prefill_elapsed_ms,
         ttft_ms,
         decode_elapsed_ms,
+        decode_steps,
     })
 }
 
@@ -3033,6 +3122,13 @@ mod tests {
                 prefill_elapsed_ms: elapsed_ms - 20,
                 ttft_ms: elapsed_ms - 15,
                 decode_elapsed_ms: 10,
+                decode_steps: vec![DecodeStepTiming {
+                    decode_step: 0,
+                    write_us: 1,
+                    return_wait_us: elapsed_ms / 10,
+                    elapsed_us: elapsed_ms / 10 + 1,
+                    predicted_token: 3,
+                }],
             })
             .collect::<Vec<_>>();
 
@@ -3047,6 +3143,9 @@ mod tests {
         assert_eq!(summary.prefill_elapsed_ms_p50, 280);
         assert_eq!(summary.ttft_ms_p50, 285);
         assert_eq!(summary.decode_elapsed_ms_p50, 10);
+        assert_eq!(summary.decode_step_write_us_p50, 1);
+        assert_eq!(summary.decode_step_return_wait_us_p50, 30);
+        assert_eq!(summary.decode_step_elapsed_us_p50, 31);
     }
 
     #[test]
@@ -3232,6 +3331,22 @@ mod tests {
                 prefill_elapsed_ms: elapsed_ms - 10,
                 ttft_ms: elapsed_ms - 20,
                 decode_elapsed_ms: 20,
+                decode_steps: vec![
+                    DecodeStepTiming {
+                        decode_step: 0,
+                        write_us: 1,
+                        return_wait_us: 8,
+                        elapsed_us: 9,
+                        predicted_token: 4,
+                    },
+                    DecodeStepTiming {
+                        decode_step: 1,
+                        write_us: 1,
+                        return_wait_us: 9,
+                        elapsed_us: 10,
+                        predicted_token: 5,
+                    },
+                ],
             })
             .collect::<Vec<_>>();
         let summary = prompt_driver_summary(&results);

@@ -36,6 +36,7 @@ fn profile_cli_emits_decode_scaffold_json() {
 
     let json: Value = serde_json::from_slice(&output.stdout).expect("parse profile json");
     assert_eq!(json["kind"], "skippy_agent_quant_profile");
+    assert_eq!(json["input_kind"], "layer_package");
     assert_eq!(json["request_shape"]["phase"], "decode");
     assert_eq!(json["request_shape"]["existing_kv_tokens"], 32768);
     assert_eq!(json["measurement"]["source"], "static");

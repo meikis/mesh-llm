@@ -46,6 +46,7 @@ skippy-model-package write-package org/repo:Q4_K_M --out-dir model-package/
 skippy-model-package write-package org/repo:Q4_K_M --projector mmproj-model-f16.gguf --out-dir model-package/
 skippy-model-package validate model.gguf slices/stage-*.gguf
 skippy-model-package validate-package model.gguf model-package/
+skippy-model-package profile model.gguf --stages 4 --phase decode --existing-kv-tokens 32768
 skippy-model-package profile model-package/ --stages 4 --phase decode --existing-kv-tokens 32768 --warmup-samples 3 --samples 20
 ```
 
@@ -93,9 +94,16 @@ than inferred from arbitrary filesystem paths.
 and sizes, declared tensor counts/bytes, layer coverage, duplicate layers, and
 exact owned tensor coverage against the source model.
 
-`profile` emits a planner-ready JSON profile envelope for a layer package. The
-initial implementation records package identity, request shape, layer artifact
+`profile` emits a planner-ready JSON profile envelope for a layer package or
+direct GGUF. The initial implementation records input identity, request
+shape, layer artifact
 summaries, split-stage artifact summaries, runtime/ABI identity, and explicit
 `not_measured` timing placeholders through the default `--timing-source static`
 source. Native per-layer decode timing hooks will fill the same report shape
 later without changing the serving request path.
+
+`profile` also accepts a direct GGUF. Direct GGUF profiles use llama-backed
+introspection to summarize layer tensor bytes, shared tensor bytes, and
+synthetic split-stage byte totals before a package has been written. This lets
+operators profile candidate source models before choosing a split or mixed
+quantization layout.

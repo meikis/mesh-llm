@@ -69,6 +69,7 @@ use crate::{
 };
 
 mod backend;
+mod decode_batcher;
 mod embedded_execution;
 mod embedded_generation;
 mod generation_flow;
@@ -81,7 +82,10 @@ mod speculative;
 mod util;
 mod wire_messages;
 
-use self::{prefill::*, request::*, speculative::*, util::*, wire_messages::*};
+use self::{
+    decode_batcher::DecodeBatcher, prefill::*, request::*, speculative::*, util::*,
+    wire_messages::*,
+};
 
 static OPENAI_GENERATION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -166,6 +170,7 @@ pub async fn serve_openai(args: ServeOpenAiArgs) -> Result<()> {
     }
     let kv = KvStageIntegration::from_config(&config)?.map(Arc::new);
     let ctx_size = usize::try_from(config.ctx_size).unwrap_or(usize::MAX);
+    let decode_batcher = DecodeBatcher::new(runtime.clone(), args.generation_concurrency);
     let backend = Arc::new(StageOpenAiBackend {
         runtime,
         config,
@@ -183,6 +188,7 @@ pub async fn serve_openai(args: ServeOpenAiArgs) -> Result<()> {
         generation_queue_limit: args.generation_concurrency,
         hook_policy: None,
         kv,
+        decode_batcher,
     });
     let app: Router = instrumented_openai_router(backend, telemetry.clone());
 
@@ -510,6 +516,7 @@ pub fn embedded_openai_backend(args: EmbeddedOpenAiArgs) -> Result<EmbeddedOpenA
     .context("prewarm embedded OpenAI runtime sessions")?;
     let kv = KvStageIntegration::from_config(&args.config)?.map(Arc::new);
     let ctx_size = usize::try_from(args.config.ctx_size).unwrap_or(usize::MAX);
+    let decode_batcher = DecodeBatcher::new(args.runtime.clone(), args.generation_concurrency);
     let backend: Arc<dyn OpenAiBackend> = Arc::new(StageOpenAiBackend {
         runtime: args.runtime,
         config: args.config.clone(),
@@ -527,6 +534,7 @@ pub fn embedded_openai_backend(args: EmbeddedOpenAiArgs) -> Result<EmbeddedOpenA
         generation_queue_limit: args.generation_concurrency,
         hook_policy: args.hook_policy,
         kv,
+        decode_batcher,
     });
     let openai_guardrails = args
         .openai_guardrails
@@ -565,6 +573,7 @@ struct StageOpenAiBackend {
     generation_queue_limit: usize,
     hook_policy: Option<Arc<dyn OpenAiHookPolicy>>,
     kv: Option<Arc<KvStageIntegration>>,
+    decode_batcher: DecodeBatcher,
 }
 
 struct GenerationQueueReservation {

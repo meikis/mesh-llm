@@ -409,59 +409,46 @@ impl StageOpenAiBackend {
                 }
                 let decode_step = decoded_tokens;
                 let token_timer = PhaseTimer::start();
-                let token_runtime_lock_wait_ms;
-                let token_runtime_lock_hold_ms;
-                let token_decode_ms;
                 let token_signal_ms;
                 let token_signal;
                 let signal_window;
-                current = {
-                    let lock_timer = PhaseTimer::start();
+                let decode_call_timer = PhaseTimer::start();
+                let outcome = self.decode_batcher.decode(
+                    &session_id,
+                    current,
+                    request.sampling.enabled.then_some(request.sampling),
+                )?;
+                current = outcome.predicted;
+                let token_batch_size = outcome.batch_size;
+                let token_batch_wait_ms = outcome.batch_wait_ms;
+                let token_runtime_lock_wait_ms = outcome.runtime_lock_wait_ms;
+                let token_runtime_lock_hold_ms = outcome.runtime_lock_hold_ms;
+                runtime_lock_wait_ms += token_runtime_lock_wait_ms;
+                runtime_lock_wait_max_ms = runtime_lock_wait_max_ms.max(token_runtime_lock_wait_ms);
+                runtime_lock_hold_ms += token_runtime_lock_hold_ms;
+                runtime_lock_hold_max_ms = runtime_lock_hold_max_ms.max(token_runtime_lock_hold_ms);
+                runtime_lock_acquires += 1;
+                let token_decode_ms = if emit_token_debug {
+                    decode_call_timer.elapsed_ms()
+                } else {
+                    0.0
+                };
+                if generation_hooks_active {
+                    let signal_timer = PhaseTimer::start();
                     let mut runtime = self
                         .runtime
                         .lock()
                         .map_err(|_| OpenAiError::backend("runtime lock poisoned"))?;
-                    let lock_wait_ms = lock_timer.elapsed_ms();
-                    token_runtime_lock_wait_ms = lock_wait_ms;
-                    runtime_lock_wait_ms += lock_wait_ms;
-                    runtime_lock_wait_max_ms = runtime_lock_wait_max_ms.max(lock_wait_ms);
-                    runtime_lock_acquires += 1;
-                    let hold_timer = PhaseTimer::start();
                     runtime_sessions_before.get_or_insert_with(|| runtime.session_stats());
-                    let decode_call_timer = PhaseTimer::start();
-                    let predicted = runtime
-                        .decode_sampled(
-                            &session_id,
-                            current,
-                            request.sampling.enabled.then_some(request.sampling),
-                        )
-                        .map_err(openai_backend_error)?;
-                    token_decode_ms = if emit_token_debug {
-                        decode_call_timer.elapsed_ms()
-                    } else {
-                        0.0
-                    };
-                    if generation_hooks_active {
-                        let signal_timer = PhaseTimer::start();
-                        token_signal = runtime.last_token_signal(&session_id).ok();
-                        signal_window = runtime.signal_window(&session_id, 16).ok();
-                        token_signal_ms = signal_timer.elapsed_ms();
-                    } else {
-                        token_signal = None;
-                        signal_window = None;
-                        token_signal_ms = 0.0;
-                    }
+                    token_signal = runtime.last_token_signal(&session_id).ok();
+                    signal_window = runtime.signal_window(&session_id, 16).ok();
                     runtime_sessions_after = Some(runtime.session_stats());
-                    token_runtime_lock_hold_ms = if emit_token_debug {
-                        hold_timer.elapsed_ms()
-                    } else {
-                        0.0
-                    };
-                    runtime_lock_hold_ms += token_runtime_lock_hold_ms;
-                    runtime_lock_hold_max_ms =
-                        runtime_lock_hold_max_ms.max(token_runtime_lock_hold_ms);
-                    predicted
-                };
+                    token_signal_ms = signal_timer.elapsed_ms();
+                } else {
+                    token_signal = None;
+                    signal_window = None;
+                    token_signal_ms = 0.0;
+                }
                 if generation_hooks_active
                     && let Some(injected_current) = self.maybe_run_generation_hooks(
                         &session_id,
@@ -494,6 +481,14 @@ impl StageOpenAiBackend {
                     token_attrs.insert(
                         "llama_stage.decode_call_ms".to_string(),
                         json!(token_decode_ms),
+                    );
+                    token_attrs.insert(
+                        "llama_stage.decode_batch_size".to_string(),
+                        json!(token_batch_size),
+                    );
+                    token_attrs.insert(
+                        "llama_stage.decode_batch_wait_ms".to_string(),
+                        json!(token_batch_wait_ms),
                     );
                     token_attrs.insert("llama_stage.signal_ms".to_string(), json!(token_signal_ms));
                     token_attrs.insert(

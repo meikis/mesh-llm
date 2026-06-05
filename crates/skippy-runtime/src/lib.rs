@@ -1192,6 +1192,12 @@ pub struct StageSession {
     token_count: u64,
 }
 
+pub struct DecodeBatchRequest<'a> {
+    pub session: &'a mut StageSession,
+    pub token_id: i32,
+    pub sampling: Option<&'a SamplingConfig>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaInput {
     pub bytes: Vec<u8>,
@@ -2549,6 +2555,55 @@ impl StageSession {
             .checked_add(1)
             .context("session token count overflow")?;
         Ok(predicted_token)
+    }
+
+    pub fn decode_batch_sampled(requests: &mut [DecodeBatchRequest<'_>]) -> Result<Vec<i32>> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let sessions = requests
+            .iter_mut()
+            .map(|request| request.session.raw)
+            .collect::<Vec<_>>();
+        let token_ids = requests
+            .iter()
+            .map(|request| request.token_id)
+            .collect::<Vec<_>>();
+        let raw_sampling = requests
+            .iter()
+            .map(|request| request.sampling.map(SamplingConfig::as_raw))
+            .collect::<Vec<_>>();
+        let sampling = raw_sampling
+            .iter()
+            .map(|sampling| {
+                sampling
+                    .as_ref()
+                    .map_or(ptr::null(), |sampling| sampling as *const RawSamplingConfig)
+            })
+            .collect::<Vec<_>>();
+        let mut predicted_tokens = vec![0_i32; requests.len()];
+        let mut error = ptr::null_mut();
+        let status = unsafe {
+            skippy_ffi::skippy_decode_batch_sampled(
+                sessions.as_ptr(),
+                token_ids.as_ptr(),
+                sampling.as_ptr(),
+                requests.len(),
+                predicted_tokens.as_mut_ptr(),
+                predicted_tokens.len(),
+                &mut error,
+            )
+        };
+        ensure_ok(status, error)?;
+        for request in requests {
+            request.session.token_count = request
+                .session
+                .token_count
+                .checked_add(1)
+                .context("session token count overflow")?;
+        }
+        Ok(predicted_tokens)
     }
 
     pub fn last_token_signal(&mut self) -> Result<TokenSignal> {

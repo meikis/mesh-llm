@@ -1,6 +1,6 @@
 pub const ABI_VERSION_MAJOR: u32 = 0;
 pub const ABI_VERSION_MINOR: u32 = 1;
-pub const ABI_VERSION_PATCH: u32 = 25;
+pub const ABI_VERSION_PATCH: u32 = 26;
 
 use std::ffi::{c_char, c_int, c_void};
 
@@ -494,6 +494,7 @@ mod dynamic {
         skippy_decode_step(session: *mut Session, token_id: i32, input_activation: *const c_void, input_activation_bytes: usize, output_activation: *mut c_void, output_activation_capacity: usize, out_output_activation_bytes: *mut usize, out_predicted_token: *mut i32, out_error: *mut *mut Error) -> Status;
         skippy_verify_tokens(session: *mut Session, token_ids: *const i32, token_count: usize, output_tokens: *mut i32, output_token_capacity: usize, out_token_count: *mut usize, out_error: *mut *mut Error) -> Status;
         skippy_decode_step_sampled(session: *mut Session, token_id: i32, sampling: *const SamplingConfig, input_activation: *const c_void, input_activation_bytes: usize, output_activation: *mut c_void, output_activation_capacity: usize, out_output_activation_bytes: *mut usize, out_predicted_token: *mut i32, out_error: *mut *mut Error) -> Status;
+        skippy_decode_batch_sampled(sessions: *const *mut Session, token_ids: *const i32, sampling: *const *const SamplingConfig, request_count: usize, out_predicted_tokens: *mut i32, predicted_token_capacity: usize, out_error: *mut *mut Error) -> Status;
         skippy_prefill_chunk_frame(session: *mut Session, token_ids: *const i32, token_count: usize, input_desc: *const ActivationDesc, input_payload: *const c_void, output_desc: *mut ActivationDesc, output_payload: *mut c_void, output_payload_capacity: usize, out_output_payload_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
         skippy_prefill_chunk_frame_sampled(session: *mut Session, token_ids: *const i32, token_count: usize, sampling: *const SamplingConfig, input_desc: *const ActivationDesc, input_payload: *const c_void, output_desc: *mut ActivationDesc, output_payload: *mut c_void, output_payload_capacity: usize, out_output_payload_bytes: *mut usize, out_predicted_token: *mut i32, out_error: *mut *mut Error) -> Status;
         skippy_prefill_chunk_frame_with_positions(session: *mut Session, token_ids: *const i32, token_count: usize, positions: *const i32, position_count: usize, input_desc: *const ActivationDesc, input_payload: *const c_void, output_desc: *mut ActivationDesc, output_payload: *mut c_void, output_payload_capacity: usize, out_output_payload_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
@@ -709,6 +710,16 @@ unsafe extern "C" {
         output_activation_capacity: usize,
         out_output_activation_bytes: *mut usize,
         out_predicted_token: *mut i32,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_decode_batch_sampled(
+        sessions: *const *mut Session,
+        token_ids: *const i32,
+        sampling: *const *const SamplingConfig,
+        request_count: usize,
+        out_predicted_tokens: *mut i32,
+        predicted_token_capacity: usize,
         out_error: *mut *mut Error,
     ) -> Status;
 

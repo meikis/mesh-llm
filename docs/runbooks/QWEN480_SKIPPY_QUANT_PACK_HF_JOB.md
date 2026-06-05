@@ -29,6 +29,37 @@ The important files are:
 - `qwen480-quant-pack-workload.sh`
 - `qwen480-hf-jobs-submit.json`
 
+## Pre-Submit Audit
+
+Last local audit: `2026-06-06`.
+
+- Local HF auth: `jamesdumay`, orgs: `meshllm`
+- Source repo visibility: public, not gated
+- Source revision verified by Hub metadata:
+  `b86deeefd82f1a3374c5536dfc1dd0ce27ac092d`
+- Published job image:
+  `ghcr.io/mesh-llm/skippy-quant-pack-job:sha-0b433a3`
+- Published image digest:
+  `sha256:7dd65ff4c1abf851116c5ac8b788123c5e350445cc17cf24c048f8fb0459ac69`
+- HF Jobs flavor: `cpu-xl`, listed by `hf jobs hardware` at `$1.00/hour`
+- Timeout: `36h`, so the configured maximum runtime cost is about `$36`
+- Upload target: `alexz-oai/qwen480-skippy-pack`
+
+The upload repo did not exist during the audit. The workload creates it
+idempotently before upload, but the submitted `HF_TOKEN` must have write access
+to the `alexz-oai` namespace. If that namespace is not available, change
+`--hf-jobs-upload-repo` and regenerate the source plan before submitting the
+job.
+
+Current local handoff artifact hashes:
+
+```text
+05a0b5f24262c4422c765715c74ec9adbefa30e567e9c62a9d273a3ae5b181cb  qwen480-source-plan.json
+c42bd2c3f6c4748efff78837a134439815ec7a887ce212abb856a442303ea99a  qwen480-quant-pack-workload.sh
+e0d78bdc2d4755c5323d0ec619112ad26dd6c157f7906d5d1bd5df633e882903  qwen480-hf-jobs-submit.json
+17eb57f2567a620e3ab1d6e19de4757d07203beb346103878c8e67cc971e090a  qwen480-hf-jobs-validate.json
+```
+
 ## Validate The Submit Payload
 
 Before building the image or submitting remote compute, validate the generated
@@ -57,7 +88,7 @@ ghcr.io/mesh-llm/skippy-quant-pack-job:sha-0b433a3
 ```
 
 The mutable `:cpu` tag was also pushed by workflow run
-`27044374997`, but the Qwen480 submit payload should use the commit-specific
+`27045110237`, but the Qwen480 submit payload should use the commit-specific
 tag above.
 
 From a shell with GitHub CLI access:

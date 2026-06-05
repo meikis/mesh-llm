@@ -16,6 +16,7 @@ of loading the 480B source model on Studio.
 - Published image digest:
   `sha256:7dd65ff4c1abf851116c5ac8b788123c5e350445cc17cf24c048f8fb0459ac69`
 - Output repo: `alexz-oai/qwen480-skippy-pack`
+  - Alternate validated output repo: `meshllm/qwen480-skippy-pack`
 
 Generated local handoff artifacts live under:
 
@@ -60,6 +61,47 @@ e0d78bdc2d4755c5323d0ec619112ad26dd6c157f7906d5d1bd5df633e882903  qwen480-hf-job
 17eb57f2567a620e3ab1d6e19de4757d07203beb346103878c8e67cc971e090a  qwen480-hf-jobs-validate.json
 ```
 
+## Choose The Upload Target
+
+Submit exactly one reviewed payload for the namespace that the submitted
+`HF_TOKEN` can write to. Do not edit `qwen480-hf-jobs-submit.json` by hand; if
+the target changes, regenerate the source plan and re-run
+`quant-pack hf-jobs-validate`.
+
+The primary handoff targets `alexz-oai/qwen480-skippy-pack`:
+
+```text
+/Volumes/External/skippy-quant-packs/qwen3-coder-480b/hf-jobs/
+```
+
+During the local audit, `hf auth whoami` reported `user=jamesdumay orgs=meshllm`
+and `hf models info alexz-oai/qwen480-skippy-pack` reported that the model did
+not exist. Use the primary payload only if the token used for submission has
+write access to `alexz-oai`.
+
+An alternate no-compute handoff has been generated and validated for
+`meshllm/qwen480-skippy-pack`:
+
+```text
+/Volumes/External/skippy-quant-packs/qwen3-coder-480b/hf-jobs-meshllm/
+```
+
+`meshllm/qwen480-skippy-pack` also did not exist during the local audit, but
+`meshllm` is visible in local auth. The workload creates the model repo before
+upload, so this payload is suitable when the submission token has write access
+to the `meshllm` org.
+
+Alternate handoff validation status: `valid`, with all 13 checks passing.
+
+Alternate local handoff artifact hashes:
+
+```text
+939caabbc84f4de8a92416ac82d13a4d223d76b87c755648862b989dbcecb046  qwen480-source-plan.json
+c42bd2c3f6c4748efff78837a134439815ec7a887ce212abb856a442303ea99a  qwen480-quant-pack-workload.sh
+2c43b61904c65cd5a5c4acefd5fbb9fb9b5a475840b2ba5f4ca328de91105cea  qwen480-hf-jobs-submit.json
+5dbeecab599c206dff99720d1feb08ce2c36c3f4959ae4ba66cf6b52cbd1748d  qwen480-hf-jobs-validate.json
+```
+
 ## Validate The Submit Payload
 
 Before building the image or submitting remote compute, validate the generated
@@ -77,6 +119,15 @@ detached execution, `HF_TOKEN` secret, source download, `quant-pack build-all`,
 idempotent output repo creation, and upload command.
 The validation report also writes an equivalent Hugging Face CLI command at
 `hf_jobs_cli.shell`.
+
+For the alternate `meshllm` handoff, validate the alternate payload with:
+
+```bash
+skippy-model-package quant-pack hf-jobs-validate \
+  /Volumes/External/skippy-quant-packs/qwen3-coder-480b/hf-jobs-meshllm/qwen480-hf-jobs-submit.json \
+  --expected-image ghcr.io/mesh-llm/skippy-quant-pack-job:sha-0b433a3 \
+  --expected-upload-repo meshllm/qwen480-skippy-pack
+```
 
 ## Build And Push The Job Image
 

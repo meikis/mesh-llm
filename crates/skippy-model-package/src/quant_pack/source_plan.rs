@@ -342,18 +342,13 @@ fn build_hf_jobs_workload_plan(
     args: &QuantPackSourcePlanArgs,
     model_id_prefix: &str,
 ) -> HfJobsWorkloadPlan {
-    let source_dir = format!("{}/source", args.hf_jobs_work_dir.trim_end_matches('/'));
+    let work_dir = args.hf_jobs_work_dir.trim_end_matches('/');
+    let source_dir = format!("{work_dir}/source");
     let quant_pack_out_dir = args
         .quant_pack_out_dir
         .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| {
-            format!(
-                "{}/quant-packs/{}",
-                args.hf_jobs_work_dir.trim_end_matches('/'),
-                repo_slug(model_id_prefix)
-            )
-        });
+        .map(|path| hf_jobs_output_dir(work_dir, path))
+        .unwrap_or_else(|| format!("{work_dir}/quant-packs/{}", repo_slug(model_id_prefix)));
     HfJobsWorkloadPlan {
         workload_script: args
             .hf_jobs_workload_out
@@ -364,6 +359,14 @@ fn build_hf_jobs_workload_plan(
         source_dir,
         quant_pack_out_dir,
         upload_repo_env: "HF_UPLOAD_REPO".to_string(),
+    }
+}
+
+fn hf_jobs_output_dir(work_dir: &str, path: &Path) -> String {
+    if path.is_absolute() {
+        path.display().to_string()
+    } else {
+        format!("{work_dir}/{}", path.display())
     }
 }
 
@@ -984,6 +987,31 @@ mod tests {
         let script_text = fs::read_to_string(&workload).expect("read hf jobs workload");
         assert_eq!(script_text, script);
         fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn hf_jobs_workload_anchors_relative_output_under_work_dir() {
+        let mut args = source_plan_args();
+        args.hf_jobs_work_dir = "/job/skippy-qwen".to_string();
+        args.quant_pack_out_dir = Some(PathBuf::from("target/skippy-quant-packs/qwen"));
+
+        let plan = build_hf_jobs_workload_plan(&args, "unsloth/qwen");
+
+        assert_eq!(
+            plan.quant_pack_out_dir,
+            "/job/skippy-qwen/target/skippy-quant-packs/qwen"
+        );
+    }
+
+    #[test]
+    fn hf_jobs_workload_preserves_absolute_output_dir() {
+        let mut args = source_plan_args();
+        args.hf_jobs_work_dir = "/job/skippy-qwen".to_string();
+        args.quant_pack_out_dir = Some(PathBuf::from("/packs/qwen"));
+
+        let plan = build_hf_jobs_workload_plan(&args, "unsloth/qwen");
+
+        assert_eq!(plan.quant_pack_out_dir, "/packs/qwen");
     }
 
     #[test]

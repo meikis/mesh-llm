@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
@@ -26,6 +26,12 @@ pub(crate) struct ProfileArgs {
     pub(crate) backend: Option<String>,
     #[arg(long)]
     pub(crate) device: Option<String>,
+    #[arg(long, default_value_t = 20)]
+    pub(crate) samples: u32,
+    #[arg(long, default_value_t = 3)]
+    pub(crate) warmup_samples: u32,
+    #[arg(long, value_enum, default_value_t = TimingSourceKind::Static)]
+    pub(crate) timing_source: TimingSourceKind,
     #[arg(long)]
     pub(crate) out: Option<PathBuf>,
 }
@@ -37,6 +43,12 @@ pub(crate) enum ProfilePhase {
     Prefill,
     SuffixPrefill,
     CacheReplay,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TimingSourceKind {
+    Static,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,6 +63,7 @@ pub(crate) struct ProfileReport {
     pub(crate) manifest_sha256: String,
     pub(crate) runtime: RuntimeProfile,
     pub(crate) request_shape: RequestShape,
+    pub(crate) measurement: MeasurementConfig,
     pub(crate) measurement_status: MeasurementStatus,
     pub(crate) summary: ProfileSummary,
     pub(crate) shared: SharedProfile,
@@ -76,6 +89,13 @@ pub(crate) struct RequestShape {
     pub(crate) backend: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) device: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct MeasurementConfig {
+    pub(crate) source: TimingSourceKind,
+    pub(crate) warmup_samples: u32,
+    pub(crate) samples: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -117,7 +137,7 @@ pub(crate) struct LayerProfile {
     pub(crate) timing: TimingProfile,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct TimingProfile {
     pub(crate) status: String,
     pub(crate) mean_ms: Option<f64>,
@@ -176,6 +196,46 @@ struct PackageLayer {
     sha256: String,
 }
 
+trait ProfileTimingSource {
+    fn profile(&self, input: &ProfileTimingInput<'_>) -> Result<ProfileTimingReport>;
+}
+
+struct StaticTimingSource;
+
+struct ProfileTimingInput<'a> {
+    package: &'a Path,
+    request_shape: &'a RequestShape,
+    measurement: &'a MeasurementConfig,
+}
+
+struct ProfileTimingReport {
+    measurement_status: MeasurementStatus,
+    layer_timings: BTreeMap<u32, TimingProfile>,
+    stage_timings: BTreeMap<usize, TimingProfile>,
+    estimated_tokens_per_second: Option<f64>,
+}
+
+impl ProfileTimingSource for StaticTimingSource {
+    fn profile(&self, input: &ProfileTimingInput<'_>) -> Result<ProfileTimingReport> {
+        Ok(ProfileTimingReport {
+            measurement_status: MeasurementStatus {
+                status: "not_measured".to_string(),
+                reason: format!(
+                    "timing source {:?} does not execute the package; native hooks will fill this {:?} report shape later for {} warmup samples and {} measured samples from {}",
+                    input.measurement.source,
+                    input.request_shape.phase,
+                    input.measurement.warmup_samples,
+                    input.measurement.samples,
+                    input.package.display()
+                ),
+            },
+            layer_timings: BTreeMap::new(),
+            stage_timings: BTreeMap::new(),
+            estimated_tokens_per_second: None,
+        })
+    }
+}
+
 pub(crate) fn run_profile(args: ProfileArgs) -> Result<()> {
     let report = profile_package(&args)?;
     let json = serde_json::to_string_pretty(&report)?;
@@ -197,10 +257,17 @@ fn profile_package(args: &ProfileArgs) -> Result<ProfileReport> {
         .with_context(|| format!("parse package manifest {}", manifest_path.display()))?;
     validate_stage_count(args.stages, manifest.layer_count)?;
 
-    let layers = layer_profiles(&manifest);
+    let request_shape = request_shape(args);
+    let measurement = measurement_config(args);
+    let timing_report = timing_source(args.timing_source).profile(&ProfileTimingInput {
+        package: &args.package,
+        request_shape: &request_shape,
+        measurement: &measurement,
+    })?;
+    let layers = layer_profiles(&manifest, &timing_report);
     let shared = shared_profile(&manifest.shared);
-    let stages = stage_profiles(&manifest, args.stages);
-    let summary = profile_summary(args.stages, &shared, &layers);
+    let stages = stage_profiles(&manifest, args.stages, &timing_report);
+    let summary = profile_summary(args.stages, &shared, &layers, &timing_report);
     let runtime = runtime_profile(&manifest);
 
     Ok(ProfileReport {
@@ -212,11 +279,9 @@ fn profile_package(args: &ProfileArgs) -> Result<ProfileReport> {
         activation_width: manifest.activation_width,
         manifest_sha256,
         runtime,
-        request_shape: request_shape(args),
-        measurement_status: MeasurementStatus {
-            status: "not_measured".to_string(),
-            reason: "native per-layer timing hooks are not wired yet; this report is a planner-ready static profile envelope".to_string(),
-        },
+        request_shape,
+        measurement,
+        measurement_status: timing_report.measurement_status,
         summary,
         shared,
         layers,
@@ -234,7 +299,10 @@ fn validate_stage_count(stages: usize, layer_count: u32) -> Result<()> {
     Ok(())
 }
 
-fn layer_profiles(manifest: &PackageManifest) -> Vec<LayerProfile> {
+fn layer_profiles(
+    manifest: &PackageManifest,
+    timing_report: &ProfileTimingReport,
+) -> Vec<LayerProfile> {
     let mut layers = manifest.layers.iter().collect::<Vec<_>>();
     layers.sort_by_key(|layer| layer.layer_index);
     layers
@@ -248,7 +316,11 @@ fn layer_profiles(manifest: &PackageManifest) -> Vec<LayerProfile> {
                 artifact_bytes: layer.artifact_bytes,
                 sha256: layer.sha256.clone(),
             },
-            timing: unmeasured_timing(),
+            timing: timing_report
+                .layer_timings
+                .get(&layer.layer_index)
+                .cloned()
+                .unwrap_or_else(unmeasured_timing),
         })
         .collect()
 }
@@ -271,7 +343,11 @@ fn artifact_profile(artifact: &PackageArtifact) -> ArtifactProfile {
     }
 }
 
-fn stage_profiles(manifest: &PackageManifest, stage_count: usize) -> Vec<StageProfile> {
+fn stage_profiles(
+    manifest: &PackageManifest,
+    stage_count: usize,
+    timing_report: &ProfileTimingReport,
+) -> Vec<StageProfile> {
     let layer_bytes = manifest
         .layers
         .iter()
@@ -288,6 +364,7 @@ fn stage_profiles(manifest: &PackageManifest, stage_count: usize) -> Vec<StagePr
                 stage_index,
                 layer_start,
                 layer_end,
+                timing_report,
             )
         })
         .collect()
@@ -300,6 +377,7 @@ fn stage_profile(
     stage_index: usize,
     layer_start: u32,
     layer_end: u32,
+    timing_report: &ProfileTimingReport,
 ) -> StageProfile {
     let includes_embeddings = stage_index == 0;
     let includes_output = stage_index + 1 == stage_count;
@@ -325,7 +403,11 @@ fn stage_profile(
         includes_output,
         part_count: parts.len(),
         artifact_bytes,
-        timing: unmeasured_timing(),
+        timing: timing_report
+            .stage_timings
+            .get(&stage_index)
+            .cloned()
+            .unwrap_or_else(unmeasured_timing),
         parts,
     }
 }
@@ -334,6 +416,7 @@ fn profile_summary(
     stage_count: usize,
     shared: &SharedProfile,
     layers: &[LayerProfile],
+    timing_report: &ProfileTimingReport,
 ) -> ProfileSummary {
     let layer_artifact_bytes = layers
         .iter()
@@ -347,8 +430,8 @@ fn profile_summary(
         layer_artifact_bytes,
         shared_artifact_bytes,
         package_artifact_bytes: layer_artifact_bytes + shared_artifact_bytes,
-        measured_layer_count: 0,
-        estimated_tokens_per_second: None,
+        measured_layer_count: timing_report.layer_timings.len(),
+        estimated_tokens_per_second: timing_report.estimated_tokens_per_second,
     }
 }
 
@@ -374,6 +457,20 @@ fn request_shape(args: &ProfileArgs) -> RequestShape {
         kv_type: args.kv_type.clone(),
         backend: args.backend.clone(),
         device: args.device.clone(),
+    }
+}
+
+fn measurement_config(args: &ProfileArgs) -> MeasurementConfig {
+    MeasurementConfig {
+        source: args.timing_source,
+        warmup_samples: args.warmup_samples,
+        samples: args.samples,
+    }
+}
+
+fn timing_source(kind: TimingSourceKind) -> Box<dyn ProfileTimingSource> {
+    match kind {
+        TimingSourceKind::Static => Box::new(StaticTimingSource),
     }
 }
 
@@ -429,6 +526,9 @@ mod tests {
             kv_type: "f16".to_string(),
             backend: Some("metal".to_string()),
             device: Some("metal:test".to_string()),
+            samples: 20,
+            warmup_samples: 3,
+            timing_source: TimingSourceKind::Static,
             out: None,
         };
 
@@ -436,6 +536,8 @@ mod tests {
 
         assert_eq!(report.kind, "skippy_agent_quant_profile");
         assert_eq!(report.request_shape.phase as u8, ProfilePhase::Decode as u8);
+        assert_eq!(report.measurement.samples, 20);
+        assert_eq!(report.measurement.warmup_samples, 3);
         assert_eq!(report.measurement_status.status, "not_measured");
         assert_eq!(report.summary.stage_count, 2);
         assert_eq!(report.summary.layer_artifact_bytes, 100);
@@ -466,6 +568,9 @@ mod tests {
             kv_type: "f16".to_string(),
             backend: None,
             device: None,
+            samples: 20,
+            warmup_samples: 3,
+            timing_source: TimingSourceKind::Static,
             out: None,
         };
 

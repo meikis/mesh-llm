@@ -19,6 +19,12 @@ fn profile_cli_emits_decode_scaffold_json() {
         .arg("decode")
         .arg("--existing-kv-tokens")
         .arg("32768")
+        .arg("--warmup-samples")
+        .arg("4")
+        .arg("--samples")
+        .arg("24")
+        .arg("--timing-source")
+        .arg("static")
         .output()
         .expect("run skippy-model-package profile");
 
@@ -32,6 +38,9 @@ fn profile_cli_emits_decode_scaffold_json() {
     assert_eq!(json["kind"], "skippy_agent_quant_profile");
     assert_eq!(json["request_shape"]["phase"], "decode");
     assert_eq!(json["request_shape"]["existing_kv_tokens"], 32768);
+    assert_eq!(json["measurement"]["source"], "static");
+    assert_eq!(json["measurement"]["warmup_samples"], 4);
+    assert_eq!(json["measurement"]["samples"], 24);
     assert_eq!(json["measurement_status"]["status"], "not_measured");
     assert_eq!(json["summary"]["stage_count"], 2);
     assert_eq!(json["summary"]["layer_artifact_bytes"], 100);

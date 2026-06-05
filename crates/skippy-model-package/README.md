@@ -46,7 +46,7 @@ skippy-model-package write-package org/repo:Q4_K_M --out-dir model-package/
 skippy-model-package write-package org/repo:Q4_K_M --projector mmproj-model-f16.gguf --out-dir model-package/
 skippy-model-package validate model.gguf slices/stage-*.gguf
 skippy-model-package validate-package model.gguf model-package/
-skippy-model-package profile model-package/ --stages 4 --phase decode --existing-kv-tokens 32768
+skippy-model-package profile model-package/ --stages 4 --phase decode --existing-kv-tokens 32768 --warmup-samples 3 --samples 20
 ```
 
 `write` and `write-stages` call the llama C ABI, which uses llama.cpp GGUF
@@ -96,5 +96,6 @@ exact owned tensor coverage against the source model.
 `profile` emits a planner-ready JSON profile envelope for a layer package. The
 initial implementation records package identity, request shape, layer artifact
 summaries, split-stage artifact summaries, runtime/ABI identity, and explicit
-`not_measured` timing placeholders. Native per-layer decode timing hooks will
-fill the same report shape later without changing the serving request path.
+`not_measured` timing placeholders through the default `--timing-source static`
+source. Native per-layer decode timing hooks will fill the same report shape
+later without changing the serving request path.

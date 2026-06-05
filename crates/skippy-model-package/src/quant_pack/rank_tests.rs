@@ -140,6 +140,7 @@ fn certification_summary_counts_failed_and_warned_gates() {
     let certification = CertificationInput {
         status: RankCertificationStatus::MeasurementOnlyCandidate,
         runtime_shape: None,
+        expected_topology: None,
         subject: None,
         gates: vec![
             CertificationGateInput {
@@ -179,6 +180,7 @@ fn certification_summary_extracts_focused_runtime_measurements_for_ranking() {
     let certification = CertificationInput {
         status: RankCertificationStatus::MeasurementOnlyCandidate,
         runtime_shape: None,
+        expected_topology: None,
         subject: None,
         gates: Vec::new(),
         skippy_bench_reports: vec![
@@ -221,6 +223,7 @@ fn certification_summary_ignores_failed_focused_runtime_measurements() {
     let certification = CertificationInput {
         status: RankCertificationStatus::Failed,
         runtime_shape: None,
+        expected_topology: None,
         subject: None,
         gates: Vec::new(),
         skippy_bench_reports: vec![serde_json::json!({
@@ -551,6 +554,7 @@ fn stale_certification_subject_is_treated_as_failed_for_ranking() {
     let certification = CertificationInput {
         status: RankCertificationStatus::AgentQualityCandidate,
         runtime_shape: Some(matching_certification_runtime_shape()),
+        expected_topology: Some(matching_certification_topology()),
         subject: Some(CertificationSubjectInput {
             build_manifest: Some(hash_ref("old-build")),
             agent_pack: Some(hash_ref("agent-pack")),
@@ -569,6 +573,7 @@ fn stale_certification_subject_is_treated_as_failed_for_ranking() {
         &dir.join("quant-pack-build.json"),
         &manifest,
         &certification,
+        &matching_preflight(),
         matching_rank_runtime_shape(),
     );
     let effective = effective_certification_status(Some(certification.status), check.status);
@@ -600,6 +605,7 @@ fn unverifiable_certification_subject_is_treated_as_failed_for_ranking() {
     let certification = CertificationInput {
         status: RankCertificationStatus::AgentQualityCandidate,
         runtime_shape: None,
+        expected_topology: None,
         subject: None,
         gates: Vec::new(),
         skippy_bench_reports: Vec::new(),
@@ -611,6 +617,7 @@ fn unverifiable_certification_subject_is_treated_as_failed_for_ranking() {
         &dir.join("quant-pack-build.json"),
         &manifest,
         &certification,
+        &matching_preflight(),
         matching_rank_runtime_shape(),
     );
     let effective = effective_certification_status(Some(certification.status), check.status);
@@ -653,6 +660,7 @@ fn certification_runtime_shape_mismatch_is_treated_as_stale_for_ranking() {
             cache_type_v: Some("f16".to_string()),
             activation_wire_dtype: Some("q8".to_string()),
         }),
+        expected_topology: Some(matching_certification_topology()),
         subject: Some(CertificationSubjectInput {
             build_manifest: Some(hash_ref("build")),
             agent_pack: Some(hash_ref("agent-pack")),
@@ -671,6 +679,7 @@ fn certification_runtime_shape_mismatch_is_treated_as_stale_for_ranking() {
         &dir.join("quant-pack-build.json"),
         &manifest,
         &certification,
+        &matching_preflight(),
         matching_rank_runtime_shape(),
     );
     let effective = effective_certification_status(Some(certification.status), check.status);
@@ -688,6 +697,66 @@ fn certification_runtime_shape_mismatch_is_treated_as_stale_for_ranking() {
             .notes
             .iter()
             .any(|note| note.contains("runtime_shape.cache_type_k q8_0 != f16"))
+    );
+    fs::remove_dir_all(dir).expect("remove fixture");
+}
+
+#[test]
+fn certification_topology_mismatch_is_treated_as_stale_for_ranking() {
+    let dir = unique_test_dir("stale-topology-certification");
+    fs::write(dir.join("quant-pack-build.json"), b"build").expect("write manifest");
+    fs::write(dir.join("agent-pack.json"), b"agent-pack").expect("write agent pack");
+    fs::write(dir.join("preflight.json"), b"preflight").expect("write preflight");
+    fs::write(dir.join("model.gguf"), b"model").expect("write model");
+    fs::create_dir_all(dir.join("package")).expect("create package");
+    fs::write(dir.join("package/model-package.json"), b"package").expect("write package");
+    let manifest = BuildManifestInput {
+        candidate: "middle-compressed".to_string(),
+        agent_pack: "agent-pack.json".to_string(),
+        preflight: "preflight.json".to_string(),
+        package: Some("package".to_string()),
+        quantized_model: Some("model.gguf".to_string()),
+        quantize_run: None,
+        decode_profile: None,
+    };
+    let certification = CertificationInput {
+        status: RankCertificationStatus::AgentQualityCandidate,
+        runtime_shape: Some(matching_certification_runtime_shape()),
+        expected_topology: Some(CertificationTopologyInput {
+            splits: Some("12".to_string()),
+            layer_end: Some(40),
+            stage_count: Some(2),
+        }),
+        subject: Some(CertificationSubjectInput {
+            build_manifest: Some(hash_ref("build")),
+            agent_pack: Some(hash_ref("agent-pack")),
+            preflight: Some(hash_ref("preflight")),
+            expected_quantized_model: Some(hash_ref("model")),
+            package_manifest: Some(hash_ref("package")),
+            quantize_run: None,
+        }),
+        gates: Vec::new(),
+        skippy_bench_reports: Vec::new(),
+        quality_evidence: Vec::new(),
+    };
+
+    let check = certification_subject_check(
+        &dir,
+        &dir.join("quant-pack-build.json"),
+        &manifest,
+        &certification,
+        &matching_preflight(),
+        matching_rank_runtime_shape(),
+    );
+    let effective = effective_certification_status(Some(certification.status), check.status);
+
+    assert_eq!(check.status, RankCertificationSubjectStatus::Stale);
+    assert_eq!(effective, Some(RankCertificationStatus::Failed));
+    assert!(
+        check
+            .notes
+            .iter()
+            .any(|note| note.contains("expected_topology.splits 12 != 20"))
     );
     fs::remove_dir_all(dir).expect("remove fixture");
 }
@@ -719,6 +788,7 @@ fn stale_certification_evidence_report_is_treated_as_failed_for_ranking() {
     let certification = CertificationInput {
         status: RankCertificationStatus::AgentQualityCandidate,
         runtime_shape: Some(matching_certification_runtime_shape()),
+        expected_topology: Some(matching_certification_topology()),
         subject: Some(CertificationSubjectInput {
             build_manifest: Some(hash_ref("build")),
             agent_pack: Some(hash_ref("agent-pack")),
@@ -742,6 +812,7 @@ fn stale_certification_evidence_report_is_treated_as_failed_for_ranking() {
         &dir.join("quant-pack-build.json"),
         &manifest,
         &certification,
+        &matching_preflight(),
         matching_rank_runtime_shape(),
     );
     let effective = effective_certification_status(Some(certification.status), check.status);
@@ -786,6 +857,7 @@ fn matching_certification_subject_is_verified_for_ranking() {
     let certification = CertificationInput {
         status: RankCertificationStatus::AgentQualityCandidate,
         runtime_shape: Some(matching_certification_runtime_shape()),
+        expected_topology: Some(matching_certification_topology()),
         subject: Some(CertificationSubjectInput {
             build_manifest: Some(hash_ref("build")),
             agent_pack: Some(hash_ref("agent-pack")),
@@ -814,6 +886,7 @@ fn matching_certification_subject_is_verified_for_ranking() {
         &dir.join("quant-pack-build.json"),
         &manifest,
         &certification,
+        &matching_preflight(),
         matching_rank_runtime_shape(),
     );
 
@@ -906,6 +979,33 @@ fn matching_certification_runtime_shape() -> CertificationRuntimeShapeInput {
         cache_type_k: Some("f16".to_string()),
         cache_type_v: Some("f16".to_string()),
         activation_wire_dtype: Some("f16".to_string()),
+    }
+}
+
+fn matching_certification_topology() -> CertificationTopologyInput {
+    CertificationTopologyInput {
+        splits: Some("20".to_string()),
+        layer_end: Some(40),
+        stage_count: Some(2),
+    }
+}
+
+fn matching_preflight() -> PreflightInput {
+    PreflightInput {
+        valid: true,
+        activation_width: Some(4096),
+        stages: vec![
+            PreflightStageInput {
+                artifact_bytes: 10_000,
+                layer_start: Some(0),
+                layer_end: Some(20),
+            },
+            PreflightStageInput {
+                artifact_bytes: 12_000,
+                layer_start: Some(20),
+                layer_end: Some(40),
+            },
+        ],
     }
 }
 

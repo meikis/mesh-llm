@@ -177,6 +177,8 @@ struct CertificationInput {
     #[serde(default)]
     runtime_shape: Option<CertificationRuntimeShapeInput>,
     #[serde(default)]
+    expected_topology: Option<CertificationTopologyInput>,
+    #[serde(default)]
     subject: Option<CertificationSubjectInput>,
     #[serde(default)]
     gates: Vec<CertificationGateInput>,
@@ -193,6 +195,13 @@ struct CertificationRuntimeShapeInput {
     cache_type_k: Option<String>,
     cache_type_v: Option<String>,
     activation_wire_dtype: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CertificationTopologyInput {
+    splits: Option<String>,
+    layer_end: Option<u32>,
+    stage_count: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -354,6 +363,7 @@ fn load_ranked_candidate(
                 &manifest_path,
                 &manifest,
                 certification,
+                &preflight,
                 runtime_shape,
             )
         })
@@ -801,6 +811,7 @@ fn certification_subject_check(
     manifest_path: &Path,
     manifest: &BuildManifestInput,
     certification: &CertificationInput,
+    preflight: &PreflightInput,
     runtime_shape: RankRuntimeShape<'_>,
 ) -> CertificationSubjectCheck {
     let Some(subject) = certification.subject.as_ref() else {
@@ -885,8 +896,128 @@ fn certification_subject_check(
         certification.runtime_shape.as_ref(),
         runtime_shape,
     );
+    compare_certification_topology(
+        &mut missing,
+        &mut mismatches,
+        certification.expected_topology.as_ref(),
+        topology_from_preflight(preflight),
+    );
 
     subject_check_result(missing, mismatches)
+}
+
+fn topology_from_preflight(preflight: &PreflightInput) -> Option<CertificationTopologyInput> {
+    if preflight.stages.is_empty() {
+        return None;
+    }
+    let ranges = preflight
+        .stages
+        .iter()
+        .map(|stage| Some((stage.layer_start?, stage.layer_end?)))
+        .collect::<Option<Vec<_>>>()?;
+    let layer_end = ranges.last().map(|(_, layer_end)| *layer_end)?;
+    let splits = ranges
+        .iter()
+        .take(ranges.len().saturating_sub(1))
+        .map(|(_, layer_end)| layer_end.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(CertificationTopologyInput {
+        splits: Some(splits),
+        layer_end: Some(layer_end),
+        stage_count: Some(ranges.len()),
+    })
+}
+
+fn compare_certification_topology(
+    missing: &mut Vec<String>,
+    mismatches: &mut Vec<String>,
+    certified: Option<&CertificationTopologyInput>,
+    current: Option<CertificationTopologyInput>,
+) {
+    let Some(certified) = certified else {
+        missing.push("expected_topology: missing from certification report".to_string());
+        return;
+    };
+    let Some(current) = current else {
+        missing.push("expected_topology: current preflight stage ranges missing".to_string());
+        return;
+    };
+    compare_topology_string_field(
+        missing,
+        mismatches,
+        "splits",
+        certified.splits.as_deref(),
+        current.splits.as_deref().unwrap_or_default(),
+    );
+    compare_topology_u32_field(
+        missing,
+        mismatches,
+        "layer_end",
+        certified.layer_end,
+        current.layer_end.unwrap_or_default(),
+    );
+    compare_topology_usize_field(
+        missing,
+        mismatches,
+        "stage_count",
+        certified.stage_count,
+        current.stage_count.unwrap_or_default(),
+    );
+}
+
+fn compare_topology_string_field(
+    missing: &mut Vec<String>,
+    mismatches: &mut Vec<String>,
+    field: &str,
+    certified: Option<&str>,
+    expected: &str,
+) {
+    match certified {
+        Some(actual) if actual == expected => {}
+        Some(actual) => {
+            mismatches.push(format!("expected_topology.{field} {actual} != {expected}"))
+        }
+        None => missing.push(format!(
+            "expected_topology.{field}: missing from certification report"
+        )),
+    }
+}
+
+fn compare_topology_u32_field(
+    missing: &mut Vec<String>,
+    mismatches: &mut Vec<String>,
+    field: &str,
+    certified: Option<u32>,
+    expected: u32,
+) {
+    match certified {
+        Some(actual) if actual == expected => {}
+        Some(actual) => {
+            mismatches.push(format!("expected_topology.{field} {actual} != {expected}"))
+        }
+        None => missing.push(format!(
+            "expected_topology.{field}: missing from certification report"
+        )),
+    }
+}
+
+fn compare_topology_usize_field(
+    missing: &mut Vec<String>,
+    mismatches: &mut Vec<String>,
+    field: &str,
+    certified: Option<usize>,
+    expected: usize,
+) {
+    match certified {
+        Some(actual) if actual == expected => {}
+        Some(actual) => {
+            mismatches.push(format!("expected_topology.{field} {actual} != {expected}"))
+        }
+        None => missing.push(format!(
+            "expected_topology.{field}: missing from certification report"
+        )),
+    }
 }
 
 fn compare_certification_runtime_shape(

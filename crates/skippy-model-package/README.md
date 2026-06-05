@@ -330,10 +330,13 @@ evidence without improving candidate score. Ranking requires certification to be
 verifiable: it checks the `subject`
 artifact hashes and the attached evidence report hashes against the current
 build, and it checks that the certification `runtime_shape` matches the rank
-request's context, GPU-layer, KV-cache, and activation-wire settings. Stale,
-wrong-shape, or unverifiable certification is treated as failed instead of
-letting old quality or runtime evidence bless changed GGUF/package/report files,
-and its attached runtime measurements are ignored for rank scoring.
+request's context, GPU-layer, KV-cache, and activation-wire settings. When the
+certification records an expected topology, rank also verifies its stage count,
+layer end, and split boundaries against the current preflight stage ranges.
+Stale, wrong-shape, wrong-topology, or unverifiable certification is treated as
+failed instead of letting old quality or runtime evidence bless changed
+GGUF/package/report files, and its attached runtime measurements are ignored
+for rank scoring.
 The output is a transparent ranking report, not a certification generator.
 
 `quant-pack evidence-plan` reads a `quant-pack build` run and emits the exact

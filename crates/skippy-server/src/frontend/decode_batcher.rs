@@ -6,13 +6,11 @@ use std::{
         mpsc as std_mpsc,
     },
     thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use super::*;
 use crate::runtime_state::RuntimeDecodeBatchRequest;
-
-const DECODE_BATCH_MAX_WAIT: Duration = Duration::from_micros(200);
 
 pub(super) struct DecodeBatcher {
     shared: Arc<DecodeBatcherShared>,
@@ -94,9 +92,10 @@ impl Clone for DecodeBatcher {
 
 impl Drop for DecodeBatcher {
     fn drop(&mut self) {
-        if self.shared.owner_count.fetch_sub(1, Ordering::AcqRel) == 1
-            && let Ok(mut state) = self.shared.state.lock()
-        {
+        if self.shared.owner_count.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
+        }
+        if let Ok(mut state) = self.shared.state.lock() {
             state.stopping = true;
             self.shared.ready.notify_all();
         }
@@ -133,13 +132,6 @@ impl DecodeBatcherShared {
         }
         if state.pending.is_empty() && state.stopping {
             return None;
-        }
-        if self.max_batch_size > 1 && state.pending.len() < self.max_batch_size {
-            let wait = self
-                .ready
-                .wait_timeout(state, DECODE_BATCH_MAX_WAIT)
-                .expect("decode batcher lock poisoned");
-            state = wait.0;
         }
         let batch_size = self.max_batch_size.min(state.pending.len());
         Some(state.pending.drain(..batch_size).collect())

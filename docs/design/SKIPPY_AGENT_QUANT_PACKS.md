@@ -640,6 +640,79 @@ Artifact hashes:
 - `e233ae0db2387e8b13f73faaf151e7cd0fe1715b608dc19b367d20865d0d5bf8`
   `local-stage-decode-profile.json`
 
+The first real Studio-local requantized proxy candidate is
+`ffn-compressed-attention-protected`, built from the same
+`unsloth/Qwen2.5-Coder-7B-Instruct-GGUF` Q4_K_M source into:
+
+```text
+/Volumes/External/skippy-quant-packs/qwen25-coder-7b-proxy/sweep/ffn-compressed-attention-protected
+```
+
+This candidate keeps the source quant layout by default and lowers only the
+middle-band FFN weight tensors for layers `4..=23` to Q3_K_M, using layout hash
+`9533097889696c9c0f722ecd089be4a63d1a0359757c3e37e28e02237d0ec17b`.
+It is intentionally attention-protected: middle-band attention tensors stay at
+the source quant tier for the first proxy experiment so long-context recall is
+not made worse before the evidence loop exists.
+
+The candidate GGUF is
+`/Volumes/External/skippy-quant-packs/qwen25-coder-7b-proxy/sweep/ffn-compressed-attention-protected/ffn-compressed-attention-protected.gguf`,
+with SHA-256
+`8e1f7e9fa707dfdd9daa897c958a3949b5503f7714cdc89ceb869e045bf873aa`.
+The source Q4_K_M blob is `4,683,073,504` bytes and the candidate GGUF is
+`4,019,503,072` bytes, so this first mixed-quant proxy saves about `663 MB`
+without changing attention tensors.
+
+Preflight validates the three-stage package and shows the stage byte effect:
+
+| Stage | Layers | Source proxy bytes | Candidate bytes |
+| --- | --- | ---: | ---: |
+| 0 | `0..10` | `1,707,802,624` | `1,581,701,888` |
+| 1 | `10..19` | `1,234,151,424` | `997,520,736` |
+| 2 | `19..28` | `1,735,165,952` | `1,630,182,176` |
+
+That is useful memory and stage-balance evidence, especially for the middle
+stage, but it is not yet a win on decode latency. The finalized direct local
+stage decode profile is measured with `existing_kv_tokens=128`,
+`warmup_samples=1`, and `samples=3`; it reports mean decode latency
+`15.891708 ms` and p95 `15.939875 ms`. The source proxy baseline from the
+earlier direct local-stage profile was `14.145417 ms` mean under the same tiny
+sample shape, so this candidate demonstrates the pipeline and memory movement
+but should not be promoted as the fast candidate.
+
+The candidate local split-chain evidence proves the actual requantized GGUF can
+run through the `10,19` stage chain, return predicted token `48298`, and carry
+f16 activation wire payloads of `7,168` bytes at each boundary for activation
+width `3,584`. After rerunning `quant-pack rank` with the finalized decode
+profile attached, the candidate is `measured: true` and the rank uses
+`direct_local_split_chain` transfer evidence. It remains uncertified:
+`certification_status` is absent, no agent-quality evidence is attached, and
+the rank notes correctly say quality is unproven.
+
+Requantized proxy artifact hashes:
+
+- `798abe557fc72fa0260209cfa01564496e2e5d3ea8a583ccfc83bdfb8c83edbf`
+  `quant-pack-build.json`
+- `e1f95b26aa1e83ea4dff282a70e3b8ef44b2324356b76d4fce3e4298bf73949a`
+  `quantize/quantize-run.json`
+- `8b06a5b7a079d41f5bb42a1412e42e952643ad5694aa1258ffed581ba8bafff1`
+  `preflight.json`
+- `300657676c6c3372a6d02bbebae02878d6367891cb9017d9aa5ca9a69d2bf118`
+  `decode-profile.json`
+- `886927bdebc99b833b484bf340cabdc34837f75d8e1441ace49caa2e1cf86728`
+  `evidence/local-split-chain.json`
+- `c54db85cb7a5d41f8832f49428bf546c10976cf80787fa678d7dbfbfe4b9dadd`
+  `evidence/rank-after-local-split.json`
+
+The next local proxy candidates should therefore preserve this evidence shape
+but avoid treating byte reduction as success by itself. The next useful sweep
+should include at least one latency-oriented candidate that protects or repairs
+decode-sensitive FFN tensors, and one stage-balance candidate that targets the
+slowest/largest stage without compressing the entire middle FFN band blindly.
+Only candidates that improve or hold decode latency while reducing memory
+pressure should graduate to the expensive agent-quality and lab/HF evidence
+lanes.
+
 Plans should optionally include a lab preflight script before the measured
 focused-runtime command. For Qwen-scale runs this makes SSH reachability, stale
 stage processes, lab-port listeners, and free-space checks part of the declared

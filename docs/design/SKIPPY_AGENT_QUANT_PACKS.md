@@ -788,6 +788,40 @@ coarse compressed lanes. Only candidates that hold decode latency while taking
 meaningful memory pressure out of the package should graduate to the expensive
 agent-quality and lab/HF evidence lanes.
 
+A follow-on mixed-candidate sweep added `quant-pack compose-candidate` as the
+bridge from measured probes to buildable combined layouts. The command appends
+an evidence-composed candidate to an existing quant plan by combining selected
+candidate groups, deduping shared groups, and recomputing the layout hash with
+the same quant-layout hash scheme used by the planner. `quant-pack build` and
+`quant-pack build-all` now also accept `--plan`, so composed plans can flow
+through the same quantize, package, preflight, decode-profile, and rank path as
+planner-native candidates. The composed 7B proxy plan lives at
+`/Volumes/External/skippy-quant-packs/qwen25-coder-7b-proxy/quant-plan-mixed-layer-candidates.json`
+with SHA-256
+`0540df673691a2ede2bfa7f7b738f8936f346ed1c103cd5295cc37c6ac37f68b`.
+The 3-candidate sweep lives at
+`/Volumes/External/skippy-quant-packs/qwen25-coder-7b-proxy/sweep-mixed-layer-candidates/`;
+its build-all manifest has SHA-256
+`49aa75c88871d5cbbac011d00fa46dec79858031482bd075f5c5e73a67b81ed9`, and its
+rank report has SHA-256
+`e5a612950e3bb7e9c15fe04da7f6774a47cff84bd4704b8474799fbc34003fe1`.
+
+| Rank | Candidate | Decode mean ms | Decode p95 ms | Package bytes | Slowest stage bytes | Stage imbalance |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | `mixed-layer-22-20-21-down-gate-up-proxy` | `13.522375` | `13.622666` | `4,810,384,256` | `1,779,022,592` | `1.375354` |
+| 2 | `mixed-layer-22-gate-up-20-21-down-proxy` | `14.098735` | `14.315041` | `4,819,401,600` | `1,779,022,592` | `1.375354` |
+| 3 | `mixed-layer-22-gate-up-20-down-proxy` | `53.905646` | `85.157000` | `4,828,418,944` | `1,779,022,592` | `1.375354` |
+
+All three mixed candidates were measured with 20 local decode samples. The best
+row combines layer 22 `ffn_gate`/`ffn_up` with `ffn_down` on layers 20, 21, and
+22. Under this proxy shape it is slightly faster than the previous single-layer
+winner and smaller than the coarse `stage-balanced-ffn-gate-up-proxy` package.
+The two-group row is a strong warning that apparent single-probe wins do not
+compose monotonically; it should not graduate. The next proxy step should keep
+the rank-1 mixed candidate, add the unchanged packaged baseline and the best
+coarse compressed lanes into the same normalized rank set, and then send only
+the surviving top candidate into coding-agent quality and larger-model evidence.
+
 Additional proxy artifact hashes:
 
 - `0dc4883de30d028bcc29947fd5ca44f3b3359049337b58db9bcd3258364301fd`

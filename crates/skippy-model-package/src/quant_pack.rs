@@ -13,13 +13,14 @@ use crate::{
     write_package,
 };
 
-mod rank;
-mod source_plan;
-
+mod compose_candidate;
 mod evidence_plan;
 mod evidence_status;
 mod hf_jobs_validate;
+mod rank;
+mod source_plan;
 
+use compose_candidate::QuantPackComposeCandidateArgs;
 use evidence_plan::{QuantPackEvidencePlanAllArgs, QuantPackEvidencePlanArgs};
 use evidence_status::QuantPackEvidenceStatusArgs;
 use hf_jobs_validate::QuantPackHfJobsValidateArgs;
@@ -37,6 +38,7 @@ enum QuantPackCommand {
     Build(Box<QuantPackBuildArgs>),
     BuildAll(Box<QuantPackBuildAllArgs>),
     Certify(crate::quant_certify::QuantPackCertifyArgs),
+    ComposeCandidate(QuantPackComposeCandidateArgs),
     EvidencePlan(Box<QuantPackEvidencePlanArgs>),
     EvidencePlanAll(Box<QuantPackEvidencePlanAllArgs>),
     EvidenceStatus(QuantPackEvidenceStatusArgs),
@@ -53,6 +55,8 @@ struct QuantPackBuildArgs {
     profile: QuantPlanProfile,
     #[arg(long, default_value_t = 2)]
     stages: usize,
+    #[arg(long)]
+    plan: Option<PathBuf>,
     #[arg(long, default_value = "middle-compressed")]
     candidate: String,
     #[arg(long)]
@@ -98,6 +102,8 @@ struct QuantPackBuildAllArgs {
     profile: QuantPlanProfile,
     #[arg(long, default_value_t = 2)]
     stages: usize,
+    #[arg(long)]
+    plan: Option<PathBuf>,
     #[arg(long = "candidate")]
     candidates: Vec<String>,
     #[arg(long)]
@@ -300,6 +306,9 @@ pub(crate) fn run_quant_pack(args: QuantPackArgs) -> Result<()> {
         QuantPackCommand::Build(args) => run_quant_pack_build(*args),
         QuantPackCommand::BuildAll(args) => run_quant_pack_build_all(*args),
         QuantPackCommand::Certify(args) => crate::quant_certify::run_quant_pack_certify(args),
+        QuantPackCommand::ComposeCandidate(args) => {
+            compose_candidate::run_quant_pack_compose_candidate(args)
+        }
         QuantPackCommand::EvidencePlan(args) => evidence_plan::run_quant_pack_evidence_plan(*args),
         QuantPackCommand::EvidencePlanAll(args) => {
             evidence_plan::run_quant_pack_evidence_plan_all(*args)
@@ -359,12 +368,13 @@ fn run_quant_pack_build(args: QuantPackBuildArgs) -> Result<()> {
     let manifest_source_identity =
         source_identity_manifest(&package_model_id, &args.source, &source_identity);
 
-    crate::quant_plan::run_quant_plan(QuantPlanArgs {
-        source: args.source.clone(),
-        profile: args.profile,
-        stages: args.stages,
-        out: Some(paths.plan.clone()),
-    })?;
+    ensure_quant_plan(
+        &args.source,
+        args.profile,
+        args.stages,
+        args.plan.as_deref(),
+        &paths.plan,
+    )?;
 
     let quantize_output = crate::quantize::run_quantize(QuantizeArgs {
         source: args.source.clone(),
@@ -698,6 +708,29 @@ fn display_paths(paths: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
+fn ensure_quant_plan(
+    source: &Path,
+    profile: QuantPlanProfile,
+    stages: usize,
+    plan_override: Option<&Path>,
+    out: &Path,
+) -> Result<()> {
+    if let Some(plan) = plan_override {
+        if plan != out {
+            fs::copy(plan, out).with_context(|| {
+                format!("copy quant plan {} to {}", plan.display(), out.display())
+            })?;
+        }
+        return Ok(());
+    }
+    crate::quant_plan::run_quant_plan(QuantPlanArgs {
+        source: source.to_path_buf(),
+        profile,
+        stages,
+        out: Some(out.to_path_buf()),
+    })
+}
+
 fn quant_pack_build_paths(
     out_dir: &Path,
     candidate: &str,
@@ -858,12 +891,13 @@ fn run_quant_pack_build_all(args: QuantPackBuildAllArgs) -> Result<()> {
         )
     })?;
     let plan_path = args.out_dir.join("quant-plan.json");
-    crate::quant_plan::run_quant_plan(QuantPlanArgs {
-        source: args.source.clone(),
-        profile: args.profile,
-        stages: args.stages,
-        out: Some(plan_path.clone()),
-    })?;
+    ensure_quant_plan(
+        &args.source,
+        args.profile,
+        args.stages,
+        args.plan.as_deref(),
+        &plan_path,
+    )?;
     let candidates = selected_candidate_ids(&plan_path, &args.candidates)?;
     let mut candidate_manifests = Vec::new();
     let mut rank_inputs = Vec::new();
@@ -905,6 +939,7 @@ fn run_quant_pack_build_all(args: QuantPackBuildAllArgs) -> Result<()> {
             source: args.source.clone(),
             profile: args.profile,
             stages: args.stages,
+            plan: Some(plan_path.clone()),
             candidate: candidate.clone(),
             out_dir: run_dir.clone(),
             llama_quantize: args.llama_quantize.clone(),
@@ -1244,6 +1279,7 @@ mod tests {
             source: PathBuf::from("/models/source.gguf"),
             profile: QuantPlanProfile::CodingAgent,
             stages: 2,
+            plan: None,
             candidate: "middle-compressed".to_string(),
             out_dir: PathBuf::from("/tmp/run"),
             llama_quantize: PathBuf::from("/opt/llama-quantize"),
@@ -1445,6 +1481,30 @@ mod tests {
         assert!(readiness.decode_profile_attached);
         assert_eq!(readiness.missing_artifacts.len(), 1);
         assert!(readiness.missing_artifacts[0].contains("decode_profile:"));
+        fs::remove_dir_all(dir).expect("remove fixture");
+    }
+
+    #[test]
+    fn ensure_quant_plan_can_use_existing_plan() {
+        let dir = unique_test_dir("plan-override");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let plan = dir.join("source-plan.json");
+        let out = dir.join("copied-plan.json");
+        fs::write(&plan, r#"{"candidates":[{"id":"mixed"}]}"#).expect("write plan");
+
+        ensure_quant_plan(
+            Path::new("/models/source.gguf"),
+            QuantPlanProfile::CodingAgent,
+            3,
+            Some(&plan),
+            &out,
+        )
+        .expect("copy plan override");
+
+        assert_eq!(
+            fs::read_to_string(out).expect("read out plan"),
+            r#"{"candidates":[{"id":"mixed"}]}"#
+        );
         fs::remove_dir_all(dir).expect("remove fixture");
     }
 

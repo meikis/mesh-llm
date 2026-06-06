@@ -711,56 +711,60 @@ to Q3_K_M; `stage-balanced-ffn-proxy`, which lowers only FFN tensors in that
 same stage band while keeping attention at the source quant; per-projection FFN
 variants that lower only `ffn_down`, `ffn_gate`, or `ffn_up` tensors in layers
 `19..23`; and a `stage-balanced-ffn-gate-up-proxy` variant that combines the
-two promising single-projection lanes. Each run has the same small local decode
-profile shape
-(`existing_kv_tokens=128`, `warmup_samples=1`, `samples=3`) and the same local
-split-chain lane (`splits=10,19`, `ctx_size=1024`, f16 activation wire). The
-refreshed quant plan lives at
+two promising single-projection lanes. The first sweep used the same small
+local decode profile shape (`existing_kv_tokens=128`, `warmup_samples=1`,
+`samples=3`) and the same local split-chain lane (`splits=10,19`,
+`ctx_size=1024`, f16 activation wire). A follow-up confirmation pass reprofiled
+the baseline, `ffn_up`, `ffn_gate`, and `ffn_gate_up` with
+`warmup_samples=3` and `samples=20`; the current rank report uses those
+stronger profiles for those four rows and the original 3-sample profiles for
+the remaining rows. The refreshed quant plan lives at
 `/Volumes/External/skippy-quant-packs/qwen25-coder-7b-proxy/quant-plan.json`
 with SHA-256
 `fcd823cce5ac16b425b380aef682b107a154d5586b28efa6173b629cb4fdd86e`.
 The current rank report lives at
 `/Volumes/External/skippy-quant-packs/qwen25-coder-7b-proxy/sweep/rank-after-proxy-candidates.json`
 with SHA-256
-`6a9489fd61baf45aee4bc47023e464068572d6ba158b8027f930c08d9c3c7abc`.
+`f68e314ea3c2262f909caf7f4253ee55cb88fa7ce7e3120e35571e55bdc81a1a`.
 
 | Rank | Candidate | Decode mean ms | Package bytes | Slowest stage bytes | Stage imbalance |
 | ---: | --- | ---: | ---: | ---: | ---: |
-| 1 | `baseline-source-quant` | `14.028069` | `4,872,975,232` | `1,800,450,848` | `1.391920` |
-| 2 | `stage-balanced-ffn-up-proxy` | `14.198681` | `4,827,888,512` | `1,779,022,592` | `1.375354` |
-| 3 | `stage-balanced-ffn-gate-proxy` | `14.218556` | `4,827,888,512` | `1,779,022,592` | `1.375354` |
-| 4 | `stage-balanced-ffn-gate-up-proxy` | `14.422194` | `4,782,801,792` | `1,779,022,592` | `1.375354` |
-| 5 | `stage-balanced-ffn-proxy` | `14.498056` | `4,702,706,560` | `1,779,022,592` | `1.375354` |
-| 6 | `stage-balanced-proxy` | `14.615736` | `4,682,263,424` | `1,779,022,592` | `1.375354` |
-| 7 | `stage-balanced-ffn-down-proxy` | `15.490472` | `4,792,880,000` | `1,779,022,592` | `1.375354` |
-| 8 | `ffn-compressed-attention-protected` | `15.891708` | `4,209,404,800` | `1,630,182,176` | `1.634234` |
+| 1 | `baseline-source-quant` | `13.912183` | `4,872,975,232` | `1,800,450,848` | `1.391920` |
+| 2 | `stage-balanced-ffn-gate-up-proxy` | `14.307750` | `4,782,801,792` | `1,779,022,592` | `1.375354` |
+| 3 | `stage-balanced-ffn-proxy` | `14.498056` | `4,702,706,560` | `1,779,022,592` | `1.375354` |
+| 4 | `stage-balanced-proxy` | `14.615736` | `4,682,263,424` | `1,779,022,592` | `1.375354` |
+| 5 | `stage-balanced-ffn-down-proxy` | `15.490472` | `4,792,880,000` | `1,779,022,592` | `1.375354` |
+| 6 | `stage-balanced-ffn-gate-proxy` | `15.934977` | `4,827,888,512` | `1,779,022,592` | `1.375354` |
+| 7 | `ffn-compressed-attention-protected` | `15.891708` | `4,209,404,800` | `1,630,182,176` | `1.634234` |
+| 8 | `stage-balanced-ffn-up-proxy` | `16.152862` | `4,827,888,512` | `1,779,022,592` | `1.375354` |
 
 This is the most important proxy result so far: the unchanged packaged source
-quant still wins on local decode. The per-projection pass is still a useful
-repair: `ffn_up` and `ffn_gate` keep decode close to baseline while reducing
-the largest stage and package bytes, while `ffn_down` is a clear latency
-regression. Combining `ffn_gate` and `ffn_up` is not additive: it saves more
-bytes than either single-projection candidate, but it is slower than both. The
-broader `stage-balanced-ffn-proxy` and `stage-balanced-proxy` variants confirm
-that byte-only lowering is too coarse, and the older
-`ffn-compressed-attention-protected` candidate is a memory win but not a decode
-win. These are valid candidate-pack evidence runs because they prove the
-builder, package, preflight, split-chain, rank, and audit hash flow. They are
-not final winners because quality is still unproven and baseline remains the
-fastest decode profile.
+quant still wins on local decode. The 20-sample confirmation pass also changed
+the earlier single-projection conclusion: `ffn_up` and `ffn_gate` looked close
+to baseline in the 3-sample sweep, but their longer profiles show much worse
+mean and tail latency. The combined `ffn_gate_up` candidate is the best current
+compressed proxy: it is still slower than baseline, but it keeps decode much
+closer than either single-projection candidate under the stronger profile while
+reducing package bytes and the largest stage. The broader
+`stage-balanced-ffn-proxy` and `stage-balanced-proxy` variants remain byte
+pressure experiments, and the older `ffn-compressed-attention-protected`
+candidate is a memory win but not a decode win. These are valid candidate-pack
+evidence runs because they prove the builder, package, preflight, split-chain,
+rank, and audit hash flow. They are not final winners because quality is still
+unproven and baseline remains the fastest decode profile.
 
-The next local proxy step should therefore stop widening the compressed tensor
-set and instead either repeat the top candidates with more decode samples or
-run one-layer-at-a-time `ffn_up`/`ffn_gate` sensitivity inside the largest
-stage. Only candidates that improve or hold decode latency while reducing
-memory pressure should graduate to the expensive agent-quality and lab/HF
-evidence lanes.
+The next local proxy step should either reprofile `stage-balanced-ffn-proxy`
+and `stage-balanced-proxy` with the same 20-sample shape to finish normalizing
+the top compressed rows, or move to one-layer-at-a-time `ffn_gate_up`
+sensitivity inside the largest stage. Only candidates that improve or hold
+decode latency while reducing memory pressure should graduate to the expensive
+agent-quality and lab/HF evidence lanes.
 
 Additional proxy artifact hashes:
 
 - `0dc4883de30d028bcc29947fd5ca44f3b3359049337b58db9bcd3258364301fd`
   `baseline-source-quant/baseline-source-quant.gguf`
-- `110003c7d08671efebf432df20d6748e7d406da372e1995ae16f2db94dbb96ff`
+- `c6227faef8cf109a1469cfa365ea24fcc42f6bfbeb65d9ef8ca612a6be835a2e`
   `baseline-source-quant/decode-profile.json`
 - `39e56ca6a3e25b8d8cc291fb98c9fe781f568e3f7f11f77cf58c4d3dd936bcae`
   `baseline-source-quant/evidence/local-split-chain.json`
@@ -778,7 +782,7 @@ Additional proxy artifact hashes:
   `stage-balanced-ffn-proxy/evidence/local-split-chain.json`
 - `83928ee2564b1afb630cbc7dd24c3e26ee87ddac8f9b715cd2f9b7695c9343fa`
   `stage-balanced-ffn-gate-up-proxy/stage-balanced-ffn-gate-up-proxy.gguf`
-- `5908ac70be1c356fd5896a3ec3b8830fd9337cfeb7e87345d0471803bdbaee31`
+- `90be96aeb503b9e8a03aa0179c0285df594a221d9db8f8f0f794bc9b79bcef08`
   `stage-balanced-ffn-gate-up-proxy/decode-profile.json`
 - `6c3ada06c556d8c315256b4a5242cf80912a9ee5f71b9e123cd40139e06289a1`
   `stage-balanced-ffn-gate-up-proxy/evidence/local-split-chain.json`
@@ -790,13 +794,13 @@ Additional proxy artifact hashes:
   `stage-balanced-ffn-down-proxy/evidence/local-split-chain.json`
 - `6b5c0b96922dc1bf30233100b45c7ac44825055bfc05aa4a8a4ccc727403e6de`
   `stage-balanced-ffn-gate-proxy/stage-balanced-ffn-gate-proxy.gguf`
-- `cca971fad4f1f4eb5c30544b7d2928c2ebf8224c2d97d9fb4dd34bcb7df0c06b`
+- `2b68a91ba8203285337e18e4845cc9243d8ef2690f2499065149b9fe10719b48`
   `stage-balanced-ffn-gate-proxy/decode-profile.json`
 - `e83cc8d685d6c66dc8d68cd9940d6b6ab7072524b8fae7e12b12738fe8c3586b`
   `stage-balanced-ffn-gate-proxy/evidence/local-split-chain.json`
 - `24e58dbd2c7c2b45adb5de689ac00b058a9bb268623a2ecb07f2bfc377fbe0ec`
   `stage-balanced-ffn-up-proxy/stage-balanced-ffn-up-proxy.gguf`
-- `efa38dfaaf719fd91524afeeec2e42770361a959dc23452578abeedc394f0a32`
+- `285a604aab0b654ecea0f59fcd33293ddab1f4dae1739b87185e80dbab2dfd5c`
   `stage-balanced-ffn-up-proxy/decode-profile.json`
 - `cc1c1aa1690a269d229d538cbbae5a8383d4161a60a9c9fb3bf3ce7dd49ff8c7`
   `stage-balanced-ffn-up-proxy/evidence/local-split-chain.json`

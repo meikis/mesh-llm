@@ -106,6 +106,38 @@ impl EvidencePlanTopology {
     fn is_empty(&self) -> bool {
         self == &Self::default()
     }
+
+    fn with_inferred_stage_count(mut self, warnings: &mut Vec<String>) -> Self {
+        if self.stage_count.is_some() {
+            return self;
+        }
+        let splits_stage_count = self.stage_count_from_splits();
+        let host_stage_count = (!self.hosts.is_empty()).then_some(self.hosts.len());
+        if let (Some(splits_stage_count), Some(host_stage_count)) =
+            (splits_stage_count, host_stage_count)
+            && splits_stage_count != host_stage_count
+        {
+            warnings.push(format!(
+                "evidence topology stage count inferred from splits ({splits_stage_count}) differs from host count ({host_stage_count})"
+            ));
+        }
+        self.stage_count = splits_stage_count.or(host_stage_count);
+        self
+    }
+
+    fn stage_count_from_splits(&self) -> Option<usize> {
+        let splits = self.splits.as_deref()?.trim();
+        if splits.is_empty() {
+            return Some(1);
+        }
+        Some(
+            splits
+                .split(',')
+                .filter(|split| !split.trim().is_empty())
+                .count()
+                + 1,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -304,6 +336,7 @@ fn candidate_status(
 ) -> CandidateEvidenceStatus {
     let mut warnings = warnings.to_vec();
     warnings.extend(toolchain_warnings(&toolchain));
+    let topology = topology.with_inferred_stage_count(&mut warnings);
     let output_base = output_base_dir(&toolchain);
     let commands = commands
         .iter()
@@ -1094,6 +1127,43 @@ mod tests {
         assert_eq!(next.id, "missing");
         assert_eq!(next.shell, "produce-missing");
         assert_eq!(next.missing_outputs, [missing.display().to_string()]);
+        fs::remove_dir_all(dir).expect("remove fixture");
+    }
+
+    #[test]
+    fn status_report_infers_missing_stage_count_from_splits() {
+        let dir = unique_test_dir("inferred-stage-count");
+        fs::create_dir_all(&dir).expect("create fixture");
+        let output = dir.join("done.json");
+        fs::write(&output, b"{}").expect("write output");
+        let plan = dir.join("evidence-plan.json");
+        fs::write(
+            &plan,
+            format!(
+                r#"{{
+  "kind": "skippy_quant_pack_evidence_plan",
+  "candidate": "ffn-compressed-attention-protected",
+  "hosts": ["host-a", "host-b", "host-c", "host-d"],
+  "splits": "16,32,47",
+  "split_source": "cli_override",
+  "layer_end": 62,
+  "commands": [
+    {{"id": "done", "description": "done", "shell": "true", "outputs": ["{}"]}}
+  ]
+}}"#,
+                output.display()
+            ),
+        )
+        .expect("write plan");
+
+        let report = build_evidence_status_report(&plan).expect("build status");
+
+        assert_eq!(report.candidates[0].topology.stage_count, Some(4));
+        assert_eq!(
+            report.candidates[0].topology.splits.as_deref(),
+            Some("16,32,47")
+        );
+        assert_eq!(report.candidates[0].warnings, Vec::<String>::new());
         fs::remove_dir_all(dir).expect("remove fixture");
     }
 

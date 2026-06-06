@@ -910,6 +910,15 @@ generated payload is detached, requests `cpu-xl` for `24h`, carries the
 `meshllm/qwen25-coder-7b-proxy-mixed-layer-evidence`. Those repo names are
 operator-review handoff values; the CLI does not submit the job.
 
+The input repo was created as a private Hugging Face model repo and populated
+from Studio with the generated upload script. After upload, `hf models info`
+reported `meshllm/qwen25-coder-7b-proxy-mixed-layer-candidate` at revision
+`900fc078827c21f35f89f392cc2d6323b74faab2` with `41` files, including the
+quantized GGUF and `package/layers/layer-000.gguf`. The evidence repo
+`meshllm/qwen25-coder-7b-proxy-mixed-layer-evidence` was also created as a
+private model repo and remains empty apart from `.gitattributes`, ready for the
+HF job to upload measured evidence.
+
 The token-length audit is now configured for the evidence lane's real context
 shape rather than the early proxy profiling shape: `ctx_size=8192`,
 `generation_limit=512`, `enable_thinking=false`. It reports `565` corpus rows,

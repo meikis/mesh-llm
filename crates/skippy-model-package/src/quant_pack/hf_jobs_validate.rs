@@ -318,6 +318,11 @@ fn add_evidence_run_checks(command_text: &str, checks: &mut Vec<HfJobsValidateCh
             "command must execute the generated evidence runbook",
         ),
         check_present(
+            "command_is_self_contained",
+            !command_text.contains("--execute-remote"),
+            "HF evidence jobs must be self-contained; private-lab focused-runtime --execute-remote runs must execute on the lab runner",
+        ),
+        check_present(
             "command_uses_concrete_hosts",
             !contains_placeholder_hosts(command_text),
             "evidence jobs must replace placeholder host-N runtime hosts before submission",

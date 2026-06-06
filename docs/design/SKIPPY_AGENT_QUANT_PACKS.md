@@ -612,10 +612,12 @@ tail latency under concurrent agent traffic.
 It is also not the safe default for 480B-scale direct GGUFs: a local chain can
 start one process per stage, and each process may map or load a large slice on
 the same machine. For large Qwen coder candidates, Studio should produce plans,
-token audits, schema smoke, and small-model/proxy local proofs; quantize,
-package, profile, and focused-runtime evidence should run on lab nodes or
-Hugging Face Jobs. Direct-GGUF local chain runs above the safety guard should
-require an explicit operator override.
+token audits, schema smoke, and small-model/proxy local proofs. Hugging Face
+Jobs can run source/build/package/profile work and self-contained evidence
+jobs, but it cannot reach private LAN stage hosts. Measured
+`focused-runtime --execute-remote` evidence for the lab must run from Studio or
+another runner that can SSH to the stage machines. Direct-GGUF local chain runs
+above the safety guard should require an explicit operator override.
 
 Current Studio-local proxy evidence uses
 `unsloth/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M` as a safe Qwen Coder family
@@ -919,11 +921,12 @@ quantized GGUF and `package/layers/layer-000.gguf`. The evidence repo
 private model repo and remains empty apart from `.gitattributes`, ready for the
 HF job to upload measured evidence.
 After tightening evidence-run validation, the generated proxy submit payload is
-intentionally `invalid` for submission while it still contains placeholder
-runtime hosts. The only failing pre-submit check is
-`command_uses_concrete_hosts`, which must be resolved by replacing
-`host-0,host-1,host-2` with real reachable lab/HF stage hosts before spending a
-focused-runtime job.
+intentionally `invalid` for HF submission. It still contains placeholder
+runtime hosts and, more importantly, embeds `focused-runtime --execute-remote`,
+which requires SSH reachability to private lab stage hosts. HF Jobs can keep the
+candidate and evidence repositories, but the measured focused-runtime runbook
+must execute from Studio or another lab-reachable runner. The pre-submit
+failures are expected guardrails, not a packaging failure.
 
 The token-length audit is now configured for the evidence lane's real context
 shape rather than the early proxy profiling shape: `ctx_size=8192`,

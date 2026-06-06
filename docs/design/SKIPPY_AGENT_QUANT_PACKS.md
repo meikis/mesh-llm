@@ -817,10 +817,32 @@ row combines layer 22 `ffn_gate`/`ffn_up` with `ffn_down` on layers 20, 21, and
 22. Under this proxy shape it is slightly faster than the previous single-layer
 winner and smaller than the coarse `stage-balanced-ffn-gate-up-proxy` package.
 The two-group row is a strong warning that apparent single-probe wins do not
-compose monotonically; it should not graduate. The next proxy step should keep
-the rank-1 mixed candidate, add the unchanged packaged baseline and the best
-coarse compressed lanes into the same normalized rank set, and then send only
-the surviving top candidate into coding-agent quality and larger-model evidence.
+compose monotonically; it should not graduate.
+
+The combined normalized comparison then ranked the surviving mixed candidate
+against the unchanged packaged baseline, the best coarse compressed lanes, and
+the best single-layer probe using the measured 20-sample decode-profile
+artifacts as the source of truth. The combined rank report lives at
+`/Volumes/External/skippy-quant-packs/qwen25-coder-7b-proxy/combined-normalized-ranking/quant-pack-rank.json`
+with SHA-256
+`25bb4a953d371371ec9041cec213c62d209bdb4fedfbedbccc21d887914835b9`.
+
+| Rank | Candidate | Decode mean ms | Decode p95 ms | Package bytes | Slowest stage bytes | Stage imbalance |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | `mixed-layer-22-20-21-down-gate-up-proxy` | `13.522375` | `13.622666` | `4,810,384,256` | `1,779,022,592` | `1.375354` |
+| 2 | `stage-balanced-layer-22-ffn-gate-up-proxy` | `13.545296` | `13.595750` | `4,854,940,544` | `1,782,416,160` | `1.377977` |
+| 3 | `baseline-source-quant` | `13.912183` | `13.993625` | `4,872,975,232` | `1,800,450,848` | `1.391920` |
+| 4 | `stage-balanced-ffn-down-proxy` | `14.025075` | `14.081625` | `4,792,880,000` | `1,779,022,592` | `1.375354` |
+| 5 | `stage-balanced-ffn-gate-up-proxy` | `14.307750` | `14.376167` | `4,782,801,792` | `1,779,022,592` | `1.375354` |
+| 6 | `stage-balanced-proxy` | `14.476614` | `14.668208` | `4,682,263,424` | `1,779,022,592` | `1.375354` |
+
+This is the current proxy graduation gate. The mixed candidate is now the best
+measured local proxy row and also improves package bytes, slowest-stage bytes,
+and stage imbalance versus the packaged source baseline. It should graduate to
+coding-agent quality evidence and larger-model/HF evidence. It is still not a
+final Skippy-optimized Qwen pack because certification, tool-call/JSON checks,
+code-edit quality, long-context recall, repeated-turn KV behavior, and
+larger-model transfer/runtime evidence remain unproven.
 
 Additional proxy artifact hashes:
 

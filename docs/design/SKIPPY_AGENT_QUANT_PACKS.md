@@ -867,7 +867,7 @@ Studio while the resulting commands target a lab/HF filesystem. The job-path
 plan lives at
 `/Volumes/External/skippy-quant-packs/qwen25-coder-7b-proxy/sweep-mixed-layer-candidates/mixed-layer-22-20-21-down-gate-up-proxy/evidence-plan-job-path.json`,
 with SHA-256
-`79a080170d3712356f3f090f310a1d5addf6cf85e3dbf0d7b15ed7ddc42c7aae`; its
+`b5ff0b151dc5bd363a54df2978dcba59495d1c99883a70176923ddeefc5c3867`; its
 runbook lives at
 `/Volumes/External/skippy-quant-packs/qwen25-coder-7b-proxy/sweep-mixed-layer-candidates/mixed-layer-22-20-21-down-gate-up-proxy/run-evidence-job-path.sh`,
 with SHA-256
@@ -882,6 +882,21 @@ local `/Volumes/External/...` planning path. On Studio, `evidence-status`
 correctly reports this plan as fully missing with toolchain warnings because
 the target paths and binaries are job-environment contracts. It is a handoff
 artifact, not a completed evidence report.
+
+The same job-path generation now emits Hugging Face Jobs handoff artifacts. The
+workload script lives at
+`/Volumes/External/skippy-quant-packs/qwen25-coder-7b-proxy/sweep-mixed-layer-candidates/mixed-layer-22-20-21-down-gate-up-proxy/run-evidence-hf-job.sh`,
+with SHA-256
+`51003eb94cebab7489e422806f4d1fa388182944e2338f3f976909ed8ef1293f`. The
+reviewable submit payload lives at
+`/Volumes/External/skippy-quant-packs/qwen25-coder-7b-proxy/sweep-mixed-layer-candidates/mixed-layer-22-20-21-down-gate-up-proxy/evidence-hf-job-submit.json`,
+with SHA-256
+`a07a4845f586e3fefab2e058f7c175399133e65051cc6794a85355e586f76f2b`. The
+generated payload is detached, requests `cpu-xl` for `24h`, carries the
+`HF_TOKEN` secret reference, downloads the candidate bundle from
+`Mesh-LLM/qwen25-coder-7b-proxy-mixed-layer-candidate`, and uploads evidence to
+`Mesh-LLM/qwen25-coder-7b-proxy-mixed-layer-evidence`. Those repo names are
+operator-review handoff values; the CLI does not submit the job.
 
 The token-length audit is now configured for the evidence lane's real context
 shape rather than the early proxy profiling shape: `ctx_size=8192`,

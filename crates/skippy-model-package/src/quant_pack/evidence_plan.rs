@@ -7,8 +7,10 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 mod focused_runtime;
+mod hf_jobs;
 
 use focused_runtime::FocusedRuntimeEvidenceArgs;
+use hf_jobs::{HfJobsEvidenceArgs, HfJobsEvidenceSubmitPlan, HfJobsEvidenceWorkloadPlan};
 
 const DEFAULT_TOKEN_CORPUS: &str = "target/bench-corpora/long/corpus.jsonl";
 const DEFAULT_CHAT_CORPUS: &str = "target/bench-corpora/coding-loop/corpus.jsonl";
@@ -72,6 +74,8 @@ pub(super) struct QuantPackEvidencePlanArgs {
     script_out: Option<PathBuf>,
     #[arg(long)]
     runbook_plan_path: Option<PathBuf>,
+    #[command(flatten)]
+    hf_jobs: HfJobsEvidenceArgs,
 }
 
 #[derive(Debug, clap::Args)]
@@ -168,6 +172,10 @@ struct EvidencePlanReport {
     focused_runtime: FocusedRuntimeEvidenceArgs,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hf_jobs_workload: Option<HfJobsEvidenceWorkloadPlan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hf_jobs_submit: Option<HfJobsEvidenceSubmitPlan>,
     commands: Vec<EvidenceCommand>,
 }
 
@@ -258,11 +266,12 @@ struct QuantPlanStageHintInput {
 }
 
 pub(super) fn run_quant_pack_evidence_plan(args: QuantPackEvidencePlanArgs) -> Result<()> {
+    args.hf_jobs.validate()?;
     let runbook_cwd = resolve_runbook_cwd(
         args.runbook_cwd.as_deref(),
         args.execution_run_dir.is_some(),
     )?;
-    let report = build_evidence_plan(EvidencePlanBuildInput {
+    let mut report = build_evidence_plan(EvidencePlanBuildInput {
         run: args.run,
         runbook_cwd: runbook_cwd.clone(),
         hosts: args.hosts,
@@ -288,13 +297,23 @@ pub(super) fn run_quant_pack_evidence_plan(args: QuantPackEvidencePlanArgs) -> R
         evidence_dir: args.evidence_dir,
         execution_run_dir: args.execution_run_dir,
     })?;
+    let runbook_plan_path = args
+        .runbook_plan_path
+        .clone()
+        .or_else(|| args.out.clone())
+        .unwrap_or_else(|| PathBuf::from(&report.run_dir).join("evidence-plan.json"));
+    let hf_jobs_artifacts =
+        hf_jobs::plan_hf_jobs_artifacts(&args.hf_jobs, &report, &runbook_plan_path)?;
+    report.hf_jobs_workload = hf_jobs_artifacts.workload_plan;
+    report.hf_jobs_submit = hf_jobs_artifacts.submit_plan;
+    let runbook_script = single_evidence_script(
+        Some(&runbook_plan_path),
+        &args.skippy_model_package_bin,
+        &report,
+    )?;
+    hf_jobs::write_hf_jobs_artifacts(&args.hf_jobs, &report, &runbook_script, &runbook_plan_path)?;
     if let Some(script_out) = args.script_out.as_deref() {
-        write_single_evidence_script(
-            script_out,
-            args.runbook_plan_path.as_deref().or(args.out.as_deref()),
-            &args.skippy_model_package_bin,
-            &report,
-        )?;
+        write_script_file(script_out, &runbook_script)?;
     }
     write_report(args.out.as_deref(), &report, "quant-pack evidence plan")
 }
@@ -484,6 +503,8 @@ fn build_evidence_plan(args: EvidencePlanBuildInput) -> Result<EvidencePlanRepor
         activation_wire_dtype: args.activation_wire_dtype.clone(),
         focused_runtime: args.focused_runtime.clone(),
         warnings,
+        hf_jobs_workload: None,
+        hf_jobs_submit: None,
         commands: evidence_commands(EvidenceCommandInputs {
             run: &execution_run_dir,
             model_id: &package_manifest.model_id,
@@ -586,12 +607,22 @@ fn resolve_runbook_cwd(runbook_cwd: Option<&Path>, allow_missing: bool) -> Resul
     Ok(resolved)
 }
 
+#[cfg(test)]
 fn write_single_evidence_script(
     path: &Path,
     plan_path: Option<&Path>,
     skippy_model_package_bin: &Path,
     report: &EvidencePlanReport,
 ) -> Result<()> {
+    let script = single_evidence_script(plan_path, skippy_model_package_bin, report)?;
+    write_script_file(path, &script)
+}
+
+fn single_evidence_script(
+    plan_path: Option<&Path>,
+    skippy_model_package_bin: &Path,
+    report: &EvidencePlanReport,
+) -> Result<String> {
     let mut script = evidence_script_header(
         plan_path,
         skippy_model_package_bin,
@@ -605,7 +636,7 @@ fn write_single_evidence_script(
         &report.warnings,
         &report.commands,
     )?;
-    write_script_file(path, &script)
+    Ok(script)
 }
 
 fn write_all_evidence_script(

@@ -65,6 +65,7 @@ fn evidence_plan_uses_candidate_stage_hints_when_splits_omitted() {
         out: Some(report_path.clone()),
         script_out: None,
         runbook_plan_path: None,
+        hf_jobs: HfJobsEvidenceArgs::default(),
     })
     .expect("write evidence plan");
 
@@ -161,6 +162,7 @@ fn evidence_plan_can_target_different_execution_run_dir() {
         out: Some(report_path.clone()),
         script_out: Some(script_path.clone()),
         runbook_plan_path: Some(execution_plan_path.clone()),
+        hf_jobs: HfJobsEvidenceArgs::default(),
     })
     .expect("write evidence plan");
 
@@ -212,6 +214,126 @@ fn evidence_plan_can_target_different_execution_run_dir() {
 }
 
 #[test]
+fn evidence_plan_can_emit_hf_jobs_handoff_artifacts() {
+    let dir = unique_test_dir("evidence-plan-hf-jobs");
+    let execution_run_dir = PathBuf::from("/job/skippy-evidence/input/studio-local");
+    let execution_plan_path = execution_run_dir.join("evidence-plan.json");
+    write_candidate_fixture_with_shape(
+        &dir,
+        "studio-local",
+        "org/qwen-coder:studio-local",
+        28,
+        3,
+        None,
+    );
+    let report_path = dir.join("evidence-plan.json");
+    let runbook_path = dir.join("run-evidence-job-path.sh");
+    let workload_path = dir.join("run-evidence-hf-job.sh");
+    let submit_path = dir.join("evidence-hf-job-submit.json");
+
+    run_quant_pack_evidence_plan(QuantPackEvidencePlanArgs {
+        run: dir.clone(),
+        hosts: "host-a,host-b,host-c".to_string(),
+        splits: Some("10,19".to_string()),
+        base_url: "http://127.0.0.1:9337/v1".to_string(),
+        token_corpus: PathBuf::from("target/bench-corpora/long/corpus.jsonl"),
+        chat_corpus: PathBuf::from("target/bench-corpora/coding-loop/corpus.jsonl"),
+        long_context_corpus: PathBuf::from("target/bench-corpora/long-context/corpus.jsonl"),
+        ctx_size: 8192,
+        n_gpu_layers: 0,
+        cache_type_k: "f16".to_string(),
+        cache_type_v: "f16".to_string(),
+        max_tokens: 512,
+        include_local_split_evidence: true,
+        local_split_prompt: DEFAULT_LOCAL_SPLIT_PROMPT.to_string(),
+        skippy_bench_bin: PathBuf::from("skippy-bench"),
+        skippy_model_package_bin: PathBuf::from("skippy-model-package"),
+        agent_tool_call_script: PathBuf::from(DEFAULT_AGENT_TOOL_CALL_SCRIPT),
+        kv_tool_loop_script: PathBuf::from(DEFAULT_KV_TOOL_LOOP_SCRIPT),
+        runbook_cwd: Some(PathBuf::from("/workspace/mesh-llm")),
+        execution_run_dir: Some(execution_run_dir.clone()),
+        activation_wire_dtype: "f16".to_string(),
+        attempts: 1,
+        focused_runtime: FocusedRuntimeEvidenceArgs::default(),
+        evidence_dir: None,
+        out: Some(report_path.clone()),
+        script_out: Some(runbook_path.clone()),
+        runbook_plan_path: Some(execution_plan_path.clone()),
+        hf_jobs: HfJobsEvidenceArgs {
+            hf_jobs_workload_out: Some(workload_path.clone()),
+            hf_jobs_submit_json_out: Some(submit_path.clone()),
+            hf_jobs_image: Some("ghcr.io/mesh-llm/skippy-evidence-job:cpu".to_string()),
+            hf_jobs_flavor: "cpu-xl".to_string(),
+            hf_jobs_timeout: "12h".to_string(),
+            hf_jobs_input_repo: Some("org/qwen-coder-candidate-bundle".to_string()),
+            hf_jobs_input_revision: "main".to_string(),
+            hf_jobs_input_includes: vec!["**".to_string()],
+            hf_jobs_upload_repo: Some("org/qwen-coder-evidence".to_string()),
+        },
+    })
+    .expect("write HF Jobs handoff artifacts");
+
+    let report = read_json::<serde_json::Value>(&report_path).expect("read report");
+    assert_eq!(
+        report["hf_jobs_workload"]["input_repo"],
+        "org/qwen-coder-candidate-bundle"
+    );
+    assert_eq!(
+        report["hf_jobs_workload"]["execution_run_dir"],
+        "/job/skippy-evidence/input/studio-local"
+    );
+    assert_eq!(
+        report["hf_jobs_workload"]["plan_path"],
+        "/job/skippy-evidence/input/studio-local/evidence-plan.json"
+    );
+    assert_eq!(
+        report["hf_jobs_submit"]["image"],
+        "ghcr.io/mesh-llm/skippy-evidence-job:cpu"
+    );
+    assert_eq!(report["hf_jobs_submit"]["flavor"], "cpu-xl");
+    assert_eq!(report["hf_jobs_submit"]["timeout"], "12h");
+
+    let workload = fs::read_to_string(&workload_path).expect("read workload script");
+    assert!(workload.contains("hf download \"${HF_INPUT_REPO}\""));
+    assert!(workload.contains("--include '**'"));
+    assert!(workload.contains("\"hf_jobs_workload\""));
+    assert!(workload.contains("cat > \"${PLAN_PATH}\" <<'SKIPPY_HF_JOB_FILE'"));
+    assert!(workload.contains("cat > \"${RUNBOOK_PATH}\" <<'SKIPPY_HF_JOB_FILE'"));
+    assert!(workload.contains(
+        "skippy-model-package quant-pack evidence-status /job/skippy-evidence/input/studio-local/evidence-plan.json"
+    ));
+    assert!(workload.contains("HF_UPLOAD_REPO=${HF_UPLOAD_REPO:-org/qwen-coder-evidence}"));
+    assert!(workload.contains("hf upload \"${HF_UPLOAD_REPO}\" \"${EXECUTION_RUN_DIR}/evidence\""));
+    assert!(!workload.contains(&report_path.display().to_string()));
+
+    let submit = read_json::<serde_json::Value>(&submit_path).expect("read submit JSON");
+    assert_eq!(submit["operation"], "run");
+    assert_eq!(
+        submit["args"]["image"],
+        "ghcr.io/mesh-llm/skippy-evidence-job:cpu"
+    );
+    assert_eq!(submit["args"]["flavor"], "cpu-xl");
+    assert_eq!(submit["args"]["timeout"], "12h");
+    assert_eq!(submit["args"]["detach"], true);
+    assert_eq!(submit["args"]["secrets"]["HF_TOKEN"], "$HF_TOKEN");
+    assert_eq!(
+        submit["args"]["env"]["HF_UPLOAD_REPO"],
+        "org/qwen-coder-evidence"
+    );
+    let command = submit["args"]["command"].as_array().expect("command array");
+    assert_eq!(command[0], "/bin/bash");
+    assert_eq!(command[1], "-lc");
+    assert!(
+        command[2]
+            .as_str()
+            .expect("workload")
+            .contains("RUNBOOK_CWD=/workspace/mesh-llm")
+    );
+
+    fs::remove_dir_all(dir).expect("remove fixture");
+}
+
+#[test]
 fn evidence_plan_cli_splits_override_candidate_stage_hints() {
     let dir = unique_test_dir("evidence-plan-stage-hints-cli");
     write_candidate_fixture_with_plan(
@@ -251,6 +373,7 @@ fn evidence_plan_cli_splits_override_candidate_stage_hints() {
         out: Some(report_path.clone()),
         script_out: None,
         runbook_plan_path: None,
+        hf_jobs: HfJobsEvidenceArgs::default(),
     })
     .expect("write evidence plan");
 
@@ -324,6 +447,7 @@ fn invalid_candidate_stage_hints_fail_evidence_plan() {
         out: Some(dir.join("evidence-plan.json")),
         script_out: None,
         runbook_plan_path: None,
+        hf_jobs: HfJobsEvidenceArgs::default(),
     })
     .expect_err("invalid stage hints should fail");
 
@@ -390,6 +514,7 @@ fn evidence_plan_can_include_local_split_chain_evidence() {
         out: Some(report_path.clone()),
         script_out: None,
         runbook_plan_path: None,
+        hf_jobs: HfJobsEvidenceArgs::default(),
     })
     .expect("write evidence plan");
 
@@ -470,6 +595,7 @@ fn local_split_chain_evidence_requires_at_least_three_stages() {
         out: Some(dir.join("evidence-plan.json")),
         script_out: None,
         runbook_plan_path: None,
+        hf_jobs: HfJobsEvidenceArgs::default(),
     })
     .expect_err("2-stage local split chain should be rejected");
 
@@ -945,6 +1071,8 @@ fn evidence_script_contains_ordered_plan_commands() {
         activation_wire_dtype: "q8".to_string(),
         focused_runtime: FocusedRuntimeEvidenceArgs::default(),
         warnings: vec!["runtime hosts must be SSH reachable".to_string()],
+        hf_jobs_workload: None,
+        hf_jobs_submit: None,
         commands: evidence_commands(EvidenceCommandInputs {
             skippy_bench_bin: Path::new("/tmp/bin/skippy-bench"),
             skippy_model_package_bin: Path::new("/tmp/bin/skippy-model-package"),
@@ -1163,6 +1291,8 @@ fn test_evidence_report(candidate: &str) -> EvidencePlanReport {
         activation_wire_dtype: "q8".to_string(),
         focused_runtime: FocusedRuntimeEvidenceArgs::default(),
         warnings: Vec::new(),
+        hf_jobs_workload: None,
+        hf_jobs_submit: None,
         commands: evidence_commands(EvidenceCommandInputs {
             run: Path::new("/tmp/run"),
             model_id: "org/repo:middle-compressed",

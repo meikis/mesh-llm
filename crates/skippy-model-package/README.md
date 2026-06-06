@@ -382,6 +382,16 @@ When writing a local runbook for a different execution filesystem, pass
 environment. The runbook then uses that path for `evidence-status` warning and
 semantic skip checks, instead of the local `--out` path used to write the JSON
 artifact.
+For remote evidence execution, pass `--hf-jobs-workload-out` with
+`--hf-jobs-input-repo` to write an executable Hugging Face Jobs workload script.
+The workload downloads the candidate bundle into `--execution-run-dir`, writes
+the generated evidence plan and runbook into that same execution filesystem,
+runs the runbook, and uploads `evidence/`, `evidence-plan.json`, and
+`run-evidence.sh` when `HF_UPLOAD_REPO` or `--hf-jobs-upload-repo` is set. Pass
+`--hf-jobs-submit-json-out` with `--hf-jobs-image` to also write a reviewable
+HF Jobs `run` payload containing the image, flavor, timeout, detached command,
+`HF_TOKEN` secret, and optional upload repo environment. The CLI only writes
+handoff artifacts; it does not submit the job.
 The generated schema-smoke command writes `focused-runtime-schema-smoke.json`
 from the same split, layer-end, context, KV cache, activation-wire, corpus, and
 lab-option arguments as the measured run, but without launching remote stages.

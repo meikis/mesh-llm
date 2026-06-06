@@ -53,6 +53,12 @@ struct ToolSchemaFailBackend {
     calls_without_tools: AtomicUsize,
 }
 
+struct InspectingAnswerBackend {
+    calls_with_tools: AtomicUsize,
+    calls_without_tools: AtomicUsize,
+    native_tool_messages: AtomicUsize,
+}
+
 impl ToolSchemaFailBackend {
     fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -67,6 +73,28 @@ impl ToolSchemaFailBackend {
 
     fn calls_without_tools(&self) -> usize {
         self.calls_without_tools.load(Ordering::SeqCst)
+    }
+}
+
+impl InspectingAnswerBackend {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            calls_with_tools: AtomicUsize::new(0),
+            calls_without_tools: AtomicUsize::new(0),
+            native_tool_messages: AtomicUsize::new(0),
+        })
+    }
+
+    fn calls_with_tools(&self) -> usize {
+        self.calls_with_tools.load(Ordering::SeqCst)
+    }
+
+    fn calls_without_tools(&self) -> usize {
+        self.calls_without_tools.load(Ordering::SeqCst)
+    }
+
+    fn native_tool_messages(&self) -> usize {
+        self.native_tool_messages.load(Ordering::SeqCst)
     }
 }
 
@@ -97,6 +125,38 @@ impl moa::ModelBackend for ToolSchemaFailBackend {
         Ok(json!({
             "choices": [{
                 "message": {"content": "The tool output lists file_a.log and file_b.log."}
+            }],
+        }))
+    }
+}
+
+#[async_trait]
+impl moa::ModelBackend for InspectingAnswerBackend {
+    async fn chat_completion(
+        &self,
+        _model: &str,
+        messages: &[Value],
+        tools: Option<&Value>,
+        _max_tokens: u32,
+        _timeout: Duration,
+        _sampling: moa::SamplingParams,
+    ) -> Result<Value, String> {
+        if tools.is_some() {
+            self.calls_with_tools.fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.calls_without_tools.fetch_add(1, Ordering::SeqCst);
+        }
+
+        if messages.iter().any(|message| {
+            message.get("role").and_then(Value::as_str) == Some("tool")
+                || message.get("tool_calls").is_some()
+        }) {
+            self.native_tool_messages.fetch_add(1, Ordering::SeqCst);
+        }
+
+        Ok(json!({
+            "choices": [{
+                "message": {"content": "Recent PR evidence is thin; review the latest open pull requests page and prioritize obvious bug-fix PRs."}
             }],
         }))
     }
@@ -215,6 +275,98 @@ fn web_tools() -> Value {
             }
         }
     ])
+}
+
+#[tokio::test]
+async fn exhausted_web_research_budget_forces_answer_only_context() {
+    let backend = InspectingAnswerBackend::new();
+    let backends: Vec<Arc<dyn moa::ModelBackend>> = vec![backend.clone()];
+    let config = moa::GatewayConfig {
+        backends,
+        models: vec![moa::ModelEntry {
+            name: "strong-32b".into(),
+            backend_index: 0,
+        }],
+        worker_timeout: Duration::from_secs(2),
+        hedge_delay: Duration::from_millis(50),
+        reducer_timeout: Duration::from_secs(2),
+        first_answer_grace: Duration::ZERO,
+        enable_thinking: None,
+    };
+
+    let body = json!({
+        "model": "mesh",
+        "tools": web_tools(),
+        "messages": [
+            {"role": "user", "content": "Find recent important GitHub bug-fix PRs for Mesh-LLM/mesh-llm."},
+            {"role": "assistant", "content": null, "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "web_search", "arguments": "{\"query\":\"mesh-llm recent bug fixes\"}"}
+            }]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "{\"results\":[{\"url\":\"https://github.com/Mesh-LLM/mesh-llm/pulls\"}]}"},
+            {"role": "assistant", "content": null, "tool_calls": [{
+                "id": "call_2",
+                "type": "function",
+                "function": {"name": "web_fetch", "arguments": "{\"url\":\"https://github.com/Mesh-LLM/mesh-llm/pulls\"}"}
+            }]},
+            {"role": "tool", "tool_call_id": "call_2", "content": "{\"status\":200,\"title\":\"Pull requests\"}"},
+            {"role": "assistant", "content": null, "tool_calls": [{
+                "id": "call_3",
+                "type": "function",
+                "function": {"name": "web_search", "arguments": "{\"query\":\"site:github.com/Mesh-LLM/mesh-llm/pulls bug fix\"}"}
+            }]},
+            {"role": "tool", "tool_call_id": "call_3", "content": "{\"results\":[]}"},
+            {"role": "assistant", "content": null, "tool_calls": [{
+                "id": "call_4",
+                "type": "function",
+                "function": {"name": "web_fetch", "arguments": "{\"url\":\"https://api.github.com/repos/Mesh-LLM/mesh-llm/pulls\"}"}
+            }]},
+            {"role": "tool", "tool_call_id": "call_4", "content": "{\"status\":200,\"items\":[]}"},
+            {"role": "assistant", "content": null, "tool_calls": [{
+                "id": "call_5",
+                "type": "function",
+                "function": {"name": "web_search", "arguments": "{\"query\":\"Mesh-LLM mesh-llm pull request important bug\"}"}
+            }]},
+            {"role": "tool", "tool_call_id": "call_5", "content": "{\"status\":\"error\",\"error\":\"bot challenge\"}"},
+            {"role": "assistant", "content": null, "tool_calls": [{
+                "id": "call_6",
+                "type": "function",
+                "function": {"name": "web_fetch", "arguments": "{\"url\":\"https://github.com/Mesh-LLM/mesh-llm/pulls?q=is%3Apr+sort%3Aupdated-desc\"}"}
+            }]},
+            {"role": "tool", "tool_call_id": "call_6", "content": "{\"status\":200,\"title\":\"Pull requests\"}"},
+        ],
+        "max_tokens": 128,
+    });
+
+    let result = moa::handle_turn(&config, &body).await;
+
+    assert_eq!(result.turn_kind, moa::TurnKind::ToolResult);
+    assert_eq!(
+        backend.calls_with_tools(),
+        0,
+        "web budget exhaustion must stop forwarding web tool schemas"
+    );
+    assert_eq!(backend.calls_without_tools(), 1);
+    assert_eq!(
+        backend.native_tool_messages(),
+        0,
+        "budgeted synthesis should use compact answer-only context, not native tool messages"
+    );
+    assert_eq!(
+        result
+            .response_body
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str),
+        Some("stop")
+    );
+    assert!(
+        result
+            .response_body
+            .pointer("/choices/0/message/tool_calls")
+            .is_none(),
+        "budget exhaustion must produce an answer, not another web tool call"
+    );
 }
 
 #[tokio::test]

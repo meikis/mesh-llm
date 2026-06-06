@@ -60,6 +60,8 @@ use worker::WorkerRole;
 pub use worker::{strip_thinking, truncate_chars};
 
 const SAME_TOOL_FORCE_ANSWER_THRESHOLD: usize = 3;
+const WEB_RESEARCH_FORCE_ANSWER_THRESHOLD: usize = 6;
+const WEB_RESEARCH_TOOLS: &[&str] = &["web_search", "web_fetch"];
 
 /// The virtual model name that triggers MoA routing.
 pub const VIRTUAL_MODEL_NAME: &str = "mesh";
@@ -816,21 +818,34 @@ async fn handle_tool_result(
     let candidates = reducer_candidates(config);
     let candidate_count = candidates.len();
     let repeated_tool = repeated_same_tool_results(session);
+    let web_budget_exhausted = web_research_tool_budget_exhausted(session);
     let mut selected_tool_names = selected_tool_names_for_turn(session, allowed_tools);
     if let Some((tool, _)) = repeated_tool.as_ref() {
         selected_tool_names.retain(|name| name != tool);
     }
-    let tools_enabled_for_reducer = has_tools && !selected_tool_names.is_empty();
-    let (mut messages, tools) = context::pack_for_tool_result_turn_selected(
-        session,
-        tools_enabled_for_reducer,
-        &selected_tool_names,
-    );
-    if let Some((tool, count)) = repeated_tool {
+    if web_budget_exhausted.is_some() {
+        selected_tool_names.retain(|name| !is_web_research_tool(name));
+    }
+    let tools_enabled_for_reducer =
+        has_tools && !selected_tool_names.is_empty() && web_budget_exhausted.is_none();
+    let (mut messages, tools) = if web_budget_exhausted.is_some() {
+        (context::pack_for_tool_result_answer_only(session), None)
+    } else {
+        context::pack_for_tool_result_turn_selected(
+            session,
+            tools_enabled_for_reducer,
+            &selected_tool_names,
+        )
+    };
+    if let Some((tool, count)) = repeated_tool.as_ref() {
         tracing::info!(
             "moa: suppressing repeated {tool} after {count} consecutive completed tool calls"
         );
-        append_tool_loop_answer_instruction(&mut messages, &tool, count);
+        append_tool_loop_answer_instruction(&mut messages, tool, *count);
+    }
+    if let Some(count) = web_budget_exhausted {
+        tracing::info!("moa: forcing answer after {count} completed web research tool calls");
+        append_web_research_budget_instruction(&mut messages, count);
     }
 
     // Hedged ladder: start candidate 0, hedge to candidate 1 after hedge_delay
@@ -1059,18 +1074,74 @@ fn short_exact_value(value: &str) -> bool {
 }
 
 fn repeated_same_tool_results(session: &Session) -> Option<(String, usize)> {
-    let calls = session.pending_tool_calls();
-    let last = calls.last()?;
-    last.result.as_ref()?;
-
-    let tool_name = last.function_name.as_str();
+    let calls = completed_tool_names_since_latest_user_before_tool_result(session);
+    let tool_name = calls.last()?;
     let count = calls
         .iter()
         .rev()
-        .take_while(|call| call.function_name == tool_name && call.result.is_some())
+        .take_while(|name| *name == tool_name)
         .count();
 
-    (count >= SAME_TOOL_FORCE_ANSWER_THRESHOLD).then(|| (tool_name.to_string(), count))
+    (count >= SAME_TOOL_FORCE_ANSWER_THRESHOLD).then(|| (tool_name.clone(), count))
+}
+
+fn web_research_tool_budget_exhausted(session: &Session) -> Option<usize> {
+    let count = completed_tool_names_since_latest_user_before_tool_result(session)
+        .iter()
+        .filter(|name| is_web_research_tool(name))
+        .count();
+
+    (count >= WEB_RESEARCH_FORCE_ANSWER_THRESHOLD).then_some(count)
+}
+
+fn completed_tool_names_since_latest_user_before_tool_result(session: &Session) -> Vec<String> {
+    let all = session.all_messages();
+    let Some(latest_tool_idx) = all.iter().rposition(|msg| message_role(msg) == "tool") else {
+        return Vec::new();
+    };
+    let start_idx = all[..=latest_tool_idx]
+        .iter()
+        .rposition(|msg| message_role(msg) == "user")
+        .unwrap_or(0);
+
+    let mut call_names = std::collections::HashMap::new();
+    let mut completed = Vec::new();
+    for msg in &all[start_idx..=latest_tool_idx] {
+        match message_role(msg) {
+            "assistant" => {
+                let Some(tool_calls) = msg.get("tool_calls").and_then(Value::as_array) else {
+                    continue;
+                };
+                for tool_call in tool_calls {
+                    let Some(id) = tool_call.get("id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(name) = tool_call.pointer("/function/name").and_then(Value::as_str)
+                    else {
+                        continue;
+                    };
+                    call_names.insert(id.to_string(), name.to_string());
+                }
+            }
+            "tool" => {
+                let Some(id) = msg.get("tool_call_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                if let Some(name) = call_names.get(id) {
+                    completed.push(name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    completed
+}
+
+fn is_web_research_tool(name: &str) -> bool {
+    WEB_RESEARCH_TOOLS
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
 }
 
 fn append_tool_loop_answer_instruction(messages: &mut [Value], tool: &str, count: usize) {
@@ -1079,6 +1150,16 @@ fn append_tool_loop_answer_instruction(messages: &mut [Value], tool: &str, count
          Do not call `{tool}` again. If a different declared tool can materially advance the \
          request, use that tool. Otherwise answer now from the gathered tool results; if the \
          evidence is incomplete, say what can be determined and what is missing."
+    );
+    append_system_instruction(messages, &instruction);
+}
+
+fn append_web_research_budget_instruction(messages: &mut [Value], count: usize) {
+    let instruction = format!(
+        "\n\nWeb research budget guard: {count} completed web_search/web_fetch calls are already \
+         in context. Do not call web_search or web_fetch again. Answer now from the gathered \
+         evidence. If the evidence is incomplete or ambiguous, give the best effort answer and \
+         state what is missing."
     );
     append_system_instruction(messages, &instruction);
 }

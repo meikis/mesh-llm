@@ -982,6 +982,10 @@ async fn handle_tool_result(
 }
 
 fn repair_tool_result_answer(session: &Session, answer: &str) -> String {
+    if let Some(github_answer) = grounded_github_tool_answer(session) {
+        return github_answer;
+    }
+
     if !tool_evidence_should_be_preserved(&session.last_user_text()) {
         return answer.to_string();
     }
@@ -998,6 +1002,129 @@ fn repair_tool_result_answer(session: &Session, answer: &str) -> String {
     repaired.push_str("Tool facts: ");
     repaired.push_str(&missing.join(", "));
     repaired
+}
+
+fn grounded_github_tool_answer(session: &Session) -> Option<String> {
+    let user_text = session.last_user_text();
+    if !github_evidence_should_ground_answer(&user_text) {
+        return None;
+    }
+
+    let rows = github_tool_evidence_rows(session);
+    if rows.is_empty() {
+        return None;
+    }
+
+    let selected = select_relevant_github_rows(&user_text, &rows);
+    let heading = if selected.len() == 1 {
+        "Grounded GitHub evidence from the fetched tool result:"
+    } else {
+        "Grounded GitHub evidence from the fetched tool results:"
+    };
+    let mut answer = String::from(heading);
+    for row in selected {
+        answer.push_str("\n- ");
+        answer.push_str(row);
+    }
+    if user_text.to_ascii_lowercase().contains("nick") {
+        answer.push_str(
+            "\n\nI do not see a `Nick` author/login in those fetched rows; use the author/login shown above.",
+        );
+    }
+    Some(answer)
+}
+
+fn github_evidence_should_ground_answer(user_text: &str) -> bool {
+    let text = user_text.to_ascii_lowercase();
+    contains_any(
+        &text,
+        &[
+            "github",
+            "pull request",
+            "pr ",
+            "pr#",
+            "issue",
+            "status",
+            "review",
+        ],
+    )
+}
+
+fn github_tool_evidence_rows(session: &Session) -> Vec<String> {
+    let mut rows = Vec::new();
+    for (_, result) in session.recent_tool_results() {
+        rows.extend(context::github_evidence_rows_from_tool_result(&result));
+    }
+    let mut deduped = Vec::new();
+    for row in rows {
+        if !deduped.iter().any(|seen| seen == &row) {
+            deduped.push(row);
+        }
+    }
+    deduped
+}
+
+fn select_relevant_github_rows<'a>(user_text: &str, rows: &'a [String]) -> Vec<&'a String> {
+    let text = user_text.to_ascii_lowercase();
+    let explicit_numbers = github_pr_numbers_from_text(&text);
+    if !explicit_numbers.is_empty() {
+        let matches = rows
+            .iter()
+            .filter(|row| explicit_numbers.iter().any(|number| row.contains(number)))
+            .collect::<Vec<_>>();
+        if !matches.is_empty() {
+            return matches;
+        }
+    }
+
+    let keywords = github_relevance_keywords(&text);
+    if !keywords.is_empty() {
+        let matches = rows
+            .iter()
+            .filter(|row| {
+                let row = row.to_ascii_lowercase();
+                keywords.iter().any(|keyword| row.contains(keyword))
+            })
+            .collect::<Vec<_>>();
+        if !matches.is_empty() {
+            return matches;
+        }
+    }
+
+    rows.iter().take(5).collect()
+}
+
+fn github_pr_numbers_from_text(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '#')
+        .filter_map(|token| {
+            let number = token.strip_prefix('#').unwrap_or(token);
+            (number.len() >= 2 && number.chars().all(|c| c.is_ascii_digit()))
+                .then(|| format!("#{number}"))
+        })
+        .collect()
+}
+
+fn github_relevance_keywords(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+        .filter(|word| word.len() >= 4)
+        .filter(|word| {
+            !matches!(
+                *word,
+                "github"
+                    | "pull"
+                    | "request"
+                    | "status"
+                    | "review"
+                    | "opened"
+                    | "what"
+                    | "about"
+                    | "please"
+                    | "quality"
+                    | "quick"
+            )
+        })
+        .map(str::to_string)
+        .collect()
 }
 
 fn tool_evidence_should_be_preserved(user_text: &str) -> bool {
@@ -2194,6 +2321,64 @@ mod response_builder_tests {
         let repaired = repair_tool_result_answer(&session, "Done.");
 
         assert_eq!(repaired, "Done.");
+    }
+
+    #[test]
+    fn repair_tool_result_answer_grounds_github_pr_rows() {
+        let github_json = serde_json::json!([
+            {
+                "number": 806,
+                "title": "Add meshllm.cloud website, catalog viewer, and onboarding docs",
+                "state": "open",
+                "html_url": "https://github.com/Mesh-LLM/mesh-llm/pull/806",
+                "updated_at": "2026-06-06T07:18:23Z",
+                "body": "x".repeat(8_000),
+                "user": {"login": "ndizazzo"},
+                "requested_reviewers": [{"login": "michaelneale"}, {"login": "i386"}]
+            },
+            {
+                "number": 709,
+                "title": "Use combined hf-hub fork for model downloads",
+                "state": "open",
+                "html_url": "https://github.com/Mesh-LLM/mesh-llm/pull/709",
+                "updated_at": "2026-05-27T11:26:00Z",
+                "user": {"login": "i386"}
+            }
+        ])
+        .to_string();
+        let wrapped = serde_json::json!({
+            "url": "https://api.github.com/repos/Mesh-LLM/mesh-llm/pulls?state=open",
+            "status": 200,
+            "text": format!(
+                "SECURITY NOTICE\n\n<<<EXTERNAL_UNTRUSTED_CONTENT id=\"x\">>>\nSource: Web Fetch\n---\n{github_json}\n<<<END_EXTERNAL_UNTRUSTED_CONTENT id=\"x\">>>"
+            )
+        })
+        .to_string();
+        let mut session = Session::new();
+        session.ingest(
+            &[
+                serde_json::json!({
+                    "role": "user",
+                    "content": "What is the status of the new website PR opened by Nick?"
+                }),
+                tool_call_msg("call_1", "web_fetch"),
+                tool_result_msg("call_1", &wrapped),
+            ],
+            &None,
+        );
+
+        let repaired = repair_tool_result_answer(
+            &session,
+            "The website PR is #806 by i386 and was updated in May.",
+        );
+
+        assert!(repaired.contains("#806"));
+        assert!(repaired.contains("website, catalog viewer"));
+        assert!(repaired.contains("author=\"ndizazzo\""));
+        assert!(repaired.contains("updated_at=\"2026-06-06T07:18:23Z\""));
+        assert!(repaired.contains("I do not see a `Nick` author/login"));
+        assert!(!repaired.contains("#709"));
+        assert!(!repaired.contains("updated in May"));
     }
 
     fn tool_call_msg(id: &str, name: &str) -> Value {

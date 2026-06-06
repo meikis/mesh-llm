@@ -677,6 +677,31 @@ fn compact_json_tool_result(original_len: usize, value: &Value) -> String {
     lines.join("\n")
 }
 
+pub(crate) fn github_evidence_rows_from_tool_result(result: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<Value>(result) else {
+        return Vec::new();
+    };
+    let mut rows = github_item_rows(&value);
+
+    if let Some(text) = value.get("text").and_then(Value::as_str)
+        && let Some(embedded) = parse_embedded_json_text(text)
+    {
+        rows.extend(github_item_rows(&embedded));
+    }
+
+    dedupe_preserving_order(rows)
+}
+
+fn dedupe_preserving_order(rows: Vec<String>) -> Vec<String> {
+    let mut deduped = Vec::new();
+    for row in rows {
+        if !deduped.iter().any(|seen| seen == &row) {
+            deduped.push(row);
+        }
+    }
+    deduped
+}
+
 fn append_embedded_json_summaries(value: &Value, lines: &mut Vec<String>) {
     let Some(text) = value.get("text").and_then(Value::as_str) else {
         return;

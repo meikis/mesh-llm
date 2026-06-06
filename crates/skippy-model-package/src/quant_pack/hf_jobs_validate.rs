@@ -317,6 +317,11 @@ fn add_evidence_run_checks(command_text: &str, checks: &mut Vec<HfJobsValidateCh
             "\"${RUNBOOK_PATH}\"",
             "command must execute the generated evidence runbook",
         ),
+        check_present(
+            "command_uses_concrete_hosts",
+            !contains_placeholder_hosts(command_text),
+            "evidence jobs must replace placeholder host-N runtime hosts before submission",
+        ),
         check_required_text(
             "command_creates_upload_repo",
             command_text,
@@ -330,6 +335,16 @@ fn add_evidence_run_checks(command_text: &str, checks: &mut Vec<HfJobsValidateCh
             "command must upload generated evidence outputs",
         ),
     ]);
+}
+
+fn contains_placeholder_hosts(command_text: &str) -> bool {
+    command_text
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-'))
+        .any(|token| {
+            token.strip_prefix("host-").is_some_and(|suffix| {
+                !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
+            })
+        })
 }
 
 fn add_optional_checks(

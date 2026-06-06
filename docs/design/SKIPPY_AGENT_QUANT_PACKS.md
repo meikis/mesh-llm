@@ -918,6 +918,12 @@ quantized GGUF and `package/layers/layer-000.gguf`. The evidence repo
 `meshllm/qwen25-coder-7b-proxy-mixed-layer-evidence` was also created as a
 private model repo and remains empty apart from `.gitattributes`, ready for the
 HF job to upload measured evidence.
+After tightening evidence-run validation, the generated proxy submit payload is
+intentionally `invalid` for submission while it still contains placeholder
+runtime hosts. The only failing pre-submit check is
+`command_uses_concrete_hosts`, which must be resolved by replacing
+`host-0,host-1,host-2` with real reachable lab/HF stage hosts before spending a
+focused-runtime job.
 
 The token-length audit is now configured for the evidence lane's real context
 shape rather than the early proxy profiling shape: `ctx_size=8192`,

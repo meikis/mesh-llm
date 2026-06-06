@@ -519,6 +519,71 @@ fn quant_pack_hf_jobs_validate_cli_accepts_evidence_run_payload() {
 }
 
 #[test]
+fn quant_pack_hf_jobs_validate_cli_rejects_placeholder_evidence_hosts() {
+    let dir = temp_dir("quant-pack-hf-jobs-validate-placeholder-hosts");
+    let run_dir = dir.join("candidate");
+    write_evidence_candidate_fixture(&run_dir, "middle-compressed", "org/repo:middle-compressed");
+    let execution_run_dir = PathBuf::from("/tmp/skippy-evidence/input/middle-compressed");
+    let submit_path = dir.join("evidence-hf-job-submit.json");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_skippy-model-package"))
+        .arg("quant-pack")
+        .arg("evidence-plan")
+        .arg(&run_dir)
+        .arg("--hosts")
+        .arg("host-0,host-1")
+        .arg("--splits")
+        .arg("20")
+        .arg("--runbook-cwd")
+        .arg("/workspace/mesh-llm")
+        .arg("--execution-run-dir")
+        .arg(&execution_run_dir)
+        .arg("--runbook-plan-path")
+        .arg(execution_run_dir.join("evidence-plan.json"))
+        .arg("--hf-jobs-submit-json-out")
+        .arg(&submit_path)
+        .arg("--hf-jobs-image")
+        .arg("ghcr.io/example/skippy-quant-pack:cpu")
+        .arg("--hf-jobs-input-repo")
+        .arg("example/qwen-coder-candidate")
+        .output()
+        .expect("run skippy-model-package quant-pack evidence-plan");
+
+    assert!(
+        output.status.success(),
+        "quant-pack evidence-plan failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let validate = Command::new(env!("CARGO_BIN_EXE_skippy-model-package"))
+        .arg("quant-pack")
+        .arg("hf-jobs-validate")
+        .arg(&submit_path)
+        .arg("--workload-kind")
+        .arg("evidence-run")
+        .output()
+        .expect("run skippy-model-package quant-pack hf-jobs-validate");
+
+    assert!(
+        !validate.status.success(),
+        "placeholder hosts unexpectedly passed evidence HF Jobs validation"
+    );
+    let report: Value =
+        serde_json::from_slice(&validate.stdout).expect("parse invalid validate report");
+    assert_eq!(report["status"], "invalid");
+    assert!(
+        report["checks"]
+            .as_array()
+            .expect("checks array")
+            .iter()
+            .any(|check| check["id"] == "command_uses_concrete_hosts"
+                && check["status"] == "invalid")
+    );
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn quant_pack_hf_jobs_validate_cli_rejects_bad_payload() {
     let dir = temp_dir("quant-pack-hf-jobs-validate-cli");
     let submit_path = dir.join("bad-submit.json");

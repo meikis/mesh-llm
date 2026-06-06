@@ -402,7 +402,8 @@ Validate this payload with
 `quant-pack hf-jobs-validate --workload-kind evidence-run` before submission.
 Evidence-run validation checks the HF Jobs envelope plus candidate download,
 embedded evidence-plan/runbook writes, evidence-status resume checks, runbook
-execution, upload repo creation, and evidence upload.
+execution, concrete non-placeholder runtime hosts, upload repo creation, and
+evidence upload.
 The generated schema-smoke command writes `focused-runtime-schema-smoke.json`
 from the same split, layer-end, context, KV cache, activation-wire, corpus, and
 lab-option arguments as the measured run, but without launching remote stages.

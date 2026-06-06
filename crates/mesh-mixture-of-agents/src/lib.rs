@@ -1158,8 +1158,9 @@ fn append_web_research_budget_instruction(messages: &mut [Value], count: usize) 
     let instruction = format!(
         "\n\nWeb research budget guard: {count} completed web_search/web_fetch calls are already \
          in context. Do not call web_search or web_fetch again. Answer now from the gathered \
-         evidence. If the evidence is incomplete or ambiguous, give the best effort answer and \
-         state what is missing."
+         evidence. For GitHub/web results, only use exact numbers, titles, authors, statuses, \
+         and URLs present in the evidence. If the evidence is incomplete, ambiguous, or conflicts \
+         with the user's premise, say that directly instead of inventing missing facts."
     );
     append_system_instruction(messages, &instruction);
 }

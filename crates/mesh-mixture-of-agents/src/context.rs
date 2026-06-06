@@ -23,6 +23,8 @@ const TOOL_RESULT_RAW_MAX_CHARS: usize = 2_400;
 const TOOL_RESULT_JSON_MAX_SCALARS: usize = 48;
 const TOOL_RESULT_JSON_MAX_ARRAY_ITEMS: usize = 12;
 const TOOL_RESULT_SCALAR_MAX_CHARS: usize = 180;
+const TOOL_RESULT_GITHUB_MAX_ROWS: usize = 8;
+const TOOL_RESULT_GITHUB_MAX_REVIEWERS: usize = 4;
 const SYSTEM_CONTEXT_MAX_CHARS: usize = 6_000;
 const FAST_USER_CONTEXT_MAX_CHARS: usize = 3_000;
 const SPECIALIST_MESSAGE_CONTEXT_MAX_CHARS: usize = 2_000;
@@ -504,7 +506,9 @@ pub fn pack_for_tool_result_answer_only(session: &Session) -> Vec<Value> {
     let mut system = augmented_system_prompt_for_mode(session, false);
     system.push_str(
         "\n\nTool result fallback: answer from the completed tool results below. \
-         Do not request another tool call.",
+         Do not request another tool call. For GitHub/web results, use exact PR numbers, \
+         titles, authors, statuses, and URLs from the evidence. If the evidence is incomplete \
+         or contradicts the user's premise, say that directly instead of inventing missing facts.",
     );
 
     let mut user = String::new();
@@ -544,7 +548,7 @@ fn tool_evidence_message(session: &Session) -> Option<Value> {
     }
 
     let mut lines = vec![
-        "Completed tool results. Preserve exact short values from these results when the user asks to include, recall, or return tool facts."
+        "Completed tool results. Preserve exact short values from these results when the user asks to include, recall, or return tool facts. For GitHub/web results, use exact numbers, titles, authors, statuses, and URLs from evidence; if the user's premise conflicts with evidence, say so instead of inventing a fit."
             .to_string(),
     ];
     for (idx, (name, result)) in results
@@ -658,6 +662,8 @@ fn compact_json_tool_result(original_len: usize, value: &Value) -> String {
         "Tool result compacted from {original_len} chars; original was JSON."
     )];
     append_json_shape(value, &mut lines);
+    append_structured_json_summaries(value, &mut lines);
+    append_embedded_json_summaries(value, &mut lines);
     let mut scalars = Vec::new();
     collect_json_scalars(value, "$", &mut scalars, 0);
 
@@ -669,6 +675,151 @@ fn compact_json_tool_result(original_len: usize, value: &Value) -> String {
     }
 
     lines.join("\n")
+}
+
+fn append_embedded_json_summaries(value: &Value, lines: &mut Vec<String>) {
+    let Some(text) = value.get("text").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(embedded) = parse_embedded_json_text(text) else {
+        return;
+    };
+
+    lines.push("Embedded JSON extracted from web_fetch text:".to_string());
+    append_json_shape(&embedded, lines);
+    append_structured_json_summaries(&embedded, lines);
+}
+
+fn parse_embedded_json_text(text: &str) -> Option<Value> {
+    let payload = text
+        .split_once("\n---\n")
+        .map(|(_, tail)| tail)
+        .unwrap_or(text);
+    let payload = payload
+        .split_once("\n<<<END_EXTERNAL_UNTRUSTED_CONTENT")
+        .map(|(head, _)| head)
+        .unwrap_or(payload)
+        .trim();
+
+    if !(payload.starts_with('[') || payload.starts_with('{')) {
+        return None;
+    }
+
+    serde_json::from_str(payload).ok()
+}
+
+fn append_structured_json_summaries(value: &Value, lines: &mut Vec<String>) {
+    let github_rows = github_item_rows(value);
+    if !github_rows.is_empty() {
+        lines.push("GitHub item summaries:".to_string());
+        lines.extend(github_rows.into_iter().map(|row| format!("- {row}")));
+    }
+
+    let file_rows = github_file_rows(value);
+    if !file_rows.is_empty() {
+        lines.push("GitHub file summaries:".to_string());
+        lines.extend(file_rows.into_iter().map(|row| format!("- {row}")));
+    }
+}
+
+fn github_item_rows(value: &Value) -> Vec<String> {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .take(TOOL_RESULT_GITHUB_MAX_ROWS)
+            .filter_map(github_item_row)
+            .collect(),
+        Value::Object(_) => github_item_row(value).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn github_item_row(value: &Value) -> Option<String> {
+    let map = value.as_object()?;
+    let number = map.get("number").and_then(Value::as_i64)?;
+    let title = map.get("title").and_then(Value::as_str)?;
+
+    let mut fields = vec![
+        format!("#{number}"),
+        format!("title=\"{}\"", crate::worker::truncate_chars(title, 120)),
+    ];
+    push_named_scalar(map, "state", &mut fields);
+    push_nested_named_scalar(map, "author", "user", "login", &mut fields);
+    push_named_scalar(map, "draft", &mut fields);
+    push_named_scalar(map, "updated_at", &mut fields);
+    push_named_scalar(map, "html_url", &mut fields);
+    push_reviewer_logins(map, &mut fields);
+
+    Some(fields.join(", "))
+}
+
+fn github_file_rows(value: &Value) -> Vec<String> {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .take(TOOL_RESULT_GITHUB_MAX_ROWS)
+            .filter_map(github_file_row)
+            .collect(),
+        Value::Object(_) => github_file_row(value).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn github_file_row(value: &Value) -> Option<String> {
+    let map = value.as_object()?;
+    let filename = map.get("filename").and_then(Value::as_str)?;
+    let mut fields = vec![format!(
+        "filename=\"{}\"",
+        crate::worker::truncate_chars(filename, 160)
+    )];
+    push_named_scalar(map, "status", &mut fields);
+    push_named_scalar(map, "additions", &mut fields);
+    push_named_scalar(map, "deletions", &mut fields);
+    push_named_scalar(map, "changes", &mut fields);
+    Some(fields.join(", "))
+}
+
+fn push_named_scalar(
+    map: &serde_json::Map<String, Value>,
+    key: &'static str,
+    fields: &mut Vec<String>,
+) {
+    let Some(value) = map.get(key).and_then(scalar_to_string) else {
+        return;
+    };
+    fields.push(format!("{key}={value}"));
+}
+
+fn push_nested_named_scalar(
+    map: &serde_json::Map<String, Value>,
+    label: &'static str,
+    object_key: &'static str,
+    scalar_key: &'static str,
+    fields: &mut Vec<String>,
+) {
+    let Some(value) = map
+        .get(object_key)
+        .and_then(Value::as_object)
+        .and_then(|nested| nested.get(scalar_key))
+        .and_then(scalar_to_string)
+    else {
+        return;
+    };
+    fields.push(format!("{label}={value}"));
+}
+
+fn push_reviewer_logins(map: &serde_json::Map<String, Value>, fields: &mut Vec<String>) {
+    let Some(reviewers) = map.get("requested_reviewers").and_then(Value::as_array) else {
+        return;
+    };
+    let logins = reviewers
+        .iter()
+        .filter_map(|reviewer| reviewer.get("login").and_then(Value::as_str))
+        .take(TOOL_RESULT_GITHUB_MAX_REVIEWERS)
+        .collect::<Vec<_>>();
+    if !logins.is_empty() {
+        fields.push(format!("requested_reviewers={}", logins.join(",")));
+    }
 }
 
 fn append_json_shape(value: &Value, lines: &mut Vec<String>) {
@@ -1304,6 +1455,80 @@ mod tests {
         assert!(
             !content.contains(&"x".repeat(512)),
             "large noisy fields should not be forwarded raw"
+        );
+    }
+
+    #[test]
+    fn wrapped_github_api_json_preserves_pr_rows() {
+        let noisy_body = "x".repeat(8_000);
+        let github_json = json!([
+            {
+                "number": 806,
+                "title": "Add meshllm.cloud website, catalog viewer, and onboarding docs",
+                "state": "open",
+                "html_url": "https://github.com/Mesh-LLM/mesh-llm/pull/806",
+                "updated_at": "2026-06-06T07:18:23Z",
+                "body": noisy_body,
+                "user": {"login": "ndizazzo"},
+                "requested_reviewers": [
+                    {"login": "michaelneale"},
+                    {"login": "i386"}
+                ]
+            },
+            {
+                "number": 709,
+                "title": "Use combined hf-hub fork for model downloads",
+                "state": "open",
+                "html_url": "https://github.com/Mesh-LLM/mesh-llm/pull/709",
+                "updated_at": "2026-05-27T11:26:00Z",
+                "body": "y".repeat(8_000),
+                "user": {"login": "i386"}
+            }
+        ])
+        .to_string();
+        let result = json!({
+            "url": "https://api.github.com/repos/Mesh-LLM/mesh-llm/pulls?state=open",
+            "status": 200,
+            "text": format!(
+                "SECURITY NOTICE\n\n<<<EXTERNAL_UNTRUSTED_CONTENT id=\"x\">>>\nSource: Web Fetch\n---\n{github_json}\n<<<END_EXTERNAL_UNTRUSTED_CONTENT id=\"x\">>>"
+            )
+        })
+        .to_string();
+        assert!(result.len() > TOOL_RESULT_RAW_MAX_CHARS);
+
+        let s = session_with(
+            &[
+                user_msg("What is the new website PR status?"),
+                assistant_tool_msg(
+                    "call_fetch",
+                    "web_fetch",
+                    json!({"url": "https://api.github.com/repos/Mesh-LLM/mesh-llm/pulls"}),
+                ),
+                tool_result_msg("call_fetch", &result),
+            ],
+            Some(weather_tools()),
+        );
+
+        let (messages, _tools) = pack_for_tool_result_turn(&s, true);
+        let tool = messages
+            .iter()
+            .find(|msg| msg.get("role").and_then(Value::as_str) == Some("tool"))
+            .expect("tool message");
+        let content = tool
+            .get("content")
+            .and_then(Value::as_str)
+            .expect("compacted content");
+
+        assert!(content.contains("Embedded JSON extracted from web_fetch text"));
+        assert!(content.contains("GitHub item summaries"));
+        assert!(content.contains("#806"));
+        assert!(content.contains("author=\"ndizazzo\""));
+        assert!(content.contains("requested_reviewers=michaelneale,i386"));
+        assert!(content.contains("#709"));
+        assert!(content.contains("Use combined hf-hub fork for model downloads"));
+        assert!(
+            !content.contains(&"x".repeat(512)),
+            "large PR bodies should not be forwarded raw"
         );
     }
 

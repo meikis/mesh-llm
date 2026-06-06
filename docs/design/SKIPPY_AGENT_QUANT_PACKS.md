@@ -844,6 +844,58 @@ final Skippy-optimized Qwen pack because certification, tool-call/JSON checks,
 code-edit quality, long-context recall, repeated-turn KV behavior, and
 larger-model transfer/runtime evidence remain unproven.
 
+The graduated mixed candidate now has a concrete evidence runbook instead of
+only an oral next step. The runbook lives at
+`/Volumes/External/skippy-quant-packs/qwen25-coder-7b-proxy/sweep-mixed-layer-candidates/mixed-layer-22-20-21-down-gate-up-proxy/run-evidence.sh`,
+with its machine-readable plan at
+`/Volumes/External/skippy-quant-packs/qwen25-coder-7b-proxy/sweep-mixed-layer-candidates/mixed-layer-22-20-21-down-gate-up-proxy/evidence-plan.json`.
+The evidence plan SHA-256 is
+`fd120822deb54f8e00fdd18727484d751c011021b32ae2b8231bec87a4a75175`, and the
+runbook SHA-256 is
+`ef07d24a95f041d52ac7361d26e2f8f931ebb31d3452b31c879f3695a618002f`.
+As of the current evidence status audit, `7` of `14` generated commands are
+complete. The complete lane covers evidence directory creation, default corpus
+materialization, token-length audit, focused-runtime schema smoke, and a
+Studio-local split-chain proof. The next missing command is the real
+`skippy-bench focused-runtime --execute-remote` report; the runbook still uses
+placeholder hosts `host-0,host-1,host-2`, so this step must run on actual lab
+hosts or a Hugging Face job lane before certification can pass.
+
+The token-length audit is now configured for the evidence lane's real context
+shape rather than the early proxy profiling shape: `ctx_size=8192`,
+`generation_limit=512`, `enable_thinking=false`. It reports `565` corpus rows,
+`565` fitting rows, `0` context overflows, p95 prompt length `734` tokens, p99
+prompt length `1316` tokens, max prompt length `3187` tokens, and max requested
+length `3699` tokens. The summary report SHA-256 is
+`923b0babf9907cc769b5c6b95f4e5249ca880008116836de651e1c7781dc7336`.
+
+The local split-chain proof for the same mixed candidate uses splits `10,19`,
+`layer_end=28`, `ctx_size=8192`, `n_gpu_layers=0`, and f16 activation wire. It
+records `mode: local-split-chain-binary`, activation width `3584`, predicted
+token `48298`, token id `7985`, and two f16 boundary transfers: stage `0 -> 1`
+at layer boundary `10` with `7168` wire payload bytes, and stage `1 -> 2` at
+layer boundary `19` with `7168` wire payload bytes. The first boundary is
+observed from the driver; the second is estimated from the first boundary
+shape. The split-chain report SHA-256 is
+`eb10d9da353812cc7f5f2ce0cecb4e235907275768286aba504e684a5b359387`.
+
+The focused-runtime schema-smoke report verifies the intended stage topology
+shape before real remote launch: three stages, placeholder hosts
+`host-0,host-1,host-2`, splits `10,19`, stage ranges `0..10`, `10..19`, and
+`19..28`, package stage-load mode, `ctx_size=8192`, `n_gpu_layers=0`, f16 KV,
+and f16 activation wire. Its SHA-256 is
+`8e4a635b4640871dfc8c6a64a98c35ea37f7894710032fe4a3ff03a5cffefe0b`. This is
+only a command/topology shape proof; it must not count as measured runtime
+evidence.
+
+The missing half of the runbook is the expensive and quality-sensitive half:
+measured focused runtime on real hosts or HF infrastructure, coding-loop
+OpenAI-compatible chat corpus, long-context chat corpus, tool-call/JSON
+reliability, repeated-turn KV/tool-loop stability, certification, and
+post-evidence ranking. Until those exist and `quant-pack certify` binds their
+hashes to the candidate artifacts, this mixed candidate remains a graduated
+proxy candidate, not a trusted Skippy-optimized Qwen Coder release.
+
 Additional proxy artifact hashes:
 
 - `0dc4883de30d028bcc29947fd5ca44f3b3359049337b58db9bcd3258364301fd`

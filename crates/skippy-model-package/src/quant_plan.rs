@@ -1,3 +1,4 @@
+mod layer_sensitivity;
 mod source;
 
 use std::fs;
@@ -234,7 +235,7 @@ fn candidate_layouts(
         boundary_protection_groups(default_quant, source_quant, protected_width, layer_count);
     let has_moe = has_moe_tensor(tensors);
     let moe_groups = moe_sensitive_groups(tensors, source_quant);
-    vec![
+    let mut candidates = vec![
         baseline_candidate(default_quant, stage_hints),
         boundary_protected_candidate(
             default_quant,
@@ -316,15 +317,29 @@ fn candidate_layouts(
             "gate-up",
             "gate/up",
         ),
-        stage_balanced_candidate(
-            default_quant,
-            source_quant,
-            combine_groups(boundary_groups, moe_groups),
-            protected_width,
-            layer_count,
-            stage_hints,
+    ];
+    candidates.extend(
+        layer_sensitivity::stage_balanced_layer_ffn_sensitivity_candidates(
+            StageBalancedFfnPartCandidateInput {
+                default_quant,
+                source_quant,
+                groups: combine_groups(boundary_groups.clone(), moe_groups.clone()),
+                protected_width,
+                layer_count,
+                stage_hints,
+                has_moe,
+            },
         ),
-    ]
+    );
+    candidates.push(stage_balanced_candidate(
+        default_quant,
+        source_quant,
+        combine_groups(boundary_groups, moe_groups),
+        protected_width,
+        layer_count,
+        stage_hints,
+    ));
+    candidates
 }
 
 fn combine_groups(mut first: Vec<QuantGroup>, second: Vec<QuantGroup>) -> Vec<QuantGroup> {
@@ -478,6 +493,7 @@ fn stage_balanced_ffn_candidate(
     })
 }
 
+#[derive(Clone)]
 struct StageBalancedFfnPartCandidateInput<'a> {
     default_quant: &'a str,
     source_quant: &'a str,
@@ -1076,7 +1092,7 @@ mod tests {
         assert_eq!(report.source.layer_count, 8);
         assert_eq!(report.stage_count, 2);
         assert_eq!(report.protected_band_width, 1);
-        assert_eq!(report.candidates.len(), 10);
+        assert_eq!(report.candidates.len(), 16);
         assert_eq!(report.candidates[0].id, "baseline-source-quant");
         assert_eq!(report.candidates[1].id, "boundary-protected");
         assert_eq!(report.candidates[2].id, "middle-compressed");
@@ -1089,7 +1105,15 @@ mod tests {
         assert_eq!(report.candidates[6].id, "stage-balanced-ffn-gate-proxy");
         assert_eq!(report.candidates[7].id, "stage-balanced-ffn-up-proxy");
         assert_eq!(report.candidates[8].id, "stage-balanced-ffn-gate-up-proxy");
-        assert_eq!(report.candidates[9].id, "stage-balanced-proxy");
+        assert_eq!(
+            report.candidates[9].id,
+            "stage-balanced-layer-4-ffn-down-proxy"
+        );
+        assert_eq!(
+            report.candidates[10].id,
+            "stage-balanced-layer-4-ffn-gate-up-proxy"
+        );
+        assert_eq!(report.candidates[15].id, "stage-balanced-proxy");
         assert!(
             report
                 .candidates
@@ -1230,6 +1254,24 @@ mod tests {
         );
         assert!(!patterns.iter().any(|pattern| pattern.contains("ffn_down")));
         assert!(!patterns.iter().any(|pattern| pattern.contains("attn")));
+    }
+
+    #[test]
+    fn stage_balanced_layer_sensitivity_candidates_target_one_layer() {
+        let report = build_quant_plan(test_input_with_heavy_stage()).expect("build quant plan");
+
+        assert_ffn_candidate_patterns(
+            &report,
+            "stage-balanced-layer-2-ffn-down-proxy",
+            "layer-2-ffn-down-sensitivity",
+            &[r"blk\.(2)\.ffn_down\.weight"],
+        );
+        assert_ffn_candidate_patterns(
+            &report,
+            "stage-balanced-layer-2-ffn-gate-up-proxy",
+            "layer-2-ffn-gate-up-sensitivity",
+            &[r"blk\.(2)\.ffn_gate\.weight", r"blk\.(2)\.ffn_up\.weight"],
+        );
     }
 
     #[test]
@@ -1428,6 +1470,15 @@ mod tests {
     fn assert_ffn_part_candidate(report: &QuantPlanReport, part: &str, expected_pattern: &str) {
         let candidate_id = format!("stage-balanced-ffn-{part}-proxy");
         let group_name = format!("stage-1-ffn-{part}-balance-band");
+        assert_ffn_candidate_patterns(report, &candidate_id, &group_name, &[expected_pattern]);
+    }
+
+    fn assert_ffn_candidate_patterns(
+        report: &QuantPlanReport,
+        candidate_id: &str,
+        group_name: &str,
+        expected_patterns: &[&str],
+    ) {
         let candidate = report
             .candidates
             .iter()
@@ -1442,7 +1493,11 @@ mod tests {
         let QuantSelector::TensorNamePattern { patterns } = &group.selector else {
             panic!("stage ffn part group should use tensor patterns");
         };
-        assert_eq!(patterns, &[expected_pattern.to_string()]);
+        let expected = expected_patterns
+            .iter()
+            .map(|pattern| (*pattern).to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(patterns, &expected);
     }
 
     fn test_input(layer_count: u32, stage_count: usize) -> QuantPlanInput {

@@ -752,11 +752,40 @@ runs because they prove the builder, package, preflight, split-chain, rank, and
 audit hash flow. They are not final winners because quality is still unproven
 and baseline remains the fastest decode profile.
 
-The next local proxy step should focus on one-layer-at-a-time `ffn_down` and
-`ffn_gate_up` sensitivity inside the largest stage, then test whether the best
-per-layer mix preserves the `ffn_down` decode result while taking more byte
-pressure out of the package. Only candidates that improve or hold decode
-latency while reducing memory pressure should graduate to the expensive
+The next layer-sensitivity pass now emits one-layer-at-a-time `ffn_down` and
+`ffn_gate_up` probes inside the largest unprotected stage. For the 7B proxy
+shape, the refreshed plan added layer probes for layers `19..23` after the
+coarse FFN candidates and before the broad `stage-balanced-proxy` candidate.
+The plan lives at
+`/Volumes/External/skippy-quant-packs/qwen25-coder-7b-proxy/quant-plan-layer-sensitivity.json`
+with SHA-256
+`6093f5d8787f24a01a6b02980e18ee9ed91973ea311e398e14b07c11e247216c`.
+The focused 10-candidate sweep built each probed GGUF, packaged it, preflighted
+it, and attached local decode profiles with `existing_kv_tokens=128`,
+`warmup_samples=3`, `samples=20`, `ctx_size=1024`, `n_gpu_layers=0`, and f16 KV
+and activation wire settings. Every decode profile reported
+`measurement_status.status: measured` with 20 samples. The rank report lives at
+`/Volumes/External/skippy-quant-packs/qwen25-coder-7b-proxy/sweep-layer-sensitivity/quant-pack-rank.json`
+with SHA-256
+`d0b1e69ab5e9898b9b8de852cfaf9478da7313e2bbe5e0f0eab36bfeaca29b07`.
+
+| Rank | Candidate | Decode mean ms | Decode p95 ms | Package bytes | Slowest stage bytes | Stage imbalance |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | `stage-balanced-layer-22-ffn-gate-up-proxy` | `13.545296` | `13.595750` | `4,854,940,544` | `1,782,416,160` | `1.377977` |
+| 2 | `stage-balanced-layer-22-ffn-down-proxy` | `13.597048` | `15.153250` | `4,863,957,888` | `1,791,433,504` | `1.384949` |
+| 3 | `stage-balanced-layer-19-ffn-gate-up-proxy` | `13.632567` | `14.051625` | `4,854,940,544` | `1,782,416,160` | `1.377977` |
+| 4 | `stage-balanced-layer-20-ffn-down-proxy` | `13.937233` | `14.013042` | `4,846,453,632` | `1,779,022,592` | `1.375354` |
+| 5 | `stage-balanced-layer-21-ffn-down-proxy` | `13.936871` | `14.040083` | `4,863,957,888` | `1,791,433,504` | `1.384949` |
+| 9 | `stage-balanced-layer-23-ffn-down-proxy` | `22.331746` | `29.860750` | `4,846,453,632` | `1,779,022,592` | `1.375354` |
+| 10 | `stage-balanced-layer-23-ffn-gate-up-proxy` | `22.880223` | `27.191958` | `4,854,940,544` | `1,782,416,160` | `1.377977` |
+
+This narrows the next candidate construction step: combine the best low-latency
+single-layer probes, starting with layer 22 `ffn_gate`/`ffn_up` and a small
+number of `ffn_down` probes from layers 20, 21, or 22, while treating layer 23
+as latency-sensitive under this local proxy shape. The combined candidates
+should be compared against both the unchanged packaged baseline and the best
+coarse compressed lanes. Only candidates that hold decode latency while taking
+meaningful memory pressure out of the package should graduate to the expensive
 agent-quality and lab/HF evidence lanes.
 
 Additional proxy artifact hashes:

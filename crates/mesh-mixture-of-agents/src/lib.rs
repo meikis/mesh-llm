@@ -2356,8 +2356,12 @@ fn tool_result_has_answerable_evidence_for_prompt(result: &str, prompt: &str) ->
     {
         return false;
     }
-    !(prompt_asks_for_pull_requests(prompt)
-        && plain_text_tool_result_looks_like_github_repo_list(result))
+    if plain_text_tool_result_looks_like_github_repo_list(result)
+        && !prompt_asks_for_github_repositories(prompt)
+    {
+        return false;
+    }
+    true
 }
 
 fn prompt_asks_for_github_work_items(prompt: &str) -> bool {
@@ -2382,6 +2386,14 @@ fn prompt_asks_for_pull_requests(prompt: &str) -> bool {
         || prompt_has_word(&lower, "prs")
         || prompt_has_word(&lower, "pulls")
         || lower.contains("pull request")
+}
+
+fn prompt_asks_for_github_repositories(prompt: &str) -> bool {
+    let lower = prompt.to_ascii_lowercase();
+    prompt_has_word(&lower, "repo")
+        || prompt_has_word(&lower, "repos")
+        || lower.contains("repository")
+        || lower.contains("repositories")
 }
 
 fn prompt_has_word(prompt: &str, needle: &str) -> bool {
@@ -4813,6 +4825,17 @@ mod response_builder_tests {
             answer_from_latest_tool_result(&session_with_user_and_tool_result(prompt, result))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn github_repo_list_needs_repo_prompt() {
+        let result = "aaif/working-group-proposals\tPropose a new working group\tpublic\t2026-05-29T18:18:10Z";
+
+        assert!(tool_result_has_answerable_evidence(result));
+        assert!(!tool_result_has_answerable_evidence_for_prompt(
+            result,
+            "Any new interesting items?"
+        ));
     }
 
     #[test]

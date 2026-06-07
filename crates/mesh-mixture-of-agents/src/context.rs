@@ -1588,7 +1588,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_chat_strips_openclaw_tool_guidance_sections() {
+    fn ordinary_chat_strips_tool_guidance_sections() {
         let prompt = "\
 You are helpful.
 ## Tooling

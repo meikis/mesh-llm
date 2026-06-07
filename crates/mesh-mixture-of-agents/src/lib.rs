@@ -1597,10 +1597,13 @@ async fn handle_tool_result(
         tracing::info!("moa: forcing answer after {count} completed tool calls");
         append_tool_budget_instruction(&mut messages, count);
     }
-    if tools_enabled_for_reducer
-        && let Some((tool, _)) = latest_completed_tool_result(session)
+    let retry_tool = if tools_enabled_for_reducer {
+        latest_completed_tool_result(session)
             .filter(|(_, result)| !tool_result_has_answerable_evidence(result))
-    {
+    } else {
+        None
+    };
+    if let Some((tool, _)) = retry_tool {
         tracing::info!(
             "moa: latest {tool} tool result looks like error/usage output; asking reducer to retry"
         );
@@ -3410,10 +3413,10 @@ mod response_builder_tests {
         let args = infer_tool_arguments_from_prompt(
             "read",
             tools.as_ref(),
-            "Use the read tool to read /tmp/openclaw_moa_probe.txt.",
+            "Use the read tool to read /tmp/moa_probe.txt.",
         );
 
-        assert_eq!(args, json!({"path": "/tmp/openclaw_moa_probe.txt"}));
+        assert_eq!(args, json!({"path": "/tmp/moa_probe.txt"}));
     }
 
     #[test]
@@ -3433,7 +3436,7 @@ mod response_builder_tests {
         session.ingest(
             &[serde_json::json!({
                 "role": "user",
-                "content": "Use the read tool to read /tmp/openclaw_moa_probe.txt."
+                "content": "Use the read tool to read /tmp/moa_probe.txt."
             })],
             &tools,
         );
@@ -3445,7 +3448,7 @@ mod response_builder_tests {
         assert_eq!(required.name, "read");
         assert_eq!(
             required.fallback_arguments,
-            json!({"path": "/tmp/openclaw_moa_probe.txt"})
+            json!({"path": "/tmp/moa_probe.txt"})
         );
     }
 
@@ -3455,7 +3458,7 @@ mod response_builder_tests {
             "model": VIRTUAL_MODEL_NAME,
             "messages": [{
                 "role": "user",
-                "content": "Use the read tool to read /tmp/openclaw_moa_probe.txt."
+                "content": "Use the read tool to read /tmp/moa_probe.txt."
             }],
             "tools": [{
                 "type": "function",
@@ -3503,7 +3506,7 @@ mod response_builder_tests {
                 .response_body
                 .pointer("/choices/0/message/tool_calls/0/function/arguments")
                 .and_then(Value::as_str),
-            Some("{\"path\":\"/tmp/openclaw_moa_probe.txt\"}")
+            Some("{\"path\":\"/tmp/moa_probe.txt\"}")
         );
     }
 
@@ -3696,7 +3699,7 @@ mod response_builder_tests {
         session.ingest(
             &[serde_json::json!({
                 "role": "user",
-                "content": "Use a tool to read /tmp/openclaw-tool-baseline.txt",
+                "content": "Use a tool to read /tmp/moa-tool-baseline.txt",
             })],
             &Some(serde_json::json!([{"type": "function", "function": {"name": "read"}}])),
         );
@@ -3951,7 +3954,7 @@ mod response_builder_tests {
     }
 
     #[test]
-    fn command_intent_selects_exec_from_openclaw_like_tool_catalog() {
+    fn command_intent_selects_exec_from_agent_tool_catalog() {
         let mut session = Session::new();
         session.ingest(
             &[serde_json::json!({
@@ -4344,7 +4347,7 @@ mod response_builder_tests {
                 tool_call_msg("call_1", "exec"),
                 tool_result_msg(
                     "call_1",
-                    "808\tStabilize OpenClaw tool loops through MoA\tfix/openclaw-moa-telegram-timeouts\tOPEN\n806\tAdd meshllm.cloud website, catalog viewer, and onboarding docs\tfeature/new-public-website\tOPEN",
+                    "808\tStabilize tool loops through MoA\tfix/moa-tool-timeouts\tOPEN\n806\tAdd meshllm.cloud website, catalog viewer, and onboarding docs\tfeature/new-public-website\tOPEN",
                 ),
                 serde_json::json!({
                     "role": "user",
@@ -4356,7 +4359,7 @@ mod response_builder_tests {
 
         let repaired = repair_tool_result_answer(&session, "#808");
 
-        assert_eq!(repaired, "#808 - Stabilize OpenClaw tool loops through MoA");
+        assert_eq!(repaired, "#808 - Stabilize tool loops through MoA");
     }
 
     #[test]
@@ -4396,7 +4399,7 @@ mod response_builder_tests {
 
     #[test]
     fn normal_tabular_cli_output_is_answerable_tool_evidence() {
-        let result = "808\tStabilize OpenClaw tool loops through MoA\tOPEN";
+        let result = "808\tStabilize tool loops through MoA\tOPEN";
 
         assert!(tool_result_has_answerable_evidence(result));
     }
@@ -4654,7 +4657,7 @@ mod response_builder_tests {
             prompt_tool_session("Use gh to list recent open PRs for mesh-LLM/mesh-llm.");
 
         let response = chat_or_schema_command_tool_response(
-            "<minimax:tool_call>\n<invoke name=\"exec\">\n<parameter name=\"command\">gh pr list --repo mesh-LLM/mesh-llm --state open --limit 10</command>\n</invoke>\n</minimax:tool_call>",
+            "<tool_call>\n<invoke name=\"exec\">\n<parameter name=\"command\">gh pr list --repo mesh-LLM/mesh-llm --state open --limit 10</command>\n</invoke>\n</tool_call>",
             session.tools(),
             &allowed,
             &profiles,

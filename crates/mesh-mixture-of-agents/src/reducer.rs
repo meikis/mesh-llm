@@ -17,7 +17,7 @@ use std::time::Duration;
 
 /// Pick the reducer — prefers first model (typically local, zero RTT).
 /// Reducer candidates in priority order: big-tier models first (multi-
-/// digit B, or names with no size like MiniMax), then small-tier models
+/// digit B, or names with no size), then small-tier models
 /// as last-resort fallback. Callers should try each in order and stop
 /// on the first that succeeds, so a broken big-tier peer (e.g. a peer
 /// running a stale binary that 502s on tool calls) doesn't take down

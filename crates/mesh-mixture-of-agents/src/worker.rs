@@ -58,7 +58,7 @@ pub fn assign_roles(models: &[ModelEntry]) -> Vec<Assignment> {
     //                     count (1B-9B), e.g. Qwen3-8B, Qwen2.5-3B
     //   - "big tier"    = everything else: multi-digit B (31B, 70B) or
     //                     names that don't encode a size at all
-    //                     (MiniMax-M2.5, Coder-Next, fine-tune tags)
+    //                     (frontier aliases, Coder-Next, fine-tune tags)
     //
     // This mirrors the same heuristic `pick_model_classified` uses in the
     // main router so MoA's reducer/strong worker matches what `auto` would
@@ -286,11 +286,11 @@ mod tests {
     #[test]
     fn assign_roles_sorts_by_size_tier() {
         // 3B is last in list-order, but should NOT end up as Strong —
-        // MiniMax (no digit) and Qwen3-32B (multi-digit) belong in the
-        // big tier; Qwen2.5-3B and Qwen3-8B belong in the small tier.
+        // A no-size alias and Qwen3-32B (multi-digit) belong in the big
+        // tier; Qwen2.5-3B and Qwen3-8B belong in the small tier.
         let models = vec![
             ModelEntry {
-                name: "MiniMax-M2.5".into(),
+                name: "frontier-reasoner".into(),
                 backend_index: 0,
             },
             ModelEntry {
@@ -315,7 +315,7 @@ mod tests {
             "fast should be small-tier, got {}",
             assignments[0].model_name
         );
-        // Strong = a big-tier model (MiniMax or 32B)
+        // Strong = a big-tier model (no-size alias or 32B)
         assert_eq!(assignments[3].role, WorkerRole::Strong);
         assert!(
             !is_single_digit_b_name(&assignments[3].model_name),
@@ -337,7 +337,7 @@ mod tests {
         assert!(!is_single_digit_b_name("llama-3-70b"));
 
         // No size in name → big tier
-        assert!(!is_single_digit_b_name("MiniMax-M2.5"));
+        assert!(!is_single_digit_b_name("frontier-reasoner"));
         assert!(!is_single_digit_b_name("Coder-Next"));
 
         // Active-params subset (A3B inside larger name) → big tier

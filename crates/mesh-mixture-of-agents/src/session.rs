@@ -44,7 +44,7 @@ pub struct PendingToolCall {
 
 /// Canonical session state for one request.
 pub struct Session {
-    /// Full message history as received from the caller.
+    /// Full message history, normalized to OpenAI chat/tool message shape.
     messages: Vec<Value>,
     /// Tool schemas from the caller.
     tools: Option<Value>,
@@ -72,20 +72,20 @@ impl Session {
     ///
     /// The caller sends the full conversation each time (OpenAI convention),
     /// so we replace our history with theirs — they're authoritative. We
-    /// scan the new history for `role: "assistant"` messages carrying
-    /// `tool_calls` and `role: "tool"` messages carrying `tool_call_id`,
-    /// pairing them into `pending_tools` so the reducer-side context packer
-    /// can surface tool outputs.
+    /// normalize known content-block tool request/result shapes into
+    /// canonical OpenAI `assistant.tool_calls` / `role: "tool"` messages,
+    /// then scan that history for paired tool calls/results so the
+    /// reducer-side context packer can surface tool outputs.
     pub fn ingest(&mut self, messages: &[Value], tools: &Option<Value>) {
         self.tools = tools.as_ref().map(normalize_tool_schemas);
-        self.messages = messages.to_vec();
+        self.messages = canonicalize_agent_tool_messages(messages);
 
         // Rebuild `pending_tools` from the canonical history. Previously
         // this was deltas-since-last-ingest, which only worked when the
         // gateway persisted Sessions across requests. With per-request
         // sessions, we scan the full caller-provided history every time.
         self.pending_tools.clear();
-        for msg in messages {
+        for msg in &self.messages {
             let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
             match role {
                 "assistant" => {
@@ -344,6 +344,207 @@ fn normalize_tool_schema(tool: &Value) -> Value {
     })
 }
 
+fn canonicalize_agent_tool_messages(messages: &[Value]) -> Vec<Value> {
+    messages
+        .iter()
+        .flat_map(canonicalize_agent_tool_message)
+        .collect()
+}
+
+fn canonicalize_agent_tool_message(msg: &Value) -> Vec<Value> {
+    if let Some(msg) = canonicalize_tool_request_blocks(msg) {
+        return vec![msg];
+    }
+
+    if let Some(messages) = canonicalize_tool_response_blocks(msg) {
+        return messages;
+    }
+
+    vec![msg.clone()]
+}
+
+fn canonicalize_tool_request_blocks(msg: &Value) -> Option<Value> {
+    if msg.get("role").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    if msg.get("tool_calls").is_some() {
+        return None;
+    }
+
+    let parts = msg.get("content").and_then(Value::as_array)?;
+    let mut tool_calls = Vec::new();
+    let mut text_parts = Vec::new();
+
+    for part in parts {
+        if is_content_block_type(part, &["toolrequest", "toolcall"]) {
+            if let Some(tool_call) = canonical_tool_call_from_block(part) {
+                tool_calls.push(tool_call);
+            }
+        } else if let Some(text) = text_from_content_block(part) {
+            text_parts.push(text.to_string());
+        }
+    }
+
+    if tool_calls.is_empty() {
+        return None;
+    }
+
+    let content = if text_parts.is_empty() {
+        Value::Null
+    } else {
+        Value::String(text_parts.join("\n"))
+    };
+
+    Some(serde_json::json!({
+        "role": "assistant",
+        "content": content,
+        "tool_calls": tool_calls,
+    }))
+}
+
+fn canonical_tool_call_from_block(part: &Value) -> Option<Value> {
+    let call = part
+        .pointer("/toolCall/value")
+        .or_else(|| part.get("toolCall"))
+        .or_else(|| part.get("tool_call"))
+        .or_else(|| part.get("value"))?;
+    let id = part
+        .get("id")
+        .and_then(Value::as_str)
+        .or_else(|| call.get("id").and_then(Value::as_str))
+        .filter(|id| !id.is_empty())?;
+    let name = call
+        .get("name")
+        .and_then(Value::as_str)
+        .or_else(|| call.pointer("/function/name").and_then(Value::as_str))
+        .filter(|name| !name.is_empty())?;
+    let arguments = call
+        .get("arguments")
+        .or_else(|| call.pointer("/function/arguments"))
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    Some(serde_json::json!({
+        "id": id,
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": openai_arguments_string(&arguments),
+        },
+    }))
+}
+
+fn canonicalize_tool_response_blocks(msg: &Value) -> Option<Vec<Value>> {
+    let parts = msg.get("content").and_then(Value::as_array)?;
+    if !parts
+        .iter()
+        .any(|part| is_content_block_type(part, &["toolresponse", "toolresult"]))
+    {
+        return None;
+    }
+
+    let role = msg.get("role").and_then(Value::as_str).unwrap_or("user");
+    let mut messages = Vec::new();
+    let mut pending_text = Vec::new();
+
+    for part in parts {
+        if is_content_block_type(part, &["toolresponse", "toolresult"]) {
+            if !pending_text.is_empty() {
+                messages.push(serde_json::json!({
+                    "role": role,
+                    "content": pending_text.join("\n"),
+                }));
+                pending_text.clear();
+            }
+            if let Some(tool_msg) = canonical_tool_result_from_block(part) {
+                messages.push(tool_msg);
+            }
+        } else if let Some(text) = text_from_content_block(part) {
+            pending_text.push(text.to_string());
+        }
+    }
+
+    if !pending_text.is_empty() {
+        messages.push(serde_json::json!({
+            "role": role,
+            "content": pending_text.join("\n"),
+        }));
+    }
+
+    Some(messages)
+}
+
+fn canonical_tool_result_from_block(part: &Value) -> Option<Value> {
+    let id = part
+        .get("id")
+        .and_then(Value::as_str)
+        .or_else(|| part.pointer("/toolResult/id").and_then(Value::as_str))
+        .filter(|id| !id.is_empty())?;
+    let content = tool_result_text(part);
+
+    Some(serde_json::json!({
+        "role": "tool",
+        "tool_call_id": id,
+        "content": content,
+    }))
+}
+
+fn tool_result_text(part: &Value) -> String {
+    let result = part
+        .get("toolResult")
+        .or_else(|| part.get("tool_result"))
+        .or_else(|| part.get("result"))
+        .unwrap_or(part);
+    let value = result.get("value").unwrap_or(result);
+
+    if let Some(text) = value.get("content").and_then(Value::as_str) {
+        return text.to_string();
+    }
+
+    if let Some(parts) = value.get("content").and_then(Value::as_array) {
+        let text: Vec<&str> = parts.iter().filter_map(text_from_content_block).collect();
+        if !text.is_empty() {
+            return text.join("\n");
+        }
+    }
+
+    if let Some(text) = value.get("text").and_then(Value::as_str) {
+        return text.to_string();
+    }
+
+    serde_json::to_string(value).unwrap_or_default()
+}
+
+fn is_content_block_type(part: &Value, expected: &[&str]) -> bool {
+    let Some(kind) = part.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    let normalized = normalize_content_block_type(kind);
+    expected.iter().any(|candidate| normalized == *candidate)
+}
+
+fn normalize_content_block_type(kind: &str) -> String {
+    kind.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn text_from_content_block(part: &Value) -> Option<&str> {
+    match part.get("type").and_then(Value::as_str) {
+        Some("text") => part.get("text").and_then(Value::as_str),
+        _ => None,
+    }
+}
+
+fn openai_arguments_string(arguments: &Value) -> String {
+    match arguments {
+        Value::String(s) => s.clone(),
+        Value::Null => "{}".to_string(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string()),
+    }
+}
+
 /// Extract text content from a message (handles both string and multipart).
 fn extract_text_content(msg: &Value) -> Option<String> {
     if let Some(s) = msg.get("content").and_then(|c| c.as_str()) {
@@ -449,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn flat_openclaw_tools_are_normalized_to_openai_function_tools() {
+    fn flat_tool_schemas_are_normalized_to_openai_function_tools() {
         let mut s = Session::new();
         s.ingest(
             &[json!({"role": "user", "content": "Use read on /tmp/a.txt"})],
@@ -520,5 +721,130 @@ mod tests {
         assert_eq!(pending[0].function_name, "good");
         // The orphaned tool result did not attach — result still None.
         assert!(pending[0].result.is_none());
+    }
+
+    #[test]
+    fn content_block_tool_request_and_response_are_canonicalized() {
+        let mut s = Session::new();
+        s.ingest(
+            &[
+                json!({"role": "user", "content": "List recent PRs"}),
+                json!({
+                    "role": "assistant",
+                    "content": [{
+                        "type": "toolRequest",
+                        "id": "call_shell",
+                        "toolCall": {
+                            "status": "success",
+                            "value": {
+                                "name": "shell",
+                                "arguments": {
+                                    "command": "gh pr list --sort created"
+                                }
+                            }
+                        }
+                    }]
+                }),
+                json!({
+                    "role": "user",
+                    "content": [{
+                        "type": "toolResponse",
+                        "id": "call_shell",
+                        "toolResult": {
+                            "status": "success",
+                            "value": {
+                                "content": [{
+                                    "type": "text",
+                                    "text": "unknown flag: --sort\n\nUsage: gh pr list"
+                                }],
+                                "isError": true
+                            }
+                        }
+                    }]
+                }),
+            ],
+            &Some(json!([{
+                "type": "function",
+                "function": {
+                    "name": "shell",
+                    "description": "Run a shell command",
+                    "parameters": {}
+                }
+            }])),
+        );
+
+        assert_eq!(s.classify_turn(), TurnType::ToolResult);
+
+        let messages = s.all_messages();
+        assert_eq!(
+            messages[1].pointer("/tool_calls/0/function/name"),
+            Some(&Value::String("shell".to_string()))
+        );
+        assert_eq!(
+            messages[2].get("role").and_then(Value::as_str),
+            Some("tool")
+        );
+        assert_eq!(
+            messages[2].get("tool_call_id").and_then(Value::as_str),
+            Some("call_shell")
+        );
+
+        let pairs = s.recent_tool_results();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, "shell");
+        assert!(
+            pairs[0].1.contains("unknown flag: --sort"),
+            "tool-result text must be available to reducer retry logic: {pairs:?}"
+        );
+    }
+
+    #[test]
+    fn mixed_content_block_tool_response_preserves_text_order() {
+        let mut s = Session::new();
+        s.ingest(
+            &[
+                json!({"role": "user", "content": "Read and summarize"}),
+                json!({
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_read",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{\"path\":\"README.md\"}"}
+                    }]
+                }),
+                json!({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Tool finished."},
+                        {
+                            "type": "toolResult",
+                            "id": "call_read",
+                            "toolResult": {
+                                "value": {"content": "# Mesh LLM"}
+                            }
+                        },
+                        {"type": "text", "text": "Please answer briefly."}
+                    ]
+                }),
+            ],
+            &None,
+        );
+
+        assert_eq!(s.classify_turn(), TurnType::ToolResult);
+        let messages = s.all_messages();
+        assert_eq!(messages.len(), 5);
+        assert_eq!(
+            messages[2],
+            json!({"role": "user", "content": "Tool finished."})
+        );
+        assert_eq!(
+            messages[3].get("role").and_then(Value::as_str),
+            Some("tool")
+        );
+        assert_eq!(
+            messages[4],
+            json!({"role": "user", "content": "Please answer briefly."})
+        );
     }
 }

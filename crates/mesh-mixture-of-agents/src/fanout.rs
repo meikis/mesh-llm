@@ -316,7 +316,7 @@ mod tests {
         serde_json::json!({
             "kind": "tool_proposal",
             "tool": name,
-            "arguments": {"path": "/tmp/openclaw-tool-baseline.txt"},
+            "arguments": {"path": "/tmp/moa-tool-baseline.txt"},
             "confidence": confidence,
             "payload": "Use the requested tool.",
         })
@@ -397,7 +397,7 @@ mod tests {
 
     #[tokio::test]
     async fn answer_grace_can_fire_when_tools_are_present() {
-        // OpenClaw-style clients attach tool schemas to ordinary chat turns.
+        // Agent clients often attach tool schemas to ordinary chat turns.
         // When the caller has classified the prompt as non-tool intent, answer
         // grace should still avoid waiting for the slow tail.
         let mut js = tokio::task::JoinSet::new();
@@ -533,7 +533,7 @@ mod tests {
         match decision.expect("tool grace should decide") {
             arbiter::Decision::ToolCall { name, arguments } => {
                 assert_eq!(name, "read");
-                assert_eq!(arguments["path"], "/tmp/openclaw-tool-baseline.txt");
+                assert_eq!(arguments["path"], "/tmp/moa-tool-baseline.txt");
             }
             other => panic!("expected tool call, got {other:?}"),
         }

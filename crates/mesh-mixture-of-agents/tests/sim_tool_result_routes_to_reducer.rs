@@ -370,19 +370,19 @@ async fn exhausted_tool_budget_forces_answer_only_context() {
 }
 
 #[tokio::test]
-async fn repeated_tool_guard_allows_different_tool_from_minimax_xml() {
+async fn repeated_tool_guard_allows_different_tool_from_xml_call() {
     let backend = RecordingBackend::new(
-        r#"<minimax:tool_call>
+        r#"<tool_call>
 <invoke name="web_fetch">
 <parameter name="url">https://github.com/Mesh-LLM/mesh-llm/issues</parameter>
 </invoke>
-</minimax:tool_call>"#,
+</tool_call>"#,
     );
     let backends: Vec<Arc<dyn moa::ModelBackend>> = vec![backend.clone()];
     let config = moa::GatewayConfig {
         backends,
         models: vec![moa::ModelEntry {
-            name: "minimax".into(),
+            name: "xml-worker".into(),
             backend_index: 0,
         }],
         worker_timeout: Duration::from_secs(2),
@@ -429,7 +429,7 @@ async fn repeated_tool_guard_allows_different_tool_from_minimax_xml() {
             .pointer("/choices/0/finish_reason")
             .and_then(Value::as_str),
         Some("tool_calls"),
-        "Minimax XML tool proposal must not leak as assistant text: {}",
+        "XML tool proposal must not leak as assistant text: {}",
         result.response_body
     );
     assert_eq!(

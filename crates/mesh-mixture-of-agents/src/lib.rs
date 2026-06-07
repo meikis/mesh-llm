@@ -2169,6 +2169,7 @@ fn plain_text_tool_result_looks_like_error(result: &str) -> bool {
         || first_line.contains("not available or not authenticated")
         || first_line.starts_with("error:")
         || first_line.starts_with("fatal:")
+        || first_line.starts_with("graphql:")
         || (first_line.starts_with("unknown ") && lower.contains("\navailable fields:"))
         || (lower.contains("\nusage:") && lower.lines().take(3).any(cli_error_line))
 }
@@ -4570,6 +4571,7 @@ mod response_builder_tests {
             "  no git remotes found\n\n(Command exited with code 1)",
             "gh search not available or not authenticated",
             "search failed: gh search not available or not authenticated",
+            "GraphQL: Could not resolve to a Repository with the name 'micn/mesh-llm'. (repository)",
             "github.com\n  ✓ Logged in to github.com account user (keyring)\n  - Active account: true",
             "michaelneale/sprout\tA hive mind communication platform\tpublic, fork\t2026-06-06T05:22:29Z",
         ];

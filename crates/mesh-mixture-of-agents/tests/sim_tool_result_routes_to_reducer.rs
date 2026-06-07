@@ -331,6 +331,7 @@ async fn pr_prompt_retries_after_bad_tool_result_permutations() {
         "Unknown JSON field: \"repository\"\nAvailable fields:\n  author\n  title",
         "no git remotes found\n\n(Command exited with code 1)",
         "gh search not available or not authenticated",
+        "GraphQL: Could not resolve to a Repository with the name 'micn/mesh-llm'. (repository)",
         "github.com\n  ✓ Logged in to github.com account user (keyring)\n  - Active account: true",
         "michaelneale/sprout\tA hive mind communication platform\tpublic, fork\t2026-06-06T05:22:29Z",
     ];

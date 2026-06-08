@@ -2180,8 +2180,7 @@ fn answer_from_recent_prompt_specific_structured_tool_results(session: &Session)
 fn repair_structured_tool_result_answer(session: &Session, answer: &str) -> Option<String> {
     let (_, result) = latest_completed_tool_result(session)?;
     let prompt = session.active_user_text();
-    let parsed = parse_tool_result_json(result.trim())?;
-    let rows = structured_tool_result_rows(&parsed, &prompt);
+    let rows = structured_tool_result_rows_from_result(&result, &prompt);
     if rows.is_empty() {
         return None;
     }
@@ -2457,12 +2456,15 @@ fn non_answerable_tool_result_answer(session: &Session, tool: &str, result: &str
 }
 
 fn answer_from_structured_tool_result(result: &str, prompt: &str) -> Option<String> {
-    let parsed = parse_tool_result_json(result.trim())?;
-    if let Some(answer) = answer_from_prompt_specific_structured_value(&parsed, prompt) {
-        return Some(answer);
-    }
-
-    let rows = structured_tool_result_rows(&parsed, prompt);
+    let rows = match parse_tool_result_json(result.trim()) {
+        Some(parsed) => {
+            if let Some(answer) = answer_from_prompt_specific_structured_value(&parsed, prompt) {
+                return Some(answer);
+            }
+            structured_tool_result_rows(&parsed, prompt)
+        }
+        None => structured_tool_result_rows_from_embedded_json(result, prompt),
+    };
     let first = rows.first()?;
     let mut answer = format!(
         "From the tool result, one relevant entry is: {}",
@@ -2507,6 +2509,73 @@ fn parse_tool_result_json(result: &str) -> Option<Value> {
         .ok()
         .or_else(|| parse_concatenated_json_values(result))
         .or_else(|| parse_json_prefix_with_escaped_string_controls(result))
+}
+
+fn structured_tool_result_rows_from_result(result: &str, prompt: &str) -> Vec<StructuredToolRow> {
+    parse_tool_result_json(result.trim())
+        .map(|value| structured_tool_result_rows(&value, prompt))
+        .unwrap_or_else(|| structured_tool_result_rows_from_embedded_json(result, prompt))
+}
+
+fn structured_tool_result_rows_from_embedded_json(
+    result: &str,
+    prompt: &str,
+) -> Vec<StructuredToolRow> {
+    embedded_json_objects(result)
+        .into_iter()
+        .flat_map(|value| structured_tool_result_rows(&value, prompt))
+        .collect()
+}
+
+fn embedded_json_objects(input: &str) -> Vec<Value> {
+    let mut values = Vec::new();
+    let mut start = None;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut depth = 0usize;
+
+    for (index, ch) in input.char_indices() {
+        if depth == 0 {
+            if ch == '{' {
+                start = Some(index);
+                depth = 1;
+                in_string = false;
+                escaped = false;
+            }
+            continue;
+        }
+
+        if in_string {
+            match ch {
+                '"' if !escaped => in_string = false,
+                _ => {}
+            }
+            escaped = ch == '\\' && !escaped;
+            if ch != '\\' {
+                escaped = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => depth = depth.saturating_add(1),
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let parsed =
+                        start.and_then(|start| serde_json::from_str(&input[start..=index]).ok());
+                    start = None;
+                    if let Some(value) = parsed {
+                        values.push(value);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    values
 }
 
 fn parse_concatenated_json_values(input: &str) -> Option<Value> {
@@ -2946,7 +3015,7 @@ fn structured_tool_row(value: &Value, prompt: &str) -> Option<StructuredToolRow>
 
     let title = first_string_field(map, &["title", "name", "subject", "summary"])?;
     let id = first_identifier_field(map, &["number", "id", "key"]);
-    let url = first_string_field(map, &["url", "html_url", "web_url", "permalink"]);
+    let url = first_string_field(map, &["html_url", "web_url", "permalink", "url"]);
     if id.is_none() && url.is_none() && !prompt_asks_for_work_items(prompt) {
         return None;
     }
@@ -3279,7 +3348,21 @@ fn retry_tool_result_response_if_plain(
         }
         _ => {}
     }
-    if response_contains_tool_call(&body) {
+    if let Some(response_call) = first_response_tool_call(&body) {
+        if let Some(corrected) = corrected_retry_tool_call(
+            &response_call,
+            latest_tool_result,
+            tools,
+            allowed_tools,
+            prompt_tool_profiles,
+        ) {
+            tracing::info!(
+                "moa: reducer returned malformed follow-up {}; retrying corrected tool call",
+                response_call.name
+            );
+            let arguments = Value::String(corrected.arguments);
+            return tool_call_response(&corrected.name, &arguments);
+        }
         return body;
     }
     retry_tool_call
@@ -3356,10 +3439,11 @@ fn corrected_retry_tool_call(
         .get(&candidate.field)
         .and_then(Value::as_str)
         .map(str::to_string)?;
-    let corrected = tool_result_is_shell_parse_error(result)
+    let corrected = tool_result_suggests_unquoted_shell_token_error(result)
         .then(|| quote_unquoted_shell_metachar_tokens(&command))
         .flatten()
-        .or_else(|| remove_unknown_cli_flags_from_command(&command, result))?;
+        .or_else(|| remove_unknown_cli_flags_from_command(&command, result))
+        .or_else(|| unescape_single_quoted_shell_double_quotes(&command, result))?;
     if corrected == command {
         return None;
     }
@@ -3375,9 +3459,49 @@ fn corrected_retry_tool_call(
     })
 }
 
-fn tool_result_is_shell_parse_error(result: &str) -> bool {
+fn tool_result_suggests_unquoted_shell_token_error(result: &str) -> bool {
     let lower = result.to_ascii_lowercase();
-    lower.contains("parse error near") || lower.contains("syntax error near")
+    lower.contains("parse error near")
+        || lower.contains("syntax error near")
+        || lower.contains("no matches found")
+}
+
+fn unescape_single_quoted_shell_double_quotes(command: &str, result: &str) -> Option<String> {
+    if !tool_result_suggests_shell_quoting_issue(result) {
+        return None;
+    }
+
+    let mut changed = false;
+    let mut out = String::with_capacity(command.len());
+    let mut quote: Option<char> = None;
+    let mut chars = command.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' | '"' if quote == Some(ch) => {
+                quote = None;
+                out.push(ch);
+            }
+            '\'' | '"' if quote.is_none() => {
+                quote = Some(ch);
+                out.push(ch);
+            }
+            '\\' if quote == Some('\'') && chars.peek() == Some(&'"') => {
+                changed = true;
+                out.push('"');
+                chars.next();
+            }
+            _ => out.push(ch),
+        }
+    }
+
+    changed.then_some(out)
+}
+
+fn tool_result_suggests_shell_quoting_issue(result: &str) -> bool {
+    let lower = result.to_ascii_lowercase();
+    lower.contains("unix shell quoting issues")
+        || (lower.contains("syntax error") && lower.contains("jq:"))
 }
 
 fn remove_unknown_cli_flags_from_command(command: &str, result: &str) -> Option<String> {
@@ -3540,7 +3664,8 @@ fn flush_shell_token(out: &mut String, token: &mut String, changed: &mut bool) {
 }
 
 fn shell_token_needs_single_quotes(token: &str) -> bool {
-    token.contains('&') && !shell_token_already_quoted(token)
+    token.chars().any(|ch| matches!(ch, '&' | '?' | '*' | '['))
+        && !shell_token_already_quoted(token)
 }
 
 fn shell_token_already_quoted(token: &str) -> bool {
@@ -3562,12 +3687,6 @@ fn first_response_tool_call(body: &Value) -> Option<CompletedToolCall> {
         name: name.to_string(),
         arguments,
     })
-}
-
-fn response_contains_tool_call(body: &Value) -> bool {
-    body.pointer("/choices/0/message/tool_calls")
-        .and_then(Value::as_array)
-        .is_some_and(|calls| !calls.is_empty())
 }
 
 fn tool_result_has_answerable_evidence(result: &str) -> bool {
@@ -3927,6 +4046,7 @@ fn plain_text_tool_result_looks_like_error(result: &str) -> bool {
         || first_line.starts_with("unknown command")
         || first_line.contains("parse error")
         || first_line.contains("syntax error")
+        || first_line.contains("no matches found")
         || first_line == "no git remotes found"
         || first_line.contains("not available or not authenticated")
         || first_line.starts_with("error:")
@@ -6429,6 +6549,22 @@ mod response_builder_tests {
     }
 
     #[test]
+    fn repair_tool_result_answer_recovers_work_item_from_embedded_json_fragment() {
+        let prompt = "Use shell/developer tool to look for recent important open GitHub issues or PRs in Mesh-LLM/mesh-llm, then tell me about one. Do not answer from memory.";
+        let result = r###"ented Plugin-only routing setup from an earlier issue body...","closed_by":null},{"url":"https://api.github.com/repos/Mesh-LLM/mesh-llm/issues/786","html_url":"https://github.com/Mesh-LLM/mesh-llm/pull/786","number":786,"title":"[codex] make installer runtime-first","state":"open","user":{"login":"i386"},"created_at":"2026-06-03T22:46:21Z","pull_request":{"html_url":"https://github.com/Mesh-LLM/mesh-llm/pull/786"},"body":"## Summary\nMakes install.sh runtime-first."},{"url":"https://api.github.com/repos/Mesh-LLM/mesh-llm/issues/775","html_url":"https://github.com/Mesh-LLM/mesh-llm/issues/775","number":775,"title":"Plan KV cache sizing","state":"open","user":{"login":"micn"},"created_at":"2026-06-02T00:00:00Z","body":"Long design note."}]"###;
+        let session = session_with_user_and_tool_result(prompt, result);
+
+        let repaired = repair_tool_result_answer(
+            &session,
+            "From the tool result, one relevant entry is: ented Plugin-only routing setup...",
+        );
+
+        assert!(repaired.contains("#786 - [codex] make installer runtime-first"));
+        assert!(repaired.contains("https://github.com/Mesh-LLM/mesh-llm/pull/786"));
+        assert!(!repaired.contains("ented Plugin-only routing"));
+    }
+
+    #[test]
     fn repair_tool_result_answer_trims_identity_preamble_before_work_item() {
         let prompt = "Use shell/developer tool to look for recent important open GitHub issues or PRs in Mesh-LLM/mesh-llm. Inspect the results with a command, then reply with one specific issue or PR number/title and why it matters. Do not answer from memory.";
         let result = serde_json::json!([{
@@ -7400,6 +7536,84 @@ mod response_builder_tests {
     }
 
     #[test]
+    fn shell_glob_error_retries_schema_corrected_command_tool_call() {
+        let tools = command_tool_schema("exec");
+        let allowed = ["exec".to_string()];
+        let command =
+            r#"{"command":"gh api repos/mesh-llm/mesh-llm/issues?state=open&per_page=1"}"#;
+        let retry = CompletedToolCall {
+            name: "exec".to_string(),
+            arguments: command.to_string(),
+        };
+        let result = "zsh:1: no matches found: repos/mesh-llm/mesh-llm/issues?state=open";
+        assert!(!tool_result_has_answerable_evidence(result));
+
+        let body = retry_tool_result_response_if_plain(
+            chat_response("The shell tool returned no matches found."),
+            Some(&retry),
+            Some(result),
+            Some(&tools),
+            &allowed,
+            &[],
+            true,
+        );
+
+        assert_eq!(
+            body.pointer("/choices/0/message/tool_calls/0/function/name")
+                .and_then(Value::as_str),
+            Some("exec")
+        );
+        let args = body
+            .pointer("/choices/0/message/tool_calls/0/function/arguments")
+            .and_then(Value::as_str)
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .expect("tool args");
+        assert_eq!(
+            args.get("command").and_then(Value::as_str),
+            Some("gh api 'repos/mesh-llm/mesh-llm/issues?state=open&per_page=1'")
+        );
+    }
+
+    #[test]
+    fn shell_glob_error_corrects_new_bad_followup_tool_call() {
+        let tools = command_tool_schema("exec");
+        let allowed = ["exec".to_string()];
+        let previous = CompletedToolCall {
+            name: "exec".to_string(),
+            arguments: r#"{"command":"curl -s https://api.github.com/repos/Mesh-LLM/mesh-llm/issues?state=open\\&per_page=1"}"#.to_string(),
+        };
+        let followup = r#"{"command":"curl -s https://api.github.com/repos/Mesh-LLM/mesh-llm/issues?state=open&per_page=1 | jq -r '.[0]'"}"#;
+        let result = "zsh:1: no matches found: https://api.github.com/repos/Mesh-LLM/mesh-llm/issues?state=open";
+
+        let body = retry_tool_result_response_if_plain(
+            tool_call_response("exec", &Value::String(followup.to_string())),
+            Some(&previous),
+            Some(result),
+            Some(&tools),
+            &allowed,
+            &[],
+            true,
+        );
+
+        assert_eq!(
+            body.pointer("/choices/0/message/tool_calls/0/function/name")
+                .and_then(Value::as_str),
+            Some("exec")
+        );
+        let args = body
+            .pointer("/choices/0/message/tool_calls/0/function/arguments")
+            .and_then(Value::as_str)
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .expect("tool args");
+        assert_eq!(
+            args.get("command").and_then(Value::as_str),
+            Some(
+                "curl -s 'https://api.github.com/repos/Mesh-LLM/mesh-llm/issues?state=open&per_page=1' | jq -r '.[0]'"
+            )
+        );
+    }
+
+    #[test]
     fn cli_unknown_flag_error_retries_schema_corrected_command_tool_call() {
         let tools = command_tool_schema("exec");
         let allowed = ["exec".to_string()];
@@ -7434,6 +7648,45 @@ mod response_builder_tests {
         assert_eq!(
             args.get("command").and_then(Value::as_str),
             Some("gh api repos/Mesh-LLM/mesh-llm/issues")
+        );
+    }
+
+    #[test]
+    fn jq_shell_quoting_error_retries_schema_corrected_command_tool_call() {
+        let tools = command_tool_schema("exec");
+        let allowed = ["exec".to_string()];
+        let command = r#"{"command":"curl -s \"https://api.github.com/repos/Mesh-LLM/mesh-llm/issues/808\" | jq -r '\\\"\\(.number) \\(.state) \\(.title)\\\"'"}"#;
+        let retry = CompletedToolCall {
+            name: "exec".to_string(),
+            arguments: command.to_string(),
+        };
+        let result = "jq: error: syntax error, unexpected INVALID_CHARACTER, expecting end of file (Unix shell quoting issues?) at <top-level>, line 1:\n\\\"\\(.number) \\(.state) \\(.title)\\\"\njq: 1 compile error\n\n(Command exited with code 3)";
+
+        let body = retry_tool_result_response_if_plain(
+            chat_response("I encountered an error while trying to fetch the details."),
+            Some(&retry),
+            Some(result),
+            Some(&tools),
+            &allowed,
+            &[],
+            true,
+        );
+
+        assert_eq!(
+            body.pointer("/choices/0/message/tool_calls/0/function/name")
+                .and_then(Value::as_str),
+            Some("exec")
+        );
+        let args = body
+            .pointer("/choices/0/message/tool_calls/0/function/arguments")
+            .and_then(Value::as_str)
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .expect("tool args");
+        assert_eq!(
+            args.get("command").and_then(Value::as_str),
+            Some(
+                "curl -s \"https://api.github.com/repos/Mesh-LLM/mesh-llm/issues/808\" | jq -r '\"\\(.number) \\(.state) \\(.title)\"'"
+            )
         );
     }
 

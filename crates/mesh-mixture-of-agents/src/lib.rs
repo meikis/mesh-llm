@@ -2074,7 +2074,7 @@ fn repair_tool_result_answer(session: &Session, answer: &str) -> String {
 
 fn answer_from_recent_prompt_specific_structured_tool_results(session: &Session) -> Option<String> {
     let prompt = session.active_user_text();
-    if !(prompt_asks_for_ci_status(&prompt) && prompt_asks_for_copilot_feedback(&prompt)) {
+    if !(prompt_asks_for_ci_status(&prompt) && prompt_asks_for_feedback(&prompt)) {
         return None;
     }
 
@@ -2085,9 +2085,9 @@ fn answer_from_recent_prompt_specific_structured_tool_results(session: &Session)
         let Some(value) = parse_tool_result_json(result.trim()) else {
             continue;
         };
-        title = title.or_else(|| github_title_state_summary(&value));
-        checks = checks.or_else(|| github_check_summary_from_value(&value));
-        feedback = feedback.or_else(|| github_feedback_summary_from_value(&value, &prompt));
+        title = title.or_else(|| structured_title_state_summary(&value));
+        checks = checks.or_else(|| structured_check_summary_from_value(&value));
+        feedback = feedback.or_else(|| structured_feedback_summary_from_value(&value, &prompt));
     }
 
     let mut parts = Vec::new();
@@ -2308,7 +2308,7 @@ fn answer_from_prompt_specific_structured_tool_result(
 
 fn answer_from_prompt_specific_structured_value(value: &Value, prompt: &str) -> Option<String> {
     if prompt_asks_for_check_or_review_status(prompt) {
-        return answer_from_github_pr_detail_value(value, prompt);
+        return answer_from_structured_status_feedback_value(value, prompt);
     }
     None
 }
@@ -2400,9 +2400,10 @@ fn prompt_asks_for_check_or_review_status(prompt: &str) -> bool {
     )
 }
 
-fn answer_from_github_pr_detail_value(value: &Value, prompt: &str) -> Option<String> {
+fn answer_from_structured_status_feedback_value(value: &Value, prompt: &str) -> Option<String> {
     if let Value::Array(_) = value {
-        return github_check_summary(Some(value)).filter(|_| prompt_asks_for_ci_status(prompt));
+        return structured_check_summary_from_value(value)
+            .filter(|_| prompt_asks_for_ci_status(prompt));
     }
 
     let map = value.as_object()?;
@@ -2417,26 +2418,17 @@ fn answer_from_github_pr_detail_value(value: &Value, prompt: &str) -> Option<Str
     }
 
     if contains_any(&prompt_lower, &["ci", "check", "checks", "green", "status"]) {
-        parts.extend(github_check_summary(map.get("statusCheckRollup")));
+        parts.extend(structured_check_summary_from_value(value));
     }
 
-    if contains_any(
-        &prompt_lower,
-        &[
-            "copilot", "feedback", "comment", "comments", "review", "reviews",
-        ],
-    ) {
-        parts.extend(github_feedback_summary(
-            map.get("comments"),
-            map.get("reviews"),
-            prompt_lower.contains("copilot"),
-        ));
+    if prompt_asks_for_feedback(prompt) {
+        parts.extend(structured_feedback_summary_from_value(value, prompt));
     }
 
     (!parts.is_empty()).then(|| truncate_for_tool_result_answer(&parts.join("\n")))
 }
 
-fn github_title_state_summary(value: &Value) -> Option<String> {
+fn structured_title_state_summary(value: &Value) -> Option<String> {
     let map = value.as_object()?;
     let title = first_string_field(map, &["title", "name"])?;
     let state = first_string_field(map, &["state", "status"]);
@@ -2446,38 +2438,63 @@ fn github_title_state_summary(value: &Value) -> Option<String> {
     })
 }
 
-fn github_check_summary_from_value(value: &Value) -> Option<String> {
+fn structured_check_summary_from_value(value: &Value) -> Option<String> {
+    let mut checks = Vec::new();
+    collect_structured_check_items(value, &mut checks);
+    structured_check_summary(&checks)
+}
+
+fn collect_structured_check_items(value: &Value, checks: &mut Vec<Value>) {
     match value {
-        Value::Object(map) => github_check_summary(map.get("statusCheckRollup")),
-        Value::Array(_) => github_check_summary(Some(value)),
-        _ => None,
+        Value::Object(map) if structured_object_looks_like_check(map) => {
+            checks.push(value.clone());
+        }
+        Value::Object(map) => {
+            for nested in map.values() {
+                collect_structured_check_items(nested, checks);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_structured_check_items(value, checks);
+            }
+        }
+        _ => {}
     }
 }
 
-fn github_feedback_summary_from_value(value: &Value, prompt: &str) -> Option<String> {
-    if !json_value_has_copilot_feedback_evidence(value) {
+fn structured_object_looks_like_check(map: &serde_json::Map<String, Value>) -> bool {
+    map.contains_key("conclusion")
+        || map.contains_key("outcome")
+        || map.contains_key("result")
+        || (map.contains_key("status")
+            && first_string_field(
+                map,
+                &[
+                    "name",
+                    "workflowName",
+                    "workflow_name",
+                    "jobName",
+                    "job_name",
+                    "detailsUrl",
+                    "details_url",
+                ],
+            )
+            .is_some())
+}
+
+fn structured_feedback_summary_from_value(value: &Value, prompt: &str) -> Option<String> {
+    if !json_value_has_feedback_evidence(value, prompt) {
         return None;
     }
 
-    let copilot_only = prompt.to_ascii_lowercase().contains("copilot");
-    match value {
-        Value::Object(map) => {
-            if map.contains_key("comments") || map.contains_key("reviews") {
-                return github_feedback_summary(
-                    map.get("comments"),
-                    map.get("reviews"),
-                    copilot_only,
-                );
-            }
-            github_feedback_summary(None, Some(&Value::Array(vec![value.clone()])), copilot_only)
-        }
-        Value::Array(_) => github_feedback_summary(None, Some(value), copilot_only),
-        _ => None,
-    }
+    let focus = feedback_focus_from_prompt(prompt);
+    let mut entries = Vec::new();
+    collect_structured_feedback_entries(value, focus.as_deref(), &mut entries);
+    structured_feedback_summary(entries, focus.as_deref())
 }
 
-fn github_check_summary(value: Option<&Value>) -> Option<String> {
-    let checks = value?.as_array()?;
+fn structured_check_summary(checks: &[Value]) -> Option<String> {
     if checks.is_empty() {
         return Some("CI/checks: no check runs were returned.".to_string());
     }
@@ -2485,19 +2502,36 @@ fn github_check_summary(value: Option<&Value>) -> Option<String> {
     let mut failing = Vec::new();
     let mut pending = Vec::new();
     for check in checks.iter().filter_map(Value::as_object) {
-        let name = first_string_field(check, &["name", "workflowName"]).unwrap_or_else(|| {
+        let name = first_string_field(
+            check,
+            &[
+                "name",
+                "workflowName",
+                "workflow_name",
+                "jobName",
+                "job_name",
+                "displayName",
+                "display_name",
+                "title",
+            ],
+        )
+        .unwrap_or_else(|| {
             check
                 .get("__typename")
                 .and_then(Value::as_str)
                 .unwrap_or("check")
                 .to_string()
         });
-        let conclusion = first_string_field(check, &["conclusion"]);
-        let status = first_string_field(check, &["status"]);
-        match conclusion.as_deref() {
-            Some("SUCCESS" | "SKIPPED" | "NEUTRAL") => {}
+        let conclusion = first_string_field(check, &["conclusion", "outcome", "result"]);
+        let status = first_string_field(check, &["status", "state"]);
+        let normalized_conclusion = conclusion.as_deref().map(str::to_ascii_uppercase);
+        match normalized_conclusion.as_deref() {
+            Some("SUCCESS" | "PASSED" | "PASS" | "SKIPPED" | "NEUTRAL") => {}
             Some(other) => failing.push(format!("{name}: {other}")),
-            None if !matches!(status.as_deref(), Some("COMPLETED")) => {
+            None if status.as_deref().is_some_and(status_value_looks_failure) => {
+                failing.push(format!("{name}: {}", status.unwrap_or_default()));
+            }
+            None if !status.as_deref().is_some_and(status_value_looks_completed) => {
                 pending.push(format!(
                     "{name}: {}",
                     status.unwrap_or_else(|| "pending".to_string())
@@ -2528,65 +2562,156 @@ fn github_check_summary(value: Option<&Value>) -> Option<String> {
     }
 }
 
-fn github_feedback_summary(
-    comments: Option<&Value>,
-    reviews: Option<&Value>,
-    copilot_only: bool,
-) -> Option<String> {
-    let mut entries = Vec::new();
-    collect_github_feedback_entries(comments, "comment", copilot_only, &mut entries);
-    collect_github_feedback_entries(reviews, "review", copilot_only, &mut entries);
+fn status_value_looks_completed(value: &str) -> bool {
+    matches!(
+        value.to_ascii_uppercase().as_str(),
+        "COMPLETED" | "COMPLETE" | "DONE" | "SUCCESS" | "PASSED" | "PASS"
+    )
+}
 
+fn status_value_looks_failure(value: &str) -> bool {
+    matches!(
+        value.to_ascii_uppercase().as_str(),
+        "FAILURE" | "FAILED" | "FAIL" | "ERROR" | "CANCELLED" | "CANCELED" | "TIMED_OUT"
+    )
+}
+
+fn structured_feedback_summary(entries: Vec<String>, focus: Option<&str>) -> Option<String> {
     if entries.is_empty() {
-        if copilot_only {
-            return Some(
-                "Copilot feedback: no Copilot-authored comments or reviews were returned."
-                    .to_string(),
-            );
+        if let Some(focus) = focus {
+            return Some(format!(
+                "{} feedback: no {}-authored comments or reviews were returned.",
+                feedback_label(focus),
+                focus
+            ));
         }
         return Some("Feedback: no comments or reviews were returned.".to_string());
     }
 
     Some(format!(
         "{}: {}",
-        if copilot_only {
-            "Copilot feedback"
-        } else {
-            "Feedback"
-        },
+        focus
+            .map(|focus| format!("{} feedback", feedback_label(focus)))
+            .unwrap_or_else(|| "Feedback".to_string()),
         entries.into_iter().take(3).collect::<Vec<_>>().join("; ")
     ))
 }
 
-fn collect_github_feedback_entries(
-    value: Option<&Value>,
-    kind: &str,
-    copilot_only: bool,
+fn collect_structured_feedback_entries(
+    value: &Value,
+    focus: Option<&str>,
     entries: &mut Vec<String>,
 ) {
-    let Some(items) = value.and_then(Value::as_array) else {
-        return;
-    };
-    for item in items.iter().filter_map(Value::as_object) {
-        let author = item
-            .get("author")
-            .and_then(|author| author.get("login").or_else(|| author.get("name")))
-            .or_else(|| item.get("author"))
-            .or_else(|| item.get("user").and_then(|user| user.get("login")))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let body = first_string_field(item, &["body"]).unwrap_or_default();
-        let author_or_body_mentions_copilot = author.to_ascii_lowercase().contains("copilot")
-            || body.to_ascii_lowercase().contains("copilot");
-        if copilot_only && !author_or_body_mentions_copilot {
-            continue;
+    match value {
+        Value::Object(map) if structured_object_looks_like_feedback_entry(map) => {
+            collect_structured_feedback_entry(map, "feedback", focus, entries);
         }
-        let state = first_string_field(item, &["state"]);
-        let body_summary = first_non_empty_line(&body).unwrap_or_else(|| "(no body)".to_string());
-        entries.push(match state {
-            Some(state) => format!("{kind} by {author} ({state}): {body_summary}"),
-            None => format!("{kind} by {author}: {body_summary}"),
-        });
+        Value::Object(map) => {
+            for key in FEEDBACK_COLLECTION_KEYS {
+                if let Some(nested) = map.get(*key) {
+                    collect_feedback_collection_entries(nested, key, focus, entries);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_structured_feedback_entries(value, focus, entries);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_feedback_collection_entries(
+    value: &Value,
+    key: &str,
+    focus: Option<&str>,
+    entries: &mut Vec<String>,
+) {
+    match value {
+        Value::Array(values) => {
+            for item in values.iter().filter_map(Value::as_object) {
+                collect_structured_feedback_entry(item, feedback_kind_for_key(key), focus, entries);
+            }
+        }
+        Value::Object(map) => {
+            collect_structured_feedback_entry(map, feedback_kind_for_key(key), focus, entries);
+        }
+        _ => {}
+    }
+}
+
+fn collect_structured_feedback_entry(
+    item: &serde_json::Map<String, Value>,
+    kind: &str,
+    focus: Option<&str>,
+    entries: &mut Vec<String>,
+) {
+    let author = item
+        .get("author")
+        .and_then(|author| author.get("login").or_else(|| author.get("name")))
+        .or_else(|| item.get("author"))
+        .or_else(|| item.get("user").and_then(|user| user.get("login")))
+        .or_else(|| item.get("creator").and_then(|user| user.get("login")))
+        .or_else(|| item.get("reviewer").and_then(|user| user.get("name")))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let body = first_string_field(item, &["body", "text", "comment", "message", "summary"])
+        .unwrap_or_default();
+    if let Some(focus) = focus {
+        let author_or_body_matches = author.to_ascii_lowercase().contains(focus)
+            || body.to_ascii_lowercase().contains(focus);
+        if !author_or_body_matches {
+            return;
+        }
+    }
+    let state = first_string_field(item, &["state"]);
+    let body_summary = first_non_empty_line(&body).unwrap_or_else(|| "(no body)".to_string());
+    entries.push(match state {
+        Some(state) => format!("{kind} by {author} ({state}): {body_summary}"),
+        None => format!("{kind} by {author}: {body_summary}"),
+    });
+}
+
+fn structured_object_looks_like_feedback_entry(map: &serde_json::Map<String, Value>) -> bool {
+    first_string_field(map, &["body", "text", "comment", "message", "summary"]).is_some()
+        && (map.contains_key("author")
+            || map.contains_key("user")
+            || map.contains_key("creator")
+            || map.contains_key("reviewer"))
+}
+
+const FEEDBACK_COLLECTION_KEYS: &[&str] = &[
+    "comments",
+    "reviews",
+    "feedback",
+    "notes",
+    "annotations",
+    "reviewComments",
+    "review_comments",
+];
+
+fn feedback_kind_for_key(key: &str) -> &str {
+    match key {
+        "comments" => "comment",
+        "reviews" => "review",
+        "annotations" => "annotation",
+        "notes" => "note",
+        "reviewComments" | "review_comments" => "review comment",
+        _ => "feedback",
+    }
+}
+
+fn feedback_focus_from_prompt(prompt: &str) -> Option<String> {
+    let lower = prompt.to_ascii_lowercase();
+    lower.contains("copilot").then(|| "copilot".to_string())
+}
+
+fn feedback_label(focus: &str) -> String {
+    let mut chars = focus.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => "Requested".to_string(),
     }
 }
 
@@ -2976,9 +3101,7 @@ fn tool_result_has_answerable_evidence_for_prompt(result: &str, prompt: &str) ->
     if prompt_asks_for_ci_status(prompt) && !tool_result_has_ci_status_evidence(result) {
         return false;
     }
-    if prompt_asks_for_copilot_feedback(prompt)
-        && !tool_result_has_copilot_feedback_evidence(result)
-    {
+    if prompt_asks_for_feedback(prompt) && !tool_result_has_feedback_evidence(result, prompt) {
         return false;
     }
     if prompt_asks_for_github_work_items(prompt)
@@ -3015,13 +3138,19 @@ fn prompt_asks_for_ci_status(prompt: &str) -> bool {
     )
 }
 
-fn prompt_asks_for_copilot_feedback(prompt: &str) -> bool {
+fn prompt_asks_for_feedback(prompt: &str) -> bool {
     let lower = prompt.to_ascii_lowercase();
-    lower.contains("copilot")
-        && contains_any(
-            &lower,
-            &["feedback", "comment", "comments", "review", "reviews"],
-        )
+    contains_any(
+        &lower,
+        &[
+            "feedback",
+            "comment",
+            "comments",
+            "review comment",
+            "review comments",
+            "reviews",
+        ],
+    )
 }
 
 fn tool_result_has_ci_status_evidence(result: &str) -> bool {
@@ -3049,54 +3178,55 @@ fn tool_result_has_ci_status_evidence(result: &str) -> bool {
     )
 }
 
-fn tool_result_has_copilot_feedback_evidence(result: &str) -> bool {
+fn tool_result_has_feedback_evidence(result: &str, prompt: &str) -> bool {
     if let Some(parsed) = parse_tool_result_json(result.trim()) {
-        return json_value_has_copilot_feedback_evidence(&parsed);
+        return json_value_has_feedback_evidence(&parsed, prompt);
     }
 
     let lower = result.to_ascii_lowercase();
+    let focus = feedback_focus_from_prompt(prompt);
+    let focus_matches = focus.as_deref().is_some_and(|focus| lower.contains(focus));
     contains_any(
         &lower,
         &[
-            "copilot feedback",
-            "github-copilot",
-            "copilot-pull-request-reviewer",
-            "no copilot",
-            "copilot-authored",
+            "feedback",
+            "comment",
+            "comments",
+            "review",
+            "reviews",
+            "no feedback",
+            "no comments",
+            "no reviews",
         ],
-    )
+    ) && (focus.is_none() || focus_matches)
 }
 
 fn json_value_has_ci_status_evidence(value: &Value) -> bool {
+    let mut checks = Vec::new();
+    collect_structured_check_items(value, &mut checks);
+    !checks.is_empty()
+}
+
+fn json_value_has_feedback_evidence(value: &Value, prompt: &str) -> bool {
+    let focus = feedback_focus_from_prompt(prompt);
     match value {
         Value::Object(map) => {
-            if map
-                .get("statusCheckRollup")
-                .and_then(Value::as_array)
-                .is_some_and(|checks| !checks.is_empty())
+            if FEEDBACK_COLLECTION_KEYS
+                .iter()
+                .any(|key| map.contains_key(*key))
+                || structured_object_looks_like_feedback_entry(map)
             {
                 return true;
             }
-            let has_check_fields = map.contains_key("conclusion")
-                || (map.contains_key("status")
-                    && (map.contains_key("workflowName") || map.contains_key("detailsUrl")));
-            has_check_fields || map.values().any(json_value_has_ci_status_evidence)
+            map.values()
+                .any(|value| json_value_has_feedback_evidence(value, prompt))
         }
-        Value::Array(values) => values.iter().any(json_value_has_ci_status_evidence),
-        _ => false,
-    }
-}
-
-fn json_value_has_copilot_feedback_evidence(value: &Value) -> bool {
-    match value {
-        Value::Object(map) => {
-            if map.contains_key("comments") || map.contains_key("reviews") {
-                return true;
-            }
-            map.values().any(json_value_has_copilot_feedback_evidence)
-        }
-        Value::Array(values) => values.iter().any(json_value_has_copilot_feedback_evidence),
-        Value::String(text) => text.to_ascii_lowercase().contains("copilot"),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| json_value_has_feedback_evidence(value, prompt)),
+        Value::String(text) => focus
+            .as_deref()
+            .is_some_and(|focus| text.to_ascii_lowercase().contains(focus)),
         _ => false,
     }
 }
@@ -5958,6 +6088,68 @@ mod response_builder_tests {
             repaired.contains("copilot-pull-request-reviewer[bot]"),
             "{repaired}"
         );
+    }
+
+    #[test]
+    fn generic_status_prompt_summarizes_nested_job_results() {
+        let prompt = "Is the deployment status green?";
+        let result = serde_json::json!({
+            "service": "billing-api",
+            "pipeline": {
+                "jobs": [
+                    {"jobName": "unit", "status": "SUCCESS"},
+                    {"jobName": "canary", "status": "FAILED"}
+                ]
+            }
+        })
+        .to_string();
+
+        let answer =
+            answer_from_latest_tool_result(&session_with_user_and_tool_result(prompt, &result))
+                .expect("generic nested job output should answer status prompt");
+
+        assert!(answer.contains("CI/checks: not all green"), "{answer}");
+        assert!(answer.contains("canary: FAILED"), "{answer}");
+    }
+
+    #[test]
+    fn generic_status_and_feedback_prompt_combines_recent_structured_tool_results() {
+        let prompt = "Is the release status green, and any review feedback?";
+        let status_result = serde_json::json!({
+            "release": "2026.06.08",
+            "checks": [
+                {"name": "deploy", "result": "passed"},
+                {"name": "smoke", "result": "failed"}
+            ]
+        })
+        .to_string();
+        let feedback_result = serde_json::json!({
+            "reviews": [
+                {
+                    "author": {"name": "nick"},
+                    "state": "COMMENTED",
+                    "message": "Please add one more timeout guard."
+                }
+            ]
+        })
+        .to_string();
+        let mut session = Session::new();
+        session.ingest(
+            &[
+                serde_json::json!({"role": "user", "content": prompt}),
+                tool_call_msg_with_args("call_1", "lookup", r#"{"id":"release"}"#),
+                tool_result_msg("call_1", &status_result),
+                tool_call_msg_with_args("call_2", "lookup", r#"{"id":"reviews"}"#),
+                tool_result_msg("call_2", &feedback_result),
+            ],
+            &None,
+        );
+
+        let repaired = repair_tool_result_answer(&session, "Status is still running.");
+
+        assert!(repaired.contains("smoke: FAILED"), "{repaired}");
+        assert!(repaired.contains("Feedback"), "{repaired}");
+        assert!(repaired.contains("review by nick"), "{repaired}");
     }
 
     #[test]

@@ -223,8 +223,7 @@ impl Session {
         self.messages
             .iter()
             .rev()
-            .find(|m| is_task_user_message(m))
-            .and_then(extract_text_content)
+            .find_map(task_text_from_user_message)
             .unwrap_or_default()
     }
 
@@ -254,8 +253,7 @@ impl Session {
         self.messages[..tool_call_idx]
             .iter()
             .rev()
-            .find(|m| is_task_user_message(m))
-            .and_then(extract_text_content)
+            .find_map(task_text_from_user_message)
             .unwrap_or_else(|| self.last_user_text())
     }
 
@@ -599,12 +597,27 @@ fn extract_text_content(msg: &Value) -> Option<String> {
     None
 }
 
-fn is_task_user_message(msg: &Value) -> bool {
-    msg.get("role").and_then(Value::as_str) == Some("user") && !is_synthetic_user_message(msg)
+fn task_text_from_user_message(msg: &Value) -> Option<String> {
+    (msg.get("role").and_then(Value::as_str) == Some("user"))
+        .then(|| extract_text_content(msg))
+        .flatten()
+        .and_then(strip_info_msg_prefix)
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
 }
 
-fn is_synthetic_user_message(msg: &Value) -> bool {
-    extract_text_content(msg).is_some_and(|text| text.trim_start().starts_with("<info-msg>"))
+fn strip_info_msg_prefix(text: String) -> Option<String> {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with("<info-msg>") {
+        return Some(text);
+    }
+    let close = "</info-msg>";
+    let close_start = trimmed.find(close)?;
+    Some(
+        trimmed[close_start + close.len()..]
+            .trim_start()
+            .to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -871,6 +884,21 @@ mod tests {
 
         assert_eq!(s.last_user_text(), "Run pwd, then run ls, then answer.");
         assert_eq!(s.active_user_text(), "Run pwd, then run ls, then answer.");
+    }
+
+    #[test]
+    fn goose_info_prefix_preserves_following_user_task() {
+        let mut s = Session::new();
+        s.ingest(
+            &[json!({
+                "role": "user",
+                "content": "<info-msg>\nWorking directory: /tmp/project\n</info-msg>\nRun pwd."
+            })],
+            &None,
+        );
+
+        assert_eq!(s.last_user_text(), "Run pwd.");
+        assert_eq!(s.active_user_text(), "Run pwd.");
     }
 
     #[test]

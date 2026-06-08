@@ -1435,11 +1435,16 @@ fn message_role(msg: &Value) -> &str {
 }
 
 fn message_is_task_user(msg: &Value) -> bool {
-    message_role(msg) == "user" && !message_is_synthetic_user(msg)
+    task_text_from_message(msg).is_some()
 }
 
-fn message_is_synthetic_user(msg: &Value) -> bool {
-    message_text(msg).is_some_and(|text| text.trim_start().starts_with("<info-msg>"))
+fn task_text_from_message(msg: &Value) -> Option<String> {
+    (message_role(msg) == "user")
+        .then(|| message_text(msg))
+        .flatten()
+        .and_then(strip_info_msg_prefix)
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
 }
 
 fn message_text(msg: &Value) -> Option<String> {
@@ -1458,6 +1463,20 @@ fn message_text(msg: &Value) -> Option<String> {
         .collect::<Vec<_>>()
         .join("\n");
     (!text.is_empty()).then_some(text)
+}
+
+fn strip_info_msg_prefix(text: String) -> Option<String> {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with("<info-msg>") {
+        return Some(text);
+    }
+    let close = "</info-msg>";
+    let close_start = trimmed.find(close)?;
+    Some(
+        trimmed[close_start + close.len()..]
+            .trim_start()
+            .to_string(),
+    )
 }
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
@@ -6713,6 +6732,40 @@ mod response_builder_tests {
             &session.active_user_text(),
             &session
         ));
+    }
+
+    #[test]
+    fn goose_info_prefix_preserves_tool_intent_text() {
+        let mut session = Session::new();
+        session.ingest(
+            &[serde_json::json!({
+                "role": "user",
+                "content": "<info-msg>\nWorking directory: /tmp/project\n</info-msg>\nActually use the shell tool. Run pwd."
+            })],
+            &Some(serde_json::json!([{
+                "type": "function",
+                "function": {
+                    "name": "shell",
+                    "description": "Run shell commands",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string", "description": "Shell command to execute"}
+                        },
+                        "required": ["command"]
+                    }
+                }
+            }])),
+        );
+
+        assert_eq!(
+            session.last_user_text(),
+            "Actually use the shell tool. Run pwd."
+        );
+        assert_eq!(
+            selected_tool_names_for_turn(&session, &[], &[]),
+            vec!["shell".to_string()]
+        );
     }
 
     #[test]

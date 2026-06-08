@@ -2295,10 +2295,10 @@ fn answer_appears_to_use_non_answerable_tool_result(answer: &str, result: &str) 
 
 fn non_answerable_tool_result_answer(session: &Session, tool: &str, result: &str) -> String {
     let prompt = session.active_user_text();
-    if prompt_asks_for_pull_requests(&prompt)
-        && plain_text_tool_result_looks_like_github_repo_list(result)
+    if prompt_asks_for_work_items(&prompt)
+        && plain_text_tool_result_looks_like_repository_list(result)
     {
-        return "The latest tool result listed repositories, not pull requests, so I can't answer the PR request from that output. I need the target repository or a corrected PR-list result before I can pick an interesting PR.".to_string();
+        return "The latest tool result listed repositories, not the requested work items, so I can't answer from that output. I need a corrected work-item result before I can pick an item.".to_string();
     }
 
     let first_line = result
@@ -2783,7 +2783,12 @@ fn structured_tool_result_rows(value: &Value, prompt: &str) -> Vec<StructuredToo
                 "nodes",
                 "data",
                 "pullRequests",
+                "mergeRequests",
                 "issues",
+                "tickets",
+                "tasks",
+                "workItems",
+                "work_items",
             ]
             .iter()
             .filter_map(|key| map.get(*key))
@@ -2802,7 +2807,7 @@ fn structured_tool_row(value: &Value, prompt: &str) -> Option<StructuredToolRow>
     let title = first_string_field(map, &["title", "name", "subject", "summary"])?;
     let id = first_identifier_field(map, &["number", "id", "key"]);
     let url = first_string_field(map, &["url", "html_url", "web_url", "permalink"]);
-    if id.is_none() && url.is_none() && !prompt_asks_for_github_work_items(prompt) {
+    if id.is_none() && url.is_none() && !prompt_asks_for_work_items(prompt) {
         return None;
     }
 
@@ -2861,7 +2866,7 @@ fn structured_tool_row_details(map: &serde_json::Map<String, Value>) -> Vec<Stri
 fn format_structured_tool_row(row: &StructuredToolRow, prompt: &str) -> String {
     let mut text = match row.id.as_deref() {
         Some(id)
-            if prompt_asks_for_pull_requests(prompt)
+            if prompt_asks_for_numbered_work_items(prompt)
                 && id.chars().all(|ch| ch.is_ascii_digit()) =>
         {
             format!("#{id} - {}", row.title)
@@ -3149,18 +3154,14 @@ fn tool_result_has_answerable_evidence_for_prompt(result: &str, prompt: &str) ->
     if prompt_asks_for_feedback(prompt) && !tool_result_has_feedback_evidence(result, prompt) {
         return false;
     }
-    if prompt_asks_for_github_work_items(prompt)
-        && plain_text_tool_result_looks_like_github_auth_status(result)
-    {
+    if prompt_asks_for_work_items(prompt) && plain_text_tool_result_looks_like_auth_status(result) {
         return false;
     }
-    if prompt_asks_for_pull_requests(prompt)
-        && plain_text_tool_result_looks_like_git_remotes(result)
-    {
+    if prompt_asks_for_work_items(prompt) && plain_text_tool_result_looks_like_git_remotes(result) {
         return false;
     }
-    if plain_text_tool_result_looks_like_github_repo_list(result)
-        && !prompt_asks_for_github_repositories(prompt)
+    if plain_text_tool_result_looks_like_repository_list(result)
+        && !prompt_asks_for_repositories(prompt)
     {
         return false;
     }
@@ -3289,31 +3290,57 @@ fn plain_text_tool_result_looks_empty(result: &str) -> bool {
     )
 }
 
-fn prompt_asks_for_github_work_items(prompt: &str) -> bool {
+fn prompt_asks_for_work_items(prompt: &str) -> bool {
     let lower = prompt.to_ascii_lowercase();
-    let asks_github = lower.contains("gh ")
-        || lower.contains("github")
+    let asks_specific_work_items = prompt_has_word(&lower, "pr")
+        || prompt_has_word(&lower, "prs")
+        || prompt_has_word(&lower, "pulls")
         || lower.contains("pull request")
-        || prompt_has_word(&lower, "pr")
-        || lower.contains("issue");
-    let asks_work_items = prompt_has_word(&lower, "pr")
-        || lower.contains("pull request")
+        || lower.contains("pull requests")
+        || lower.contains("merge request")
+        || lower.contains("merge requests")
         || lower.contains("issue")
-        || lower.contains("interesting")
-        || lower.contains("recent")
-        || lower.contains("open");
-    asks_github && asks_work_items
+        || lower.contains("issues")
+        || lower.contains("ticket")
+        || lower.contains("tickets")
+        || lower.contains("task")
+        || lower.contains("tasks")
+        || lower.contains("bug")
+        || lower.contains("bugs")
+        || lower.contains("work item")
+        || lower.contains("work items");
+    let asks_listing = contains_any(
+        &lower,
+        &[
+            "list",
+            "find",
+            "show",
+            "check",
+            "get",
+            "recent",
+            "open",
+            "important",
+            "interesting",
+            "status",
+        ],
+    );
+    asks_specific_work_items && asks_listing
 }
 
-fn prompt_asks_for_pull_requests(prompt: &str) -> bool {
+fn prompt_asks_for_numbered_work_items(prompt: &str) -> bool {
     let lower = prompt.to_ascii_lowercase();
     prompt_has_word(&lower, "pr")
         || prompt_has_word(&lower, "prs")
         || prompt_has_word(&lower, "pulls")
         || lower.contains("pull request")
+        || lower.contains("merge request")
+        || lower.contains("issue")
+        || lower.contains("ticket")
+        || lower.contains("task")
+        || lower.contains("work item")
 }
 
-fn prompt_asks_for_github_repositories(prompt: &str) -> bool {
+fn prompt_asks_for_repositories(prompt: &str) -> bool {
     let lower = prompt.to_ascii_lowercase();
     prompt_has_word(&lower, "repo")
         || prompt_has_word(&lower, "repos")
@@ -3327,16 +3354,18 @@ fn prompt_has_word(prompt: &str, needle: &str) -> bool {
         .any(|token| token == needle)
 }
 
-fn plain_text_tool_result_looks_like_github_auth_status(result: &str) -> bool {
+fn plain_text_tool_result_looks_like_auth_status(result: &str) -> bool {
     let normalized = result.replace('\r', "");
     let lower = normalized.trim_start().to_ascii_lowercase();
     let first_line = lower.lines().next().unwrap_or("").trim();
-    first_line == "github.com"
-        && lower.contains("logged in to github.com")
-        && lower.contains("active account:")
+    let first_line_looks_like_service =
+        first_line.contains('.') && !first_line.contains(char::is_whitespace);
+    first_line_looks_like_service
+        && (lower.contains("logged in to") || lower.contains("authenticated"))
+        && (lower.contains("active account") || lower.contains("account:"))
 }
 
-fn plain_text_tool_result_looks_like_github_repo_list(result: &str) -> bool {
+fn plain_text_tool_result_looks_like_repository_list(result: &str) -> bool {
     let rows = result
         .lines()
         .map(str::trim)
@@ -3346,20 +3375,44 @@ fn plain_text_tool_result_looks_like_github_repo_list(result: &str) -> bool {
             Some((columns.next()?, columns.next()?, columns.next()?))
         });
     rows.take(3).any(|(repo, _description, visibility)| {
-        repo.contains('/')
-            && !repo.contains(char::is_whitespace)
+        repository_slug_looks_like_owner_name(repo)
             && (visibility.contains("public") || visibility.contains("private"))
     })
+}
+
+fn repository_slug_looks_like_owner_name(value: &str) -> bool {
+    let mut parts = value.split('/');
+    let Some(owner) = parts.next() else {
+        return false;
+    };
+    let Some(name) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && !owner.is_empty()
+        && !name.is_empty()
+        && owner.chars().all(repository_slug_char)
+        && name.chars().all(repository_slug_char)
+}
+
+fn repository_slug_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.')
 }
 
 fn plain_text_tool_result_looks_like_git_remotes(result: &str) -> bool {
     result.lines().map(str::trim).any(|line| {
         let mut columns = line.split('\t').map(str::trim);
         matches!(columns.next(), Some("origin" | "upstream"))
-            && columns.next().is_some_and(|remote| {
-                remote.contains("github.com:") || remote.contains("github.com/")
-            })
+            && columns.next().is_some_and(looks_like_git_remote_location)
     })
+}
+
+fn looks_like_git_remote_location(remote: &str) -> bool {
+    remote.contains("://")
+        || remote.contains('@')
+        || remote.contains(".git")
+        || remote.contains(" (fetch)")
+        || remote.contains(" (push)")
 }
 
 fn plain_text_tool_result_looks_like_error(result: &str) -> bool {

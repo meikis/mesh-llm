@@ -520,7 +520,7 @@ async fn goose_repo_list_tool_result_is_not_final_pr_evidence() {
 
     assert_eq!(result.turn_kind, moa::TurnKind::ToolResult);
     assert!(
-        answer.contains("listed repositories, not pull requests"),
+        answer.contains("listed repositories, not the requested work items"),
         "{answer}"
     );
     assert!(

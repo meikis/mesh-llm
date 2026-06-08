@@ -1743,6 +1743,15 @@ fn named_argument_boundary(token: &str) -> bool {
             | "please"
             | "use"
             | "using"
+            | "look"
+            | "lookup"
+            | "check"
+            | "find"
+            | "get"
+            | "search"
+            | "run"
+            | "execute"
+            | "call"
             | "with"
             | "the"
             | "a"
@@ -5264,6 +5273,29 @@ mod response_builder_tests {
             forced.fallback_arguments,
             serde_json::json!({"city": "Sydney"})
         );
+    }
+
+    #[test]
+    fn named_argument_inference_skips_intent_verbs_after_prepositions() {
+        let tools = serde_json::json!([
+            {"type": "function", "function": {
+                "name": "weather_lookup",
+                "description": "Look up current weather for a city",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string", "description": "City to check"}},
+                    "required": ["city"]
+                }
+            }}
+        ]);
+
+        let args = infer_tool_arguments_from_prompt(
+            "weather_lookup",
+            Some(&tools),
+            "Use the weather lookup tool to check Sydney.",
+        );
+
+        assert_eq!(args, serde_json::json!({"city": "Sydney"}));
     }
 
     #[test]

@@ -27,6 +27,24 @@ pub struct ModelSummary {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogRecommendedModel {
+    pub name: String,
+    pub file: String,
+    pub url: String,
+    pub size: String,
+    pub description: String,
+    pub draft: Option<String>,
+    pub extra_files: Vec<CatalogRecommendedAsset>,
+    pub mmproj: Option<CatalogRecommendedAsset>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogRecommendedAsset {
+    pub file: String,
+    pub url: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ModelSearchQuery {
     pub query: String,
     pub limit: usize,
@@ -202,14 +220,43 @@ fn maybe_push_model(root: &Path, path: PathBuf, models: &mut Vec<InstalledModel>
 }
 
 pub fn recommended_models() -> Vec<ModelSummary> {
+    recommended_catalog_models()
+        .into_iter()
+        .map(|model| {
+            let capabilities = infer_recommended_model_capabilities(&model);
+            ModelSummary {
+                id: model.name.clone(),
+                name: model.name,
+                size_label: Some(model.size),
+                description: Some(model.description),
+                capabilities,
+            }
+        })
+        .collect()
+}
+
+pub fn recommended_catalog_models() -> Vec<CatalogRecommendedModel> {
     catalog_models()
         .into_iter()
-        .map(|model| ModelSummary {
-            id: model.name.clone(),
+        .map(|model| CatalogRecommendedModel {
             name: model.name.clone(),
-            size_label: Some(model.size.clone()),
-            description: Some(model.description.clone()),
-            capabilities: infer_catalog_capabilities(&model),
+            file: model.file.clone(),
+            url: model.url.clone(),
+            size: model.size.clone(),
+            description: model.description.clone(),
+            draft: model.draft.clone(),
+            extra_files: model
+                .extra_files
+                .into_iter()
+                .map(|asset| CatalogRecommendedAsset {
+                    file: asset.file,
+                    url: asset.url,
+                })
+                .collect(),
+            mmproj: model.mmproj.map(|asset| CatalogRecommendedAsset {
+                file: asset.file,
+                url: asset.url,
+            }),
         })
         .collect()
 }
@@ -648,6 +695,30 @@ fn infer_catalog_capabilities(model: &CatalogModel) -> ModelCapabilities {
     caps.normalize()
 }
 
+fn infer_recommended_model_capabilities(model: &CatalogRecommendedModel) -> ModelCapabilities {
+    let mut caps = ModelCapabilities::default();
+    if let Some(mmproj) = &model.mmproj {
+        caps.vision = CapabilityLevel::Supported;
+        caps.multimodal = true;
+        caps = merge_name_signals(caps, &[mmproj.file.as_str(), mmproj.url.as_str()]);
+    }
+    let extra_file_signals = model
+        .extra_files
+        .iter()
+        .flat_map(|asset| [asset.file.as_str(), asset.url.as_str()])
+        .collect::<Vec<_>>();
+    caps = merge_name_signals(
+        caps,
+        &[
+            model.name.as_str(),
+            model.file.as_str(),
+            model.description.as_str(),
+        ],
+    );
+    caps = merge_name_signals(caps, &extra_file_signals);
+    caps.normalize()
+}
+
 fn infer_remote_capabilities(repo: &str, file: &str) -> ModelCapabilities {
     merge_name_signals(ModelCapabilities::default(), &[repo, file]).normalize()
 }
@@ -805,6 +876,22 @@ mod tests {
             recommended
                 .iter()
                 .any(|model| model.id == "Qwen3-4B-Q4_K_M")
+        );
+        let gemma_e4b = recommended
+            .iter()
+            .find(|model| model.id == "Gemma-4-E4B-it-Q4_K_M")
+            .expect("Gemma 4 E4B recommendation");
+        assert!(gemma_e4b.capabilities.multimodal);
+        assert_eq!(gemma_e4b.capabilities.vision, CapabilityLevel::Supported);
+        assert!(
+            recommended
+                .iter()
+                .any(|model| model.id == "Qwen3.6-35B-A3B-UD-Q4_K_M")
+        );
+        assert!(
+            recommended
+                .iter()
+                .all(|model| model.id != "Qwen3.5-9B-Vision-Q4_K_M")
         );
     }
 

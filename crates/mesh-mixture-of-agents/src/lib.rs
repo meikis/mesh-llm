@@ -51,8 +51,8 @@ pub(crate) use tool_guard::enforce_tool_call_contract;
 use backend::call_backend;
 use fanout::{GraceMode, gather_workers_incremental};
 use mesh_llm_guardrails::{
-    extract_tool_name_and_arguments, normalize_tool_arguments, sanitize_tool_arguments_for_tool,
-    tool_arguments_wire_string,
+    ToolCallParseError, extract_tool_name_and_arguments, normalize_tool_arguments,
+    rescue_tool_call_from_text, sanitize_tool_arguments_for_tool, tool_arguments_wire_string,
 };
 use normalize::WorkerOutput;
 use reducer::{hedged_reducer_call, reducer_candidates};
@@ -4468,6 +4468,9 @@ fn chat_or_schema_command_tool_response(
     if let Some(tool) = command_tool {
         return tool_call_response(&tool.name, &tool.fallback_arguments);
     }
+    if let Some(response) = rescued_tool_call_response(content, tools, allowed_tools) {
+        return response;
+    }
     if let Some(tool) =
         inline_json_tool_choice_from_text(content, tools, allowed_tools, prompt_tool_profiles)
     {
@@ -4485,6 +4488,56 @@ fn chat_or_schema_command_tool_response(
     }
 
     chat_response(content)
+}
+
+fn rescued_tool_call_response(
+    content: &str,
+    tools: Option<&Value>,
+    allowed_tools: &[String],
+) -> Option<Value> {
+    if allowed_tools.is_empty() {
+        return None;
+    }
+    match rescue_tool_call_from_text(content, allowed_tools) {
+        Ok(calls) => {
+            let call = calls.into_iter().next()?;
+            match validate_response_tool_arguments(
+                &call.name,
+                &Value::Object(call.arguments),
+                tools,
+                allowed_tools,
+                &[],
+            ) {
+                Ok(arguments) => Some(tool_call_response(&call.name, &arguments)),
+                Err(err) => {
+                    tracing::info!("moa: rescued tool call {} rejected: {err}", call.name);
+                    Some(error_response(
+                        "MoA reducer returned an invalid tool call",
+                        MOA_ERR_NO_USABLE_ANSWER,
+                    ))
+                }
+            }
+        }
+        Err(ToolCallParseError::UnknownTool | ToolCallParseError::InvalidArguments)
+            if starts_with_tool_call_envelope(content) =>
+        {
+            Some(error_response(
+                "MoA reducer returned an undeclared or invalid tool call",
+                MOA_ERR_NO_USABLE_ANSWER,
+            ))
+        }
+        Err(ToolCallParseError::Malformed)
+        | Err(ToolCallParseError::UnknownTool)
+        | Err(ToolCallParseError::InvalidArguments) => None,
+    }
+}
+
+fn starts_with_tool_call_envelope(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    trimmed.starts_with("[TOOL_CALL]")
+        || trimmed.starts_with("<|tool_call>")
+        || trimmed.starts_with("<tool_call>")
+        || trimmed.starts_with("<function=")
 }
 
 fn fenced_command_tool_conversion_allowed(user_text: Option<&str>) -> bool {
@@ -7507,6 +7560,65 @@ mod response_builder_tests {
                 .pointer("/choices/0/message/tool_calls/0/function/arguments")
                 .and_then(Value::as_str),
             Some("{\"command\":\"pwd\"}")
+        );
+    }
+
+    #[test]
+    fn bracketed_arrow_tool_call_maps_to_declared_tool() {
+        let tools = read_file_tool_schema();
+        let response = chat_or_schema_command_tool_response(
+            "[TOOL_CALL]\n{tool => \"read_file\", args => {path: \"README.md\"}}\n[/TOOL_CALL]",
+            Some(&tools),
+            &["read_file".to_string()],
+            &[],
+            Some("Read README.md."),
+        );
+
+        assert_eq!(
+            response
+                .pointer("/choices/0/finish_reason")
+                .and_then(Value::as_str),
+            Some("tool_calls")
+        );
+        assert_eq!(
+            response
+                .pointer("/choices/0/message/tool_calls/0/function/name")
+                .and_then(Value::as_str),
+            Some("read_file")
+        );
+        assert_eq!(
+            response.pointer("/choices/0/message/tool_calls/0/function/arguments"),
+            Some(&Value::String("{\"path\":\"README.md\"}".to_string()))
+        );
+    }
+
+    #[test]
+    fn unknown_bracketed_arrow_tool_call_does_not_leak_as_content() {
+        let tools = read_file_tool_schema();
+        let response = chat_or_schema_command_tool_response(
+            "[TOOL_CALL]\n{tool => \"filesystem_list_allowed_directories\", args => {}}\n[/TOOL_CALL]",
+            Some(&tools),
+            &["read_file".to_string()],
+            &[],
+            Some("Read README.md."),
+        );
+
+        assert_eq!(
+            response
+                .pointer("/choices/0/finish_reason")
+                .and_then(Value::as_str),
+            Some("error")
+        );
+        assert_eq!(
+            response.pointer("/error/code").and_then(Value::as_str),
+            Some(MOA_ERR_NO_USABLE_ANSWER)
+        );
+        assert!(
+            response
+                .pointer("/choices/0/message/content")
+                .and_then(Value::as_str)
+                .is_some_and(|content| !content.contains("[TOOL_CALL]")),
+            "pseudo tool call must not leak to client: {response}"
         );
     }
 

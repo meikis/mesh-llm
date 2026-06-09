@@ -105,6 +105,12 @@ fn tool_call_candidates(content: &str) -> Vec<Value> {
     if let Some(value) = parse_qwen_xml_syntax(content) {
         candidates.push(value);
     }
+    if let Some(value) = parse_bracketed_tool_call_syntax(content) {
+        candidates.push(value);
+    }
+    if let Some(value) = parse_sentinel_tool_call_syntax(content) {
+        candidates.push(value);
+    }
     if let Some(value) = parse_granite_tool_call_syntax(content) {
         candidates.push(value);
     }
@@ -278,6 +284,268 @@ fn parse_granite_tool_call_syntax(content: &str) -> Option<Value> {
     serde_json::from_str(after_start[..end_index].trim()).ok()
 }
 
+fn parse_bracketed_tool_call_syntax(content: &str) -> Option<Value> {
+    let body = bracketed_tool_call_body(content)?;
+    if let Ok(value) = serde_json::from_str::<Value>(body.trim()) {
+        return Some(value);
+    }
+    let mut object = parse_pseudo_argument_object(body.trim())?;
+    let name = object
+        .remove("tool")
+        .or_else(|| object.remove("name"))
+        .or_else(|| object.remove("function"))
+        .and_then(|value| value.as_str().map(ToString::to_string))?;
+    let arguments = object
+        .remove("args")
+        .or_else(|| object.remove("arguments"))
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    Some(json!({ "name": name, "arguments": arguments }))
+}
+
+fn bracketed_tool_call_body(content: &str) -> Option<&str> {
+    let trimmed = content.trim_start();
+    let after_start = trimmed.strip_prefix("[TOOL_CALL]")?;
+    let end_index = after_start.find("[/TOOL_CALL]")?;
+    Some(&after_start[..end_index])
+}
+
+fn parse_sentinel_tool_call_syntax(content: &str) -> Option<Value> {
+    let body = sentinel_tool_call_body(content)?;
+    let call_body = body.trim().strip_prefix("call:")?.trim_start();
+    let name_len = call_body
+        .char_indices()
+        .take_while(|(_, character)| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+        .last()
+        .map(|(index, character)| index + character.len_utf8())?;
+    let name = call_body[..name_len].trim();
+    if name.is_empty() {
+        return None;
+    }
+    let arguments_text = call_body[name_len..].trim_start();
+    let arguments = parse_pseudo_argument_object(arguments_text)?;
+    Some(json!({ "name": name, "arguments": Value::Object(arguments) }))
+}
+
+fn sentinel_tool_call_body(content: &str) -> Option<&str> {
+    let trimmed = content.trim_start();
+    let after_start = trimmed.strip_prefix("<|tool_call>")?;
+    let end_index = [
+        "<tool_call|>",
+        "<|/tool_call|>",
+        "</tool_call>",
+        "<|end_tool_call|>",
+    ]
+    .iter()
+    .filter_map(|marker| after_start.find(marker))
+    .min()?;
+    Some(&after_start[..end_index])
+}
+
+fn parse_pseudo_argument_object(content: &str) -> Option<Map<String, Value>> {
+    let object_text = first_balanced_pseudo_object(content)?;
+    if let Ok(Value::Object(arguments)) = serde_json::from_str::<Value>(object_text) {
+        return Some(arguments);
+    }
+    parse_unquoted_argument_object(object_text)
+}
+
+fn first_balanced_pseudo_object(content: &str) -> Option<&str> {
+    let content = content.trim_start();
+    if !content.starts_with('{') {
+        return None;
+    }
+    let end = balanced_pseudo_object_end(content)?;
+    Some(&content[..=end])
+}
+
+fn balanced_pseudo_object_end(content: &str) -> Option<usize> {
+    let mut depth = 0_u32;
+    let mut in_string: Option<char> = None;
+    let mut escaped = false;
+    let mut in_sentinel_string = false;
+    let mut index = 0;
+    while index < content.len() {
+        if let Some(len) = sentinel_string_len_at(&content[index..]) {
+            in_sentinel_string = !in_sentinel_string;
+            index += len;
+            continue;
+        }
+        let character = content[index..].chars().next()?;
+        let next_index = index + character.len_utf8();
+        if in_sentinel_string {
+            index = next_index;
+            continue;
+        }
+        if let Some(quote) = in_string {
+            if escaped {
+                escaped = false;
+                index = next_index;
+                continue;
+            }
+            match character {
+                '\\' => escaped = true,
+                _ if character == quote => in_string = None,
+                _ => {}
+            }
+            index = next_index;
+            continue;
+        }
+        match character {
+            '"' | '\'' => in_string = Some(character),
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+        index = next_index;
+    }
+    None
+}
+
+fn parse_unquoted_argument_object(object_text: &str) -> Option<Map<String, Value>> {
+    let inner = object_text
+        .trim()
+        .strip_prefix('{')?
+        .strip_suffix('}')?
+        .trim();
+    let mut arguments = Map::new();
+    for field in split_pseudo_fields(inner) {
+        let (key, value) = split_pseudo_key_value(field)?;
+        arguments.insert(key.to_string(), parse_pseudo_value(value));
+    }
+    (!arguments.is_empty()).then_some(arguments)
+}
+
+fn split_pseudo_fields(input: &str) -> Vec<&str> {
+    let mut fields = Vec::new();
+    let mut start = 0;
+    let mut depth = 0_u32;
+    let mut in_string: Option<char> = None;
+    let mut escaped = false;
+    let mut in_sentinel_string = false;
+    let mut index = 0;
+    while index < input.len() {
+        if let Some(len) = sentinel_string_len_at(&input[index..]) {
+            in_sentinel_string = !in_sentinel_string;
+            index += len;
+            continue;
+        }
+        let Some(character) = input[index..].chars().next() else {
+            break;
+        };
+        let next_index = index + character.len_utf8();
+        if in_sentinel_string {
+            index = next_index;
+            continue;
+        }
+        if let Some(quote) = in_string {
+            if escaped {
+                escaped = false;
+                index = next_index;
+                continue;
+            }
+            match character {
+                '\\' => escaped = true,
+                _ if character == quote => in_string = None,
+                _ => {}
+            }
+            index = next_index;
+            continue;
+        }
+        match character {
+            '"' | '\'' => in_string = Some(character),
+            '{' | '[' => depth += 1,
+            '}' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let field = input[start..index].trim();
+                if !field.is_empty() {
+                    fields.push(field);
+                }
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+        index = next_index;
+    }
+    let field = input[start..].trim();
+    if !field.is_empty() {
+        fields.push(field);
+    }
+    fields
+}
+
+fn sentinel_string_len_at(input: &str) -> Option<usize> {
+    ["<|\"|>", "<|'|>"]
+        .iter()
+        .find(|marker| input.starts_with(**marker))
+        .map(|marker| marker.len())
+}
+
+fn split_pseudo_key_value(field: &str) -> Option<(&str, &str)> {
+    if let Some(separator) = field.find("=>") {
+        return split_pseudo_key_value_at(field, separator, 2);
+    }
+    let separator = field.find(':').or_else(|| field.find('='))?;
+    split_pseudo_key_value_at(field, separator, 1)
+}
+
+fn split_pseudo_key_value_at(
+    field: &str,
+    separator: usize,
+    separator_len: usize,
+) -> Option<(&str, &str)> {
+    let key = field[..separator]
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'');
+    if key.is_empty() {
+        return None;
+    }
+    Some((key, field[separator + separator_len..].trim()))
+}
+
+fn parse_pseudo_value(value: &str) -> Value {
+    let value = value.trim();
+    if let Some(unwrapped) = strip_sentinel_string(value) {
+        return Value::String(unwrapped.to_string());
+    }
+    if let Ok(parsed) = serde_json::from_str::<Value>(value) {
+        return parsed;
+    }
+    let pseudo_object = value
+        .starts_with('{')
+        .then(|| parse_pseudo_argument_object(value))
+        .flatten();
+    if let Some(arguments) = pseudo_object {
+        return Value::Object(arguments);
+    }
+    let unquoted = value
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string();
+    Value::String(unquoted)
+}
+
+fn strip_sentinel_string(value: &str) -> Option<&str> {
+    let double = "<|\"|>";
+    let single = "<|'|>";
+    value
+        .strip_prefix(double)
+        .and_then(|inner| inner.strip_suffix(double))
+        .or_else(|| {
+            value
+                .strip_prefix(single)
+                .and_then(|inner| inner.strip_suffix(single))
+        })
+}
+
 fn first_balanced_object(content: &str) -> Option<String> {
     let start = content.find('{')?;
     let end = balanced_substring_end(content.as_bytes(), start, b'{', b'}')?;
@@ -327,16 +595,117 @@ fn parse_one_tool_call(
     let Some((name, arguments_value)) = extract_tool_name_and_arguments(value) else {
         return Err(ToolCallParseError::Malformed);
     };
-    if !allowed_tools.is_empty() && !allowed_tools.contains(name) {
-        return Err(ToolCallParseError::UnknownTool);
-    }
+    let name = resolve_allowed_tool_name(name, allowed_tools)?;
     let Some(arguments) = normalize_tool_arguments(arguments_value) else {
         return Err(ToolCallParseError::InvalidArguments);
     };
-    Ok(ParsedToolCall {
-        name: name.to_string(),
-        arguments,
-    })
+    Ok(ParsedToolCall { name, arguments })
+}
+
+fn resolve_allowed_tool_name(
+    raw_name: &str,
+    allowed_tools: &BTreeSet<&str>,
+) -> Result<String, ToolCallParseError> {
+    if allowed_tools.is_empty() {
+        return Ok(raw_name.to_string());
+    }
+    if allowed_tools.contains(raw_name) {
+        return Ok(raw_name.to_string());
+    }
+
+    let Some(matched) = high_confidence_name_match(raw_name, allowed_tools.iter().copied()) else {
+        return Err(ToolCallParseError::UnknownTool);
+    };
+    Ok(matched.to_string())
+}
+
+fn high_confidence_name_match<'a>(
+    raw_name: &str,
+    candidates: impl Iterator<Item = &'a str>,
+) -> Option<&'a str> {
+    let raw_norm = normalized_identifier(raw_name);
+    if raw_norm.len() < 4 {
+        return None;
+    }
+
+    let mut matches = candidates
+        .filter_map(|candidate| {
+            let candidate_norm = normalized_identifier(candidate);
+            name_match_score(raw_name, &raw_norm, candidate, &candidate_norm)
+                .map(|score| (score, candidate))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(right.1)));
+
+    let [(score, candidate), rest @ ..] = matches.as_slice() else {
+        return None;
+    };
+    let runner_up = rest.first().map(|(score, _)| *score).unwrap_or(0);
+    (*score >= 90 && *score >= runner_up + 12).then_some(*candidate)
+}
+
+fn name_match_score(
+    raw_name: &str,
+    raw_norm: &str,
+    candidate: &str,
+    candidate_norm: &str,
+) -> Option<u16> {
+    if raw_norm == candidate_norm {
+        return Some(120);
+    }
+    let raw_tokens = identifier_tokens(raw_name);
+    let candidate_tokens = identifier_tokens(candidate);
+    if !candidate_tokens.is_empty()
+        && token_suffix_matches(&raw_tokens, &candidate_tokens)
+        && candidate_norm.len() >= 6
+    {
+        return Some(105);
+    }
+    close_identifier_match(raw_norm, candidate_norm).then_some(95)
+}
+
+fn normalized_identifier(name: &str) -> String {
+    name.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn identifier_tokens(name: &str) -> Vec<String> {
+    name.split(|character: char| !character.is_ascii_alphanumeric())
+        .filter_map(|token| {
+            let token = token.trim().to_ascii_lowercase();
+            (!token.is_empty()).then_some(token)
+        })
+        .collect()
+}
+
+fn token_suffix_matches(raw_tokens: &[String], candidate_tokens: &[String]) -> bool {
+    raw_tokens.len() >= candidate_tokens.len()
+        && raw_tokens[raw_tokens.len() - candidate_tokens.len()..] == *candidate_tokens
+}
+
+fn close_identifier_match(left: &str, right: &str) -> bool {
+    if left.len().abs_diff(right.len()) > 2 || left.len().min(right.len()) < 6 {
+        return false;
+    }
+    levenshtein_distance(left, right) <= 1
+}
+
+fn levenshtein_distance(left: &str, right: &str) -> usize {
+    let mut previous: Vec<usize> = (0..=right.chars().count()).collect();
+    let mut current = vec![0; previous.len()];
+    for (left_index, left_char) in left.chars().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_char) in right.chars().enumerate() {
+            let insert = current[right_index] + 1;
+            let delete = previous[right_index + 1] + 1;
+            let replace = previous[right_index] + usize::from(left_char != right_char);
+            current[right_index + 1] = insert.min(delete).min(replace);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.chars().count()]
 }
 
 #[cfg(test)]
@@ -373,5 +742,115 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, ToolCallParseError::UnknownTool);
+    }
+
+    #[test]
+    fn canonicalizes_tool_name_from_allowed_catalog() {
+        let allowed_tools = vec!["web_search".to_string()];
+        let calls = rescue_tool_call_from_text(
+            r#"{"name":"web.search","arguments":{"query":"Mesh-LLM"}}"#,
+            &allowed_tools,
+        )
+        .unwrap();
+
+        assert_eq!(calls[0].name, "web_search");
+        assert_eq!(calls[0].arguments["query"], "Mesh-LLM");
+    }
+
+    #[test]
+    fn canonicalizes_namespaced_tool_name_only_when_unique() {
+        let allowed_tools = vec!["read_file".to_string()];
+        let calls = rescue_tool_call_from_text(
+            r#"{"name":"filesystem.read_file","arguments":{"path":"README.md"}}"#,
+            &allowed_tools,
+        )
+        .unwrap();
+
+        assert_eq!(calls[0].name, "read_file");
+    }
+
+    #[test]
+    fn ambiguous_tool_name_correction_fails_closed() {
+        let allowed_tools = vec!["read_file".to_string(), "write_file".to_string()];
+        let error = rescue_tool_call_from_text(
+            r#"{"name":"filesystem.file","arguments":{"path":"README.md"}}"#,
+            &allowed_tools,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, ToolCallParseError::UnknownTool);
+    }
+
+    #[test]
+    fn rescues_sentinel_tool_call() {
+        let calls = rescue_tool_call_from_text(
+            r#"<|tool_call>call:web_search{query:<|"|>Mesh-LLM #808 Harden OpenClaw/MoA Telegram timeouts<|"|>}<tool_call|>"#,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(calls[0].name, "web_search");
+        assert_eq!(
+            calls[0].arguments["query"],
+            "Mesh-LLM #808 Harden OpenClaw/MoA Telegram timeouts"
+        );
+    }
+
+    #[test]
+    fn rescues_bracketed_arrow_tool_call() {
+        let calls = rescue_tool_call_from_text(
+            "[TOOL_CALL]\n{tool => \"read_file\", args => {path: \"README.md\"}}\n[/TOOL_CALL]",
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(calls[0].arguments["path"], "README.md");
+    }
+
+    #[test]
+    fn bracketed_arrow_tool_call_rejects_unknown_tool_when_catalog_is_present() {
+        let allowed_tools = vec!["read_file".to_string()];
+        let error = rescue_tool_call_from_text(
+            "[TOOL_CALL]\n{tool => \"filesystem_list_allowed_directories\", args => {}}\n[/TOOL_CALL]",
+            &allowed_tools,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, ToolCallParseError::UnknownTool);
+    }
+
+    #[test]
+    fn explanatory_bracketed_tool_call_text_stays_malformed() {
+        let error = rescue_tool_call_from_text(
+            "Use this shape: [TOOL_CALL]\n{tool => \"read_file\", args => {path: \"README.md\"}}\n[/TOOL_CALL]",
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error, ToolCallParseError::Malformed);
+    }
+
+    #[test]
+    fn sentinel_tool_call_rejects_unknown_tool_when_catalog_is_present() {
+        let allowed_tools = vec!["web_fetch".to_string()];
+        let error = rescue_tool_call_from_text(
+            r#"<|tool_call>call:web_search{query:<|"|>Mesh-LLM<|"|>}<tool_call|>"#,
+            &allowed_tools,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, ToolCallParseError::UnknownTool);
+    }
+
+    #[test]
+    fn explanatory_sentinel_tool_call_text_stays_malformed() {
+        let error = rescue_tool_call_from_text(
+            r#"Use this shape when calling a tool: <|tool_call>call:web_search{query:<|"|>Mesh-LLM<|"|>}<tool_call|>"#,
+            &[],
+        )
+        .unwrap_err();
+
+        assert_eq!(error, ToolCallParseError::Malformed);
     }
 }

@@ -1,4 +1,5 @@
 use serde_json::{Map, Value, json};
+use std::collections::HashSet;
 use std::fmt;
 
 use crate::{request_contract::GuardrailRequestContract, structured::StructuredOutputSpec};
@@ -164,6 +165,7 @@ pub fn sanitize_tool_arguments_for_tool(
         return Ok(arguments);
     };
 
+    repair_argument_keys_for_schema(&mut arguments, parameters);
     sanitize_object_for_schema(&mut arguments, parameters);
     ensure_required_arguments(tool_name, &arguments, parameters)?;
     Ok(arguments)
@@ -179,6 +181,143 @@ fn tool_parameters<'a>(tool_name: &str, tools: Option<&'a Value>) -> Option<&'a 
                 .is_some_and(|name| name == tool_name)
         })?
         .pointer("/function/parameters")
+}
+
+fn repair_argument_keys_for_schema(arguments: &mut Value, schema: &Value) {
+    let Some(arguments) = arguments.as_object_mut() else {
+        return;
+    };
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return;
+    };
+
+    for repair in argument_key_repairs(arguments, properties, required_fields(schema)) {
+        if arguments.contains_key(&repair.to) {
+            continue;
+        }
+        if let Some(value) = arguments.remove(&repair.from) {
+            arguments.insert(repair.to, value);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct ArgumentKeyRepair {
+    from: String,
+    to: String,
+}
+
+fn argument_key_repairs(
+    arguments: &Map<String, Value>,
+    properties: &Map<String, Value>,
+    required: HashSet<&str>,
+) -> Vec<ArgumentKeyRepair> {
+    arguments
+        .iter()
+        .filter(|(key, _)| !properties.contains_key(*key))
+        .filter_map(|(key, value)| {
+            let destination = high_confidence_property_match(key, value, properties, &required)?;
+            Some(ArgumentKeyRepair {
+                from: key.clone(),
+                to: destination.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn required_fields(schema: &Value) -> HashSet<&str> {
+    schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect()
+}
+
+fn high_confidence_property_match<'a>(
+    raw_key: &str,
+    value: &Value,
+    properties: &'a Map<String, Value>,
+    required: &HashSet<&str>,
+) -> Option<&'a str> {
+    let mut matches = properties
+        .iter()
+        .filter(|(name, schema)| {
+            argument_value_matches_schema(value, schema) && (required.contains(name.as_str()))
+        })
+        .filter_map(|(name, _)| property_match_score(raw_key, name).map(|score| (score, name)))
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(right.1)));
+
+    let [(score, name), rest @ ..] = matches.as_slice() else {
+        return None;
+    };
+    let runner_up = rest.first().map(|(score, _)| *score).unwrap_or(0);
+    (*score >= 90 && *score >= runner_up + 12).then_some(name.as_str())
+}
+
+fn property_match_score(raw_key: &str, candidate: &str) -> Option<u16> {
+    let raw_norm = normalized_identifier(raw_key);
+    let candidate_norm = normalized_identifier(candidate);
+    if raw_norm.len() < 3 || candidate_norm.len() < 3 {
+        return None;
+    }
+    if raw_norm == candidate_norm {
+        return Some(120);
+    }
+
+    let raw_tokens = identifier_tokens(raw_key);
+    let candidate_tokens = identifier_tokens(candidate);
+    if !candidate_tokens.is_empty() && token_suffix_matches(&raw_tokens, &candidate_tokens) {
+        return Some(105);
+    }
+
+    close_identifier_match(&raw_norm, &candidate_norm).then_some(95)
+}
+
+fn normalized_identifier(name: &str) -> String {
+    name.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn identifier_tokens(name: &str) -> Vec<String> {
+    name.split(|character: char| !character.is_ascii_alphanumeric())
+        .filter_map(|token| {
+            let token = token.trim().to_ascii_lowercase();
+            (!token.is_empty()).then_some(token)
+        })
+        .collect()
+}
+
+fn token_suffix_matches(raw_tokens: &[String], candidate_tokens: &[String]) -> bool {
+    raw_tokens.len() >= candidate_tokens.len()
+        && raw_tokens[raw_tokens.len() - candidate_tokens.len()..] == *candidate_tokens
+}
+
+fn close_identifier_match(left: &str, right: &str) -> bool {
+    if left.len().abs_diff(right.len()) > 2 || left.len().min(right.len()) < 5 {
+        return false;
+    }
+    levenshtein_distance(left, right) <= 1
+}
+
+fn levenshtein_distance(left: &str, right: &str) -> usize {
+    let mut previous: Vec<usize> = (0..=right.chars().count()).collect();
+    let mut current = vec![0; previous.len()];
+    for (left_index, left_char) in left.chars().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_char) in right.chars().enumerate() {
+            let insert = current[right_index] + 1;
+            let delete = previous[right_index + 1] + 1;
+            let replace = previous[right_index] + usize::from(left_char != right_char);
+            current[right_index + 1] = insert.min(delete).min(replace);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.chars().count()]
 }
 
 fn sanitize_object_for_schema(arguments: &mut Value, schema: &Value) {
@@ -375,6 +514,59 @@ mod tests {
                 fields: vec!["path".into()]
             }
         );
+    }
+
+    #[test]
+    fn schema_sanitizer_repairs_required_argument_key_from_schema() {
+        let tools = json!([{
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "File path to read"}
+                    },
+                    "required": ["path"],
+                    "additionalProperties": false
+                }
+            }
+        }]);
+
+        let cleaned = sanitize_tool_arguments_for_tool(
+            "read_file",
+            &json!({"file_path": "README.md"}),
+            Some(&tools),
+        )
+        .unwrap();
+
+        assert_eq!(cleaned, json!({"path": "README.md"}));
+    }
+
+    #[test]
+    fn schema_sanitizer_does_not_repair_non_required_argument_key() {
+        let tools = json!([{
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "File path to read"}
+                    },
+                    "additionalProperties": false
+                }
+            }
+        }]);
+
+        let cleaned = sanitize_tool_arguments_for_tool(
+            "read_file",
+            &json!({"file_path": "README.md"}),
+            Some(&tools),
+        )
+        .unwrap();
+
+        assert_eq!(cleaned, json!({}));
     }
 
     #[test]

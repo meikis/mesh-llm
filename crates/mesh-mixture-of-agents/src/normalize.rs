@@ -905,6 +905,28 @@ mod tests {
     }
 
     #[test]
+    fn sentinel_tool_call_uses_guardrail_rescue() {
+        let raw = r#"<|tool_call>call:web_search{query:<|"|>Mesh-LLM #808 Harden OpenClaw/MoA Telegram timeouts<|"|>}<tool_call|>"#;
+        let out = normalize_worker_output(raw, "gemma", WorkerRole::Reducer, 100);
+        assert_eq!(out.kind, OutputKind::ToolProposal);
+        assert_eq!(out.tool_name.as_deref(), Some("web_search"));
+        assert_eq!(
+            out.tool_arguments.expect("args")["query"],
+            "Mesh-LLM #808 Harden OpenClaw/MoA Telegram timeouts"
+        );
+    }
+
+    #[test]
+    fn bracketed_arrow_tool_call_uses_guardrail_rescue() {
+        let raw =
+            "[TOOL_CALL]\n{tool => \"read_file\", args => {path: \"README.md\"}}\n[/TOOL_CALL]";
+        let out = normalize_worker_output(raw, "worker", WorkerRole::Reducer, 100);
+        assert_eq!(out.kind, OutputKind::ToolProposal);
+        assert_eq!(out.tool_name.as_deref(), Some("read_file"));
+        assert_eq!(out.tool_arguments.expect("args")["path"], "README.md");
+    }
+
+    #[test]
     fn parenthesized_tool_call_uses_guardrail_rescue() {
         let raw = r#"read_file({"path":"README.md"})"#;
         let out = normalize_worker_output(raw, "small-model", WorkerRole::Fast, 100);

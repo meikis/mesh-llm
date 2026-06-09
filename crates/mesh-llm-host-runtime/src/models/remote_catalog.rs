@@ -57,6 +57,10 @@ const CATALOG_REFRESH_BACKOFF: Duration = Duration::from_secs(5 * 60);
 
 static CATALOG_ENTRIES_OVERRIDE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+const SUPPRESSED_RECOMMENDATION_NAMES: &[&str] = &["Qwen3.5-9B-Vision-Q4_K_M"];
+const BUNDLED_RECOMMENDATION_OVERLAY_NAMES: &[&str] =
+    &["Gemma-4-E4B-it-Q4_K_M", "Qwen3.6-35B-A3B-UD-Q4_K_M"];
+
 #[cfg(test)]
 type HfModelFileProbe = Arc<dyn Fn(&str, &str, &str) -> bool + Send + Sync>;
 
@@ -568,10 +572,77 @@ pub fn loaded_models() -> Result<Vec<RemoteCatalogModel>> {
     Ok(models)
 }
 
+pub fn recommended_models() -> Result<Vec<RemoteCatalogModel>> {
+    let mut models = loaded_models()?;
+    apply_bundled_recommendation_overlay(&mut models)?;
+    Ok(models)
+}
+
 /// Returns all loaded catalog entries (if any).
 pub fn catalog_entries() -> Option<Vec<CatalogEntry>> {
     let lock = CATALOG_ENTRIES.read().ok()?;
     lock.clone()
+}
+
+fn apply_bundled_recommendation_overlay(models: &mut Vec<RemoteCatalogModel>) -> Result<()> {
+    models.retain(|model| {
+        !SUPPRESSED_RECOMMENDATION_NAMES
+            .iter()
+            .any(|name| model.name.eq_ignore_ascii_case(name))
+    });
+
+    let mut overlays = mesh_llm_node::models::recommended_catalog_models()
+        .into_iter()
+        .filter(|model| {
+            BUNDLED_RECOMMENDATION_OVERLAY_NAMES
+                .iter()
+                .any(|name| model.name.eq_ignore_ascii_case(name))
+        })
+        .map(remote_model_from_bundled_recommendation)
+        .collect::<Result<Vec<_>>>()?;
+
+    for overlay in &overlays {
+        models.retain(|model| !model.name.eq_ignore_ascii_case(&overlay.name));
+    }
+    overlays.append(models);
+    *models = overlays;
+    Ok(())
+}
+
+fn remote_model_from_bundled_recommendation(
+    model: mesh_llm_node::models::CatalogRecommendedModel,
+) -> Result<RemoteCatalogModel> {
+    let source = remote_asset_from_bundled_url(&model.file, &model.url)?;
+    Ok(RemoteCatalogModel {
+        name: model.name,
+        file: source.file.clone(),
+        repo: source.repo.clone(),
+        revision: source.revision.clone(),
+        source_file: source.source_file.clone(),
+        size: Some(model.size),
+        description: Some(model.description),
+        draft: model.draft,
+        extra_files: model
+            .extra_files
+            .into_iter()
+            .map(|asset| remote_asset_from_bundled_url(&asset.file, &asset.url))
+            .collect::<Result<Vec<_>>>()?,
+        mmproj: model
+            .mmproj
+            .map(|asset| remote_asset_from_bundled_url(&asset.file, &asset.url))
+            .transpose()?,
+    })
+}
+
+fn remote_asset_from_bundled_url(file: &str, url: &str) -> Result<RemoteCatalogAsset> {
+    let (repo, revision, source_file) = model_resolver::parse_hf_resolve_url(url)
+        .with_context(|| format!("parse bundled catalog URL for {file}: {url}"))?;
+    Ok(RemoteCatalogAsset {
+        file: file.to_string(),
+        repo,
+        revision,
+        source_file,
+    })
 }
 
 fn resolver_from_loaded_entries() -> Option<ModelResolver<HfCatalogProvider>> {
@@ -984,6 +1055,40 @@ mod tests {
                 revision: Some("main".to_string()),
                 source_file: "mmproj-BF16.gguf".to_string(),
             })
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn recommended_models_apply_bundled_overlay() {
+        let _catalog = set_catalog_entries_for_test(vec![CatalogEntry {
+            schema_version: 1,
+            source_repo: "example/recommendations".to_string(),
+            variants: HashMap::from([
+                (
+                    "old-qwen".to_string(),
+                    test_variant("Qwen3.5-9B-Vision-Q4_K_M", "unsloth/Qwen3.5-9B-GGUF", &[]),
+                ),
+                (
+                    "other".to_string(),
+                    test_variant("Other-Recommendation-Q4_K_M", "example/other", &[]),
+                ),
+            ]),
+        }]);
+
+        let models = recommended_models().expect("recommended models");
+
+        assert_eq!(models[0].name, "Gemma-4-E4B-it-Q4_K_M");
+        assert_eq!(models[1].name, "Qwen3.6-35B-A3B-UD-Q4_K_M");
+        assert!(
+            models
+                .iter()
+                .any(|model| model.name == "Other-Recommendation-Q4_K_M")
+        );
+        assert!(
+            models
+                .iter()
+                .all(|model| model.name != "Qwen3.5-9B-Vision-Q4_K_M")
         );
     }
 

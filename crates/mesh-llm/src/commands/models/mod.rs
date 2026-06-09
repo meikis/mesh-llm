@@ -135,7 +135,7 @@ pub async fn run_model_search(
 pub fn run_model_recommended(json_output: bool) -> Result<()> {
     let formatter = models_formatter(json_output);
     remote_catalog::ensure_catalog()?;
-    let models = remote_catalog::loaded_models()?;
+    let models = remote_catalog::recommended_models()?;
     formatter.render_recommended(&models)
 }
 

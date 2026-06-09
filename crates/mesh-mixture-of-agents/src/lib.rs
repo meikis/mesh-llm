@@ -731,20 +731,24 @@ fn selected_tool_names_for_turn(
         return with_recent_tool_chain_names(session, &available, explicit);
     }
 
-    let command_intent =
-        command_intent_tool_names(session.tools(), &available, &text, prompt_tool_profiles);
-    if !command_intent.is_empty() {
-        return with_recent_tool_chain_names(session, &available, command_intent);
-    }
-
     let url_intent = url_intent_tool_names(session.tools(), &available, &text);
     if !url_intent.is_empty() {
         return with_recent_tool_chain_names(session, &available, url_intent);
     }
 
+    let command_intent =
+        command_intent_tool_names(session.tools(), &available, &text, prompt_tool_profiles);
+    if !command_intent.is_empty() && text_has_command_execution_pattern(&text) {
+        return with_recent_tool_chain_names(session, &available, command_intent);
+    }
+
     let search_intent = search_intent_tool_names(session.tools(), &available, &text);
     if !search_intent.is_empty() {
         return with_recent_tool_chain_names(session, &available, search_intent);
+    }
+
+    if !command_intent.is_empty() {
+        return with_recent_tool_chain_names(session, &available, command_intent);
     }
 
     let file_read_intent =
@@ -1240,12 +1244,13 @@ fn search_tool_score(tool: &Value, user_text: &str) -> usize {
 
     let user_tokens = text_tokens(user_text);
     let external_prompt = prompt_looks_external_search(&user_tokens);
-    let local_prompt = user_tokens.iter().any(|token| {
-        matches!(
-            token.as_str(),
-            "memory" | "memories" | "session" | "sessions"
-        )
-    });
+    let local_prompt = !external_prompt
+        && user_tokens.iter().any(|token| {
+            matches!(
+                token.as_str(),
+                "memory" | "memories" | "session" | "sessions"
+            )
+        });
 
     let mut score = 0;
     for token in &tokens {
@@ -1711,7 +1716,14 @@ fn command_execution_pattern_matches(tokens: &[String]) -> bool {
     })
 }
 
+fn text_has_command_execution_pattern(text: &str) -> bool {
+    command_execution_pattern_matches(&lexical_tokens(text))
+}
+
 fn executable_token(token: &str) -> bool {
+    if matches!(token, "tool" | "tools" | "available") {
+        return false;
+    }
     if !(2..=40).contains(&token.len()) {
         return false;
     }
@@ -2724,14 +2736,17 @@ async fn handle_tool_result(
                     );
                     retry_tool_result_response_if_plain(
                         body,
-                        retry_tool_call.as_ref(),
-                        latest_non_answerable_tool
-                            .as_ref()
-                            .map(|(_, result)| result.as_str()),
-                        session.tools(),
-                        response_allowed_tools,
-                        response_prompt_profiles,
-                        response_tools_enabled,
+                        RetryToolResultContext {
+                            retry_tool_call: retry_tool_call.as_ref(),
+                            latest_tool_result: latest_non_answerable_tool
+                                .as_ref()
+                                .map(|(_, result)| result.as_str()),
+                            tools: session.tools(),
+                            allowed_tools: response_allowed_tools,
+                            prompt_tool_profiles: response_prompt_profiles,
+                            user_text: Some(&session.active_user_text()),
+                            tools_enabled: response_tools_enabled,
+                        },
                     )
                 }
                 normalize::OutputKind::Uncertainty => {
@@ -2747,6 +2762,7 @@ async fn handle_tool_result(
                                     session.tools(),
                                     response_allowed_tools,
                                     response_prompt_profiles,
+                                    Some(&session.active_user_text()),
                                 )
                             })
                             .unwrap_or_else(|| {
@@ -2777,14 +2793,28 @@ async fn handle_tool_result(
                             ) =>
                         {
                             let answer = non_answerable_tool_result_answer(session, tool, result);
+                            let response_body = retry_tool_result_response_if_plain(
+                                chat_response(&answer),
+                                RetryToolResultContext {
+                                    retry_tool_call: retry_tool_call.as_ref(),
+                                    latest_tool_result: Some(result),
+                                    tools: session.tools(),
+                                    allowed_tools: response_allowed_tools,
+                                    prompt_tool_profiles: response_prompt_profiles,
+                                    user_text: Some(&session.active_user_text()),
+                                    tools_enabled: response_tools_enabled,
+                                },
+                            );
+                            let output_kind = first_response_tool_call(&response_body)
+                                .map(|_| normalize::OutputKind::ToolProposal);
                             return TurnResult {
-                                response_body: chat_response(&answer),
+                                response_body,
                                 worker_summaries: vec![WorkerSummary {
                                     model: name,
                                     role: WorkerRole::Reducer,
-                                    succeeded: false,
+                                    succeeded: output_kind.is_some(),
                                     elapsed_ms: start.elapsed().as_millis() as u64,
-                                    output_kind: None,
+                                    output_kind,
                                     confidence: None,
                                 }],
                                 reducer_used: true,
@@ -2804,18 +2834,21 @@ async fn handle_tool_result(
                             Some(&session.last_user_text()),
                         )
                     } else {
-                        chat_response(&repaired)
+                        disabled_tool_result_chat_or_evidence_response(session, &repaired)
                     };
                     retry_tool_result_response_if_plain(
                         body,
-                        retry_tool_call.as_ref(),
-                        latest_non_answerable_tool
-                            .as_ref()
-                            .map(|(_, result)| result.as_str()),
-                        session.tools(),
-                        response_allowed_tools,
-                        response_prompt_profiles,
-                        response_tools_enabled,
+                        RetryToolResultContext {
+                            retry_tool_call: retry_tool_call.as_ref(),
+                            latest_tool_result: latest_non_answerable_tool
+                                .as_ref()
+                                .map(|(_, result)| result.as_str()),
+                            tools: session.tools(),
+                            allowed_tools: response_allowed_tools,
+                            prompt_tool_profiles: response_prompt_profiles,
+                            user_text: Some(&session.active_user_text()),
+                            tools_enabled: response_tools_enabled,
+                        },
                     )
                 }
             };
@@ -3135,6 +3168,13 @@ fn tool_result_answer_from_evidence_response(session: &Session) -> Value {
     }
 }
 
+fn disabled_tool_result_chat_or_evidence_response(session: &Session, content: &str) -> Value {
+    if looks_like_unusable_pseudo_tool_text(content) {
+        return tool_result_answer_from_evidence_response(session);
+    }
+    chat_response(content)
+}
+
 fn answer_from_latest_tool_result(session: &Session) -> Option<String> {
     let (_, result) = latest_completed_tool_result(session)?;
     let prompt = session.active_user_text();
@@ -3316,7 +3356,7 @@ fn answer_from_prompt_specific_plain_text_tool_result(
 
 fn requested_path_existence_targets(prompt: &str) -> Vec<String> {
     let lower = prompt.to_ascii_lowercase();
-    if text_suggests_file_read_intent(&lower) {
+    if text_suggests_file_read_intent(&lower) || text_suggests_url_content_fetch_intent(prompt) {
         return Vec::new();
     }
     if !contains_any(
@@ -3341,6 +3381,27 @@ fn requested_path_existence_targets(prompt: &str) -> Vec<String> {
         .filter(|candidate| is_path_like_candidate(candidate, "path"))
         .filter(|candidate| seen.insert(candidate.clone()))
         .collect()
+}
+
+fn text_suggests_url_content_fetch_intent(prompt: &str) -> bool {
+    if !text_contains_http_url(prompt) {
+        return false;
+    }
+    contains_any(
+        &prompt.to_ascii_lowercase(),
+        &[
+            "fetch",
+            "open",
+            "read",
+            "view",
+            "inspect",
+            "title",
+            "summarize",
+            "summarise",
+            "content",
+            "visible",
+        ],
+    )
 }
 
 fn plain_text_tool_result_contains_path(result: &str, path: &str) -> bool {
@@ -3372,7 +3433,47 @@ fn answer_from_prompt_specific_structured_value(value: &Value, prompt: &str) -> 
     if prompt_asks_for_check_or_review_status(prompt) {
         return answer_from_structured_status_feedback_value(value, prompt);
     }
+    if prompt_asks_for_title_field(prompt) && !prompt_asks_for_work_items(prompt) {
+        return answer_from_structured_title_value(value, prompt);
+    }
     None
+}
+
+fn prompt_asks_for_title_field(prompt: &str) -> bool {
+    let lower = prompt.to_ascii_lowercase();
+    prompt_has_word(&lower, "title")
+        || prompt_has_word(&lower, "name")
+        || prompt_has_word(&lower, "subject")
+}
+
+fn answer_from_structured_title_value(value: &Value, prompt: &str) -> Option<String> {
+    let title = first_structured_title_value(value)?;
+    let label = if prompt_has_word(&prompt.to_ascii_lowercase(), "issue") {
+        "The issue title"
+    } else {
+        "The title"
+    };
+    Some(format!("{label} is: {title}"))
+}
+
+fn first_structured_title_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            for field in ["title", "name", "subject", "summary"] {
+                if let Some(title) = map
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .map(clean_structured_text_field)
+                    .filter(|title| !title.is_empty())
+                {
+                    return Some(title);
+                }
+            }
+            map.values().find_map(first_structured_title_value)
+        }
+        Value::Array(values) => values.iter().find_map(first_structured_title_value),
+        _ => None,
+    }
 }
 
 fn parse_tool_result_json(result: &str) -> Option<Value> {
@@ -3972,16 +4073,42 @@ fn clean_structured_text_field(value: &str) -> String {
         return trimmed.to_string();
     }
 
-    let payload = trimmed
-        .split_once("\n---\n")
-        .map(|(_, tail)| tail)
-        .unwrap_or(trimmed);
-    payload
-        .split_once("\n<<<END_EXTERNAL_UNTRUSTED_CONTENT")
-        .map(|(head, _)| head)
-        .unwrap_or(payload)
-        .trim()
-        .to_string()
+    clean_external_untrusted_wrappers(trimmed)
+}
+
+fn clean_external_untrusted_wrappers(value: &str) -> String {
+    const START: &str = "<<<EXTERNAL_UNTRUSTED_CONTENT";
+    const END: &str = "<<<END_EXTERNAL_UNTRUSTED_CONTENT";
+
+    let mut rest = value;
+    let mut cleaned = String::with_capacity(value.len());
+    while let Some(start) = rest.find(START) {
+        cleaned.push_str(&rest[..start]);
+        let wrapped = &rest[start..];
+        let Some(start_close) = wrapped.find(">>>") else {
+            cleaned.push_str(wrapped);
+            return cleaned.trim().to_string();
+        };
+        let payload_and_tail = &wrapped[start_close + 3..];
+        let Some(end) = payload_and_tail.find(END) else {
+            cleaned.push_str(wrapped);
+            return cleaned.trim().to_string();
+        };
+
+        let mut payload = payload_and_tail[..end].trim_start_matches('\n');
+        if let Some((_, tail)) = payload.split_once("\n---\n") {
+            payload = tail;
+        }
+        cleaned.push_str(payload.trim());
+
+        let end_marker_and_tail = &payload_and_tail[end..];
+        rest = match end_marker_and_tail.find(">>>") {
+            Some(end_close) => &end_marker_and_tail[end_close + 3..],
+            None => &end_marker_and_tail[END.len()..],
+        };
+    }
+    cleaned.push_str(rest);
+    cleaned.trim().to_string()
 }
 
 fn first_identifier_field(map: &serde_json::Map<String, Value>, fields: &[&str]) -> Option<String> {
@@ -4274,29 +4401,32 @@ fn latest_completed_tool_call(session: &Session) -> Option<CompletedToolCall> {
         .last()
 }
 
-fn retry_tool_result_response_if_plain(
-    body: Value,
-    retry_tool_call: Option<&CompletedToolCall>,
-    latest_tool_result: Option<&str>,
-    tools: Option<&Value>,
-    allowed_tools: &[String],
-    prompt_tool_profiles: &[PromptToolProfile],
+struct RetryToolResultContext<'a> {
+    retry_tool_call: Option<&'a CompletedToolCall>,
+    latest_tool_result: Option<&'a str>,
+    tools: Option<&'a Value>,
+    allowed_tools: &'a [String],
+    prompt_tool_profiles: &'a [PromptToolProfile],
+    user_text: Option<&'a str>,
     tools_enabled: bool,
-) -> Value {
-    if !tools_enabled {
+}
+
+fn retry_tool_result_response_if_plain(body: Value, context: RetryToolResultContext<'_>) -> Value {
+    if !context.tools_enabled {
         return body;
     }
-    match (first_response_tool_call(&body), retry_tool_call) {
+    match (first_response_tool_call(&body), context.retry_tool_call) {
         (Some(response_call), Some(retry_call))
             if response_call.same_signature(retry_call)
-                && !same_tool_call_retry_allowed(latest_tool_result) =>
+                && !same_tool_call_retry_allowed(context.latest_tool_result) =>
         {
             if let Some(corrected) = corrected_retry_tool_call(
                 retry_call,
-                latest_tool_result,
-                tools,
-                allowed_tools,
-                prompt_tool_profiles,
+                context.latest_tool_result,
+                context.tools,
+                context.allowed_tools,
+                context.prompt_tool_profiles,
+                context.user_text,
             ) {
                 let arguments = Value::String(corrected.arguments);
                 return tool_call_response(&corrected.name, &arguments);
@@ -4315,10 +4445,11 @@ fn retry_tool_result_response_if_plain(
     if let Some(response_call) = first_response_tool_call(&body) {
         if let Some(corrected) = corrected_retry_tool_call(
             &response_call,
-            latest_tool_result,
-            tools,
-            allowed_tools,
-            prompt_tool_profiles,
+            context.latest_tool_result,
+            context.tools,
+            context.allowed_tools,
+            context.prompt_tool_profiles,
+            context.user_text,
         ) {
             tracing::info!(
                 "moa: reducer returned malformed follow-up {}; retrying corrected tool call",
@@ -4329,14 +4460,16 @@ fn retry_tool_result_response_if_plain(
         }
         return body;
     }
-    retry_tool_call
+    context
+        .retry_tool_call
         .and_then(|call| {
             retry_tool_call_response(
                 call,
-                latest_tool_result,
-                tools,
-                allowed_tools,
-                prompt_tool_profiles,
+                context.latest_tool_result,
+                context.tools,
+                context.allowed_tools,
+                context.prompt_tool_profiles,
+                context.user_text,
             )
         })
         .unwrap_or(body)
@@ -4348,6 +4481,7 @@ fn retry_tool_call_response(
     tools: Option<&Value>,
     allowed_tools: &[String],
     prompt_tool_profiles: &[PromptToolProfile],
+    user_text: Option<&str>,
 ) -> Option<Value> {
     if let Some(corrected) = corrected_retry_tool_call(
         call,
@@ -4355,6 +4489,7 @@ fn retry_tool_call_response(
         tools,
         allowed_tools,
         prompt_tool_profiles,
+        user_text,
     ) {
         tracing::info!(
             "moa: reducer returned plain text after non-answerable {}; retrying corrected tool call",
@@ -4392,8 +4527,15 @@ fn corrected_retry_tool_call(
     tools: Option<&Value>,
     allowed_tools: &[String],
     prompt_tool_profiles: &[PromptToolProfile],
+    user_text: Option<&str>,
 ) -> Option<CompletedToolCall> {
     let result = latest_tool_result?;
+    if let Some(corrected) =
+        corrected_search_retry_tool_call(call, result, tools, allowed_tools, user_text)
+    {
+        return Some(corrected);
+    }
+
     let candidates = command_tool_candidates(tools, allowed_tools, prompt_tool_profiles);
     let candidate = candidates
         .iter()
@@ -4422,6 +4564,104 @@ fn corrected_retry_tool_call(
         name: call.name.clone(),
         arguments: wire,
     })
+}
+
+fn corrected_search_retry_tool_call(
+    call: &CompletedToolCall,
+    result: &str,
+    tools: Option<&Value>,
+    allowed_tools: &[String],
+    user_text: Option<&str>,
+) -> Option<CompletedToolCall> {
+    let prompt = user_text?;
+    if !tool_result_is_generic_structured_collection_for_prompt(result, prompt) {
+        return None;
+    }
+    if !allowed_tools.is_empty() && !allowed_tools.iter().any(|name| name == &call.name) {
+        return None;
+    }
+    let tool = tool_by_name(&call.name, tools)?;
+    if !tool_looks_like_searcher(tool) {
+        return None;
+    }
+
+    let mut arguments = serde_json::from_str::<Value>(&call.arguments).ok()?;
+    let field = search_query_argument_field(tool, &arguments)?;
+    let current = arguments.get(&field)?.as_str()?;
+    let refined = refine_search_query_for_specific_result(current, prompt)?;
+    arguments[&field] = Value::String(refined);
+    let sanitized = sanitize_tool_arguments_for_tool(&call.name, &arguments, tools).ok()?;
+    let wire = tool_arguments_wire_string(&sanitized);
+    if wire == call.arguments {
+        return None;
+    }
+    Some(CompletedToolCall {
+        name: call.name.clone(),
+        arguments: wire,
+    })
+}
+
+fn search_query_argument_field(tool: &Value, arguments: &Value) -> Option<String> {
+    let arguments = arguments.as_object()?;
+    for field in arguments.keys() {
+        if field_looks_like_search_query(field) {
+            return Some(field.clone());
+        }
+    }
+
+    let properties = tool
+        .pointer("/function/parameters/properties")
+        .and_then(Value::as_object)?;
+    properties.iter().find_map(|(field, schema)| {
+        (schema_allows_string(schema) && field_looks_like_search_query(field))
+            .then(|| field.clone())
+    })
+}
+
+fn field_looks_like_search_query(field: &str) -> bool {
+    matches!(
+        field.to_ascii_lowercase().as_str(),
+        "q" | "query" | "search" | "search_query" | "term" | "terms" | "keywords" | "topic"
+    )
+}
+
+fn refine_search_query_for_specific_result(query: &str, prompt: &str) -> Option<String> {
+    if !prompt_asks_for_work_items(prompt) {
+        return None;
+    }
+    let mut refined = query.trim().to_string();
+    if refined.is_empty() {
+        return None;
+    }
+
+    let prompt_lower = prompt.to_ascii_lowercase();
+    append_search_term_if_missing(&mut refined, "specific");
+    append_search_term_if_missing(&mut refined, "title");
+    append_search_term_if_missing(&mut refined, "number");
+    if contains_any(&prompt_lower, &["issue", "issues"]) {
+        append_search_term_if_missing(&mut refined, "issue");
+    }
+    if contains_any(
+        &prompt_lower,
+        &["pull request", "pull requests", " pr ", " prs "],
+    ) {
+        append_search_term_if_missing(&mut refined, "pull request");
+    }
+    if contains_any(&prompt_lower, &["discussion", "discussions"]) {
+        append_search_term_if_missing(&mut refined, "discussion");
+    }
+
+    (refined != query.trim()).then_some(refined)
+}
+
+fn append_search_term_if_missing(query: &mut String, term: &str) {
+    if !query
+        .to_ascii_lowercase()
+        .contains(&term.to_ascii_lowercase())
+    {
+        query.push(' ');
+        query.push_str(term);
+    }
 }
 
 fn tool_result_suggests_unquoted_shell_token_error(result: &str) -> bool {
@@ -4725,6 +4965,9 @@ fn tool_result_has_answerable_evidence(result: &str) -> bool {
     }
 
     if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+        if json_value_looks_like_disabled_empty_result(&parsed) {
+            return false;
+        }
         return json_value_has_answerable_evidence(&parsed);
     }
 
@@ -4745,10 +4988,7 @@ fn tool_result_has_answerable_evidence_for_prompt(result: &str, prompt: &str) ->
     if !structured_rows.is_empty() {
         return true;
     }
-    if prompt_asks_for_work_items(prompt)
-        && parse_tool_result_json(result.trim())
-            .is_some_and(|value| json_value_has_structured_result_collection(&value))
-    {
+    if tool_result_is_generic_structured_collection_for_prompt(result, prompt) {
         return false;
     }
     if prompt_asks_for_work_items(prompt) && plain_text_tool_result_looks_like_auth_status(result) {
@@ -4768,6 +5008,14 @@ fn tool_result_has_answerable_evidence_for_prompt(result: &str, prompt: &str) ->
         return false;
     }
     true
+}
+
+fn tool_result_is_generic_structured_collection_for_prompt(result: &str, prompt: &str) -> bool {
+    prompt_asks_for_work_items(prompt)
+        && parse_tool_result_json(result.trim()).is_some_and(|value| {
+            json_value_has_structured_result_collection(&value)
+                && structured_tool_result_rows(&value, prompt).is_empty()
+        })
 }
 
 fn prompt_asks_for_ci_status(prompt: &str) -> bool {
@@ -4906,6 +5154,19 @@ fn json_value_has_structured_result_collection(value: &Value) -> bool {
             .any(json_value_has_structured_result_collection),
         _ => false,
     }
+}
+
+fn json_value_looks_like_disabled_empty_result(value: &Value) -> bool {
+    let Value::Object(map) = value else {
+        return false;
+    };
+    map.get("disabled").and_then(Value::as_bool) == Some(true)
+        && map
+            .get("results")
+            .or_else(|| map.get("items"))
+            .or_else(|| map.get("data"))
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
 }
 
 fn plain_text_tool_result_looks_empty(result: &str) -> bool {
@@ -5477,11 +5738,19 @@ fn contains_pseudo_tool_markup(content: &str) -> bool {
         || trimmed.starts_with("tool code")
         || lower.contains("<tool_code")
         || lower.contains("</tool_code")
-        || lower.contains("<tool_call")
-        || lower.contains("</tool_call")
+        || contains_xml_tool_call_tag(&lower)
         || lower.contains("[tool_call]")
         || lower.contains("[/tool_call]")
         || lower.contains("<function=")
+}
+
+fn contains_xml_tool_call_tag(lowercase_content: &str) -> bool {
+    lowercase_content
+        .split('<')
+        .skip(1)
+        .filter_map(|tail| tail.split(['>', ' ', '\t', '\n', '\r']).next())
+        .map(|tag| tag.trim_start_matches('/').trim_end_matches('/'))
+        .any(|tag| tag == "tool_call" || tag.ends_with(":tool_call"))
 }
 
 fn is_tool_error_content(content: &str) -> bool {
@@ -5710,8 +5979,19 @@ fn starts_with_tool_call_envelope(content: &str) -> bool {
     let trimmed = content.trim_start();
     trimmed.starts_with("[TOOL_CALL]")
         || trimmed.starts_with("<|tool_call>")
-        || trimmed.starts_with("<tool_call>")
+        || starts_with_xml_tool_call_tag(trimmed)
         || trimmed.starts_with("<function=")
+}
+
+fn starts_with_xml_tool_call_tag(content: &str) -> bool {
+    let Some(rest) = content.strip_prefix('<') else {
+        return false;
+    };
+    let Some(tag) = rest.split(['>', ' ', '\t', '\n', '\r']).next() else {
+        return false;
+    };
+    let tag = tag.trim_end_matches('/').to_ascii_lowercase();
+    tag == "tool_call" || tag.ends_with(":tool_call")
 }
 
 fn fenced_command_tool_conversion_allowed(user_text: Option<&str>) -> bool {
@@ -6391,6 +6671,11 @@ pub const MOA_ERR_ALL_REDUCERS_FAILED: &str = "all_reducers_failed";
 pub const MOA_ERR_NO_USABLE_ANSWER: &str = "no_usable_answer";
 
 fn chat_response(content: &str) -> Value {
+    let content = if content.contains("<<<EXTERNAL_UNTRUSTED_CONTENT") {
+        clean_external_untrusted_wrappers(content)
+    } else {
+        content.to_string()
+    };
     json!({
         "id": format!("chatcmpl-moa-{}", short_id()),
         "object": "chat.completion",
@@ -6400,7 +6685,7 @@ fn chat_response(content: &str) -> Value {
             "message": { "role": "assistant", "content": content },
             "finish_reason": "stop"
         }],
-        "usage": usage_for_content(content)
+        "usage": usage_for_content(&content)
     })
 }
 
@@ -6503,6 +6788,13 @@ mod response_builder_tests {
             answer("b", 0.6, "Here is a real response."),
         ];
         assert_eq!(best_answer(&outputs), "Here is a real response.");
+    }
+
+    #[test]
+    fn pseudo_tool_markup_detects_namespaced_xml_tool_call() {
+        let content = "I found a result.\n<minimax:tool_call>\n<invoke name=\"web_fetch\">\n<parameter name=\"url\">https://example.invalid</parameter>\n</invoke>\n</minimax:tool_call>";
+
+        assert!(looks_like_unusable_pseudo_tool_text(content));
     }
 
     #[test]
@@ -7616,6 +7908,21 @@ mod response_builder_tests {
     }
 
     #[test]
+    fn chat_response_cleans_external_untrusted_wrappers() {
+        let resp = chat_response(
+            "The page title is:\n<<<EXTERNAL_UNTRUSTED_CONTENT id=\"x\">>>\nSource: Web Fetch\n---\nExample Domain\n<<<END_EXTERNAL_UNTRUSTED_CONTENT id=\"x\">>>",
+        );
+        let content = resp
+            .pointer("/choices/0/message/content")
+            .and_then(Value::as_str)
+            .expect("assistant content");
+
+        assert_eq!(content, "The page title is:\nExample Domain");
+        assert!(!content.contains("EXTERNAL_UNTRUSTED_CONTENT"), "{content}");
+        assert!(!content.contains("Source: Web Fetch"), "{content}");
+    }
+
+    #[test]
     fn tool_enabled_chat_uses_answer_grace() {
         let mut session = Session::new();
         session.ingest(
@@ -8125,6 +8432,126 @@ mod response_builder_tests {
                 .pointer("/query")
                 .and_then(Value::as_str),
             Some("open issues or recent discussion about mesh-LLM/mesh-llm on GitHub")
+        );
+    }
+
+    #[test]
+    fn web_search_prompt_selects_search_tool_over_shell_tool() {
+        let tools = serde_json::json!([
+            {"type": "function", "function": {
+                "name": "exec",
+                "description": "Run shell commands",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string", "description": "Shell command to execute"}},
+                    "required": ["command"]
+                }
+            }},
+            {"type": "function", "function": {
+                "name": "web_search",
+                "description": "Search online web sources",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string", "description": "Web search query"}},
+                    "required": ["query"]
+                }
+            }}
+        ]);
+        let mut session = Session::new();
+        session.ingest(
+            &[serde_json::json!({
+                "role": "user",
+                "content": "Use tools to search the web for mesh-llm memory slot batch issue and report one specific source URL."
+            })],
+            &Some(tools.clone()),
+        );
+
+        let selected = selected_tool_names_for_turn(&session, &[], &[]);
+
+        assert_eq!(selected, vec!["web_search".to_string()]);
+        let forced =
+            required_tool_choice_for_intent(&session, &Some(tools), &selected).expect("tool");
+        assert_eq!(forced.name, "web_search");
+        assert_eq!(
+            forced
+                .fallback_arguments
+                .pointer("/query")
+                .and_then(Value::as_str),
+            Some("mesh-llm memory slot batch issue and report one specific source URL")
+        );
+    }
+
+    #[test]
+    fn explicit_web_search_with_memory_subject_does_not_select_memory_search() {
+        let tools = serde_json::json!([
+            {"type": "function", "function": {
+                "name": "memory_search",
+                "description": "Search stored local memories",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string", "description": "Memory search query"}},
+                    "required": ["query"]
+                }
+            }},
+            {"type": "function", "function": {
+                "name": "web_search",
+                "description": "Search online web sources",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string", "description": "Web search query"}},
+                    "required": ["query"]
+                }
+            }}
+        ]);
+        let mut session = Session::new();
+        session.ingest(
+            &[serde_json::json!({
+                "role": "user",
+                "content": "Use tools to search the web for mesh-llm memory slot batch issue and report one specific source URL."
+            })],
+            &Some(tools),
+        );
+
+        assert_eq!(
+            selected_tool_names_for_turn(&session, &[], &[]),
+            vec!["web_search".to_string()]
+        );
+    }
+
+    #[test]
+    fn explicit_command_prompt_still_selects_shell_tool_over_search_tool() {
+        let tools = serde_json::json!([
+            {"type": "function", "function": {
+                "name": "exec",
+                "description": "Run shell commands",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string", "description": "Shell command to execute"}},
+                    "required": ["command"]
+                }
+            }},
+            {"type": "function", "function": {
+                "name": "web_search",
+                "description": "Search online web sources",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string", "description": "Web search query"}},
+                    "required": ["query"]
+                }
+            }}
+        ]);
+        let mut session = Session::new();
+        session.ingest(
+            &[serde_json::json!({
+                "role": "user",
+                "content": "Use gh to list recent open PRs for mesh-LLM/mesh-llm."
+            })],
+            &Some(tools),
+        );
+
+        assert_eq!(
+            selected_tool_names_for_turn(&session, &[], &[]),
+            vec!["exec".to_string()]
         );
     }
 
@@ -8983,6 +9410,14 @@ mod response_builder_tests {
     }
 
     #[test]
+    fn disabled_empty_json_tool_result_is_not_answerable_evidence() {
+        let result = r#"{"results":[],"disabled":true}"#;
+
+        assert!(!tool_result_has_answerable_evidence(result));
+        assert!(answer_from_latest_tool_result(&session_with_tool_result(result)).is_none());
+    }
+
+    #[test]
     fn path_existence_prompt_answers_from_plain_text_tool_evidence() {
         let prompt =
             "Use your tools to list the current directory, then say whether AGENTS.md exists.";
@@ -9079,6 +9514,76 @@ mod response_builder_tests {
         assert!(answer.contains("Issue #652"), "{answer}");
         assert!(!answer.contains("EXTERNAL_UNTRUSTED_CONTENT"), "{answer}");
         assert!(!answer.contains("Source: Web Search"), "{answer}");
+    }
+
+    #[test]
+    fn disabled_tool_result_turn_pseudo_tool_text_answers_from_evidence() {
+        let prompt = "Find one specific open issue for mesh-LLM/mesh-llm.";
+        let result = serde_json::json!({
+            "results": [
+                {
+                    "title": "memory slot failure - Issue #652",
+                    "url": "https://github.com/Mesh-LLM/mesh-llm/issues/652",
+                    "snippet": "decode failed to find a memory slot"
+                }
+            ]
+        })
+        .to_string();
+        let session = session_with_user_and_tool_result(prompt, &result);
+        let response = disabled_tool_result_chat_or_evidence_response(
+            &session,
+            "I found an issue. Let me fetch it:\n<minimax:tool_call>\n<invoke name=\"web_fetch\">\n<parameter name=\"url\">https://github.com/Mesh-LLM/mesh-llm/issues/652</parameter>\n</invoke>\n</minimax:tool_call>",
+        );
+        let content = response
+            .pointer("/choices/0/message/content")
+            .and_then(Value::as_str)
+            .expect("assistant content");
+
+        assert!(content.contains("Issue #652"), "{content}");
+        assert!(!content.contains("tool_call"), "{content}");
+    }
+
+    #[test]
+    fn fetched_url_title_is_content_evidence_not_path_existence() {
+        let prompt = "Use available tools to fetch https://example.invalid/issues/652 and tell me the issue title if visible.";
+        let result = serde_json::json!({
+            "url": "https://example.invalid/issues/652",
+            "title": "\n<<<EXTERNAL_UNTRUSTED_CONTENT id=\"x\">>>\nSource: Web Fetch\n---\nskippy: decode failed - Issue #652\n<<<END_EXTERNAL_UNTRUSTED_CONTENT id=\"x\">>>",
+            "text": "Issue details"
+        })
+        .to_string();
+        let session = session_with_user_and_tool_result(prompt, &result);
+
+        let answer = answer_from_latest_tool_result(&session).expect("fetched title evidence");
+
+        assert!(
+            answer.contains("skippy: decode failed - Issue #652"),
+            "{answer}"
+        );
+        assert!(!answer.contains("exists in the tool result"), "{answer}");
+        assert!(!answer.contains("EXTERNAL_UNTRUSTED_CONTENT"), "{answer}");
+    }
+
+    #[test]
+    fn repair_tool_result_answer_prefers_structured_title_over_security_notice() {
+        let prompt = "Use available tools to fetch https://example.invalid/issues/652 and tell me the issue title if visible.";
+        let result = serde_json::json!({
+            "url": "https://example.invalid/issues/652",
+            "title": "\n<<<EXTERNAL_UNTRUSTED_CONTENT id=\"x\">>>\nSource: Web Fetch\n---\nskippy: decode failed - Issue #652\n<<<END_EXTERNAL_UNTRUSTED_CONTENT id=\"x\">>>",
+            "text": "SECURITY NOTICE: external content follows\n\n<<<EXTERNAL_UNTRUSTED_CONTENT id=\"y\">>>\nSource: Web Fetch\n---\n## What\nBody text\n<<<END_EXTERNAL_UNTRUSTED_CONTENT id=\"y\">>>"
+        })
+        .to_string();
+        let session = session_with_user_and_tool_result(prompt, &result);
+
+        let repaired = repair_tool_result_answer(
+            &session,
+            "The issue title is not explicitly provided; the content begins with a SECURITY NOTICE.",
+        );
+
+        assert_eq!(
+            repaired,
+            "The issue title is: skippy: decode failed - Issue #652"
+        );
     }
 
     #[test]
@@ -10100,12 +10605,15 @@ mod response_builder_tests {
         let retry = latest_completed_tool_call(&session).expect("completed tool call");
         let body = retry_tool_result_response_if_plain(
             chat_response("I could not retrieve any pull requests."),
-            Some(&retry),
-            Some("(no output)"),
-            None,
-            &[],
-            &[],
-            true,
+            RetryToolResultContext {
+                retry_tool_call: Some(&retry),
+                latest_tool_result: Some("(no output)"),
+                tools: None,
+                allowed_tools: &[],
+                prompt_tool_profiles: &[],
+                user_text: None,
+                tools_enabled: true,
+            },
         );
 
         assert_eq!(
@@ -10137,12 +10645,17 @@ mod response_builder_tests {
 
         let body = retry_tool_result_response_if_plain(
             chat_response("The GitHub API command failed."),
-            Some(&retry),
-            Some("(eval):1: parse error near `&'\n\n(Command exited with code 1)"),
-            Some(&tools),
-            &allowed,
-            &[],
-            true,
+            RetryToolResultContext {
+                retry_tool_call: Some(&retry),
+                latest_tool_result: Some(
+                    "(eval):1: parse error near `&'\n\n(Command exited with code 1)",
+                ),
+                tools: Some(&tools),
+                allowed_tools: &allowed,
+                prompt_tool_profiles: &[],
+                user_text: None,
+                tools_enabled: true,
+            },
         );
 
         assert_eq!(
@@ -10178,12 +10691,15 @@ mod response_builder_tests {
 
         let body = retry_tool_result_response_if_plain(
             chat_response("The shell tool returned no matches found."),
-            Some(&retry),
-            Some(result),
-            Some(&tools),
-            &allowed,
-            &[],
-            true,
+            RetryToolResultContext {
+                retry_tool_call: Some(&retry),
+                latest_tool_result: Some(result),
+                tools: Some(&tools),
+                allowed_tools: &allowed,
+                prompt_tool_profiles: &[],
+                user_text: None,
+                tools_enabled: true,
+            },
         );
 
         assert_eq!(
@@ -10215,12 +10731,15 @@ mod response_builder_tests {
 
         let body = retry_tool_result_response_if_plain(
             tool_call_response("exec", &Value::String(followup.to_string())),
-            Some(&previous),
-            Some(result),
-            Some(&tools),
-            &allowed,
-            &[],
-            true,
+            RetryToolResultContext {
+                retry_tool_call: Some(&previous),
+                latest_tool_result: Some(result),
+                tools: Some(&tools),
+                allowed_tools: &allowed,
+                prompt_tool_profiles: &[],
+                user_text: None,
+                tools_enabled: true,
+            },
         );
 
         assert_eq!(
@@ -10255,12 +10774,15 @@ mod response_builder_tests {
 
         let body = retry_tool_result_response_if_plain(
             chat_response("Let me try again with a corrected command."),
-            Some(&retry),
-            Some(result),
-            Some(&tools),
-            &allowed,
-            &[],
-            true,
+            RetryToolResultContext {
+                retry_tool_call: Some(&retry),
+                latest_tool_result: Some(result),
+                tools: Some(&tools),
+                allowed_tools: &allowed,
+                prompt_tool_profiles: &[],
+                user_text: None,
+                tools_enabled: true,
+            },
         );
 
         assert_eq!(
@@ -10292,12 +10814,15 @@ mod response_builder_tests {
 
         let body = retry_tool_result_response_if_plain(
             chat_response("I encountered an error while trying to fetch the details."),
-            Some(&retry),
-            Some(result),
-            Some(&tools),
-            &allowed,
-            &[],
-            true,
+            RetryToolResultContext {
+                retry_tool_call: Some(&retry),
+                latest_tool_result: Some(result),
+                tools: Some(&tools),
+                allowed_tools: &allowed,
+                prompt_tool_profiles: &[],
+                user_text: None,
+                tools_enabled: true,
+            },
         );
 
         assert_eq!(
@@ -10316,6 +10841,72 @@ mod response_builder_tests {
                 "curl -s \"https://api.github.com/repos/Mesh-LLM/mesh-llm/issues/808\" | jq -r '\"\\(.number) \\(.state) \\(.title)\"'"
             )
         );
+    }
+
+    #[test]
+    fn generic_collection_search_result_retries_with_more_specific_query() {
+        let tools = serde_json::json!([{"type": "function", "function": {
+            "name": "web_search",
+            "description": "Search online web sources",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "Search query"}},
+                "required": ["query"]
+            }
+        }}]);
+        let allowed = ["web_search".to_string()];
+        let prompt = "Find one specific open issue or recent discussion for mesh-LLM/mesh-llm.";
+        let retry = CompletedToolCall {
+            name: "web_search".to_string(),
+            arguments: r#"{"query":"open issues or recent discussion about mesh-LLM/mesh-llm"}"#
+                .to_string(),
+        };
+        let result = serde_json::json!({
+            "results": [
+                {
+                    "title": "Issues - Mesh-LLM/mesh-llm",
+                    "url": "https://example.invalid/Mesh-LLM/mesh-llm/issues/",
+                    "snippet": "Issue tracker"
+                },
+                {
+                    "title": "Mesh-LLM mesh-llm discussions",
+                    "url": "https://example.invalid/Mesh-LLM/mesh-llm/discussions",
+                    "snippet": "Discussion forum"
+                }
+            ]
+        })
+        .to_string();
+
+        let body = retry_tool_result_response_if_plain(
+            chat_response("The result only listed collection pages."),
+            RetryToolResultContext {
+                retry_tool_call: Some(&retry),
+                latest_tool_result: Some(&result),
+                tools: Some(&tools),
+                allowed_tools: &allowed,
+                prompt_tool_profiles: &[],
+                user_text: Some(prompt),
+                tools_enabled: true,
+            },
+        );
+
+        assert_eq!(
+            body.pointer("/choices/0/message/tool_calls/0/function/name")
+                .and_then(Value::as_str),
+            Some("web_search")
+        );
+        let args = body
+            .pointer("/choices/0/message/tool_calls/0/function/arguments")
+            .and_then(Value::as_str)
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .expect("tool args");
+        let query = args
+            .get("query")
+            .and_then(Value::as_str)
+            .expect("query arg");
+        assert!(query.contains("specific"), "{query}");
+        assert!(query.contains("title"), "{query}");
+        assert!(query.contains("number"), "{query}");
     }
 
     #[test]

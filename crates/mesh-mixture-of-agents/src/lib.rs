@@ -1470,7 +1470,9 @@ fn strip_info_msg_prefix(text: String) -> Option<String> {
         return Some(text);
     }
     let close = "</info-msg>";
-    let close_start = trimmed.find(close)?;
+    let Some(close_start) = trimmed.find(close) else {
+        return Some(text);
+    };
     Some(
         trimmed[close_start + close.len()..]
             .trim_start()
@@ -7845,6 +7847,40 @@ mod response_builder_tests {
         assert_eq!(
             session.last_user_text(),
             "Actually use the shell tool. Run pwd."
+        );
+        assert_eq!(
+            selected_tool_names_for_turn(&session, &[], &[]),
+            vec!["shell".to_string()]
+        );
+    }
+
+    #[test]
+    fn malformed_goose_info_prefix_does_not_hide_tool_intent_text() {
+        let mut session = Session::new();
+        session.ingest(
+            &[serde_json::json!({
+                "role": "user",
+                "content": "<info-msg>\nWorking directory: /tmp/project\nActually use the shell tool. Run pwd."
+            })],
+            &Some(serde_json::json!([{
+                "type": "function",
+                "function": {
+                    "name": "shell",
+                    "description": "Run shell commands",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string", "description": "Shell command to execute"}
+                        },
+                        "required": ["command"]
+                    }
+                }
+            }])),
+        );
+
+        assert_eq!(
+            session.last_user_text(),
+            "<info-msg>\nWorking directory: /tmp/project\nActually use the shell tool. Run pwd."
         );
         assert_eq!(
             selected_tool_names_for_turn(&session, &[], &[]),

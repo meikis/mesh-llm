@@ -96,6 +96,28 @@ async fn call_remote_candidates(
         return Err("remote: no peer candidates".to_string());
     }
 
+    let candidate_count = peer_ids.len();
+    match tokio::time::timeout(
+        timeout,
+        call_remote_candidates_inner(node, peer_ids, raw, timeout, hedge_delay),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "remote: timed out after {}s across up to {candidate_count} peer candidate(s)",
+            timeout.as_secs()
+        )),
+    }
+}
+
+async fn call_remote_candidates_inner(
+    node: mesh::Node,
+    peer_ids: Vec<iroh::EndpointId>,
+    raw: Vec<u8>,
+    timeout: std::time::Duration,
+    hedge_delay: std::time::Duration,
+) -> Result<serde_json::Value, String> {
     let mut remaining = peer_ids.into_iter();
     let mut join_set = tokio::task::JoinSet::new();
     let mut last_err = None;

@@ -633,7 +633,9 @@ fn strip_info_msg_prefix(text: String) -> Option<String> {
         return Some(text);
     }
     let close = "</info-msg>";
-    let close_start = trimmed.find(close)?;
+    let Some(close_start) = trimmed.find(close) else {
+        return Some(text);
+    };
     Some(
         trimmed[close_start + close.len()..]
             .trim_start()
@@ -959,6 +961,27 @@ mod tests {
 
         assert_eq!(s.last_user_text(), "Run pwd.");
         assert_eq!(s.active_user_text(), "Run pwd.");
+    }
+
+    #[test]
+    fn malformed_goose_info_prefix_keeps_user_text() {
+        let mut s = Session::new();
+        s.ingest(
+            &[json!({
+                "role": "user",
+                "content": "<info-msg>\nWorking directory: /tmp/project\nRun pwd."
+            })],
+            &None,
+        );
+
+        assert_eq!(
+            s.last_user_text(),
+            "<info-msg>\nWorking directory: /tmp/project\nRun pwd."
+        );
+        assert_eq!(
+            s.active_user_text(),
+            "<info-msg>\nWorking directory: /tmp/project\nRun pwd."
+        );
     }
 
     #[test]

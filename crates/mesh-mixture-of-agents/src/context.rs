@@ -508,10 +508,15 @@ pub fn pack_for_tool_result_turn_selected(
     for msg in &all[start_idx..] {
         let role = message_role(msg);
         if role != "system" && !role.is_empty() {
-            messages.push(compact_chat_message(
-                &compact_tool_message(msg),
-                STRONG_MESSAGE_CONTEXT_MAX_CHARS,
-            ));
+            let compacted = compact_tool_message(msg);
+            if role == "tool" {
+                messages.push(compacted);
+            } else {
+                messages.push(compact_chat_message(
+                    &compacted,
+                    STRONG_MESSAGE_CONTEXT_MAX_CHARS,
+                ));
+            }
         }
     }
 
@@ -1526,7 +1531,7 @@ mod tests {
         assert!(content.contains("$[2]: number=799"));
         assert!(content.contains("Reuse Skippy decode wire messages"));
         assert!(
-            content.len() < 2_000,
+            content.len() <= TOOL_RESULT_RAW_MAX_CHARS,
             "compacted tool content should be small, got {} chars:\n{content}",
             content.len()
         );

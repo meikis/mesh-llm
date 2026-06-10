@@ -657,6 +657,13 @@ fn previous_assistant_text(session: &Session) -> Option<String> {
     None
 }
 
+fn extract_urls_from_text(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(clean_path_token)
+        .filter(|token| token.starts_with("http://") || token.starts_with("https://"))
+        .collect()
+}
+
 fn message_text_content(message: &Value) -> Option<String> {
     if let Some(text) = message.get("content").and_then(Value::as_str) {
         return Some(text.to_string());
@@ -2123,45 +2130,11 @@ fn infer_string_argument(field: &str, schema: &Value, prompt: &str) -> Option<St
         return None;
     }
 
-    infer_command_argument(field, schema, prompt)
-        .or_else(|| infer_enum_argument(schema, prompt))
+    infer_enum_argument(schema, prompt)
         .or_else(|| infer_assignment_argument(field, prompt))
         .or_else(|| infer_path_like_argument(field, schema, prompt))
         .or_else(|| infer_query_argument(field, prompt))
         .or_else(|| infer_named_argument(field, schema, prompt))
-}
-
-fn infer_command_argument(field: &str, schema: &Value, prompt: &str) -> Option<String> {
-    let mut schema_tokens = text_tokens(field);
-    collect_tool_schema_tokens(schema, &mut schema_tokens);
-    if !schema_tokens_look_command_like(&schema_tokens) {
-        return None;
-    }
-
-    if text_suggests_directory_list_intent(prompt) {
-        let path = if prompt_mentions_current_directory(prompt) {
-            ".".to_string()
-        } else {
-            prompt
-                .split_whitespace()
-                .map(clean_path_token)
-                .find(|candidate| is_path_like_candidate(candidate, "path"))
-                .unwrap_or_else(|| ".".to_string())
-        };
-        return Some(format!("ls -la {}", shell_quote_path(&path)));
-    }
-
-    None
-}
-
-fn shell_quote_path(path: &str) -> String {
-    if path
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | '~'))
-    {
-        return path.to_string();
-    }
-    format!("'{}'", path.replace('\'', "'\\''"))
 }
 
 fn schema_allows_string(schema: &Value) -> bool {
@@ -2516,37 +2489,6 @@ fn tool_by_name<'a>(tool_name: &str, tools: Option<&'a Value>) -> Option<&'a Val
     })
 }
 
-fn tool_parameters_from_tool(tool: &Value) -> Option<&Value> {
-    tool.pointer("/function/parameters")
-}
-
-fn tool_name_and_description_look_directory_like(tool: &Value) -> bool {
-    let mut tokens = HashSet::new();
-    if let Some(name) = tool.pointer("/function/name").and_then(Value::as_str) {
-        tokens.extend(text_tokens(name));
-    }
-    if let Some(description) = tool
-        .pointer("/function/description")
-        .and_then(Value::as_str)
-    {
-        tokens.extend(text_tokens(description));
-    }
-    tokens.contains("tree")
-        || ["list", "show", "view", "inspect"]
-            .iter()
-            .any(|token| tokens.contains(*token))
-            && [
-                "dir",
-                "dirs",
-                "directory",
-                "directories",
-                "folder",
-                "folders",
-            ]
-            .iter()
-            .any(|token| tokens.contains(*token))
-}
-
 // ─── Tool result handling ────────────────────────────────────────────
 
 async fn handle_tool_result(
@@ -2741,47 +2683,23 @@ async fn handle_tool_result(
                             latest_tool_result: latest_non_answerable_tool
                                 .as_ref()
                                 .map(|(_, result)| result.as_str()),
-                            tools: session.tools(),
-                            allowed_tools: response_allowed_tools,
-                            prompt_tool_profiles: response_prompt_profiles,
-                            user_text: Some(&session.active_user_text()),
                             tools_enabled: response_tools_enabled,
                         },
                     )
                 }
-                normalize::OutputKind::Uncertainty => {
-                    if response_tools_enabled {
-                        retry_tool_call
-                            .as_ref()
-                            .and_then(|call| {
-                                retry_tool_call_response(
-                                    call,
-                                    latest_non_answerable_tool
-                                        .as_ref()
-                                        .map(|(_, result)| result.as_str()),
-                                    session.tools(),
-                                    response_allowed_tools,
-                                    response_prompt_profiles,
-                                    Some(&session.active_user_text()),
-                                )
-                            })
-                            .unwrap_or_else(|| {
-                                error_response(
-                                    "MoA reducer returned no usable answer",
-                                    MOA_ERR_NO_USABLE_ANSWER,
-                                )
-                            })
-                    } else {
-                        answer_from_latest_tool_result(session)
-                            .map(|answer| chat_response(&answer))
-                            .unwrap_or_else(|| {
-                                error_response(
-                                    "MoA reducer returned no usable answer",
-                                    MOA_ERR_NO_USABLE_ANSWER,
-                                )
-                            })
-                    }
-                }
+                normalize::OutputKind::Uncertainty => answer_from_latest_tool_result(session)
+                    .map(|answer| chat_response(&answer))
+                    .or_else(|| {
+                        latest_non_answerable_tool.as_ref().map(|(tool, result)| {
+                            chat_response(&non_answerable_tool_result_answer(session, tool, result))
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        error_response(
+                            "MoA reducer returned no usable answer",
+                            MOA_ERR_NO_USABLE_ANSWER,
+                        )
+                    }),
                 _ => {
                     let repaired = repair_tool_result_answer(session, &reduced.payload);
                     match latest_non_answerable_tool.as_ref() {
@@ -2790,7 +2708,7 @@ async fn handle_tool_result(
                                 &repaired,
                                 result,
                                 &session.active_user_text(),
-                            ) =>
+                            ) || answer_appears_to_use_stale_tool_result(session, &repaired) =>
                         {
                             let answer = non_answerable_tool_result_answer(session, tool, result);
                             let response_body = retry_tool_result_response_if_plain(
@@ -2798,10 +2716,6 @@ async fn handle_tool_result(
                                 RetryToolResultContext {
                                     retry_tool_call: retry_tool_call.as_ref(),
                                     latest_tool_result: Some(result),
-                                    tools: session.tools(),
-                                    allowed_tools: response_allowed_tools,
-                                    prompt_tool_profiles: response_prompt_profiles,
-                                    user_text: Some(&session.active_user_text()),
                                     tools_enabled: response_tools_enabled,
                                 },
                             );
@@ -2843,10 +2757,6 @@ async fn handle_tool_result(
                             latest_tool_result: latest_non_answerable_tool
                                 .as_ref()
                                 .map(|(_, result)| result.as_str()),
-                            tools: session.tools(),
-                            allowed_tools: response_allowed_tools,
-                            prompt_tool_profiles: response_prompt_profiles,
-                            user_text: Some(&session.active_user_text()),
                             tools_enabled: response_tools_enabled,
                         },
                     )
@@ -2865,6 +2775,15 @@ async fn handle_tool_result(
                     candidates.first().map(|c| c.0.clone()).unwrap_or_default(),
                     false,
                     chat_response(&answer),
+                )
+            } else if let Some((tool, result)) = latest_non_answerable_tool.as_ref() {
+                tracing::warn!(
+                    "moa: reducers failed after non-answerable {tool} result; returning evidence gap"
+                );
+                (
+                    candidates.first().map(|c| c.0.clone()).unwrap_or_default(),
+                    false,
+                    chat_response(&non_answerable_tool_result_answer(session, tool, result)),
                 )
             } else {
                 (
@@ -2938,6 +2857,19 @@ fn repair_tool_result_answer(session: &Session, answer: &str) -> String {
     repaired
 }
 
+fn structured_title_looks_incomplete(title: &str) -> bool {
+    title.contains("...")
+}
+
+fn prompt_specific_plain_text_answer_is_present(result: &str, prompt: &str) -> bool {
+    prompt_asks_for_first_instruction(prompt) && instruction_line_from_plain_text(result).is_some()
+}
+
+fn plain_text_result_lacks_requested_evidence(result: &str, prompt: &str) -> bool {
+    prompt_asks_for_first_instruction(prompt)
+        && !prompt_specific_plain_text_answer_is_present(result, prompt)
+}
+
 fn answer_from_recent_prompt_specific_structured_tool_results(session: &Session) -> Option<String> {
     let prompt = session.active_user_text();
     if !(prompt_asks_for_ci_status(&prompt) && prompt_asks_for_feedback(&prompt)) {
@@ -2986,6 +2918,17 @@ fn repair_structured_tool_result_answer(session: &Session, answer: &str) -> Opti
         return Some(trimmed);
     }
 
+    if prompt_asks_for_title_field(&prompt)
+        && rows.iter().any(|row| {
+            row.url
+                .as_deref()
+                .is_some_and(|url| answer_contains_text(answer, url))
+                && !answer_contains_text(answer, &row.title)
+        })
+    {
+        return answer_from_structured_tool_result(&result, &prompt);
+    }
+
     let missing_rows = rows
         .iter()
         .take(3)
@@ -3020,7 +2963,13 @@ fn structured_tool_row_missing_reference(
         .id
         .as_deref()
         .is_some_and(|id| answer_has_row_id(answer, id));
-    ((has_id && !has_title) || (has_title && row.id.is_some() && !has_id))
+    let has_url = row
+        .url
+        .as_deref()
+        .is_some_and(|url| answer_contains_text(answer, url));
+    ((has_id && !has_title)
+        || (prompt_asks_for_title_field(prompt) && has_url && !has_title)
+        || (has_title && row.id.is_some() && !has_id))
         .then(|| format_structured_tool_row(row, prompt))
 }
 
@@ -3190,6 +3139,10 @@ fn answer_from_latest_tool_result(session: &Session) -> Option<String> {
         return Some(answer);
     }
 
+    if plain_text_result_lacks_requested_evidence(&result, &prompt) {
+        return None;
+    }
+
     let mut lines = result
         .lines()
         .map(str::trim)
@@ -3230,12 +3183,33 @@ fn answer_appears_to_use_non_answerable_tool_result(
         return true;
     }
 
+    if answer_mentions_incomplete_structured_title(answer, result, prompt) {
+        return true;
+    }
+
     result
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .take(3)
         .any(|line| line.len() >= 12 && answer.contains(line))
+}
+
+fn answer_mentions_incomplete_structured_title(answer: &str, result: &str, prompt: &str) -> bool {
+    if !prompt_asks_for_title_field(prompt) {
+        return false;
+    }
+    let Some(parsed) = parse_tool_result_json(result.trim()) else {
+        return false;
+    };
+    structured_tool_result_rows_unfiltered(&parsed, prompt)
+        .iter()
+        .filter(|row| structured_title_looks_incomplete(&row.title))
+        .any(|row| {
+            answer_contains_text(answer, &row.title)
+                || incomplete_title_prefix(&row.title)
+                    .is_some_and(|prefix| answer_contains_text(answer, &prefix))
+        })
 }
 
 fn answer_mentions_non_specific_work_item_collection(
@@ -3257,6 +3231,63 @@ fn answer_mentions_non_specific_work_item_collection(
         && rows
             .iter()
             .any(|row| structured_tool_row_is_referenced(answer, row))
+}
+
+fn answer_appears_to_use_stale_tool_result(session: &Session, answer: &str) -> bool {
+    let current_results = current_turn_tool_result_texts(session);
+    if current_results.is_empty() {
+        return false;
+    }
+    let current_text = current_results.join("\n");
+    let prior_results = prior_turn_tool_result_texts(session);
+    if prior_results.is_empty() {
+        return false;
+    }
+
+    extract_urls_from_text(answer).into_iter().any(|url| {
+        !current_text.contains(&url) && prior_results.iter().any(|result| result.contains(&url))
+    }) || short_tool_result_values_from_results(&prior_results)
+        .into_iter()
+        .any(|value| !current_text.contains(&value) && answer_contains_text(answer, &value))
+}
+
+fn current_turn_tool_result_texts(session: &Session) -> Vec<String> {
+    tool_result_texts_partitioned_by_latest_user(session).1
+}
+
+fn prior_turn_tool_result_texts(session: &Session) -> Vec<String> {
+    tool_result_texts_partitioned_by_latest_user(session).0
+}
+
+fn tool_result_texts_partitioned_by_latest_user(session: &Session) -> (Vec<String>, Vec<String>) {
+    let messages = session.all_messages();
+    let latest_user_idx = messages
+        .iter()
+        .rposition(message_is_task_user)
+        .unwrap_or(messages.len());
+    let mut prior = Vec::new();
+    let mut current = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        if message_role(message) != "tool" {
+            continue;
+        }
+        let Some(text) = message_text_content(message) else {
+            continue;
+        };
+        if index > latest_user_idx {
+            current.push(text);
+        } else {
+            prior.push(text);
+        }
+    }
+    (prior, current)
+}
+
+fn short_tool_result_values_from_results(results: &[String]) -> Vec<String> {
+    results
+        .iter()
+        .flat_map(|result| short_tool_result_values(result))
+        .collect()
 }
 
 fn non_answerable_tool_result_answer(session: &Session, tool: &str, result: &str) -> String {
@@ -3331,6 +3362,10 @@ fn answer_from_prompt_specific_plain_text_tool_result(
     result: &str,
     prompt: &str,
 ) -> Option<String> {
+    if let Some(answer) = answer_from_first_plain_text_tool_content(result, prompt) {
+        return Some(answer);
+    }
+
     let requested = requested_path_existence_targets(prompt);
     if requested.is_empty() {
         return None;
@@ -3352,6 +3387,126 @@ fn answer_from_prompt_specific_plain_text_tool_result(
                 .join(", ")
         )),
     }
+}
+
+fn answer_from_first_plain_text_tool_content(result: &str, prompt: &str) -> Option<String> {
+    let lower = prompt.to_ascii_lowercase();
+    if !text_suggests_file_read_intent(&lower)
+        || !contains_any(
+            &lower,
+            &[
+                "first line",
+                "first lines",
+                "first few lines",
+                "first instruction",
+                "appears first",
+                "head",
+            ],
+        )
+    {
+        return None;
+    }
+
+    if prompt_asks_for_first_instruction(prompt) {
+        let line = instruction_line_from_plain_text(result)?;
+        return Some(format!(
+            "The first instruction in the tool result is: \"{line}\""
+        ));
+    }
+
+    let lines = first_plain_text_lines(result, requested_first_line_count(&lower))
+        .into_iter()
+        .map(|line| format!("- {line}"))
+        .collect::<Vec<_>>();
+    (!lines.is_empty()).then(|| {
+        format!(
+            "The first lines from the tool result are:\n{}",
+            lines.join("\n")
+        )
+    })
+}
+
+fn prompt_asks_for_first_instruction(prompt: &str) -> bool {
+    let lower = prompt.to_ascii_lowercase();
+    contains_any(&lower, &["first instruction", "instruction appears first"])
+}
+
+fn requested_first_line_count(prompt_lower: &str) -> usize {
+    prompt_lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find_map(|window| match window {
+            [count, "line" | "lines"] => count.parse::<usize>().ok(),
+            _ => None,
+        })
+        .unwrap_or(3)
+        .clamp(1, 12)
+}
+
+fn first_plain_text_lines(result: &str, count: usize) -> Vec<String> {
+    result
+        .lines()
+        .filter_map(clean_plain_text_tool_line)
+        .take(count)
+        .collect()
+}
+
+fn instruction_line_from_plain_text(result: &str) -> Option<String> {
+    result
+        .lines()
+        .filter_map(clean_instruction_candidate_line)
+        .find(|line| plain_text_line_looks_like_instruction(line))
+}
+
+fn clean_instruction_candidate_line(line: &str) -> Option<String> {
+    let line = clean_plain_text_tool_line(line)?;
+    if instruction_scaffolding_line(&line) {
+        return None;
+    }
+    Some(line)
+}
+
+fn instruction_scaffolding_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with('#')
+        || trimmed == "---"
+        || (trimmed.starts_with("--- ") && trimmed.ends_with(" ---"))
+        || trimmed.starts_with("<!--")
+        || trimmed.ends_with("-->")
+        || (trimmed.starts_with('<') && trimmed.ends_with('>') && !trimmed.contains(' '))
+}
+
+fn clean_plain_text_tool_line(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with("```") || markdown_table_separator_line(line) {
+        return None;
+    }
+    let line = line.trim_start_matches(['-', '*', '+', '>']).trim_start();
+    (!line.is_empty()).then(|| line.to_string())
+}
+
+fn markdown_table_separator_line(line: &str) -> bool {
+    let trimmed = line.trim_matches('|').trim();
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|ch| matches!(ch, '-' | ':' | '|' | ' '))
+}
+
+fn plain_text_line_looks_like_instruction(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.starts_with("always ")
+        || lower.starts_with("never ")
+        || lower.starts_with("do not ")
+        || lower.starts_with("don't ")
+        || lower.starts_with("when ")
+        || lower.starts_with("prefer ")
+        || lower.starts_with("avoid ")
+        || lower.starts_with("use ")
+        || lower.contains(" must ")
+        || lower.contains(" should ")
+        || lower.contains(" should not ")
 }
 
 fn requested_path_existence_targets(prompt: &str) -> Vec<String> {
@@ -3448,6 +3603,9 @@ fn prompt_asks_for_title_field(prompt: &str) -> bool {
 
 fn answer_from_structured_title_value(value: &Value, prompt: &str) -> Option<String> {
     let title = first_structured_title_value(value)?;
+    if structured_title_looks_incomplete(&title) {
+        return None;
+    }
     let label = if prompt_has_word(&prompt.to_ascii_lowercase(), "issue") {
         "The issue title"
     } else {
@@ -3950,9 +4108,98 @@ fn first_non_empty_line(text: &str) -> Option<String> {
 
 fn structured_tool_result_rows(value: &Value, prompt: &str) -> Vec<StructuredToolRow> {
     filter_structured_rows_for_prompt(
-        structured_tool_result_rows_unfiltered(value, prompt),
+        expand_incomplete_structured_row_titles(
+            structured_tool_result_rows_unfiltered(value, prompt),
+            value,
+        ),
         prompt,
     )
+}
+
+fn expand_incomplete_structured_row_titles(
+    rows: Vec<StructuredToolRow>,
+    value: &Value,
+) -> Vec<StructuredToolRow> {
+    if rows.is_empty() {
+        return rows;
+    }
+
+    let candidates = structured_text_candidates(value);
+    if candidates.is_empty() {
+        return rows;
+    }
+
+    rows.into_iter()
+        .map(|mut row| {
+            if let Some(expanded) = expanded_structured_title(&row.title, &candidates) {
+                row.title = expanded;
+            }
+            row
+        })
+        .collect()
+}
+
+fn expanded_structured_title(title: &str, candidates: &[String]) -> Option<String> {
+    let prefix = incomplete_title_prefix(title)?;
+    candidates
+        .iter()
+        .filter(|candidate| candidate.chars().count() > title.chars().count())
+        .filter(|candidate| {
+            candidate
+                .to_ascii_lowercase()
+                .contains(&prefix.to_ascii_lowercase())
+        })
+        .max_by_key(|candidate| candidate.chars().count())
+        .cloned()
+}
+
+fn incomplete_title_prefix(title: &str) -> Option<String> {
+    let before_ellipsis = title.split("...").next()?.trim();
+    if before_ellipsis == title {
+        return None;
+    }
+    (before_ellipsis.chars().count() >= 16).then(|| before_ellipsis.to_string())
+}
+
+fn structured_text_candidates(value: &Value) -> Vec<String> {
+    let mut candidates = Vec::new();
+    collect_structured_text_candidates(value, &mut candidates);
+    candidates
+}
+
+fn collect_structured_text_candidates(value: &Value, candidates: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for field in [
+                "title",
+                "name",
+                "subject",
+                "summary",
+                "snippet",
+                "description",
+                "body",
+                "text",
+            ] {
+                if let Some(text) = map
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .map(clean_structured_text_field)
+                    .filter(|text| !text.is_empty())
+                {
+                    candidates.push(text);
+                }
+            }
+            for nested in map.values() {
+                collect_structured_text_candidates(nested, candidates);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_structured_text_candidates(value, candidates);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn structured_tool_result_rows_unfiltered(value: &Value, prompt: &str) -> Vec<StructuredToolRow> {
@@ -3988,9 +4235,12 @@ fn structured_tool_result_rows_unfiltered(value: &Value, prompt: &str) -> Vec<St
 }
 
 fn filter_structured_rows_for_prompt(
-    rows: Vec<StructuredToolRow>,
+    mut rows: Vec<StructuredToolRow>,
     prompt: &str,
 ) -> Vec<StructuredToolRow> {
+    if prompt_asks_for_title_field(prompt) {
+        rows.retain(|row| !structured_title_looks_incomplete(&row.title));
+    }
     if !prompt_asks_for_work_items(prompt) {
         return rows;
     }
@@ -4404,10 +4654,6 @@ fn latest_completed_tool_call(session: &Session) -> Option<CompletedToolCall> {
 struct RetryToolResultContext<'a> {
     retry_tool_call: Option<&'a CompletedToolCall>,
     latest_tool_result: Option<&'a str>,
-    tools: Option<&'a Value>,
-    allowed_tools: &'a [String],
-    prompt_tool_profiles: &'a [PromptToolProfile],
-    user_text: Option<&'a str>,
     tools_enabled: bool,
 }
 
@@ -4420,17 +4666,6 @@ fn retry_tool_result_response_if_plain(body: Value, context: RetryToolResultCont
             if response_call.same_signature(retry_call)
                 && !same_tool_call_retry_allowed(context.latest_tool_result) =>
         {
-            if let Some(corrected) = corrected_retry_tool_call(
-                retry_call,
-                context.latest_tool_result,
-                context.tools,
-                context.allowed_tools,
-                context.prompt_tool_profiles,
-                context.user_text,
-            ) {
-                let arguments = Value::String(corrected.arguments);
-                return tool_call_response(&corrected.name, &arguments);
-            }
             tracing::info!(
                 "moa: suppressing repeated failing {} tool call with unchanged arguments",
                 retry_call.name
@@ -4442,501 +4677,11 @@ fn retry_tool_result_response_if_plain(body: Value, context: RetryToolResultCont
         }
         _ => {}
     }
-    if let Some(response_call) = first_response_tool_call(&body) {
-        if let Some(corrected) = corrected_retry_tool_call(
-            &response_call,
-            context.latest_tool_result,
-            context.tools,
-            context.allowed_tools,
-            context.prompt_tool_profiles,
-            context.user_text,
-        ) {
-            tracing::info!(
-                "moa: reducer returned malformed follow-up {}; retrying corrected tool call",
-                response_call.name
-            );
-            let arguments = Value::String(corrected.arguments);
-            return tool_call_response(&corrected.name, &arguments);
-        }
-        return body;
-    }
-    context
-        .retry_tool_call
-        .and_then(|call| {
-            retry_tool_call_response(
-                call,
-                context.latest_tool_result,
-                context.tools,
-                context.allowed_tools,
-                context.prompt_tool_profiles,
-                context.user_text,
-            )
-        })
-        .unwrap_or(body)
-}
-
-fn retry_tool_call_response(
-    call: &CompletedToolCall,
-    latest_tool_result: Option<&str>,
-    tools: Option<&Value>,
-    allowed_tools: &[String],
-    prompt_tool_profiles: &[PromptToolProfile],
-    user_text: Option<&str>,
-) -> Option<Value> {
-    if let Some(corrected) = corrected_retry_tool_call(
-        call,
-        latest_tool_result,
-        tools,
-        allowed_tools,
-        prompt_tool_profiles,
-        user_text,
-    ) {
-        tracing::info!(
-            "moa: reducer returned plain text after non-answerable {}; retrying corrected tool call",
-            call.name
-        );
-        let arguments = Value::String(corrected.arguments);
-        return Some(tool_call_response(&corrected.name, &arguments));
-    }
-
-    if !same_tool_call_retry_allowed(latest_tool_result) {
-        tracing::info!(
-            "moa: reducer returned plain text after non-answerable {}; not retrying identical failing call",
-            call.name
-        );
-        return None;
-    }
-
-    tracing::info!(
-        "moa: reducer returned plain text after non-answerable {}; retrying same tool call",
-        call.name
-    );
-    Some(tool_call_response(
-        &call.name,
-        &Value::String(call.arguments.clone()),
-    ))
+    body
 }
 
 fn same_tool_call_retry_allowed(latest_tool_result: Option<&str>) -> bool {
     latest_tool_result.is_some_and(|result| plain_text_tool_result_looks_empty(result.trim()))
-}
-
-fn corrected_retry_tool_call(
-    call: &CompletedToolCall,
-    latest_tool_result: Option<&str>,
-    tools: Option<&Value>,
-    allowed_tools: &[String],
-    prompt_tool_profiles: &[PromptToolProfile],
-    user_text: Option<&str>,
-) -> Option<CompletedToolCall> {
-    let result = latest_tool_result?;
-    if let Some(corrected) =
-        corrected_search_retry_tool_call(call, result, tools, allowed_tools, user_text)
-    {
-        return Some(corrected);
-    }
-
-    let candidates = command_tool_candidates(tools, allowed_tools, prompt_tool_profiles);
-    let candidate = candidates
-        .iter()
-        .find(|candidate| candidate.name == call.name)?;
-    let mut arguments = serde_json::from_str::<Value>(&call.arguments).ok()?;
-    let command = arguments
-        .get(&candidate.field)
-        .and_then(Value::as_str)
-        .map(str::to_string)?;
-    let corrected = tool_result_suggests_unquoted_shell_token_error(result)
-        .then(|| quote_unquoted_shell_metachar_tokens(&command))
-        .flatten()
-        .or_else(|| remove_unknown_json_fields_from_command(&command, result))
-        .or_else(|| remove_unknown_cli_flags_from_command(&command, result))
-        .or_else(|| unescape_single_quoted_shell_double_quotes(&command, result))?;
-    if corrected == command {
-        return None;
-    }
-    arguments[&candidate.field] = Value::String(corrected);
-    let sanitized = sanitize_tool_arguments_for_tool(&call.name, &arguments, tools).ok()?;
-    let wire = tool_arguments_wire_string(&sanitized);
-    if wire == call.arguments {
-        return None;
-    }
-    Some(CompletedToolCall {
-        name: call.name.clone(),
-        arguments: wire,
-    })
-}
-
-fn corrected_search_retry_tool_call(
-    call: &CompletedToolCall,
-    result: &str,
-    tools: Option<&Value>,
-    allowed_tools: &[String],
-    user_text: Option<&str>,
-) -> Option<CompletedToolCall> {
-    let prompt = user_text?;
-    if !tool_result_is_generic_structured_collection_for_prompt(result, prompt) {
-        return None;
-    }
-    if !allowed_tools.is_empty() && !allowed_tools.iter().any(|name| name == &call.name) {
-        return None;
-    }
-    let tool = tool_by_name(&call.name, tools)?;
-    if !tool_looks_like_searcher(tool) {
-        return None;
-    }
-
-    let mut arguments = serde_json::from_str::<Value>(&call.arguments).ok()?;
-    let field = search_query_argument_field(tool, &arguments)?;
-    let current = arguments.get(&field)?.as_str()?;
-    let refined = refine_search_query_for_specific_result(current, prompt)?;
-    arguments[&field] = Value::String(refined);
-    let sanitized = sanitize_tool_arguments_for_tool(&call.name, &arguments, tools).ok()?;
-    let wire = tool_arguments_wire_string(&sanitized);
-    if wire == call.arguments {
-        return None;
-    }
-    Some(CompletedToolCall {
-        name: call.name.clone(),
-        arguments: wire,
-    })
-}
-
-fn search_query_argument_field(tool: &Value, arguments: &Value) -> Option<String> {
-    let arguments = arguments.as_object()?;
-    for field in arguments.keys() {
-        if field_looks_like_search_query(field) {
-            return Some(field.clone());
-        }
-    }
-
-    let properties = tool
-        .pointer("/function/parameters/properties")
-        .and_then(Value::as_object)?;
-    properties.iter().find_map(|(field, schema)| {
-        (schema_allows_string(schema) && field_looks_like_search_query(field))
-            .then(|| field.clone())
-    })
-}
-
-fn field_looks_like_search_query(field: &str) -> bool {
-    matches!(
-        field.to_ascii_lowercase().as_str(),
-        "q" | "query" | "search" | "search_query" | "term" | "terms" | "keywords" | "topic"
-    )
-}
-
-fn refine_search_query_for_specific_result(query: &str, prompt: &str) -> Option<String> {
-    if !prompt_asks_for_work_items(prompt) {
-        return None;
-    }
-    let mut refined = query.trim().to_string();
-    if refined.is_empty() {
-        return None;
-    }
-
-    let prompt_lower = prompt.to_ascii_lowercase();
-    append_search_term_if_missing(&mut refined, "specific");
-    append_search_term_if_missing(&mut refined, "title");
-    append_search_term_if_missing(&mut refined, "number");
-    if contains_any(&prompt_lower, &["issue", "issues"]) {
-        append_search_term_if_missing(&mut refined, "issue");
-    }
-    if contains_any(
-        &prompt_lower,
-        &["pull request", "pull requests", " pr ", " prs "],
-    ) {
-        append_search_term_if_missing(&mut refined, "pull request");
-    }
-    if contains_any(&prompt_lower, &["discussion", "discussions"]) {
-        append_search_term_if_missing(&mut refined, "discussion");
-    }
-
-    (refined != query.trim()).then_some(refined)
-}
-
-fn append_search_term_if_missing(query: &mut String, term: &str) {
-    if !query
-        .to_ascii_lowercase()
-        .contains(&term.to_ascii_lowercase())
-    {
-        query.push(' ');
-        query.push_str(term);
-    }
-}
-
-fn tool_result_suggests_unquoted_shell_token_error(result: &str) -> bool {
-    let lower = result.to_ascii_lowercase();
-    lower.contains("parse error near")
-        || lower.contains("syntax error near")
-        || lower.contains("no matches found")
-}
-
-fn unescape_single_quoted_shell_double_quotes(command: &str, result: &str) -> Option<String> {
-    if !tool_result_suggests_shell_quoting_issue(result) {
-        return None;
-    }
-
-    let mut changed = false;
-    let mut out = String::with_capacity(command.len());
-    let mut quote: Option<char> = None;
-    let mut chars = command.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\'' | '"' if quote == Some(ch) => {
-                quote = None;
-                out.push(ch);
-            }
-            '\'' | '"' if quote.is_none() => {
-                quote = Some(ch);
-                out.push(ch);
-            }
-            '\\' if quote == Some('\'') && chars.peek() == Some(&'"') => {
-                changed = true;
-                out.push('"');
-                chars.next();
-            }
-            _ => out.push(ch),
-        }
-    }
-
-    changed.then_some(out)
-}
-
-fn tool_result_suggests_shell_quoting_issue(result: &str) -> bool {
-    let lower = result.to_ascii_lowercase();
-    lower.contains("unix shell quoting issues")
-        || (lower.contains("syntax error") && lower.contains("jq:"))
-}
-
-fn remove_unknown_json_fields_from_command(command: &str, result: &str) -> Option<String> {
-    let unknown = unknown_json_field_from_tool_result(result)?;
-    let tokens = split_shell_tokens(command)?;
-    let mut changed = false;
-    let mut filtered = Vec::with_capacity(tokens.len());
-    let mut index = 0;
-    while index < tokens.len() {
-        let token = &tokens[index];
-        if let Some(value) = token.strip_prefix("--json=") {
-            changed = true;
-            if let Some(updated) = remove_field_from_csv(value, &unknown) {
-                filtered.push(format!("--json={updated}"));
-            }
-            index += 1;
-            continue;
-        }
-        if token == "--json" {
-            let Some(value) = tokens.get(index + 1) else {
-                filtered.push(token.clone());
-                index += 1;
-                continue;
-            };
-            if let Some(updated) = remove_field_from_csv(value, &unknown) {
-                filtered.push(token.clone());
-                filtered.push(updated);
-            }
-            changed = true;
-            index += 2;
-            continue;
-        }
-        filtered.push(token.clone());
-        index += 1;
-    }
-    changed.then(|| join_shell_tokens(&filtered))
-}
-
-fn unknown_json_field_from_tool_result(result: &str) -> Option<String> {
-    result.lines().take(4).find_map(|line| {
-        let trimmed = line.trim();
-        let lower = trimmed.to_ascii_lowercase();
-        let rest = lower
-            .strip_prefix("unknown json field:")
-            .map(|_| &trimmed["unknown json field:".len()..])?;
-        let field = rest
-            .trim()
-            .trim_matches(|ch: char| matches!(ch, '"' | '\'' | '`' | ':' | ' '));
-        (!field.is_empty()).then(|| field.to_string())
-    })
-}
-
-fn remove_field_from_csv(value: &str, unknown: &str) -> Option<String> {
-    let fields = value
-        .split(',')
-        .map(str::trim)
-        .filter(|field| !field.is_empty())
-        .filter(|field| *field != unknown)
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    (!fields.is_empty()).then(|| fields.join(","))
-}
-
-fn remove_unknown_cli_flags_from_command(command: &str, result: &str) -> Option<String> {
-    let allowed = allowed_cli_long_flags_from_usage(result)?;
-    let tokens = split_shell_tokens(command)?;
-    let mut changed = false;
-    let mut filtered = Vec::with_capacity(tokens.len());
-    let mut index = 0;
-    while index < tokens.len() {
-        let token = &tokens[index];
-        match shell_long_flag_name(token) {
-            Some(flag) if !allowed.contains(flag) => {
-                changed = true;
-                index += unknown_flag_token_span(&tokens, index);
-                continue;
-            }
-            _ => {}
-        }
-        filtered.push(token.clone());
-        index += 1;
-    }
-    changed.then(|| join_shell_tokens(&filtered))
-}
-
-fn allowed_cli_long_flags_from_usage(result: &str) -> Option<HashSet<String>> {
-    let lower = result.to_ascii_lowercase();
-    if !lower
-        .lines()
-        .take(4)
-        .any(|line| line.contains("unknown flag:"))
-        || !lower.contains("\nusage:")
-    {
-        return None;
-    }
-
-    let flags_section = result
-        .lines()
-        .skip_while(|line| line.trim() != "Flags:")
-        .skip(1)
-        .collect::<Vec<_>>()
-        .join("\n");
-    let allowed = flags_section
-        .split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | ')' | '('))
-        .filter_map(|token| token.strip_prefix("--"))
-        .map(|token| {
-            token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_')
-        })
-        .filter(|token| !token.is_empty())
-        .map(str::to_string)
-        .collect::<HashSet<_>>();
-    (!allowed.is_empty()).then_some(allowed)
-}
-
-fn shell_long_flag_name(token: &str) -> Option<&str> {
-    token
-        .strip_prefix("--")
-        .map(|flag| flag.split_once('=').map_or(flag, |(name, _)| name))
-        .filter(|flag| !flag.is_empty())
-}
-
-fn unknown_flag_token_span(tokens: &[String], index: usize) -> usize {
-    let token = &tokens[index];
-    if token.contains('=') {
-        return 1;
-    }
-    let Some(next) = tokens.get(index + 1) else {
-        return 1;
-    };
-    if next.starts_with('-') { 1 } else { 2 }
-}
-
-fn split_shell_tokens(command: &str) -> Option<Vec<String>> {
-    let mut tokens = Vec::new();
-    let mut token = String::new();
-    let mut quote: Option<char> = None;
-
-    for ch in command.chars() {
-        match ch {
-            '\'' | '"' if quote == Some(ch) => quote = None,
-            '\'' | '"' if quote.is_none() => quote = Some(ch),
-            ch if ch.is_whitespace() && quote.is_none() => {
-                if !token.is_empty() {
-                    tokens.push(std::mem::take(&mut token));
-                }
-            }
-            _ => token.push(ch),
-        }
-    }
-    if quote.is_some() {
-        return None;
-    }
-    if !token.is_empty() {
-        tokens.push(token);
-    }
-    (!tokens.is_empty()).then_some(tokens)
-}
-
-fn join_shell_tokens(tokens: &[String]) -> String {
-    tokens
-        .iter()
-        .map(|token| {
-            if shell_token_needs_join_quotes(token) {
-                format!("'{}'", token.replace('\'', r#"'"'"'"#))
-            } else {
-                token.clone()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn shell_token_needs_join_quotes(token: &str) -> bool {
-    token.is_empty()
-        || token
-            .chars()
-            .any(|ch| ch.is_whitespace() || matches!(ch, '&' | '|' | ';' | '<' | '>' | '(' | ')'))
-}
-
-fn quote_unquoted_shell_metachar_tokens(command: &str) -> Option<String> {
-    let mut changed = false;
-    let mut out = String::with_capacity(command.len() + 8);
-    let mut token = String::new();
-    let mut quote: Option<char> = None;
-
-    for ch in command.chars() {
-        match ch {
-            '\'' | '"' if quote == Some(ch) => {
-                quote = None;
-                token.push(ch);
-            }
-            '\'' | '"' if quote.is_none() => {
-                quote = Some(ch);
-                token.push(ch);
-            }
-            ch if ch.is_whitespace() && quote.is_none() => {
-                flush_shell_token(&mut out, &mut token, &mut changed);
-                out.push(ch);
-            }
-            _ => token.push(ch),
-        }
-    }
-    flush_shell_token(&mut out, &mut token, &mut changed);
-
-    changed.then_some(out)
-}
-
-fn flush_shell_token(out: &mut String, token: &mut String, changed: &mut bool) {
-    if token.is_empty() {
-        return;
-    }
-    if shell_token_needs_single_quotes(token) {
-        *changed = true;
-        out.push('\'');
-        out.push_str(&token.replace('\'', r#"'"'"'"#));
-        out.push('\'');
-    } else {
-        out.push_str(token);
-    }
-    token.clear();
-}
-
-fn shell_token_needs_single_quotes(token: &str) -> bool {
-    token.chars().any(|ch| matches!(ch, '&' | '?' | '*' | '['))
-        && !shell_token_already_quoted(token)
-}
-
-fn shell_token_already_quoted(token: &str) -> bool {
-    (token.starts_with('\'') && token.ends_with('\''))
-        || (token.starts_with('"') && token.ends_with('"'))
 }
 
 fn first_response_tool_call(body: &Value) -> Option<CompletedToolCall> {
@@ -4988,6 +4733,11 @@ fn tool_result_has_answerable_evidence_for_prompt(result: &str, prompt: &str) ->
     if !structured_rows.is_empty() {
         return true;
     }
+    if prompt_asks_for_title_field(prompt)
+        && tool_result_has_only_incomplete_structured_title_rows(result, prompt)
+    {
+        return false;
+    }
     if tool_result_is_generic_structured_collection_for_prompt(result, prompt) {
         return false;
     }
@@ -5002,12 +4752,26 @@ fn tool_result_has_answerable_evidence_for_prompt(result: &str, prompt: &str) ->
     {
         return false;
     }
+    if plain_text_result_lacks_requested_evidence(result, prompt) {
+        return false;
+    }
     if plain_text_tool_result_looks_like_repository_list(result)
         && !prompt_asks_for_repositories(prompt)
     {
         return false;
     }
     true
+}
+
+fn tool_result_has_only_incomplete_structured_title_rows(result: &str, prompt: &str) -> bool {
+    let Some(parsed) = parse_tool_result_json(result.trim()) else {
+        return false;
+    };
+    let rows = structured_tool_result_rows_unfiltered(&parsed, prompt);
+    !rows.is_empty()
+        && rows
+            .iter()
+            .all(|row| structured_title_looks_incomplete(&row.title))
 }
 
 fn tool_result_is_generic_structured_collection_for_prompt(result: &str, prompt: &str) -> bool {
@@ -5206,9 +4970,13 @@ fn prompt_asks_for_work_items(prompt: &str) -> bool {
         &[
             "list",
             "find",
+            "search",
+            "searching",
             "show",
             "check",
             "get",
+            "look for",
+            "looking for",
             "recent",
             "open",
             "important",
@@ -5482,7 +5250,7 @@ async fn resolve_decision(
                     &tool.name,
                     &tool.fallback_arguments,
                     session.tools(),
-                    response_tool_names,
+                    allowed_tools,
                     prompt_tool_profiles,
                     Some(&session.last_user_text()),
                 );
@@ -5609,7 +5377,7 @@ async fn resolve_decision(
                                 &tool.name,
                                 &tool.fallback_arguments,
                                 session.tools(),
-                                response_tool_names,
+                                allowed_tools,
                                 prompt_tool_profiles,
                                 Some(&session.last_user_text()),
                             );
@@ -5634,7 +5402,7 @@ async fn resolve_decision(
                                 &tool.name,
                                 &tool.fallback_arguments,
                                 session.tools(),
-                                response_tool_names,
+                                allowed_tools,
                                 prompt_tool_profiles,
                                 Some(&session.last_user_text()),
                             );
@@ -5676,7 +5444,7 @@ async fn resolve_decision(
                             &tool.name,
                             &tool.fallback_arguments,
                             session.tools(),
-                            response_tool_names,
+                            allowed_tools,
                             prompt_tool_profiles,
                             Some(&session.last_user_text()),
                         );
@@ -6353,27 +6121,17 @@ fn validate_response_tool_arguments_for_prompt(
     tools: Option<&Value>,
     allowed_tools: &[String],
     prompt_tool_profiles: &[PromptToolProfile],
-    user_text: Option<&str>,
+    _user_text: Option<&str>,
 ) -> Result<Value, String> {
     if tool_names_from_schemas(tools, allowed_tools)
         .iter()
         .any(|schema_name| schema_name == name)
     {
-        let mut arguments = sanitize_tool_arguments_for_tool(name, arguments, tools)
-            .map_err(|err| err.to_string())?;
-        if let Some(user_text) = user_text {
-            correct_directory_path_argument_for_prompt(name, &mut arguments, tools, user_text);
-        }
-        return Ok(arguments);
+        return sanitize_tool_arguments_for_tool(name, arguments, tools)
+            .map_err(|err| err.to_string());
     }
 
-    validate_prompt_tool_arguments(
-        name,
-        arguments,
-        allowed_tools,
-        prompt_tool_profiles,
-        user_text,
-    )
+    validate_prompt_tool_arguments(name, arguments, allowed_tools, prompt_tool_profiles)
 }
 
 fn corrected_response_tool_arguments_for_prompt(
@@ -6382,92 +6140,17 @@ fn corrected_response_tool_arguments_for_prompt(
     tools: Option<&Value>,
     allowed_tools: &[String],
     prompt_tool_profiles: &[PromptToolProfile],
-    user_text: Option<&str>,
+    _user_text: Option<&str>,
 ) -> Value {
-    let mut corrected = arguments.clone();
-    if let Some(user_text) = user_text {
-        correct_directory_path_argument_for_prompt(name, &mut corrected, tools, user_text);
-        correct_prompt_directory_path_argument_for_prompt(
-            name,
-            &mut corrected,
-            prompt_tool_profiles,
-            user_text,
-        );
-        correct_tool_name_directory_path_argument_for_prompt(name, &mut corrected, user_text);
-    }
-    let _ = allowed_tools;
-    corrected
-}
-
-fn correct_tool_name_directory_path_argument_for_prompt(
-    name: &str,
-    arguments: &mut Value,
-    user_text: &str,
-) {
-    if !prompt_mentions_current_directory(user_text) || !tool_name_looks_directory_lister(name) {
-        return;
-    }
-    let Some(arguments) = arguments.as_object_mut() else {
-        return;
-    };
-    let Some(value) = arguments.get("path").and_then(Value::as_str) else {
-        return;
-    };
-    if value != "." && is_path_like_candidate(value, "path") {
-        arguments.insert("path".to_string(), Value::String(".".to_string()));
-    }
-}
-
-fn tool_name_looks_directory_lister(name: &str) -> bool {
-    let tokens = text_tokens(name);
-    tokens.contains("tree")
-        || (["list", "ls"].iter().any(|token| tokens.contains(*token))
-            && [
-                "dir",
-                "dirs",
-                "directory",
-                "directories",
-                "folder",
-                "folders",
-            ]
-            .iter()
-            .any(|token| tokens.contains(*token)))
-}
-
-fn correct_directory_path_argument_for_prompt(
-    name: &str,
-    arguments: &mut Value,
-    tools: Option<&Value>,
-    user_text: &str,
-) {
-    if !prompt_mentions_current_directory(user_text) {
-        return;
-    }
-    let Some(tool) = tool_by_name(name, tools) else {
-        return;
-    };
-    let tool_looks_directory_like = tool_name_and_description_look_directory_like(tool);
-    let Some(parameters) = tool_parameters_from_tool(tool) else {
-        return;
-    };
-    let Some(properties) = parameters.get("properties").and_then(Value::as_object) else {
-        return;
-    };
-    let Some(arguments) = arguments.as_object_mut() else {
-        return;
-    };
-
-    for (field, schema) in properties {
-        if !tool_looks_directory_like && !schema_or_field_looks_directory_like(schema, field) {
-            continue;
-        }
-        let Some(value) = arguments.get(field).and_then(Value::as_str) else {
-            continue;
-        };
-        if value != "." && is_path_like_candidate(value, "path") {
-            arguments.insert(field.clone(), Value::String(".".to_string()));
-        }
-    }
+    validate_response_tool_arguments_for_prompt(
+        name,
+        arguments,
+        tools,
+        allowed_tools,
+        prompt_tool_profiles,
+        None,
+    )
+    .unwrap_or_else(|_| arguments.clone())
 }
 
 fn validate_prompt_tool_arguments(
@@ -6475,7 +6158,6 @@ fn validate_prompt_tool_arguments(
     arguments: &Value,
     allowed_tools: &[String],
     prompt_tool_profiles: &[PromptToolProfile],
-    user_text: Option<&str>,
 ) -> Result<Value, String> {
     let allowed: HashSet<&str> = allowed_tools.iter().map(String::as_str).collect();
     let declared = prompt_tool_profiles
@@ -6508,66 +6190,7 @@ fn validate_prompt_tool_arguments(
         }
     }
 
-    let mut arguments = Value::Object(arguments.clone());
-    if let Some(user_text) = user_text {
-        correct_prompt_directory_path_argument_for_prompt(
-            name,
-            &mut arguments,
-            prompt_tool_profiles,
-            user_text,
-        );
-    }
-    Ok(arguments)
-}
-
-fn correct_prompt_directory_path_argument_for_prompt(
-    name: &str,
-    arguments: &mut Value,
-    prompt_tool_profiles: &[PromptToolProfile],
-    user_text: &str,
-) {
-    if !prompt_mentions_current_directory(user_text) {
-        return;
-    }
-    let Some(profile) = prompt_tool_profiles
-        .iter()
-        .find(|profile| profile.name == name)
-    else {
-        return;
-    };
-    if !prompt_profile_looks_directory_lister(profile) {
-        return;
-    }
-    let Some(arguments) = arguments.as_object_mut() else {
-        return;
-    };
-    for field in ["path", "dir", "directory", "folder"] {
-        let Some(value) = arguments.get(field).and_then(Value::as_str) else {
-            continue;
-        };
-        if value != "." && is_path_like_candidate(value, "path") {
-            arguments.insert(field.to_string(), Value::String(".".to_string()));
-        }
-    }
-}
-
-fn prompt_profile_looks_directory_lister(profile: &PromptToolProfile) -> bool {
-    let tokens = &profile.tokens;
-    let has_listing_action = ["list", "tree", "show", "view", "inspect"]
-        .iter()
-        .any(|token| tokens.contains(*token));
-    let has_directory_target = [
-        "dir",
-        "dirs",
-        "directory",
-        "directories",
-        "folder",
-        "folders",
-        "tree",
-    ]
-    .iter()
-    .any(|token| tokens.contains(*token));
-    has_listing_action && has_directory_target
+    Ok(Value::Object(arguments.clone()))
 }
 
 fn declared_response_tool_names(
@@ -6994,7 +6617,7 @@ mod response_builder_tests {
     }
 
     #[tokio::test]
-    async fn arbiter_tool_call_corrects_prompt_directory_path_for_current_directory() {
+    async fn arbiter_tool_call_preserves_prompt_directory_path_argument() {
         let config = GatewayConfig {
             backends: Vec::new(),
             models: Vec::new(),
@@ -7042,11 +6665,11 @@ mod response_builder_tests {
             .and_then(Value::as_str)
             .and_then(|text| serde_json::from_str::<Value>(text).ok())
             .expect("tool arguments");
-        assert_eq!(args, json!({"path": "."}));
+        assert_eq!(args, json!({"path": "AGENTS.md"}));
     }
 
     #[tokio::test]
-    async fn arbiter_tool_call_corrects_directory_path_from_tool_name_without_schema() {
+    async fn arbiter_tool_call_preserves_directory_path_argument_without_schema() {
         let config = GatewayConfig {
             backends: Vec::new(),
             models: Vec::new(),
@@ -7090,7 +6713,7 @@ mod response_builder_tests {
             .and_then(Value::as_str)
             .and_then(|text| serde_json::from_str::<Value>(text).ok())
             .expect("tool arguments");
-        assert_eq!(args, json!({"path": "."}));
+        assert_eq!(args, json!({"path": "AGENTS.md"}));
     }
 
     fn tool_proposal(payload: &str) -> WorkerOutput {
@@ -7202,7 +6825,7 @@ mod response_builder_tests {
     }
 
     #[test]
-    fn tool_proposal_response_corrects_directory_path_for_current_directory_prompt() {
+    fn tool_proposal_response_preserves_directory_path_argument() {
         let tools = serde_json::json!([{
             "type": "function",
             "function": {
@@ -7242,11 +6865,11 @@ mod response_builder_tests {
             .and_then(Value::as_str)
             .and_then(|text| serde_json::from_str::<Value>(text).ok())
             .expect("tool arguments");
-        assert_eq!(args, json!({"path": "."}));
+        assert_eq!(args, json!({"path": "AGENTS.md"}));
     }
 
     #[test]
-    fn prompt_tool_proposal_corrects_directory_path_for_current_directory_prompt() {
+    fn prompt_tool_proposal_preserves_directory_path_argument() {
         let profiles = vec![PromptToolProfile {
             name: "tree".to_string(),
             tokens: text_tokens("tree: List directory tree for a path"),
@@ -7278,7 +6901,7 @@ mod response_builder_tests {
             .and_then(Value::as_str)
             .and_then(|text| serde_json::from_str::<Value>(text).ok())
             .expect("tool arguments");
-        assert_eq!(args, json!({"path": "."}));
+        assert_eq!(args, json!({"path": "AGENTS.md"}));
     }
 
     #[test]
@@ -7845,7 +7468,14 @@ mod response_builder_tests {
             })],
             &Some(serde_json::json!([{
                 "type": "function",
-                "function": {"name": "lookup_probe_fact"}
+                "function": {
+                    "name": "lookup_probe_fact",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"key": {"type": "string"}},
+                        "required": ["key"]
+                    }
+                }
             }])),
         );
         let config = GatewayConfig {
@@ -8154,7 +7784,7 @@ mod response_builder_tests {
     }
 
     #[test]
-    fn local_directory_prompt_uses_command_tool_when_directory_tools_need_node() {
+    fn local_directory_prompt_selects_command_tool_but_does_not_invent_command_args() {
         let tools = serde_json::json!([
             {"type": "function", "function": {
                 "name": "exec",
@@ -8202,12 +7832,9 @@ mod response_builder_tests {
         let selected = selected_tool_names_for_turn(&session, &[], &[]);
 
         assert_eq!(selected, vec!["exec".to_string()]);
-        let forced =
-            required_tool_choice_for_intent(&session, &Some(tools), &selected).expect("tool");
-        assert_eq!(forced.name, "exec");
-        assert_eq!(
-            forced.fallback_arguments,
-            serde_json::json!({"command": "ls -la ."})
+        assert!(
+            required_tool_choice_for_intent(&session, &Some(tools), &selected).is_none(),
+            "MoA must not synthesize shell commands from directory-list intent"
         );
     }
 
@@ -9458,6 +9085,79 @@ mod response_builder_tests {
     }
 
     #[test]
+    fn first_instruction_read_prompt_answers_from_plain_text_tool_result() {
+        let prompt =
+            "Read the first lines of AGENTS.md in the workspace and tell me the first instruction.";
+        let result = "# Agent Notes\n\n## Repo Overview\n\nThis repo contains a Rust binary.\n\n## Building\n\nAlways use `just`. Never build manually.\n\n```bash\njust build\n```";
+        let session = session_with_user_and_tool_result(prompt, result);
+
+        let answer = answer_from_latest_tool_result(&session).expect("read evidence answer");
+
+        assert_eq!(
+            answer,
+            "The first instruction in the tool result is: \"Always use `just`. Never build manually.\""
+        );
+    }
+
+    #[test]
+    fn first_instruction_read_prompt_skips_instruction_wrappers() {
+        let prompt =
+            "Read the first lines of AGENTS.md in the workspace and tell me the first instruction.";
+        let result = "<INSTRUCTIONS>\nWhen sending messages on my behalf, always clearly indicate the message is sent by my AI agent.\n</INSTRUCTIONS>";
+        let session = session_with_user_and_tool_result(prompt, result);
+
+        let answer = answer_from_latest_tool_result(&session).expect("read evidence answer");
+
+        assert_eq!(
+            answer,
+            "The first instruction in the tool result is: \"When sending messages on my behalf, always clearly indicate the message is sent by my AI agent.\""
+        );
+    }
+
+    #[test]
+    fn repair_tool_result_answer_replaces_clipped_prompt_context_for_first_instruction() {
+        let prompt =
+            "Read the first lines of AGENTS.md in the workspace and tell me the first instruction.";
+        let result = "# Agent Notes\n\n## Repo Overview\n\nThis repo contains a Rust binary.\n\n## Building\n\nAlways use `just`. Never build manually.";
+        let session = session_with_user_and_tool_result(prompt, result);
+
+        let repaired = repair_tool_result_answer(
+            &session,
+            "The first instruction in `AGENTS.md` is: \"rence through every model in `/v1/models`.\"",
+        );
+
+        assert_eq!(
+            repaired,
+            "The first instruction in the tool result is: \"Always use `just`. Never build manually.\""
+        );
+    }
+
+    #[test]
+    fn partial_plain_text_read_does_not_invent_continuation_args() {
+        let prompt =
+            "Read the first lines of AGENTS.md in the workspace and tell me the first instruction.";
+        let result = "# Agent Notes\n\n## Repo Overview\n\nThis repo contains a Rust binary.\n\n[151 more lines in file. Use offset=6 to continue.]";
+        let mut session = Session::new();
+        session.ingest(
+            &[
+                serde_json::json!({"role": "user", "content": prompt}),
+                tool_call_msg_with_args(
+                    "call_1",
+                    "read",
+                    r#"{"path":"/workspace/AGENTS.md","limit":5}"#,
+                ),
+                tool_result_msg("call_1", result),
+            ],
+            &None,
+        );
+
+        assert!(!tool_result_has_answerable_evidence_for_prompt(
+            result, prompt
+        ));
+        assert!(answer_from_latest_tool_result(&session).is_none());
+    }
+
+    #[test]
     fn web_search_result_json_can_answer_research_prompt_from_evidence() {
         let prompt = "Use available tools to look for open issues or recent discussion about mesh-LLM/mesh-llm on GitHub, then tell me one specific item you found with a short reason it matters.";
         let result = serde_json::json!({
@@ -9495,6 +9195,193 @@ mod response_builder_tests {
     }
 
     #[test]
+    fn web_search_exact_issue_title_prompt_uses_specific_url_and_expanded_snippet_title() {
+        let prompt = "Search the web for mesh-llm memory slot batch issue. Use web search if appropriate. Tell me one relevant GitHub issue URL and its exact title.";
+        let result = serde_json::json!({
+            "query": "mesh-llm memory slot batch issue github",
+            "provider": "duckduckgo",
+            "count": 2,
+            "results": [
+                {
+                    "title": "\n<<<EXTERNAL_UNTRUSTED_CONTENT id=\"a\">>>\nSource: Web Search\n---\nIssues · Mesh-LLM/mesh-llm · GitHub\n<<<END_EXTERNAL_UNTRUSTED_CONTENT id=\"a\">>>",
+                    "url": "https://github.com/Mesh-LLM/mesh-llm/issues/",
+                    "snippet": "\n<<<EXTERNAL_UNTRUSTED_CONTENT id=\"b\">>>\nSource: Web Search\n---\nskippy: 'decode: failed to find a memory slot for batch of size 2048' on goose/pi after a few tool-laden turns\n<<<END_EXTERNAL_UNTRUSTED_CONTENT id=\"b\">>>",
+                    "siteName": "github.com"
+                },
+                {
+                    "title": "\n<<<EXTERNAL_UNTRUSTED_CONTENT id=\"c\">>>\nSource: Web Search\n---\nskippy: 'decode: failed to find a memory slot for batch of ... - GitHub\n<<<END_EXTERNAL_UNTRUSTED_CONTENT id=\"c\">>>",
+                    "url": "https://github.com/Mesh-LLM/mesh-llm/issues/652",
+                    "snippet": "\n<<<EXTERNAL_UNTRUSTED_CONTENT id=\"d\">>>\nSource: Web Search\n---\nAnyone trying to use mesh-llm with a small local model in an agentic harness like goose or pi will hit this within 2-3 turns.\n<<<END_EXTERNAL_UNTRUSTED_CONTENT id=\"d\">>>",
+                    "siteName": "github.com"
+                }
+            ]
+        })
+        .to_string();
+        let session = session_with_user_and_tool_result(prompt, &result);
+
+        assert!(prompt_asks_for_work_items(prompt));
+        assert!(tool_result_has_answerable_evidence_for_prompt(
+            &result, prompt
+        ));
+        let answer = answer_from_latest_tool_result(&session).expect("issue evidence");
+
+        assert!(
+            answer.contains("https://github.com/Mesh-LLM/mesh-llm/issues/652"),
+            "{answer}"
+        );
+        assert!(
+            answer.contains(
+                "skippy: 'decode: failed to find a memory slot for batch of size 2048' on goose/pi after a few tool-laden turns"
+            ),
+            "{answer}"
+        );
+        assert!(
+            !answer.contains("Issues · Mesh-LLM/mesh-llm · GitHub"),
+            "{answer}"
+        );
+        assert!(!answer.contains("EXTERNAL_UNTRUSTED_CONTENT"), "{answer}");
+    }
+
+    #[test]
+    fn repair_tool_result_answer_replaces_truncated_title_when_url_was_referenced() {
+        let prompt = "Search the web for mesh-llm memory slot batch issue. Tell me one relevant GitHub issue URL and its exact title.";
+        let result = serde_json::json!({
+            "results": [
+                {
+                    "title": "Issues · Mesh-LLM/mesh-llm · GitHub",
+                    "url": "https://github.com/Mesh-LLM/mesh-llm/issues/",
+                    "snippet": "skippy: 'decode: failed to find a memory slot for batch of size 2048' on goose/pi after a few tool-laden turns"
+                },
+                {
+                    "title": "skippy: 'decode: failed to find a memory slot for batch of ... - GitHub",
+                    "url": "https://github.com/Mesh-LLM/mesh-llm/issues/652",
+                    "snippet": "Anyone trying to use mesh-llm with a small local model in an agentic harness like goose or pi will hit this within 2-3 turns."
+                }
+            ]
+        })
+        .to_string();
+        let session = session_with_user_and_tool_result(prompt, &result);
+
+        let repaired = repair_tool_result_answer(
+            &session,
+            "URL: https://github.com/Mesh-LLM/mesh-llm/issues/652\nTitle: skippy: 'decode: failed to find a memory slot for batch of... - GitHub",
+        );
+
+        assert!(
+            repaired.contains(
+                "skippy: 'decode: failed to find a memory slot for batch of size 2048' on goose/pi after a few tool-laden turns"
+            ),
+            "{repaired}"
+        );
+        assert!(
+            repaired.contains("https://github.com/Mesh-LLM/mesh-llm/issues/652"),
+            "{repaired}"
+        );
+        assert!(!repaired.contains("batch of... - GitHub"), "{repaired}");
+    }
+
+    #[test]
+    fn exact_title_search_result_with_truncated_title_is_not_answer_evidence() {
+        let prompt = "Search the web for mesh-llm memory slot batch issue. Tell me one relevant GitHub issue URL and its exact title.";
+        let result = serde_json::json!({
+            "results": [
+                {
+                    "title": "skippy: 'decode: failed to find a memory slot for batch of ... - GitHub",
+                    "url": "https://github.com/Mesh-LLM/mesh-llm/issues/652",
+                    "snippet": "Anyone trying to use mesh-llm with a small local model in an agentic harness like goose or pi will hit this within 2-3 turns."
+                }
+            ]
+        })
+        .to_string();
+        let session = session_with_user_and_tool_result(prompt, &result);
+
+        assert!(!tool_result_has_answerable_evidence_for_prompt(
+            &result, prompt
+        ));
+        assert!(answer_from_latest_tool_result(&session).is_none());
+    }
+
+    #[test]
+    fn reducer_answer_repeating_truncated_title_from_non_answerable_result_is_rejected() {
+        let prompt = "Find the exact title of the mesh-llm GitHub issue about decode failed to find a memory slot for batch.";
+        let result = serde_json::json!({
+            "results": [
+                {
+                    "title": "skippy: decode failed to find a memory slot for batch of ... - GitHub",
+                    "url": "https://example.invalid/issues/652",
+                    "snippet": "mesh-llm issue result"
+                }
+            ]
+        })
+        .to_string();
+        let answer = "The exact title is: skippy: decode failed to find a memory slot for batch of... - GitHub";
+
+        assert!(answer_appears_to_use_non_answerable_tool_result(
+            answer, &result, prompt
+        ));
+    }
+
+    #[test]
+    fn generic_exact_title_prompt_rejects_incomplete_structured_title() {
+        let prompt = "Find the exact title of the specific record about decode failed to find a memory slot for batch.";
+        let result = serde_json::json!({
+            "results": [
+                {
+                    "title": "decode failed to find a memory slot for batch of ...",
+                    "url": "https://example.invalid/records/652",
+                    "snippet": "one candidate record"
+                }
+            ]
+        })
+        .to_string();
+        let session = session_with_user_and_tool_result(prompt, &result);
+
+        assert!(!tool_result_has_answerable_evidence_for_prompt(
+            &result, prompt
+        ));
+        assert!(answer_from_latest_tool_result(&session).is_none());
+    }
+
+    #[test]
+    fn deictic_url_prompt_does_not_synthesize_url_arguments_from_context() {
+        let tools = serde_json::json!([
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_fetch",
+                    "description": "Fetch a web URL",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"url": {"type": "string", "format": "uri"}},
+                        "required": ["url"]
+                    }
+                }
+            }
+        ]);
+        let allowed = vec!["web_search".to_string(), "web_fetch".to_string()];
+
+        assert!(
+            url_intent_tool_names(
+                Some(&tools),
+                &allowed,
+                "Now fetch that issue URL and tell me the exact title."
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
     fn wrapped_web_search_title_is_cleaned_in_structured_answer() {
         let prompt = "Find one specific open issue for mesh-LLM/mesh-llm.";
         let result = serde_json::json!({
@@ -9514,6 +9401,40 @@ mod response_builder_tests {
         assert!(answer.contains("Issue #652"), "{answer}");
         assert!(!answer.contains("EXTERNAL_UNTRUSTED_CONTENT"), "{answer}");
         assert!(!answer.contains("Source: Web Search"), "{answer}");
+    }
+
+    #[test]
+    fn stale_prior_tool_url_is_not_valid_answer_for_new_non_answerable_turn() {
+        let mut session = Session::new();
+        let prior_result = serde_json::json!({
+            "url": "https://github.com/Mesh-LLM/mesh-llm/issues/652",
+            "title": "skippy: decode failed"
+        })
+        .to_string();
+        let current_result = serde_json::json!({
+            "query": "site:github.com/Mesh-LLM/mesh-llm/issues specific title",
+            "count": 0,
+            "results": []
+        })
+        .to_string();
+        session.ingest(
+            &[
+                serde_json::json!({"role": "user", "content": "Fetch issue 652."}),
+                tool_call_msg("call_1", "web_fetch"),
+                tool_result_msg("call_1", &prior_result),
+                serde_json::json!({"role": "assistant", "content": "The issue title is skippy: decode failed."}),
+                serde_json::json!({"role": "user", "content": "Look for one open issue or recent discussion and tell me why it matters."}),
+                tool_call_msg("call_2", "web_search"),
+                tool_result_msg("call_2", &current_result),
+            ],
+            &None,
+        );
+        let stale_answer = "Based on the tool results, Issue #652 at https://github.com/Mesh-LLM/mesh-llm/issues/652 is about external content security.";
+
+        assert!(answer_appears_to_use_stale_tool_result(
+            &session,
+            stale_answer
+        ));
     }
 
     #[test]
@@ -10548,26 +10469,6 @@ mod response_builder_tests {
         })
     }
 
-    fn command_tool_schema(name: &str) -> Value {
-        serde_json::json!([{
-            "type": "function",
-            "function": {
-                "name": name,
-                "description": "Run shell commands",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "Shell command to execute"
-                        }
-                    },
-                    "required": ["command"]
-                }
-            }
-        }])
-    }
-
     fn session_with_tool_result(result: &str) -> Session {
         session_with_user_and_tool_result("run command", result)
     }
@@ -10586,7 +10487,7 @@ mod response_builder_tests {
     }
 
     #[test]
-    fn empty_tool_result_plain_answer_retries_same_tool_call() {
+    fn empty_tool_result_plain_answer_does_not_retry_same_tool_call() {
         let command =
             r#"{"command":"gh pr list --repo Mesh-LLM/mesh-llm --state open --limit 10"}"#;
         let mut session = Session::new();
@@ -10608,35 +10509,23 @@ mod response_builder_tests {
             RetryToolResultContext {
                 retry_tool_call: Some(&retry),
                 latest_tool_result: Some("(no output)"),
-                tools: None,
-                allowed_tools: &[],
-                prompt_tool_profiles: &[],
-                user_text: None,
                 tools_enabled: true,
             },
         );
 
-        assert_eq!(
-            body.pointer("/choices/0/message/tool_calls/0/function/name")
-                .and_then(Value::as_str),
-            Some("exec")
-        );
-        assert_eq!(
-            body.pointer("/choices/0/message/tool_calls/0/function/arguments")
-                .and_then(Value::as_str),
-            Some(command)
-        );
         assert!(
+            body.pointer("/choices/0/message/tool_calls/0").is_none(),
+            "{body}"
+        );
+        assert_eq!(
             body.pointer("/choices/0/message/content")
-                .and_then(Value::as_str)
-                .is_none()
+                .and_then(Value::as_str),
+            Some("I could not retrieve any pull requests.")
         );
     }
 
     #[test]
-    fn shell_parse_error_retries_schema_corrected_command_tool_call() {
-        let tools = command_tool_schema("exec");
-        let allowed = ["exec".to_string()];
+    fn identical_failing_followup_tool_call_is_suppressed() {
         let command = r#"{"command":"gh api repos/Mesh-LLM/mesh-llm/issues?state=open&sort=updated&direction=desc --jq '.items[0:1]'"}"#;
         let retry = CompletedToolCall {
             name: "exec".to_string(),
@@ -10644,100 +10533,39 @@ mod response_builder_tests {
         };
 
         let body = retry_tool_result_response_if_plain(
-            chat_response("The GitHub API command failed."),
+            tool_call_response("exec", &Value::String(command.to_string())),
             RetryToolResultContext {
                 retry_tool_call: Some(&retry),
                 latest_tool_result: Some(
                     "(eval):1: parse error near `&'\n\n(Command exited with code 1)",
                 ),
-                tools: Some(&tools),
-                allowed_tools: &allowed,
-                prompt_tool_profiles: &[],
-                user_text: None,
                 tools_enabled: true,
             },
         );
 
-        assert_eq!(
-            body.pointer("/choices/0/message/tool_calls/0/function/name")
-                .and_then(Value::as_str),
-            Some("exec")
+        assert!(
+            body.pointer("/choices/0/message/tool_calls/0").is_none(),
+            "{body}"
         );
-        let args = body
-            .pointer("/choices/0/message/tool_calls/0/function/arguments")
-            .and_then(Value::as_str)
-            .and_then(|text| serde_json::from_str::<Value>(text).ok())
-            .expect("tool args");
         assert_eq!(
-            args.get("command").and_then(Value::as_str),
-            Some(
-                "gh api 'repos/Mesh-LLM/mesh-llm/issues?state=open&sort=updated&direction=desc' --jq '.items[0:1]'"
-            )
+            body.pointer("/error/code").and_then(Value::as_str),
+            Some(MOA_ERR_NO_USABLE_ANSWER)
         );
     }
 
     #[test]
-    fn shell_glob_error_retries_schema_corrected_command_tool_call() {
-        let tools = command_tool_schema("exec");
-        let allowed = ["exec".to_string()];
-        let command =
-            r#"{"command":"gh api repos/mesh-llm/mesh-llm/issues?state=open&per_page=1"}"#;
-        let retry = CompletedToolCall {
-            name: "exec".to_string(),
-            arguments: command.to_string(),
-        };
-        let result = "zsh:1: no matches found: repos/mesh-llm/mesh-llm/issues?state=open";
-        assert!(!tool_result_has_answerable_evidence(result));
-
-        let body = retry_tool_result_response_if_plain(
-            chat_response("The shell tool returned no matches found."),
-            RetryToolResultContext {
-                retry_tool_call: Some(&retry),
-                latest_tool_result: Some(result),
-                tools: Some(&tools),
-                allowed_tools: &allowed,
-                prompt_tool_profiles: &[],
-                user_text: None,
-                tools_enabled: true,
-            },
-        );
-
-        assert_eq!(
-            body.pointer("/choices/0/message/tool_calls/0/function/name")
-                .and_then(Value::as_str),
-            Some("exec")
-        );
-        let args = body
-            .pointer("/choices/0/message/tool_calls/0/function/arguments")
-            .and_then(Value::as_str)
-            .and_then(|text| serde_json::from_str::<Value>(text).ok())
-            .expect("tool args");
-        assert_eq!(
-            args.get("command").and_then(Value::as_str),
-            Some("gh api 'repos/mesh-llm/mesh-llm/issues?state=open&per_page=1'")
-        );
-    }
-
-    #[test]
-    fn shell_glob_error_corrects_new_bad_followup_tool_call() {
-        let tools = command_tool_schema("exec");
-        let allowed = ["exec".to_string()];
+    fn different_model_emitted_followup_tool_call_is_preserved() {
         let previous = CompletedToolCall {
             name: "exec".to_string(),
-            arguments: r#"{"command":"curl -s https://api.github.com/repos/Mesh-LLM/mesh-llm/issues?state=open\\&per_page=1"}"#.to_string(),
+            arguments: r#"{"command":"gh pr list --limit 1"}"#.to_string(),
         };
-        let followup = r#"{"command":"curl -s https://api.github.com/repos/Mesh-LLM/mesh-llm/issues?state=open&per_page=1 | jq -r '.[0]'"}"#;
-        let result = "zsh:1: no matches found: https://api.github.com/repos/Mesh-LLM/mesh-llm/issues?state=open";
+        let followup = r#"{"command":"gh issue list --limit 1"}"#;
 
         let body = retry_tool_result_response_if_plain(
             tool_call_response("exec", &Value::String(followup.to_string())),
             RetryToolResultContext {
                 retry_tool_call: Some(&previous),
-                latest_tool_result: Some(result),
-                tools: Some(&tools),
-                allowed_tools: &allowed,
-                prompt_tool_profiles: &[],
-                user_text: None,
+                latest_tool_result: Some("unknown flag: --state"),
                 tools_enabled: true,
             },
         );
@@ -10754,108 +10582,12 @@ mod response_builder_tests {
             .expect("tool args");
         assert_eq!(
             args.get("command").and_then(Value::as_str),
-            Some(
-                "curl -s 'https://api.github.com/repos/Mesh-LLM/mesh-llm/issues?state=open&per_page=1' | jq -r '.[0]'"
-            )
+            Some("gh issue list --limit 1")
         );
     }
 
     #[test]
-    fn cli_unknown_flag_error_retries_schema_corrected_command_tool_call() {
-        let tools = command_tool_schema("exec");
-        let allowed = ["exec".to_string()];
-        let command =
-            r#"{"command":"gh api repos/Mesh-LLM/mesh-llm/issues --state open --limit 1"}"#;
-        let retry = CompletedToolCall {
-            name: "exec".to_string(),
-            arguments: command.to_string(),
-        };
-        let result = "unknown flag: --state\n\nUsage:  gh api <endpoint> [flags]\n\nFlags:\n      --cache duration        Cache the response\n  -H, --header key:value      Add a HTTP request header\n      --paginate              Make additional HTTP requests\n\n(Command exited with code 1)";
-
-        let body = retry_tool_result_response_if_plain(
-            chat_response("Let me try again with a corrected command."),
-            RetryToolResultContext {
-                retry_tool_call: Some(&retry),
-                latest_tool_result: Some(result),
-                tools: Some(&tools),
-                allowed_tools: &allowed,
-                prompt_tool_profiles: &[],
-                user_text: None,
-                tools_enabled: true,
-            },
-        );
-
-        assert_eq!(
-            body.pointer("/choices/0/message/tool_calls/0/function/name")
-                .and_then(Value::as_str),
-            Some("exec")
-        );
-        let args = body
-            .pointer("/choices/0/message/tool_calls/0/function/arguments")
-            .and_then(Value::as_str)
-            .and_then(|text| serde_json::from_str::<Value>(text).ok())
-            .expect("tool args");
-        assert_eq!(
-            args.get("command").and_then(Value::as_str),
-            Some("gh api repos/Mesh-LLM/mesh-llm/issues")
-        );
-    }
-
-    #[test]
-    fn jq_shell_quoting_error_retries_schema_corrected_command_tool_call() {
-        let tools = command_tool_schema("exec");
-        let allowed = ["exec".to_string()];
-        let command = r#"{"command":"curl -s \"https://api.github.com/repos/Mesh-LLM/mesh-llm/issues/808\" | jq -r '\\\"\\(.number) \\(.state) \\(.title)\\\"'"}"#;
-        let retry = CompletedToolCall {
-            name: "exec".to_string(),
-            arguments: command.to_string(),
-        };
-        let result = "jq: error: syntax error, unexpected INVALID_CHARACTER, expecting end of file (Unix shell quoting issues?) at <top-level>, line 1:\n\\\"\\(.number) \\(.state) \\(.title)\\\"\njq: 1 compile error\n\n(Command exited with code 3)";
-
-        let body = retry_tool_result_response_if_plain(
-            chat_response("I encountered an error while trying to fetch the details."),
-            RetryToolResultContext {
-                retry_tool_call: Some(&retry),
-                latest_tool_result: Some(result),
-                tools: Some(&tools),
-                allowed_tools: &allowed,
-                prompt_tool_profiles: &[],
-                user_text: None,
-                tools_enabled: true,
-            },
-        );
-
-        assert_eq!(
-            body.pointer("/choices/0/message/tool_calls/0/function/name")
-                .and_then(Value::as_str),
-            Some("exec")
-        );
-        let args = body
-            .pointer("/choices/0/message/tool_calls/0/function/arguments")
-            .and_then(Value::as_str)
-            .and_then(|text| serde_json::from_str::<Value>(text).ok())
-            .expect("tool args");
-        assert_eq!(
-            args.get("command").and_then(Value::as_str),
-            Some(
-                "curl -s \"https://api.github.com/repos/Mesh-LLM/mesh-llm/issues/808\" | jq -r '\"\\(.number) \\(.state) \\(.title)\"'"
-            )
-        );
-    }
-
-    #[test]
-    fn generic_collection_search_result_retries_with_more_specific_query() {
-        let tools = serde_json::json!([{"type": "function", "function": {
-            "name": "web_search",
-            "description": "Search online web sources",
-            "parameters": {
-                "type": "object",
-                "properties": {"query": {"type": "string", "description": "Search query"}},
-                "required": ["query"]
-            }
-        }}]);
-        let allowed = ["web_search".to_string()];
-        let prompt = "Find one specific open issue or recent discussion for mesh-LLM/mesh-llm.";
+    fn generic_collection_result_plain_answer_does_not_refine_search_query() {
         let retry = CompletedToolCall {
             name: "web_search".to_string(),
             arguments: r#"{"query":"open issues or recent discussion about mesh-LLM/mesh-llm"}"#
@@ -10882,31 +10614,19 @@ mod response_builder_tests {
             RetryToolResultContext {
                 retry_tool_call: Some(&retry),
                 latest_tool_result: Some(&result),
-                tools: Some(&tools),
-                allowed_tools: &allowed,
-                prompt_tool_profiles: &[],
-                user_text: Some(prompt),
                 tools_enabled: true,
             },
         );
 
-        assert_eq!(
-            body.pointer("/choices/0/message/tool_calls/0/function/name")
-                .and_then(Value::as_str),
-            Some("web_search")
+        assert!(
+            body.pointer("/choices/0/message/tool_calls/0").is_none(),
+            "{body}"
         );
-        let args = body
-            .pointer("/choices/0/message/tool_calls/0/function/arguments")
-            .and_then(Value::as_str)
-            .and_then(|text| serde_json::from_str::<Value>(text).ok())
-            .expect("tool args");
-        let query = args
-            .get("query")
-            .and_then(Value::as_str)
-            .expect("query arg");
-        assert!(query.contains("specific"), "{query}");
-        assert!(query.contains("title"), "{query}");
-        assert!(query.contains("number"), "{query}");
+        assert_eq!(
+            body.pointer("/choices/0/message/content")
+                .and_then(Value::as_str),
+            Some("The result only listed collection pages.")
+        );
     }
 
     #[test]

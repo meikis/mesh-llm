@@ -36,14 +36,20 @@ async fn downloads_and_generates_real_tokens() {
         "config should report layers"
     );
 
-    // Generate a short greedy completion entirely in-process via MLX.
+    // Generate a greedy completion entirely in-process via MLX. Use a factual
+    // question with a deterministic answer so we can assert correctness, not
+    // just non-emptiness — this catches forward-pass / sampling regressions.
     let out = engine
-        .chat(Some("You are concise."), "Say hello in one word.", 8)
+        .chat(None, "What is the capital of France?", 16)
         .expect("generation should succeed");
 
+    eprintln!("MLX completion: {out:?}");
     assert!(
         !out.trim().is_empty(),
         "expected non-empty completion, got {out:?}"
     );
-    eprintln!("MLX completion: {out:?}");
+    assert!(
+        out.to_lowercase().contains("paris"),
+        "expected the model to answer Paris, got {out:?}"
+    );
 }

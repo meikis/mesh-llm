@@ -46,6 +46,10 @@ pub struct Stream {
     pub(crate) raw: sys::mlx_stream,
 }
 
+// SAFETY: see the note on `Array` — engine access is serialised by the runtime.
+unsafe impl Send for Stream {}
+unsafe impl Sync for Stream {}
+
 impl Stream {
     /// The default Metal (GPU) stream — what inference runs on.
     pub fn gpu() -> Self {
@@ -74,6 +78,14 @@ impl Drop for Stream {
 pub struct Array {
     pub(crate) raw: sys::mlx_array,
 }
+
+// SAFETY: an `mlx_array` is a reference-counted handle into the MLX engine.
+// It is safe to move between threads, and safe to share provided callers do not
+// mutate the same array concurrently. The runtime serialises all engine access
+// for a given model behind a mutex (see `runtime::server`), so these bounds
+// hold. The same applies to `Stream` and the distributed `Group`.
+unsafe impl Send for Array {}
+unsafe impl Sync for Array {}
 
 impl Array {
     /// Wrap a raw handle taking ownership (used internally after C calls).

@@ -64,6 +64,27 @@ pub fn concatenate(arrays: &[&Array], axis: i32, s: &Stream) -> Result<Array> {
     Ok(Array::from_raw(res))
 }
 
+/// Slice `a[start[i]..stop[i]]` along each axis with unit strides.
+pub fn slice(a: &Array, start: &[i32], stop: &[i32], s: &Stream) -> Result<Array> {
+    let strides = vec![1i32; start.len()];
+    let mut res = unsafe { sys::mlx_array_new() };
+    let rc = unsafe {
+        sys::mlx_slice(
+            &mut res,
+            a.raw,
+            start.as_ptr(),
+            start.len(),
+            stop.as_ptr(),
+            stop.len(),
+            strides.as_ptr(),
+            strides.len(),
+            s.raw,
+        )
+    };
+    check(rc, "slice")?;
+    Ok(Array::from_raw(res))
+}
+
 /// Gather rows along `axis` (used for embedding lookup with `axis=0`).
 pub fn take(a: &Array, indices: &Array, axis: i32, s: &Stream) -> Result<Array> {
     let mut res = unsafe { sys::mlx_array_new() };
@@ -72,10 +93,12 @@ pub fn take(a: &Array, indices: &Array, axis: i32, s: &Stream) -> Result<Array> 
     Ok(Array::from_raw(res))
 }
 
-/// Argmax over the last axis (`keepdims = false`).
+/// Argmax over the last axis (`keepdims = false`). Reduces only the final
+/// dimension, so `[..., vocab]` yields one index per row (not a global scalar).
 pub fn argmax(a: &Array, s: &Stream) -> Result<Array> {
+    let axis = (a.ndim() as i32) - 1;
     let mut res = unsafe { sys::mlx_array_new() };
-    let rc = unsafe { sys::mlx_argmax(&mut res, a.raw, false, s.raw) };
+    let rc = unsafe { sys::mlx_argmax_axis(&mut res, a.raw, axis, false, s.raw) };
     check(rc, "argmax")?;
     Ok(Array::from_raw(res))
 }
@@ -85,6 +108,79 @@ pub fn softmax(a: &Array, axis: i32, s: &Stream) -> Result<Array> {
     let mut res = unsafe { sys::mlx_array_new() };
     let rc = unsafe { sys::mlx_softmax_axis(&mut res, a.raw, axis, true, s.raw) };
     check(rc, "softmax")?;
+    Ok(Array::from_raw(res))
+}
+
+fn opt_int(v: i32) -> sys::mlx_optional_int {
+    sys::mlx_optional_int {
+        value: v,
+        has_value: true,
+    }
+}
+
+/// Quantized matmul `x @ dequant(w)ᵀ` for affine-quantized linear weights.
+/// `biases` may be a null array.
+pub fn quantized_matmul(
+    x: &Array,
+    w: &Array,
+    scales: &Array,
+    biases: Option<&Array>,
+    group_size: i32,
+    bits: i32,
+    s: &Stream,
+) -> Result<Array> {
+    let mode = cstr("affine")?;
+    let biases_raw = biases.map(|b| b.raw).unwrap_or(sys::mlx_array::null());
+    let mut res = unsafe { sys::mlx_array_new() };
+    let rc = unsafe {
+        sys::mlx_quantized_matmul(
+            &mut res,
+            x.raw,
+            w.raw,
+            scales.raw,
+            biases_raw,
+            true, // transpose: weight stored [out, in_packed]
+            opt_int(group_size),
+            opt_int(bits),
+            mode.as_ptr(),
+            s.raw,
+        )
+    };
+    check(rc, "quantized_matmul")?;
+    Ok(Array::from_raw(res))
+}
+
+/// Dequantize an affine-quantized weight back to a dense array.
+pub fn dequantize(
+    w: &Array,
+    scales: &Array,
+    biases: Option<&Array>,
+    group_size: i32,
+    bits: i32,
+    s: &Stream,
+) -> Result<Array> {
+    let mode = cstr("affine")?;
+    let biases_raw = biases.map(|b| b.raw).unwrap_or(sys::mlx_array::null());
+    let no_dtype = sys::mlx_optional_dtype {
+        value: sys::mlx_dtype::MLX_FLOAT32,
+        has_value: false,
+    };
+    let mut res = unsafe { sys::mlx_array_new() };
+    let rc = unsafe {
+        sys::mlx_dequantize(
+            &mut res,
+            w.raw,
+            scales.raw,
+            biases_raw,
+            opt_int(group_size),
+            opt_int(bits),
+            mode.as_ptr(),
+            sys::mlx_array::null(),
+            no_dtype,
+            s.raw,
+        )
+    };
+    check(rc, "dequantize")?;
     Ok(Array::from_raw(res))
 }
 

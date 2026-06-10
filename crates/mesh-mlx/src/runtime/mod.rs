@@ -2,9 +2,11 @@
 //! distributed. Ties together download → load → tokenizer → forward/generate.
 
 mod generate;
+mod server;
 mod tokenizer;
 
-pub use generate::{decode_step, generate_local};
+pub use generate::{generate_distributed, generate_local};
+pub use server::{ServerState, router, serve};
 pub use tokenizer::{Tokenizer, apply_chat_template};
 
 use crate::Result;
@@ -63,24 +65,96 @@ impl Engine {
         })
     }
 
+    /// Load a model for tensor-parallel serving across a live [`Group`]. The
+    /// per-rank weight shards are sliced after loading. All ranks call this.
+    pub async fn load_tensor_parallel(model: &ModelRef, group: &Group) -> Result<Self> {
+        // Tensor parallel: every rank loads the full repo (single pipeline
+        // stage), then slices its shard of each projection.
+        let pipeline = Pipeline::plan(0, 1, 0);
+        let mut engine = Self::load_with_pipeline(model, pipeline).await?;
+        let load_stream = Stream::cpu();
+        loader::shard_tensor_parallel(
+            &mut engine.weights,
+            &engine.config,
+            group.rank(),
+            group.size(),
+            &load_stream,
+        )?;
+        Ok(engine)
+    }
+
     /// Build the model bound to this engine's loaded weights.
     pub fn model(&self) -> LlamaModel<'_> {
         LlamaModel::new(&self.config, &self.weights, self.pipeline.clone())
+    }
+
+    /// Build the model with tensor parallelism enabled over `group`.
+    pub fn model_tensor_parallel<'g>(&'g self, group: &'g Group) -> LlamaModel<'g> {
+        LlamaModel::new(&self.config, &self.weights, self.pipeline.clone())
+            .with_tensor_parallel(group)
     }
 
     /// Generate a completion for a chat prompt (single-node greedy).
     pub fn chat(&self, system: Option<&str>, user: &str, max_tokens: usize) -> Result<String> {
         let prompt = apply_chat_template(system, user);
         let ids = self.tokenizer.encode(&prompt)?;
-        let model = self.model();
-        let out = generate_local(
-            &model,
-            &self.pipeline,
-            &ids,
-            max_tokens,
-            |t| self.tokenizer.is_eos(t),
-            &self.stream,
-        )?;
+        self.complete_ids(&ids, max_tokens, None)
+    }
+
+    /// Generate a completion for a chat prompt across a live distributed
+    /// [`Group`] (pipeline parallelism). All ranks must call this in lock-step.
+    pub fn chat_distributed(
+        &self,
+        group: &Group,
+        system: Option<&str>,
+        user: &str,
+        max_tokens: usize,
+    ) -> Result<String> {
+        let prompt = apply_chat_template(system, user);
+        let ids = self.tokenizer.encode(&prompt)?;
+        self.complete_ids(&ids, max_tokens, Some(group))
+    }
+
+    /// Core completion: routes to single-node, pipeline, or tensor-parallel
+    /// generation and decodes the result.
+    ///
+    /// - No group, or group size 1 → single-node local generate.
+    /// - Group with `pipeline.size > 1` → pipeline-parallel generate (send/recv).
+    /// - Group with `pipeline.size == 1` → tensor-parallel generate (the group
+    ///   is the tensor group; layers are sharded and all-reduce per layer).
+    pub fn complete_ids(
+        &self,
+        ids: &[i32],
+        max_tokens: usize,
+        group: Option<&Group>,
+    ) -> Result<String> {
+        let eos = |t: i32| self.tokenizer.is_eos(t);
+        let out = match group {
+            Some(g) if self.pipeline.size > 1 => {
+                // Pipeline parallelism.
+                let model = self.model();
+                generate_distributed(
+                    &model,
+                    &self.pipeline,
+                    g,
+                    ids,
+                    max_tokens,
+                    eos,
+                    &self.stream,
+                )?
+            }
+            Some(g) if g.size() > 1 => {
+                // Tensor parallelism: sharded model, plain local loop — the
+                // all-reduces inside the layers do the cross-rank work, and the
+                // loop is identical on every rank (greedy is deterministic).
+                let model = self.model_tensor_parallel(g);
+                generate_local(&model, &self.pipeline, ids, max_tokens, eos, &self.stream)?
+            }
+            _ => {
+                let model = self.model();
+                generate_local(&model, &self.pipeline, ids, max_tokens, eos, &self.stream)?
+            }
+        };
         self.tokenizer.decode(&out)
     }
 

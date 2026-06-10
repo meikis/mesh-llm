@@ -70,11 +70,27 @@ pub enum mlx_dtype {
     MLX_COMPLEX64,
 }
 
-/// `mlx_optional_float` from `mlx/c/types.h` — a float with a validity flag.
+/// `mlx_optional_float` — a float with a validity flag.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct mlx_optional_float {
     pub value: c_float,
+    pub has_value: bool,
+}
+
+/// `mlx_optional_int` — an int with a validity flag.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct mlx_optional_int {
+    pub value: c_int,
+    pub has_value: bool,
+}
+
+/// `mlx_optional_dtype` — a dtype with a validity flag.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct mlx_optional_dtype {
+    pub value: mlx_dtype,
     pub has_value: bool,
 }
 
@@ -177,13 +193,59 @@ unsafe extern "C" {
         axis: c_int,
         s: mlx_stream,
     ) -> c_int;
-    pub fn mlx_argmax(res: *mut mlx_array, a: mlx_array, keepdims: bool, s: mlx_stream) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    pub fn mlx_slice(
+        res: *mut mlx_array,
+        a: mlx_array,
+        start: *const c_int,
+        start_num: size_t,
+        stop: *const c_int,
+        stop_num: size_t,
+        strides: *const c_int,
+        strides_num: size_t,
+        s: mlx_stream,
+    ) -> c_int;
+    pub fn mlx_argmax_axis(
+        res: *mut mlx_array,
+        a: mlx_array,
+        axis: c_int,
+        keepdims: bool,
+        s: mlx_stream,
+    ) -> c_int;
     pub fn mlx_sigmoid(res: *mut mlx_array, a: mlx_array, s: mlx_stream) -> c_int;
     pub fn mlx_softmax_axis(
         res: *mut mlx_array,
         a: mlx_array,
         axis: c_int,
         precise: bool,
+        s: mlx_stream,
+    ) -> c_int;
+
+    // ---- quantization ----
+    #[allow(clippy::too_many_arguments)]
+    pub fn mlx_quantized_matmul(
+        res: *mut mlx_array,
+        x: mlx_array,
+        w: mlx_array,
+        scales: mlx_array,
+        biases: mlx_array,
+        transpose: bool,
+        group_size: mlx_optional_int,
+        bits: mlx_optional_int,
+        mode: *const c_char,
+        s: mlx_stream,
+    ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    pub fn mlx_dequantize(
+        res: *mut mlx_array,
+        w: mlx_array,
+        scales: mlx_array,
+        biases: mlx_array,
+        group_size: mlx_optional_int,
+        bits: mlx_optional_int,
+        mode: *const c_char,
+        global_scale: mlx_array,
+        dtype: mlx_optional_dtype,
         s: mlx_stream,
     ) -> c_int;
 

@@ -95,9 +95,14 @@ stub!(mlx_transpose_axes(r: *mut mlx_array, a: mlx_array, ax: *const c_int, n: s
 stub!(mlx_astype(r: *mut mlx_array, a: mlx_array, t: mlx_dtype, s: mlx_stream) -> c_int);
 stub!(mlx_concatenate_axis(r: *mut mlx_array, a: mlx_vector_array, ax: c_int, s: mlx_stream) -> c_int);
 stub!(mlx_take_axis(r: *mut mlx_array, a: mlx_array, i: mlx_array, ax: c_int, s: mlx_stream) -> c_int);
-stub!(mlx_argmax(r: *mut mlx_array, a: mlx_array, k: bool, s: mlx_stream) -> c_int);
+stub!(mlx_slice(r: *mut mlx_array, a: mlx_array, st: *const c_int, sn: size_t, sp: *const c_int, spn: size_t, sd: *const c_int, sdn: size_t, s: mlx_stream) -> c_int);
+stub!(mlx_argmax_axis(r: *mut mlx_array, a: mlx_array, ax: c_int, k: bool, s: mlx_stream) -> c_int);
 stub!(mlx_sigmoid(r: *mut mlx_array, a: mlx_array, s: mlx_stream) -> c_int);
 stub!(mlx_softmax_axis(r: *mut mlx_array, a: mlx_array, ax: c_int, p: bool, s: mlx_stream) -> c_int);
+
+// quantization
+stub!(mlx_quantized_matmul(r: *mut mlx_array, x: mlx_array, w: mlx_array, sc: mlx_array, b: mlx_array, t: bool, g: mlx_optional_int, bi: mlx_optional_int, m: *const c_char, s: mlx_stream) -> c_int);
+stub!(mlx_dequantize(r: *mut mlx_array, w: mlx_array, sc: mlx_array, b: mlx_array, g: mlx_optional_int, bi: mlx_optional_int, m: *const c_char, gs: mlx_array, d: mlx_optional_dtype, s: mlx_stream) -> c_int);
 
 // fast
 stub!(mlx_fast_rms_norm(r: *mut mlx_array, x: mlx_array, w: mlx_array, e: c_float, s: mlx_stream) -> c_int);

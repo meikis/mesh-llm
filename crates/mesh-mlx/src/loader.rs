@@ -177,6 +177,99 @@ fn load_safetensors_into(file: &Path, weights: &mut Weights, s: &Stream) -> Resu
     res
 }
 
+/// Shard the per-layer projection weights for tensor parallelism, in place.
+///
+/// Following the Megatron / mlx-lm pattern across a group of size `n`, rank `r`:
+/// - **column-parallel** (split output dim, axis 0): `q/k/v/gate/up` proj — each
+///   rank keeps `[r*out/n .. (r+1)*out/n, :]`.
+/// - **row-parallel** (split input dim, axis 1): `o/down` proj — each rank keeps
+///   `[:, r*in/n .. (r+1)*in/n]`; the model `all_sum`s their partial outputs.
+///
+/// Quantized weights are packed along the input dim; only the **output-dim**
+/// (column-parallel) split is safe to do by plain slicing without dequantizing,
+/// so for quantized models we shard only the column-parallel projections and
+/// leave row-parallel ones replicated (still correct, just less memory saving).
+/// Dense models shard both.
+pub fn shard_tensor_parallel(
+    weights: &mut Weights,
+    config: &ModelConfig,
+    rank: i32,
+    size: i32,
+    s: &crate::array::Stream,
+) -> Result<()> {
+    if size <= 1 {
+        return Ok(());
+    }
+    let quantized = config.quantization.is_some();
+    for l in 0..config.num_hidden_layers {
+        let p = format!("model.layers.{l}");
+        // Column-parallel (axis 0): always safe.
+        for proj in [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+            "mlp.gate_proj",
+            "mlp.up_proj",
+        ] {
+            shard_axis(weights, &format!("{p}.{proj}"), 0, rank, size, quantized, s)?;
+        }
+        // Row-parallel (axis 1): dense only (quantized packing prevents naive
+        // slicing along the input dim).
+        if !quantized {
+            for proj in ["self_attn.o_proj", "mlp.down_proj"] {
+                shard_axis(weights, &format!("{p}.{proj}"), 1, rank, size, false, s)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Slice `{prefix}.weight` (and `.scales`/`.biases` for quantized column shards)
+/// to this rank's contiguous chunk along `axis`.
+fn shard_axis(
+    weights: &mut Weights,
+    prefix: &str,
+    axis: usize,
+    rank: i32,
+    size: i32,
+    quantized: bool,
+    s: &crate::array::Stream,
+) -> Result<()> {
+    let names: Vec<String> = if quantized && axis == 0 {
+        // Column-parallel quantized: weight, scales, biases all split on rows.
+        ["weight", "scales", "biases"]
+            .iter()
+            .map(|k| format!("{prefix}.{k}"))
+            .filter(|n| weights.contains(n))
+            .collect()
+    } else {
+        vec![format!("{prefix}.weight")]
+    };
+
+    for name in names {
+        let arr = weights.get(&name)?;
+        let shape = arr.shape();
+        if axis >= shape.len() {
+            continue;
+        }
+        let dim = shape[axis];
+        if dim % size != 0 {
+            return Err(MlxError::Load(format!(
+                "cannot shard '{name}' dim {dim} across {size} ranks"
+            )));
+        }
+        let chunk = dim / size;
+        let mut start = vec![0i32; shape.len()];
+        let mut stop = shape.clone();
+        start[axis] = rank * chunk;
+        stop[axis] = (rank + 1) * chunk;
+        let sliced = crate::ops::slice(arr, &start, &stop, s)?;
+        sliced.eval()?;
+        weights.replace(&name, sliced);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

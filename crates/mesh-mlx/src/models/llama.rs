@@ -13,18 +13,28 @@
 
 use crate::Result;
 use crate::array::{Array, Stream};
-use crate::distributed::Pipeline;
+use crate::distributed::{Group, Pipeline};
 use crate::models::config::{Family, ModelConfig};
-use crate::nn::{Embedding, Linear, RmsNorm, Weights};
+use crate::nn::{Embedding, Linear, QuantParams, RmsNorm, Weights};
 use crate::ops;
+
+/// Tensor-parallel context: the group to all-reduce over and its size.
+#[derive(Clone)]
+pub struct TensorParallel<'g> {
+    pub group: &'g Group,
+    pub size: i32,
+}
 
 /// A loaded Llama-family model bound to a set of weights.
 pub struct LlamaModel<'w> {
     cfg: &'w ModelConfig,
     weights: &'w Weights,
     family: Family,
+    quant: Option<QuantParams>,
     /// Layer ownership for pipeline parallelism (full range when single rank).
     pipeline: Pipeline,
+    /// Tensor-parallel context when sharding within layers across a group.
+    tensor: Option<TensorParallel<'w>>,
 }
 
 /// Per-layer KV cache (keys/values concatenated along the sequence axis).
@@ -37,12 +47,55 @@ pub struct LayerCache {
 
 impl<'w> LlamaModel<'w> {
     pub fn new(cfg: &'w ModelConfig, weights: &'w Weights, pipeline: Pipeline) -> Self {
+        let quant = cfg.quantization.map(|q| QuantParams {
+            group_size: q.group_size,
+            bits: q.bits,
+        });
         LlamaModel {
             cfg,
             weights,
             family: cfg.family(),
+            quant,
             pipeline,
+            tensor: None,
         }
+    }
+
+    /// Enable tensor parallelism: heads are split across the group and the
+    /// row-parallel projections (`o_proj`, `mlp.down_proj`) all-reduce. The
+    /// weights must already be sharded (see `loader::shard_tensor_parallel`).
+    pub fn with_tensor_parallel(mut self, group: &'w Group) -> Self {
+        let size = group.size();
+        if size > 1 {
+            self.tensor = Some(TensorParallel { group, size });
+        }
+        self
+    }
+
+    /// Local head count after tensor-parallel splitting.
+    fn local_heads(&self, total: i32) -> i32 {
+        match &self.tensor {
+            Some(tp) => total / tp.size,
+            None => total,
+        }
+    }
+
+    /// All-reduce a row-parallel projection output across the tensor group.
+    fn tp_all_sum(&self, x: Array, s: &Stream) -> Result<Array> {
+        match &self.tensor {
+            Some(tp) => tp.group.all_sum(&x, s),
+            None => Ok(x),
+        }
+    }
+
+    /// Quant-aware linear loader bound to this model's params.
+    fn linear(&self, prefix: &str) -> Result<Linear<'w>> {
+        Linear::load_quant(self.weights, prefix, self.quant)
+    }
+
+    /// Quant-aware embedding loader.
+    fn embedding(&self, prefix: &str) -> Result<Embedding<'w>> {
+        Embedding::load_quant(self.weights, prefix, self.quant)
     }
 
     /// Fresh per-layer caches for the layers this rank owns.
@@ -55,7 +108,7 @@ impl<'w> LlamaModel<'w> {
     /// Embed token ids `[B, L]` (i32) into hidden states. Only meaningful on the
     /// first forward stage (which owns the embedding).
     pub fn embed(&self, ids: &Array, s: &Stream) -> Result<Array> {
-        Embedding::load(self.weights, "model.embed_tokens")?.forward(ids, s)
+        self.embedding("model.embed_tokens")?.forward(ids, s)
     }
 
     /// Run this rank's owned layers over hidden state `h` `[B, L, D]`.
@@ -79,9 +132,9 @@ impl<'w> LlamaModel<'w> {
         let normed =
             RmsNorm::load(self.weights, "model.norm", self.cfg.rms_norm_eps)?.forward(h, s)?;
         if self.cfg.tie_word_embeddings || !self.weights.contains("lm_head.weight") {
-            Embedding::load(self.weights, "model.embed_tokens")?.as_linear(&normed, s)
+            self.embedding("model.embed_tokens")?.as_linear(&normed, s)
         } else {
-            Linear::load(self.weights, "lm_head")?.forward(&normed, s)
+            self.linear("lm_head")?.forward(&normed, s)
         }
     }
 
@@ -118,15 +171,20 @@ impl<'w> LlamaModel<'w> {
     ) -> Result<Array> {
         let shape = x.shape();
         let (b, l) = (shape[0], shape[1]);
-        let n_heads = self.cfg.num_attention_heads;
-        let n_kv = self.cfg.kv_heads();
+        // Under tensor parallelism each rank holds a slice of the heads.
+        let n_heads = self.local_heads(self.cfg.num_attention_heads);
+        let n_kv = self.local_heads(self.cfg.kv_heads());
         let hd = self.cfg.head_dim();
 
-        let mut q =
-            Linear::load(self.weights, &format!("{prefix}.self_attn.q_proj"))?.forward(x, s)?;
-        let mut k =
-            Linear::load(self.weights, &format!("{prefix}.self_attn.k_proj"))?.forward(x, s)?;
-        let v = Linear::load(self.weights, &format!("{prefix}.self_attn.v_proj"))?.forward(x, s)?;
+        let mut q = self
+            .linear(&format!("{prefix}.self_attn.q_proj"))?
+            .forward(x, s)?;
+        let mut k = self
+            .linear(&format!("{prefix}.self_attn.k_proj"))?
+            .forward(x, s)?;
+        let v = self
+            .linear(&format!("{prefix}.self_attn.v_proj"))?
+            .forward(x, s)?;
 
         // [B, L, H, hd] -> [B, H, L, hd]
         q = ops::transpose(
@@ -175,8 +233,18 @@ impl<'w> LlamaModel<'w> {
         }
         cache.offset += l;
 
-        let out =
-            ops::scaled_dot_product_attention(&q, &k, &v, self.cfg.attention_scale(), "causal", s)?;
+        // Mask: causal for multi-token prefill; none for single-token decode
+        // (one query against the cached keys needs no mask) — matches the
+        // reference `create_attention_mask` (returns None when N == 1).
+        let mask_mode = if l > 1 { "causal" } else { "" };
+        let out = ops::scaled_dot_product_attention(
+            &q,
+            &k,
+            &v,
+            self.cfg.attention_scale(),
+            mask_mode,
+            s,
+        )?;
         // store updated cache (clone handles by re-reading: we keep k/v)
         cache.keys = Some(clone_ref(&k, s)?);
         cache.values = Some(clone_ref(&v, s)?);
@@ -184,15 +252,29 @@ impl<'w> LlamaModel<'w> {
         // [B, H, L, hd] -> [B, L, H*hd]
         let out = ops::transpose(&out, &[0, 2, 1, 3], s)?;
         let out = ops::reshape(&out, &[b, l, n_heads * hd], s)?;
-        Linear::load(self.weights, &format!("{prefix}.self_attn.o_proj"))?.forward(&out, s)
+        // o_proj is row-parallel under tensor parallelism: each rank computes a
+        // partial sum, then all-reduce to the full output.
+        let out = self
+            .linear(&format!("{prefix}.self_attn.o_proj"))?
+            .forward(&out, s)?;
+        self.tp_all_sum(out, s)
     }
 
     fn mlp(&self, prefix: &str, x: &Array, s: &Stream) -> Result<Array> {
-        let gate = Linear::load(self.weights, &format!("{prefix}.mlp.gate_proj"))?.forward(x, s)?;
-        let up = Linear::load(self.weights, &format!("{prefix}.mlp.up_proj"))?.forward(x, s)?;
+        // gate/up are column-parallel (sharded output); down is row-parallel
+        // (sharded input) and all-reduces under tensor parallelism.
+        let gate = self
+            .linear(&format!("{prefix}.mlp.gate_proj"))?
+            .forward(x, s)?;
+        let up = self
+            .linear(&format!("{prefix}.mlp.up_proj"))?
+            .forward(x, s)?;
         let act = ops::silu(&gate, s)?;
         let h = ops::multiply(&act, &up, s)?;
-        Linear::load(self.weights, &format!("{prefix}.mlp.down_proj"))?.forward(&h, s)
+        let down = self
+            .linear(&format!("{prefix}.mlp.down_proj"))?
+            .forward(&h, s)?;
+        self.tp_all_sum(down, s)
     }
 }
 
@@ -224,6 +306,7 @@ mod tests {
             attention_bias: false,
             tie_word_embeddings: true,
             max_position_embeddings: 4096,
+            quantization: None,
         };
         let weights = Weights::new();
         // 2 ranks: rank 0 owns last 4 layers.

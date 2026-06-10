@@ -49,27 +49,71 @@ impl Weights {
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
+
+    /// Replace a tensor with a new value (used by tensor-parallel sharding).
+    pub fn replace(&mut self, name: &str, value: Array) {
+        self.map.insert(name.to_string(), value);
+    }
+}
+
+/// Quantization parameters carried into a layer.
+#[derive(Copy, Clone, Debug)]
+pub struct QuantParams {
+    pub group_size: i32,
+    pub bits: i32,
 }
 
 /// A dense linear layer: `y = x @ Wᵀ (+ b)`. Weight is stored `[out, in]`
-/// (HF/safetensors convention), so we matmul against its transpose.
+/// (HF/safetensors convention). When the model is quantized the layer also has
+/// `{prefix}.scales` (+ optional `{prefix}.biases`) and uses MLX's
+/// `quantized_matmul`; otherwise a plain transpose + matmul.
 pub struct Linear<'w> {
     weight: &'w Array,
     bias: Option<&'w Array>,
+    scales: Option<&'w Array>,
+    qbiases: Option<&'w Array>,
+    quant: Option<QuantParams>,
 }
 
 impl<'w> Linear<'w> {
-    /// Look up `"{prefix}.weight"` (and optional `"{prefix}.bias"`).
+    /// Look up `"{prefix}.weight"` (+ optional dense `.bias`).
     pub fn load(w: &'w Weights, prefix: &str) -> Result<Self> {
+        Self::load_quant(w, prefix, None)
+    }
+
+    /// Like [`Linear::load`] but quantization-aware: if `quant` is set and
+    /// `{prefix}.scales` exists, the layer runs a quantized matmul.
+    pub fn load_quant(w: &'w Weights, prefix: &str, quant: Option<QuantParams>) -> Result<Self> {
         let weight = w.get(&format!("{prefix}.weight"))?;
         let bias = w.get(&format!("{prefix}.bias")).ok();
-        Ok(Linear { weight, bias })
+        let scales = w.get(&format!("{prefix}.scales")).ok();
+        let qbiases = w.get(&format!("{prefix}.biases")).ok();
+        // Only treat as quantized when both config quant params and scales exist.
+        let quant = quant.filter(|_| scales.is_some());
+        Ok(Linear {
+            weight,
+            bias,
+            scales,
+            qbiases,
+            quant,
+        })
     }
 
     pub fn forward(&self, x: &Array, s: &Stream) -> Result<Array> {
-        // weight is [out, in]; transpose to [in, out] for x[..,in] @ [in,out].
-        let wt = ops::transpose(self.weight, &transpose_axes(self.weight.ndim()), s)?;
-        let mut y = ops::matmul(x, &wt, s)?;
+        let mut y = if let (Some(q), Some(scales)) = (self.quant, self.scales) {
+            ops::quantized_matmul(
+                x,
+                self.weight,
+                scales,
+                self.qbiases,
+                q.group_size,
+                q.bits,
+                s,
+            )?
+        } else {
+            let wt = ops::transpose(self.weight, &transpose_axes(self.weight.ndim()), s)?;
+            ops::matmul(x, &wt, s)?
+        };
         if let Some(b) = self.bias {
             y = ops::add(&y, b, s)?;
         }
@@ -77,25 +121,68 @@ impl<'w> Linear<'w> {
     }
 }
 
-/// Token embedding: gather rows of the `[vocab, dim]` table.
+/// Token embedding: gather rows of the `[vocab, dim]` table. Quantization-aware:
+/// for quantized models the table is stored quantized, so we dequantize before
+/// gathering (correctness-first; can be optimised to gather-then-dequant later).
 pub struct Embedding<'w> {
     weight: &'w Array,
+    scales: Option<&'w Array>,
+    qbiases: Option<&'w Array>,
+    quant: Option<QuantParams>,
 }
 
 impl<'w> Embedding<'w> {
     pub fn load(w: &'w Weights, prefix: &str) -> Result<Self> {
+        Self::load_quant(w, prefix, None)
+    }
+
+    pub fn load_quant(w: &'w Weights, prefix: &str, quant: Option<QuantParams>) -> Result<Self> {
+        let weight = w.get(&format!("{prefix}.weight"))?;
+        let scales = w.get(&format!("{prefix}.scales")).ok();
+        let qbiases = w.get(&format!("{prefix}.biases")).ok();
+        let quant = quant.filter(|_| scales.is_some());
         Ok(Embedding {
-            weight: w.get(&format!("{prefix}.weight"))?,
+            weight,
+            scales,
+            qbiases,
+            quant,
         })
     }
 
     /// `ids` is an `i32` array of token ids.
+    ///
+    /// For quantized embeddings we gather the packed rows for `ids` **first**
+    /// (from `weight`/`scales`/`biases`), then dequantize the gathered rows —
+    /// matching the reference `dequantize(weight[x], scales[x], biases[x])`.
+    /// Dequantizing the whole table then gathering is incorrect because the
+    /// packed layout is per-row with its own group structure.
     pub fn forward(&self, ids: &Array, s: &Stream) -> Result<Array> {
+        if let (Some(q), Some(scales)) = (self.quant, self.scales) {
+            let w_rows = ops::take(self.weight, ids, 0, s)?;
+            let s_rows = ops::take(scales, ids, 0, s)?;
+            let b_rows = match self.qbiases {
+                Some(b) => Some(ops::take(b, ids, 0, s)?),
+                None => None,
+            };
+            return ops::dequantize(&w_rows, &s_rows, b_rows.as_ref(), q.group_size, q.bits, s);
+        }
         ops::take(self.weight, ids, 0, s)
     }
 
-    /// As-linear projection (weight tying for the LM head): `x @ weightᵀ`.
+    /// As-linear projection (weight tying for the LM head): `x @ tableᵀ`. For
+    /// quantized embeddings this uses `quantized_matmul` directly (no dequant).
     pub fn as_linear(&self, x: &Array, s: &Stream) -> Result<Array> {
+        if let (Some(q), Some(scales)) = (self.quant, self.scales) {
+            return ops::quantized_matmul(
+                x,
+                self.weight,
+                scales,
+                self.qbiases,
+                q.group_size,
+                q.bits,
+                s,
+            );
+        }
         let wt = ops::transpose(self.weight, &transpose_axes(self.weight.ndim()), s)?;
         ops::matmul(x, &wt, s)
     }

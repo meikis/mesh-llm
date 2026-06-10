@@ -1,10 +1,13 @@
 # mesh-mlx — native Rust MLX runtime (no Python, no Swift)
 
-Status: **working single-node** on branch `micn/mlx-distributed`. Verified
-end-to-end on Apple Silicon: downloads a safetensors model from Hugging Face,
-loads it into the native MLX Metal engine, and generates tokens entirely from
-Rust over `mlx-c` — no Python, no Swift. Distributed (pipeline/tensor) wiring
-and quantized-weight support are the next steps (see "Status & roadmap" below).
+Status: **code-complete** on branch `micn/mlx-distributed` (single-node verified;
+multi-node execution pending hardware testing). Verified end-to-end on Apple
+Silicon: downloads a safetensors model from Hugging Face, loads it into the
+native MLX Metal engine, and generates coherent tokens entirely from Rust over
+`mlx-c` — no Python, no Swift. Both **bf16 and quantized 4-bit** models produce
+correct output ("What is the capital of France?" → "The capital of France is
+Paris."). Pipeline + tensor parallel paths and the OpenAI server are implemented;
+distributed execution is wired and unit-tested, awaiting a multi-node test rig.
 
 `mesh-mlx` lets an all-Mac mesh run inference on **MLX** entirely from Rust. It
 links the MLX C++ engine through its C API (`mlx-c`) and implements model
@@ -121,19 +124,33 @@ and returns a non-empty completion. Requires the Metal Toolchain
 
 ## Status & roadmap
 
-Done:
+Done (code-complete):
 - `mesh-mlx-sys` FFI + gated native build/link (verified linking real engine).
-- Safe array/ops/nn layer; Llama / Qwen2 / Qwen3 forward pass.
+- Safe array/ops/nn layer; Llama / Mistral / Qwen2 / Qwen3 forward pass.
+- **Quantized 4-bit** weights: quantized matmul for linears + gather-then-
+  dequantize for embeddings. bf16/fp16 and 4-bit both verified coherent.
 - Selective safetensors download + load; tokenizer; greedy generate.
-- Single-node inference verified end-to-end on Metal.
-- Latency-aware planner + transport plan (pure logic, unit-tested).
-- Pipeline layer-assignment + collectives wrappers (unit-tested; multi-node
-  execution wiring pending).
+- **Single-node inference verified end-to-end on Metal** (correct answers).
+- **OpenAI-compatible server** (`/v1/chat/completions`, `/v1/models`) + the
+  `mlx-serve` binary mesh spawns/targets.
+- **Pipeline-parallel** generate loop (`generate_distributed`: embed → recv →
+  layers → send → head → broadcast) wired over the `Group` collectives.
+- **Tensor-parallel** path: per-rank weight slicing (`shard_tensor_parallel`)
+  + sharded attention/MLP with `all_sum` on row-parallel projections.
+- Latency-aware planner + transport plan + `MlxOrchestrator` (mesh-facing
+  decision surface). All pure logic unit-tested.
 
-Next:
-- Quantized weights (4-bit MLX-community models): dequantize / use MLX quantized
-  matmul so the common `*-4bit` repos load. (bf16/fp16 work today.)
-- Multi-node execution: drive the pipeline send/recv loop across ranks and the
-  tensor sharded-linear path with a live `Group`.
-- Full Jinja `chat_template` support (currently a ChatML-compatible framing).
+Pending (needs multi-node hardware, mechanical otherwise):
+- Run the pipeline/tensor paths across a live 2+ node `Group` (Ethernet ring /
+  Thunderbolt JACCL) and validate throughput. The code paths exist and are
+  unit-tested for the planning/assignment logic; execution needs a rig.
+- Host-runtime call site: mesh invokes `MlxOrchestrator` + spawns `mlx-serve`
+  and routes to its endpoint. The seam is the orchestrator API; final wiring
+  into the host-runtime inference selector is a small, isolated change.
+
+Polish (non-blocking):
+- Full Jinja `chat_template` (currently a ChatML-compatible framing that works
+  for Qwen/Llama-style models).
 - Sampling beyond greedy (temperature / top-p).
+- Quantized row-parallel tensor sharding (currently dense-only; quantized
+  models shard column-parallel projections only — correct, less memory saving).

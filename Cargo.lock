@@ -4344,6 +4344,7 @@ name = "mesh-mlx"
 version = "0.68.0"
 dependencies = [
  "anyhow",
+ "axum",
  "mesh-mlx-sys",
  "model-hf",
  "serde",

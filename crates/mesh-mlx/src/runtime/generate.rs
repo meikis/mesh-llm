@@ -28,75 +28,11 @@ fn sample_greedy(logits: &Array, s: &Stream) -> Result<i32> {
     Ok(*ids.last().unwrap_or(&0))
 }
 
-/// One decode step. Returns the next token id (valid on every rank after the
-/// `all_gather`). `input` is the hidden-state input for non-first stages and the
-/// token-id array for the first-forward stage.
-#[allow(clippy::too_many_arguments)]
-pub fn decode_step(
-    model: &LlamaModel<'_>,
-    pipeline: &Pipeline,
-    group: Option<&Group>,
-    token_ids: &Array,
-    cache: &mut [LayerCache],
-    s: &Stream,
-) -> Result<i32> {
-    // Stage input: first-forward stage embeds tokens; others receive.
-    let mut h = if pipeline.is_first_forward_stage() {
-        model.embed(token_ids, s)?
-    } else {
-        // Receive from the next-earlier stage. We need a template shaped like
-        // the hidden state: embed a zero-length placeholder is awkward, so for
-        // the first cut single-node path this branch is exercised only when a
-        // group is present.
-        let src = pipeline.recv_from().expect("non-first stage has a source");
-        let template = model.embed(token_ids, s)?; // same [B,L,D] shape
-        group
-            .expect("pipeline requires a group")
-            .recv_like(&template, src, s)?
-    };
-
-    h = model.forward_layers(h, cache, s)?;
-
-    if let Some(dst) = pipeline.send_to() {
-        // Hand off to the next-later stage; this rank is done this step.
-        let g = group.expect("pipeline requires a group");
-        let dep = g.send(&h, dst, s)?;
-        dep.eval()?;
-        // Non-output stages still need the chosen token to advance their cache
-        // offset; the output stage broadcasts it via all_gather below.
-    }
-
-    // Output stage computes logits + samples.
-    let next = if pipeline.is_output_stage() {
-        let logits = model.head(&h, s)?;
-        sample_greedy(&logits, s)?
-    } else {
-        0
-    };
-
-    // Broadcast the chosen token to all ranks.
-    let next = if let Some(g) = group {
-        if pipeline.size > 1 {
-            let tok = Array::from_i32(&[next], &[1])?;
-            let gathered = g.all_gather(&tok, s)?;
-            let all = gathered.to_vec_i32()?;
-            // The output stage (rank 0) holds the real token at its slot.
-            *all.first().unwrap_or(&next)
-        } else {
-            next
-        }
-    } else {
-        next
-    };
-
-    Ok(next)
-}
-
 /// Generate up to `max_tokens` greedily from a prompt token sequence,
 /// single-node (no group). Returns the generated token ids.
 pub fn generate_local(
     model: &LlamaModel<'_>,
-    pipeline: &Pipeline,
+    _pipeline: &Pipeline,
     prompt_ids: &[i32],
     max_tokens: usize,
     eos: impl Fn(i32) -> bool,
@@ -117,11 +53,91 @@ pub fn generate_local(
             break;
         }
         out.push(next);
-        // Decode one token at a time.
+        // Decode one token at a time: embed → layers → head → sample.
         let step_ids = Array::from_i32(&[next], &[1, 1])?;
-        next = decode_step(model, pipeline, None, &step_ids, &mut cache, s)?;
+        let h = model.embed(&step_ids, s)?;
+        let h = model.forward_layers(h, &mut cache, s)?;
+        let logits = model.head(&h, s)?;
+        next = sample_greedy(&logits, s)?;
     }
     Ok(out)
+}
+
+/// Generate greedily across a pipeline-parallel [`Group`].
+///
+/// Every rank runs this in lock-step. The token-id sequence is replicated on
+/// all ranks (kept in sync by the per-step `all_gather` of the chosen token),
+/// so each rank can embed/locate positions identically. Only the output stage
+/// (rank 0) computes logits; the chosen token is broadcast so all ranks advance
+/// their KV-cache offset together.
+pub fn generate_distributed(
+    model: &LlamaModel<'_>,
+    pipeline: &Pipeline,
+    group: &Group,
+    prompt_ids: &[i32],
+    max_tokens: usize,
+    eos: impl Fn(i32) -> bool,
+    s: &Stream,
+) -> Result<Vec<i32>> {
+    let mut cache = model.new_cache();
+
+    // Prefill: run the whole prompt through the pipeline once.
+    let prompt = Array::from_i32(prompt_ids, &[1, prompt_ids.len() as i32])?;
+    let mut next = pipeline_forward(model, pipeline, group, &prompt, &mut cache, s)?;
+
+    let mut out = Vec::with_capacity(max_tokens);
+    for _ in 0..max_tokens {
+        if eos(next) {
+            break;
+        }
+        out.push(next);
+        let step = Array::from_i32(&[next], &[1, 1])?;
+        next = pipeline_forward(model, pipeline, group, &step, &mut cache, s)?;
+    }
+    Ok(out)
+}
+
+/// One pipeline forward over `token_ids`, returning the next token (valid on
+/// every rank after the broadcast).
+fn pipeline_forward(
+    model: &LlamaModel<'_>,
+    pipeline: &Pipeline,
+    group: &Group,
+    token_ids: &Array,
+    cache: &mut [LayerCache],
+    s: &Stream,
+) -> Result<i32> {
+    // First-forward stage embeds; later stages receive the hidden state.
+    let mut h = if pipeline.is_first_forward_stage() {
+        model.embed(token_ids, s)?
+    } else {
+        let src = pipeline.recv_from().expect("non-first stage has a source");
+        // Template shaped like the hidden state for this input length.
+        let template = model.embed(token_ids, s)?;
+        group.recv_like(&template, src, s)?
+    };
+
+    h = model.forward_layers(h, cache, s)?;
+
+    if let Some(dst) = pipeline.send_to() {
+        let dep = group.send(&h, dst, s)?;
+        dep.eval()?;
+    }
+
+    // Output stage (rank 0) computes logits and samples.
+    let chosen = if pipeline.is_output_stage() {
+        let logits = model.head(&h, s)?;
+        sample_greedy(&logits, s)?
+    } else {
+        0
+    };
+
+    // Broadcast the chosen token: rank 0 holds the real value, others 0; sum
+    // reduces to the real token on every rank.
+    let tok = Array::from_i32(&[chosen], &[1])?;
+    let summed = group.all_sum(&tok, s)?;
+    let vals = summed.to_vec_i32()?;
+    Ok(*vals.first().unwrap_or(&chosen))
 }
 
 #[cfg(test)]

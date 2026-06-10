@@ -46,8 +46,23 @@ cargo test -p mesh-mlx --features link-mlx --test live_single_node -- --nocaptur
 Downloads a small bf16 model from Hugging Face and generates tokens entirely in
 Rust + MLX on Metal.
 
+## Serve it (mesh-facing)
+
+`mlx-serve` loads a model and exposes the OpenAI API mesh routes to:
+
+```bash
+cargo run -p mesh-mlx --features link-mlx --bin mlx-serve -- \
+  --model mlx-community/Qwen2.5-0.5B-Instruct-4bit --addr 127.0.0.1:9999
+# POST http://127.0.0.1:9999/v1/chat/completions
+```
+
+Mesh uses `MlxOrchestrator` to gate eligibility (`mlx_supported()`), plan
+tensor-vs-pipeline from measured RTT, and render the MLX hostfile; then it spawns
+`mlx-serve` per node and routes OpenAI traffic to it.
+
 ## Status
 
-Single-node inference works end-to-end (verified). Quantized 4-bit weights and
-multi-node pipeline/tensor execution are in progress — see
-`docs/design/MESH_MLX.md`.
+Code-complete; single-node verified end-to-end (bf16 **and** quantized 4-bit
+produce correct output). Pipeline + tensor parallel paths, the OpenAI server,
+and the mesh orchestrator are implemented and unit-tested. Multi-node execution
+awaits a hardware test rig. See `docs/design/MESH_MLX.md`.

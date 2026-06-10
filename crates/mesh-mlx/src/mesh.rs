@@ -193,6 +193,53 @@ impl TransportPlan {
     }
 }
 
+/// Whether this host can run the MLX backend (Apple Silicon + macOS).
+///
+/// Mesh calls this to decide if a peer is MLX-eligible before forming a group.
+/// MLX mode is local-only and Metal-only, so the gate is macOS on aarch64.
+pub fn mlx_supported() -> bool {
+    cfg!(all(target_os = "macos", target_arch = "aarch64"))
+}
+
+/// The mesh-facing orchestration surface for an MLX node.
+///
+/// Mesh uses this to (1) check eligibility, (2) plan parallelism from measured
+/// latency, and (3) obtain the backend address it should bind the OpenAI server
+/// to and then route OpenAI traffic to. The actual serving (loading the model
+/// and running the OpenAI server) is driven by [`crate::runtime`]; this type is
+/// the thin, testable decision layer mesh owns.
+#[derive(Debug, Clone, Default)]
+pub struct MlxOrchestrator {
+    pub planner: ParallelismPlanner,
+}
+
+impl MlxOrchestrator {
+    pub fn new(planner: ParallelismPlanner) -> Self {
+        Self { planner }
+    }
+
+    /// Whether this host can serve MLX.
+    pub fn supported(&self) -> bool {
+        mlx_supported()
+    }
+
+    /// Plan the parallelism mode + transport for a candidate MLX group.
+    ///
+    /// `nodes` are the directly-routable, MLX-eligible peers (mesh must have
+    /// already filtered to Apple-Silicon, MLX-capable, same-LAN/Thunderbolt
+    /// peers — MLX is local-only and cannot use mesh QUIC). `samples` is the
+    /// measured inter-node RTT.
+    pub fn plan(
+        &self,
+        nodes: Vec<NodeEndpoint>,
+        samples: &[LatencySample],
+    ) -> (ParallelismPlan, TransportPlan) {
+        let plan = self.planner.plan(nodes.len().max(1), samples);
+        let transport = TransportPlan::recommend(plan.mode, nodes);
+        (plan, transport)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +305,26 @@ mod tests {
         nodes[1].rdma = vec![Some("rdma_en5".into()), None];
         let plan = TransportPlan::recommend(ParallelismMode::Tensor, nodes);
         assert_eq!(plan.backend, MlxBackendKind::Jaccl);
+    }
+
+    #[test]
+    fn orchestrator_plans_mode_and_transport_together() {
+        let orch = MlxOrchestrator::default();
+        // Low-latency 2-node → tensor + (ring, since no rdma maps here).
+        let (plan, transport) = orch.plan(
+            plain(2),
+            &[LatencySample::new(0, 1, Duration::from_micros(700))],
+        );
+        assert_eq!(plan.mode, ParallelismMode::Tensor);
+        assert_eq!(transport.backend, MlxBackendKind::Ring);
+
+        // High-latency → pipeline + ring.
+        let (plan, transport) = orch.plan(
+            plain(3),
+            &[LatencySample::new(0, 1, Duration::from_millis(7))],
+        );
+        assert_eq!(plan.mode, ParallelismMode::Pipeline);
+        assert_eq!(transport.backend, MlxBackendKind::Ring);
     }
 
     #[test]

@@ -50,6 +50,11 @@ pub struct Group {
     size: i32,
 }
 
+// SAFETY: an `mlx_distributed_group` is a reference-counted handle; engine
+// access is serialised by the runtime. See the note on `array::Array`.
+unsafe impl Send for Group {}
+unsafe impl Sync for Group {}
+
 impl Group {
     /// Initialise the distributed runtime for `backend`. With `strict`, errors
     /// if no real backend is available (rather than silently single-process).

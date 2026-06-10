@@ -41,11 +41,11 @@ pub use array::{Array, Dtype, Stream};
 pub use distributed::{Backend, Group, Pipeline};
 pub use download::ModelRef;
 pub use mesh::{
-    LatencySample, MlxBackendKind, NodeEndpoint, ParallelismMode, ParallelismPlan,
-    ParallelismPlanner, TransportPlan,
+    LatencySample, MlxBackendKind, MlxOrchestrator, NodeEndpoint, ParallelismMode, ParallelismPlan,
+    ParallelismPlanner, TransportPlan, mlx_supported,
 };
 pub use models::{Family, ModelConfig};
-pub use runtime::Engine;
+pub use runtime::{Engine, ServerState, router, serve};
 
 /// Errors from the MLX runtime.
 #[derive(Debug, thiserror::Error)]

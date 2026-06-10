@@ -31,6 +31,18 @@ pub struct ModelConfig {
     pub tie_word_embeddings: bool,
     #[serde(default = "default_max_pos")]
     pub max_position_embeddings: i32,
+
+    /// Quantization block (`{group_size, bits}`) when the repo ships quantized
+    /// weights (e.g. mlx-community `*-4bit`). Absent for bf16/fp16 models.
+    #[serde(default)]
+    pub quantization: Option<Quantization>,
+}
+
+/// Affine quantization parameters from `config.json`.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct Quantization {
+    pub group_size: i32,
+    pub bits: i32,
 }
 
 fn default_rms_eps() -> f32 {

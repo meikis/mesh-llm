@@ -49,6 +49,18 @@ More work around using ngrams, drafting models is in progress.
 Some experimental work around predictive prompt completion into prefile has been done (yet to be proven, prefil is parallel so latency tolerant)
 MTP work with llama.cpp ongoing, but should be part of this to accelerate inference and especially reduce vulnerability to latency between layers. 
 
+## Skippy pipeline improvements
+
+Skippy's layer pipeline is the path for running models that do not fit on one
+machine. The next performance work should stay focused on that pipeline:
+transport-aware stage ordering, large prefill activation-frame transfer,
+metadata-first package planning, readout-stage topology experiments, and
+request/cache epoch coordination.
+
+The MLX distributed stack has useful ideas here, but they should be translated
+into Skippy rather than treated as a replacement backend. See
+[docs/skippy/MLX_CONCEPTS_FOR_SKIPPY.md](docs/skippy/MLX_CONCEPTS_FOR_SKIPPY.md).
+
 ## Demand-based rebalancing
 
 Partially done. Unified demand map via gossip, standby nodes promote to serve, and large-VRAM hosts can opt into fresh active-demand upgrades for local artifacts. Next: download-backed upgrades, split-aware upgrades, and replica-count balancing.

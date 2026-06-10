@@ -27,6 +27,7 @@ Use this hub to find project guides that are not owned by a single Rust crate.
 | [skippy/TOPOLOGY_PLANNER.md](skippy/TOPOLOGY_PLANNER.md) | Stage topology planning behavior |
 | [skippy/CONFIGURATION.md](skippy/CONFIGURATION.md) | Authoritative operator matrix for Skippy config keys and rejection boundaries |
 | [skippy/DATA_FLOW.md](skippy/DATA_FLOW.md) | Stage data flow and transport details |
+| [skippy/MLX_CONCEPTS_FOR_SKIPPY.md](skippy/MLX_CONCEPTS_FOR_SKIPPY.md) | MLX distributed-parallelism ideas translated into Skippy implementation work |
 | [skippy/LLAMA_PARITY.md](skippy/LLAMA_PARITY.md) | Remaining llama.cpp parity queue |
 | [specs/layer-package-repos.md](specs/layer-package-repos.md) | Manifest schema and package artifact rules |
 | [SKIPPY.md](SKIPPY.md) | Skippy integration readiness and parity notes |

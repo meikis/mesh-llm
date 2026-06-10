@@ -27,6 +27,7 @@ WORKSPACE_MEMBERS=(
   "mesh-llm-types"
   "mesh-llm-console-server"
   "mesh-llm-embedded-runtime"
+  "mesh-llm-mlx-runtime"
   "mesh-llm-tui"
   "mesh-llm-ui"
   "mesh-llm-plugin"

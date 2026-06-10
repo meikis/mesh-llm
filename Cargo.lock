@@ -4071,6 +4071,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mesh-llm-mlx-runtime"
+version = "0.68.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "mesh-llm-native-runtime"
 version = "0.68.0"
 dependencies = [

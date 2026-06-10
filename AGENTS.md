@@ -27,6 +27,7 @@ The workspace is split across many crates under `crates/`. The shipped binary `m
 | `docs/design/MoE_PLAN.md` | MoE expert sharding design |
 | `docs/design/MoE_DEPLOY_DESIGN.md` | MoE auto-deploy UX |
 | `docs/design/VIRTUAL_LLM.md` | Virtual LLM engine (inter-model collaboration) |
+| `docs/design/MLX_RUNTIME.md` | MLX (Apple Silicon) sidecar runtime: backend trait, latency-aware parallelism, networking |
 | `docs/design/LLAMA_CPP_FORK.md` | llama.cpp fork: what's patched, how to update, how to sync |
 | `docs/moe/README.md` | MoE analyzer, placement, and CLI planning notes |
 | `docs/plugins/README.md` | Plugin architecture and plugin development |

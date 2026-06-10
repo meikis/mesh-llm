@@ -42,7 +42,8 @@ pub use distributed::{Backend, Group, Pipeline};
 pub use download::ModelRef;
 pub use mesh::{
     LatencySample, MlxBackendKind, MlxOrchestrator, NodeEndpoint, ParallelismMode, ParallelismPlan,
-    ParallelismPlanner, TransportPlan, mlx_supported,
+    ParallelismPlanner, TransportPlan, TransportPreference, detect_rdma_devices, jaccl_env,
+    mlx_supported,
 };
 pub use models::{Family, ModelConfig};
 pub use runtime::{

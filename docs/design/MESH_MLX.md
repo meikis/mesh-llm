@@ -176,6 +176,29 @@ Discovery → MLX handoff (wired):
   this stage's layers; tensor = sliced projections). The OpenAI server's chat
   path drives the group in lock-step.
 
+Transport selection (ring vs JACCL/RDMA) — ergonomics:
+- `MESH_LLM_MLX_TRANSPORT` = `auto` (default) | `ring` | `jaccl`.
+  - `auto`: JACCL only when a complete RDMA mesh is detected (every node has an
+    RDMA device map) **and** the planner chose tensor parallelism; otherwise the
+    TCP ring. Zero-config: JACCL just "turns on" once the Thunderbolt fabric is
+    present.
+  - `ring`: force TCP even if RDMA exists.
+  - `jaccl`: require JACCL — errors loudly (no silent downgrade) if RDMA isn't
+    available across the group; the host logs the error and falls back to ring
+    so serving still works, but the gap is explicit.
+- `detect_rdma_devices()` runs `ibv_devices` to find this node's RDMA devices
+  (`rdma_en*`). JACCL also needs macOS 26.2+, `rdma_ctl enable` in recovery
+  mode, and a Thunderbolt-5 mesh — these can't be auto-provisioned, hence the
+  opt-in.
+- When JACCL is selected, the hostfile carries the per-node `rdma` mesh field
+  (N-length array, `null` on the diagonal) and `jaccl_env()` provides the env
+  MLX reads (`MLX_IBV_DEVICES`, `MLX_JACCL_COORDINATOR`, `MLX_RANK`).
+- **Known gap:** `PeerInfo` has no RDMA field yet, so peers' device maps aren't
+  gossiped. We detect/populate the local (rank 0) row; a *complete* auto JACCL
+  mesh needs a gossiped per-peer RDMA capability (additive protobuf change).
+  Until then JACCL engages reliably only when device maps are supplied; `auto`
+  safely falls back to ring.
+
 Pending (needs multi-node hardware):
 - Validate the pipeline/tensor execution across a live 2+ node `Group` (Ethernet
   ring / Thunderbolt JACCL) — throughput + correctness. All the upstream

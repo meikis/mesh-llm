@@ -19,7 +19,7 @@ use anyhow::Result;
 #[allow(unused_imports)]
 pub use mesh_mlx::{
     LatencySample, MlxBackendKind, MlxOrchestrator, NodeEndpoint, ParallelismMode, ParallelismPlan,
-    TransportPlan, mlx_supported,
+    TransportPlan, TransportPreference, detect_rdma_devices, mlx_supported,
 };
 
 use crate::mesh::{self, PeerInfo};
@@ -57,6 +57,7 @@ impl MlxGroupPlan {
 /// from measured inter-node latency. Pure decision logic mesh owns; usable
 /// without the native engine. Exercised by unit tests and used by
 /// [`plan_group_from_peers`].
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn plan_parallelism(
     nodes: Vec<NodeEndpoint>,
     samples: &[LatencySample],
@@ -147,7 +148,16 @@ pub async fn plan_group_from_peers(node: &mesh::Node) -> Option<MlxGroupPlan> {
         }
     }
 
-    let (parallelism, transport) = plan_parallelism(endpoints.clone(), &samples);
+    // Transport preference (MESH_LLM_MLX_TRANSPORT=auto|ring|jaccl) decides
+    // whether we attempt JACCL (RDMA/Thunderbolt) or stay on the TCP ring.
+    let pref = TransportPreference::from_env();
+    apply_local_rdma_row(&mut endpoints, pref);
+
+    let parallelism = MlxOrchestrator::default()
+        .planner
+        .plan(endpoints.len(), &samples);
+    let transport = select_transport(parallelism.mode, &endpoints, pref);
+
     Some(MlxGroupPlan {
         local_rank: 0,
         endpoints,
@@ -155,6 +165,57 @@ pub async fn plan_group_from_peers(node: &mesh::Node) -> Option<MlxGroupPlan> {
         parallelism,
         transport,
     })
+}
+
+/// Populate rank 0's RDMA device row from locally-detected devices when JACCL
+/// is wanted (auto/jaccl).
+///
+/// We can detect *this* node's devices via `ibv_devices`; the peers' device
+/// names must be carried by mesh gossip, which is not yet wired (`PeerInfo` has
+/// no RDMA field). So this fills rank 0's row best-effort; a full JACCL mesh
+/// engages once peer device maps are gossiped. Until then `Auto` detects-but-
+/// falls-back (safe), and explicit `Jaccl` without devices warns.
+fn apply_local_rdma_row(endpoints: &mut [NodeEndpoint], pref: TransportPreference) {
+    if !matches!(pref, TransportPreference::Jaccl | TransportPreference::Auto) {
+        return;
+    }
+    let local_rdma = detect_rdma_devices();
+    if local_rdma.is_empty() {
+        if pref == TransportPreference::Jaccl {
+            tracing::warn!(
+                "MESH_LLM_MLX_TRANSPORT=jaccl but no local RDMA devices detected \
+                 (ibv_devices empty); JACCL requires macOS 26.2+, `rdma_ctl enable`, \
+                 and a Thunderbolt-5 mesh. Falling back per planner."
+            );
+        }
+        return;
+    }
+    let n = endpoints.len();
+    let dev = local_rdma.first().cloned();
+    // Diagonal (self) is null; reuse the first device for each peer link until
+    // per-link mapping is gossiped.
+    let row: Vec<Option<String>> = (0..n)
+        .map(|j| if j == 0 { None } else { dev.clone() })
+        .collect();
+    endpoints[0].rdma = row;
+    tracing::info!(devices = ?local_rdma, "MLX detected local RDMA devices for JACCL");
+}
+
+/// Pick the transport, falling back to ring (loudly) if explicit JACCL can't be
+/// satisfied across the group.
+fn select_transport(
+    mode: ParallelismMode,
+    endpoints: &[NodeEndpoint],
+    pref: TransportPreference,
+) -> TransportPlan {
+    match TransportPlan::recommend_with(mode, endpoints.to_vec(), pref) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("MLX transport: {e}; falling back to TCP ring");
+            TransportPlan::recommend_with(mode, endpoints.to_vec(), TransportPreference::Ring)
+                .expect("ring never errors")
+        }
+    }
 }
 
 /// Distributed setup for an MLX backend node: the rank-ordered hostfile, this

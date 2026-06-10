@@ -682,15 +682,15 @@ fn run_binary_chain(args: LocalSplitChainBinaryArgs) -> Result<BinaryChainResult
     })
 }
 
-struct LocalSplitTopologyStage<'a> {
-    stage_id: &'a str,
-    stage_index: u32,
-    endpoint: String,
-    layer_start: u32,
-    layer_end: u32,
+pub(crate) struct LocalSplitTopologyStage<'a> {
+    pub(crate) stage_id: &'a str,
+    pub(crate) stage_index: u32,
+    pub(crate) endpoint: String,
+    pub(crate) layer_start: u32,
+    pub(crate) layer_end: u32,
 }
 
-fn local_split_topology(
+pub(crate) fn local_split_topology(
     topology_id: &str,
     model_id: &str,
     stages: &[LocalSplitTopologyStage<'_>],
@@ -712,7 +712,7 @@ fn local_split_topology(
     })
 }
 
-fn send_generation_config(
+pub(crate) fn send_generation_config(
     stream: &mut std::net::TcpStream,
     wire_dtype: skippy_protocol::binary::WireActivationDType,
     request_id: u64,
@@ -735,7 +735,7 @@ fn send_generation_config(
     Ok(())
 }
 
-fn validate_local_topology_plan(
+pub(crate) fn validate_local_topology_plan(
     model_path: &std::path::Path,
     layer_end: u32,
     splits: &[u32],
@@ -803,7 +803,7 @@ fn validate_local_topology_plan(
     Ok(())
 }
 
-fn configure_child_logs(command: &mut Command, child_logs: bool) {
+pub(crate) fn configure_child_logs(command: &mut Command, child_logs: bool) {
     if child_logs {
         command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
     } else {

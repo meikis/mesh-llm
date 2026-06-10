@@ -18,6 +18,7 @@ pub enum CommandKind {
     LocalSingle(LocalSingleArgs),
     LocalSplitInprocess(LocalSplitInprocessArgs),
     LocalSplitBinary(LocalSplitBinaryArgs),
+    LocalSplitPrefillBinary(LocalSplitPrefillBinaryArgs),
     LocalSplitCompare(LocalSplitCompareArgs),
     LocalSplitChainBinary(LocalSplitChainBinaryArgs),
     #[command(name = "activation-striping")]
@@ -402,6 +403,44 @@ pub struct LocalSplitBinaryArgs {
     #[arg(long)]
     pub child_logs: bool,
     #[arg(long, default_value_t = 60)]
+    pub startup_timeout_secs: u64,
+}
+
+#[derive(Parser)]
+pub struct LocalSplitPrefillBinaryArgs {
+    #[arg(long, default_value = "target/debug/skippy-server")]
+    pub stage_server_bin: PathBuf,
+    #[arg(long)]
+    pub model_path: PathBuf,
+    #[arg(long, default_value = DEFAULT_LOCAL_MODEL_ID)]
+    pub model_id: String,
+    #[arg(long, default_value_t = 15)]
+    pub split_layer: u32,
+    #[arg(long, default_value_t = 30)]
+    pub layer_end: u32,
+    #[arg(long, default_value_t = 8192)]
+    pub ctx_size: u32,
+    #[arg(long, default_value_t = 0)]
+    pub n_gpu_layers: i32,
+    #[arg(long, default_value = "Hello")]
+    pub prompt: String,
+    #[arg(
+        long,
+        default_value = "512,2048,8192",
+        help = "Comma-separated prompt token counts to benchmark."
+    )]
+    pub token_counts: String,
+    #[arg(long, default_value_t = 512)]
+    pub prefill_chunk_size: usize,
+    #[arg(long, default_value_t = 1)]
+    pub repetitions: usize,
+    #[arg(long, default_value = "127.0.0.1:19041")]
+    pub stage1_bind_addr: SocketAddr,
+    #[arg(long, default_value = "f16")]
+    pub activation_wire_dtype: String,
+    #[arg(long)]
+    pub child_logs: bool,
+    #[arg(long, default_value_t = 120)]
     pub startup_timeout_secs: u64,
 }
 

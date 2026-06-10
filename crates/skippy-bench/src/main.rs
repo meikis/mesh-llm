@@ -5,6 +5,7 @@ mod direct_return;
 mod distributed;
 mod local_single;
 mod local_split;
+mod local_split_prefill;
 mod model_identity;
 mod support;
 mod token_lengths;
@@ -21,6 +22,7 @@ use crate::{
     local_split::{
         local_split_binary, local_split_chain_binary, local_split_compare, local_split_inprocess,
     },
+    local_split_prefill::local_split_prefill_binary,
     token_lengths::token_lengths,
 };
 
@@ -29,6 +31,7 @@ fn main() -> Result<()> {
         CommandKind::LocalSingle(args) => local_single(args),
         CommandKind::LocalSplitInprocess(args) => local_split_inprocess(args),
         CommandKind::LocalSplitBinary(args) => local_split_binary(args),
+        CommandKind::LocalSplitPrefillBinary(args) => local_split_prefill_binary(args),
         CommandKind::LocalSplitCompare(args) => local_split_compare(args),
         CommandKind::LocalSplitChainBinary(args) => local_split_chain_binary(args),
         CommandKind::ActivationStriping(args) => activation_striping(args),

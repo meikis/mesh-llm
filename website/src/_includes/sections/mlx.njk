@@ -1,0 +1,45 @@
+{% from "components/ui.njk" import sectionHead, badge %}
+
+<section class="sec py-14 sm:py-20" id="mlx">
+  <div class="shell">
+    {{ sectionHead(
+      "Apple Silicon MLX, without leaving the mesh.",
+      "Opt into the native MLX/Metal runtime for safetensors models on Macs, with explicit Ethernet/RDMA and tensor-vs-pipeline controls."
+    ) }}
+
+    <div class="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+      <div class="tile min-w-0 overflow-hidden rounded-mesh border border-line-soft bg-surface/70 p-5 sm:p-7">
+        <div class="head">
+          <h3>Build once, serve MLX repos directly.</h3>
+          <p>The default binary still uses the GGUF/Skippy lane. When you want MLX, build the opt-in feature and point <span class="mono">--model</span> at an MLX/safetensors Hugging Face repo.</p>
+          <div class="mt-3 flex flex-wrap gap-1.5">
+            {{ badge("Apple Silicon", "green") }}
+            {{ badge("safetensors", "blue") }}
+            {{ badge("MLX/Metal") }}
+          </div>
+        </div>
+        <div class="code-thumb mt-5">
+<span class="c"># native MLX build</span>
+<span class="p">$</span> just <span class="f">build-mlx</span>
+
+<span class="c"># serve an MLX model</span>
+<span class="p">$</span> ./target/debug/mesh-llm <span class="f">serve</span> <span class="v">\</span>
+    <span class="f">--model</span> <span class="v">mlx-community/Qwen2.5-0.5B-Instruct-bf16</span>
+        </div>
+      </div>
+
+      <div class="tile min-w-0 overflow-hidden rounded-mesh border border-line-soft bg-surface/70 p-5 sm:p-7">
+        <div class="head">
+          <h3>Choose the fabric and split mode.</h3>
+          <p>Use TCP ring over Ethernet/Wi-Fi, or JACCL/RDMA over Thunderbolt when the full RDMA mesh is available. Auto mode uses RTT; operators can force tensor or pipeline.</p>
+        </div>
+        <div class="mt-4 grid gap-3 text-sm text-muted">
+          <div class="rounded-mesh border border-line-soft bg-void/40 p-3"><span class="mono text-fg">MESH_LLM_MLX_TRANSPORT=ring</span><br/>Ethernet/Wi-Fi TCP ring.</div>
+          <div class="rounded-mesh border border-line-soft bg-void/40 p-3"><span class="mono text-fg">MESH_LLM_MLX_TRANSPORT=jaccl</span><br/>Thunderbolt/RDMA when every node has RDMA metadata.</div>
+          <div class="rounded-mesh border border-line-soft bg-void/40 p-3"><span class="mono text-fg">MESH_LLM_MLX_PARALLELISM=tensor|pipeline</span><br/>Force a mode, or leave unset for latency-aware auto.</div>
+        </div>
+        <p class="mt-4 text-sm text-muted">Read the full guide: <a href="/docs/pages/mlx/">Apple Silicon MLX</a>.</p>
+      </div>
+    </div>
+  </div>
+</section>

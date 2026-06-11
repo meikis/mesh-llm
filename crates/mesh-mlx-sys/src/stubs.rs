@@ -110,12 +110,10 @@ stub!(mlx_fast_rope(r: *mut mlx_array, x: mlx_array, d: c_int, t: bool, b: mlx_o
 stub!(mlx_fast_scaled_dot_product_attention(r: *mut mlx_array, q: mlx_array, k: mlx_array, v: mlx_array, sc: c_float, m: *const c_char, ma: mlx_array, si: mlx_array, s: mlx_stream) -> c_int);
 
 // distributed group
-stub!(mlx_distributed_group_new() -> mlx_distributed_group);
-stub!(mlx_distributed_group_free(g: mlx_distributed_group) -> c_int);
-stub!(mlx_distributed_init(r: *mut mlx_distributed_group, st: bool, bk: *const c_char) -> c_int);
+stub!(mlx_distributed_init(st: bool, bk: *const c_char) -> mlx_distributed_group);
 stub!(mlx_distributed_group_rank(g: mlx_distributed_group) -> c_int);
 stub!(mlx_distributed_group_size(g: mlx_distributed_group) -> c_int);
-stub!(mlx_distributed_group_split(r: *mut mlx_distributed_group, g: mlx_distributed_group, c: c_int, k: c_int) -> c_int);
+stub!(mlx_distributed_group_split(g: mlx_distributed_group, c: c_int, k: c_int) -> mlx_distributed_group);
 stub!(mlx_distributed_is_available(bk: *const c_char) -> bool);
 
 // distributed collectives

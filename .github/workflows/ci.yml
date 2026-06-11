@@ -620,9 +620,9 @@ jobs:
           cargo test -p mesh-mlx --lib
       - name: MLX runtime end-to-end (native engine + HF model)
         # The real inference test builds the MLX Metal engine and downloads a
-        # small safetensors model. Gated to workflow_dispatch so the long native
-        # build only runs on demand, not on every PR.
-        if: ${{ github.event_name == 'workflow_dispatch' }}
+        # small safetensors model. Run it whenever MLX changed (plus manual
+        # dispatch/all-rust) so the native link path cannot silently rot.
+        if: ${{ github.event_name == 'workflow_dispatch' || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-mlx') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-mlx-sys') || needs.changes.outputs.all_rust == 'true' }}
         run: |
           xcodebuild -downloadComponent MetalToolchain || true
           cargo test -p mesh-mlx --features link-mlx --test live_single_node -- --nocapture

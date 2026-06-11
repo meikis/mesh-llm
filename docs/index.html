@@ -58,6 +58,7 @@
         <div class="links">
             <a href="#install">Quick start</a>
             <a href="#models">Models</a>
+            <a href="#mlx">MLX</a>
             <a href="#splits">Splits</a>
             <a href="#agents">Agents</a>
             <a href="#blackboard">Blackboard</a>
@@ -141,6 +142,11 @@
                 <div class="feature-icon">🧩</div>
                 <h3>Stage lifecycle</h3>
                 <p>The planner chooses peers and layer ranges, loads stages downstream-to-upstream, waits for readiness, then publishes the stage-0 route.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">🍎</div>
+                <h3>Apple Silicon MLX</h3>
+                <p>Opt-in native MLX runtime for safetensors models on Macs. Use TCP ring over Ethernet or JACCL/RDMA over Thunderbolt, with explicit tensor-vs-pipeline control.</p>
             </div>
             <div class="feature">
                 <div class="feature-icon">🔀</div>
@@ -329,6 +335,43 @@
         </table>
         </div>
         <p style="font-size:0.75rem; color:var(--text3); margin-top:0.8rem;">Full catalog: <code>mesh-llm download</code> · Not in the catalog? Use a HuggingFace URL — any GGUF works.</p>
+    </section>
+
+    <section id="mlx">
+        <div class="section-tag">Apple Silicon</div>
+        <h2>Serve MLX models on Macs</h2>
+        <p class="section-lead">Build the opt-in native MLX/Metal runtime to serve Hugging Face MLX/safetensors models. MLX uses its own TCP/RDMA sockets for distributed inference, so peer Macs need direct network reachability.</p>
+
+        <div class="code-block">
+            <span class="comment"># Build the native MLX-enabled binary (first build can take a while)</span><br>
+            <span class="cmd">just</span> build-mlx<br><br>
+            <span class="comment"># Serve an MLX/safetensors repo on Apple Silicon</span><br>
+            <span class="cmd">./target/debug/mesh-llm</span> serve <span class="flag">--model</span> <span class="val">mlx-community/Qwen2.5-0.5B-Instruct-bf16</span> <span class="flag">--log-format</span> <span class="val">json</span><br><br>
+            <span class="comment"># Ethernet-friendly pipeline over the TCP ring</span><br>
+            <span class="cmd">MESH_LLM_MLX_PARALLELISM</span>=<span class="val">pipeline</span> <span class="cmd">MESH_LLM_MLX_TRANSPORT</span>=<span class="val">ring</span> <span class="cmd">./target/debug/mesh-llm</span> serve <span class="flag">--model</span> <span class="val">mlx-community/Qwen2.5-0.5B-Instruct-bf16</span><br><br>
+            <span class="comment"># Low-latency tensor parallelism; use jaccl when the RDMA mesh is available</span><br>
+            <span class="cmd">MESH_LLM_MLX_PARALLELISM</span>=<span class="val">tensor</span> <span class="cmd">MESH_LLM_MLX_TRANSPORT</span>=<span class="val">jaccl</span> <span class="cmd">./target/debug/mesh-llm</span> serve <span class="flag">--model</span> <span class="val">mlx-community/Qwen2.5-0.5B-Instruct-bf16</span>
+        </div>
+
+        <div class="features" style="margin-top:1.5rem;">
+            <div class="feature">
+                <div class="feature-icon">🌐</div>
+                <h3>Ethernet / Wi-Fi</h3>
+                <p>Use <code>MESH_LLM_MLX_TRANSPORT=ring</code>. Pipeline is recommended because it sends activations at stage boundaries and tolerates ordinary LAN latency.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">⚡</div>
+                <h3>Thunderbolt / RDMA</h3>
+                <p>Use <code>MESH_LLM_MLX_TRANSPORT=jaccl</code> when every node has complete RDMA metadata. Tensor parallelism benefits most from the lower latency.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">🔀</div>
+                <h3>Operator choice</h3>
+                <p><code>MESH_LLM_MLX_PARALLELISM=auto</code> uses RTT (≤2ms chooses tensor). Force <code>tensor</code> or <code>pipeline</code> when you want to test a specific mode.</p>
+            </div>
+        </div>
+
+        <p style="font-size:0.82rem; color:var(--text2); margin-top:1rem;">Full guide: <a href="MLX.md">docs/MLX.md</a>. Current limitations: native MLX is opt-in, multi-node needs hardware validation, OpenAI streaming/tool-calls are not yet implemented for the MLX lane, and MLX traffic does not use mesh QUIC tunnels.</p>
     </section>
 
     <section id="splits">

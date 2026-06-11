@@ -95,7 +95,7 @@ impl Array {
 
     /// Build an array from a flat `f32` buffer and shape (row-major).
     pub fn from_f32(data: &[f32], shape: &[i32]) -> Result<Self> {
-        let want: usize = shape.iter().product::<i32>().max(0) as usize;
+        let want = expected_len(shape)?;
         if want != data.len() {
             return Err(MlxError::Shape(format!(
                 "data len {} does not match shape {:?} ({} elements)",
@@ -117,7 +117,7 @@ impl Array {
 
     /// Build an `i32` array (e.g. token ids) from a flat buffer and shape.
     pub fn from_i32(data: &[i32], shape: &[i32]) -> Result<Self> {
-        let want: usize = shape.iter().product::<i32>().max(0) as usize;
+        let want = expected_len(shape)?;
         if want != data.len() {
             return Err(MlxError::Shape(format!(
                 "data len {} != shape {:?}",
@@ -210,6 +210,20 @@ impl Drop for Array {
     }
 }
 
+/// Element count a shape implies, rejecting negative dimensions and overflow
+/// before the buffer is handed to the C API.
+fn expected_len(shape: &[i32]) -> Result<usize> {
+    let mut total: usize = 1;
+    for &dim in shape {
+        let d = usize::try_from(dim)
+            .map_err(|_| MlxError::Shape(format!("negative dimension in shape {shape:?}")))?;
+        total = total
+            .checked_mul(d)
+            .ok_or_else(|| MlxError::Shape(format!("shape too large: {shape:?}")))?;
+    }
+    Ok(total)
+}
+
 /// Check a C return code, mapping non-zero to an engine error.
 pub(crate) fn check(rc: i32, op: &str) -> Result<()> {
     if rc == 0 {
@@ -228,8 +242,10 @@ pub(crate) fn unary(
 ) -> Result<Array> {
     let mut res = unsafe { sys::mlx_array_new() };
     let rc = unsafe { f(&mut res, a.raw, s.raw) };
+    // Take ownership before the check so the handle is freed on error paths.
+    let res = Array::from_raw(res);
     check(rc, op)?;
-    Ok(Array::from_raw(res))
+    Ok(res)
 }
 
 /// Run a binary C op of the form `int f(res, a, b, stream)`.
@@ -247,16 +263,18 @@ pub(crate) fn binary(
 ) -> Result<Array> {
     let mut res = unsafe { sys::mlx_array_new() };
     let rc = unsafe { f(&mut res, a.raw, b.raw, s.raw) };
+    let res = Array::from_raw(res);
     check(rc, op)?;
-    Ok(Array::from_raw(res))
+    Ok(res)
 }
 
 impl Array {
     pub(crate) fn astype(&self, dtype: Dtype, s: &Stream) -> Result<Array> {
         let mut res = unsafe { sys::mlx_array_new() };
         let rc = unsafe { sys::mlx_astype(&mut res, self.raw, dtype.to_sys(), s.raw) };
+        let res = Array::from_raw(res);
         check(rc, "astype")?;
-        Ok(Array::from_raw(res))
+        Ok(res)
     }
 }
 
@@ -280,6 +298,18 @@ mod tests {
     fn shape_element_mismatch_is_rejected() {
         // Pure validation path — does not call the engine.
         let err = Array::from_f32(&[1.0, 2.0], &[3]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_shape_dimension_is_rejected() {
+        let err = Array::from_f32(&[1.0, 2.0], &[-2, -1]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn overflowing_shape_is_rejected() {
+        let err = Array::from_i32(&[1], &[i32::MAX, i32::MAX, i32::MAX]);
         assert!(err.is_err());
     }
 }

@@ -281,22 +281,15 @@ unsafe extern "C" {
     ) -> c_int;
 
     // ---- distributed group ----
-    pub fn mlx_distributed_group_new() -> mlx_distributed_group;
-    pub fn mlx_distributed_group_free(group: mlx_distributed_group) -> c_int;
-    /// `strict` forces a real backend (errors if unavailable).
-    pub fn mlx_distributed_init(
-        res: *mut mlx_distributed_group,
-        strict: bool,
-        bk: *const c_char,
-    ) -> c_int;
+    /// `strict` forces a real backend (returns a null group if unavailable).
+    pub fn mlx_distributed_init(strict: bool, bk: *const c_char) -> mlx_distributed_group;
     pub fn mlx_distributed_group_rank(group: mlx_distributed_group) -> c_int;
     pub fn mlx_distributed_group_size(group: mlx_distributed_group) -> c_int;
     pub fn mlx_distributed_group_split(
-        res: *mut mlx_distributed_group,
         group: mlx_distributed_group,
         color: c_int,
         key: c_int,
-    ) -> c_int;
+    ) -> mlx_distributed_group;
     pub fn mlx_distributed_is_available(bk: *const c_char) -> bool;
 
     // ---- distributed collectives ----

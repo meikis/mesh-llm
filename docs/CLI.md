@@ -581,6 +581,27 @@ Subcommands:
 
 - `--owner-key <OWNER_KEY>`: keystore path.
 
+## MLX runtime controls
+
+The native MLX runtime is Apple-Silicon-only and opt-in at build time:
+
+```bash
+just build-mlx
+```
+
+Then use a Hugging Face MLX/safetensors repo with `serve --model`:
+
+```bash
+./target/debug/mesh-llm serve --model mlx-community/Qwen2.5-0.5B-Instruct-bf16 --log-format json
+```
+
+MLX distributed mode uses direct MLX TCP/RDMA sockets, not mesh QUIC tunnels. These environment variables control the MLX planner:
+
+- `MESH_LLM_MLX_PARALLELISM=auto|tensor|pipeline` — `auto` chooses tensor when worst measured RTT is <= 2ms, otherwise pipeline. Force `tensor` to test tensor over Ethernet; force `pipeline` for latency-tolerant Ethernet serving.
+- `MESH_LLM_MLX_TRANSPORT=auto|ring|jaccl` — `ring` is TCP over Ethernet/Wi-Fi; `jaccl` is RDMA/Thunderbolt when every node has a complete RDMA map; `auto` uses JACCL only when available and otherwise falls back to ring.
+
+Full guide: [MLX.md](MLX.md).
+
 ## Model reference formats
 
 Supported for `models show`, `models download`, and `serve --model`:

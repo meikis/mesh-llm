@@ -33,7 +33,12 @@ impl Tokenizer {
 
     /// Decode token ids to text.
     pub fn decode(&self, ids: &[i32]) -> Result<String> {
-        let ids: Vec<u32> = ids.iter().map(|&i| i as u32).collect();
+        let ids: Vec<u32> = ids
+            .iter()
+            .map(|&i| {
+                u32::try_from(i).map_err(|_| MlxError::Tokenizer(format!("negative token id {i}")))
+            })
+            .collect::<Result<_>>()?;
         self.inner
             .decode(&ids, true)
             .map_err(|e| MlxError::Tokenizer(format!("decode: {e}")))

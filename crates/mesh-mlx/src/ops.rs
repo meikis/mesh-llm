@@ -49,6 +49,11 @@ pub fn transpose(a: &Array, axes: &[i32], s: &Stream) -> Result<Array> {
 
 /// Concatenate along `axis`.
 pub fn concatenate(arrays: &[&Array], axis: i32, s: &Stream) -> Result<Array> {
+    if arrays.is_empty() {
+        return Err(MlxError::Shape(
+            "concatenate requires at least one array".into(),
+        ));
+    }
     let vec = unsafe { sys::mlx_vector_array_new() };
     for a in arrays {
         let rc = unsafe { sys::mlx_vector_array_append_value(vec, a.raw) };

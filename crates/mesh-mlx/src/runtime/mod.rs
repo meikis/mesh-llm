@@ -21,13 +21,16 @@ use crate::nn::Weights;
 /// A loaded, ready-to-serve MLX engine for one model on this node.
 ///
 /// Owns the parsed config, the loaded weights for this stage, the tokenizer,
-/// and the pipeline topology. Generation borrows these to build the model.
+/// the pipeline topology, and the **parallelism mode it was loaded for**.
+/// Generation borrows these to build the model; routing in [`Engine::complete_ids`]
+/// branches on the persisted mode, never re-inferred from topology sizes.
 pub struct Engine {
     pub config: ModelConfig,
     pub weights: Weights,
     pub tokenizer: Tokenizer,
     pub pipeline: Pipeline,
     pub stream: Stream,
+    mode: ParallelismMode,
 }
 
 impl Engine {
@@ -56,12 +59,21 @@ impl Engine {
         let stream = Stream::gpu();
         let tokenizer = Tokenizer::from_dir(&meta.dir)?;
 
+        // Loading by pipeline topology implies Single for a one-stage plan and
+        // Pipeline otherwise; `load_tensor_parallel` overrides this to Tensor
+        // after slicing the weights.
+        let mode = if pipeline.size > 1 {
+            ParallelismMode::Pipeline
+        } else {
+            ParallelismMode::Single
+        };
         Ok(Engine {
             config: meta.config,
             weights,
             tokenizer,
             pipeline,
             stream,
+            mode,
         })
     }
 
@@ -104,6 +116,7 @@ impl Engine {
             group.size(),
             &load_stream,
         )?;
+        engine.mode = ParallelismMode::Tensor;
         Ok(engine)
     }
 
@@ -142,10 +155,16 @@ impl Engine {
     /// Core completion: routes to single-node, pipeline, or tensor-parallel
     /// generation and decodes the result.
     ///
-    /// - No group, or group size 1 → single-node local generate.
-    /// - Group with `pipeline.size > 1` → pipeline-parallel generate (send/recv).
-    /// - Group with `pipeline.size == 1` → tensor-parallel generate (the group
-    ///   is the tensor group; layers are sharded and all-reduce per layer).
+    /// Routing follows the **persisted load mode** ([`Engine::mode`]), not a
+    /// re-inference from topology sizes:
+    ///
+    /// - `Single` (or no group) → single-node local generate.
+    /// - `Pipeline` + group → pipeline-parallel generate (send/recv).
+    /// - `Tensor` + group → tensor-parallel generate (sharded weights; the
+    ///   all-reduces inside the layers do the cross-rank work).
+    ///
+    /// A distributed mode without a group is an error — sharded weights cannot
+    /// produce correct output locally.
     pub fn complete_ids(
         &self,
         ids: &[i32],
@@ -153,9 +172,12 @@ impl Engine {
         group: Option<&Group>,
     ) -> Result<String> {
         let eos = |t: i32| self.tokenizer.is_eos(t);
-        let out = match group {
-            Some(g) if self.pipeline.size > 1 => {
-                // Pipeline parallelism.
+        let out = match (self.mode, group) {
+            (ParallelismMode::Single, _) => {
+                let model = self.model();
+                generate_local(&model, &self.pipeline, ids, max_tokens, eos, &self.stream)?
+            }
+            (ParallelismMode::Pipeline, Some(g)) => {
                 let model = self.model();
                 generate_distributed(
                     &model,
@@ -167,27 +189,25 @@ impl Engine {
                     &self.stream,
                 )?
             }
-            Some(g) if g.size() > 1 => {
-                // Tensor parallelism: sharded model, plain local loop — the
-                // all-reduces inside the layers do the cross-rank work, and the
-                // loop is identical on every rank (greedy is deterministic).
+            (ParallelismMode::Tensor, Some(g)) => {
+                // Sharded model, plain local loop — the all-reduces inside the
+                // layers do the cross-rank work, and the loop is identical on
+                // every rank (greedy is deterministic).
                 let model = self.model_tensor_parallel(g);
                 generate_local(&model, &self.pipeline, ids, max_tokens, eos, &self.stream)?
             }
-            _ => {
-                let model = self.model();
-                generate_local(&model, &self.pipeline, ids, max_tokens, eos, &self.stream)?
+            (mode, None) => {
+                return Err(crate::MlxError::Distributed(format!(
+                    "engine loaded for {mode:?} parallelism but no group supplied"
+                )));
             }
         };
         self.tokenizer.decode(&out)
     }
 
-    /// The parallelism mode this engine is configured for.
+    /// The parallelism mode this engine was loaded for.
     pub fn mode(&self) -> ParallelismMode {
-        match self.pipeline.size {
-            s if s <= 1 => ParallelismMode::Single,
-            _ => ParallelismMode::Pipeline,
-        }
+        self.mode
     }
 }
 
@@ -232,19 +252,10 @@ impl DistributedEngine {
     /// at it, initialises the group on `backend`, and loads the model per
     /// `mode`. The hostfile path is kept alive for the process lifetime.
     pub async fn join(model: &ModelRef, params: JoinParams) -> Result<Self> {
-        use std::io::Write;
-
         // Persist the hostfile and expose it to the MLX backend via env. The
         // file is intentionally leaked (kept for the process lifetime) because
         // MLX re-reads it lazily during collective setup.
-        let mut path = std::env::temp_dir();
-        path.push(format!("mesh-mlx-hosts-{}.json", std::process::id()));
-        {
-            let mut f = std::fs::File::create(&path)
-                .map_err(|e| crate::MlxError::Distributed(format!("write hostfile: {e}")))?;
-            f.write_all(params.hostfile_json.as_bytes())
-                .map_err(|e| crate::MlxError::Distributed(format!("write hostfile: {e}")))?;
-        }
+        let path = write_hostfile(&params.hostfile_json)?;
         // SAFETY: set before any MLX distributed init on this process; the
         // runtime is single-threaded at this point in startup.
         unsafe {
@@ -268,4 +279,36 @@ impl DistributedEngine {
         self.engine
             .complete_ids(&ids, max_tokens, Some(&self.group))
     }
+}
+
+/// Write the hostfile to a fresh, exclusively created temp file with an
+/// unguessable name. `create_new` fails closed if the path already exists, so a
+/// pre-created file or symlink in the shared temp directory cannot be reused.
+fn write_hostfile(hostfile_json: &str) -> Result<std::path::PathBuf> {
+    use std::io::Write;
+
+    let nonce = {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        // RandomState seeds from OS randomness; enough entropy for a
+        // non-guessable filename without pulling in a rand dependency.
+        let mut h = RandomState::new().build_hasher();
+        h.write_u32(std::process::id());
+        h.finish()
+    };
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "mesh-mlx-hosts-{}-{nonce:016x}.json",
+        std::process::id()
+    ));
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| {
+            crate::MlxError::Distributed(format!("create hostfile {}: {e}", path.display()))
+        })?;
+    f.write_all(hostfile_json.as_bytes())
+        .map_err(|e| crate::MlxError::Distributed(format!("write hostfile: {e}")))?;
+    Ok(path)
 }

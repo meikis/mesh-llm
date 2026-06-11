@@ -128,6 +128,16 @@ build-dev backend="" cuda_arch="" rocm_arch="":
 build-mac:
     @scripts/build-mac.sh
 
+# Build with the native MLX engine (Apple Silicon; first build compiles MLX ~30 min)
+[macos]
+build-mlx:
+    @MESH_LLM_FEATURES=mlx scripts/build-mac.sh
+
+# Release build with the native MLX engine (Apple Silicon)
+[macos]
+release-build-mlx:
+    @MESH_LLM_FEATURES=mlx MESH_LLM_BUILD_PROFILE=release scripts/build-mac.sh
+
 # Build patched llama.cpp ABI and mesh-llm on Linux
 build-linux backend="" cuda_arch="" rocm_arch="":
     @scripts/build-linux.sh --backend "{{ backend }}" --cuda-arch "{{ cuda_arch }}" --rocm-arch "{{ rocm_arch }}"

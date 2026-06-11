@@ -9,6 +9,10 @@ default = ["web-ui"]
 # binary keeps shipping the console; turn off (`--no-default-features`)
 # for a lean variant that drops the embedded UI assets.
 web-ui = ["mesh-llm-host-runtime/web-ui"]
+# Link the native MLX Metal engine (Apple Silicon only) so safetensors models
+# are served by the embedded `mesh-mlx` runtime. Off by default: the native
+# MLX build is long and macOS-only. Build with `just build-mlx`.
+mlx = ["mesh-llm-host-runtime/mlx-backend"]
 gpu-bench-cuda = ["mesh-llm-host-runtime/gpu-bench-cuda"]
 gpu-bench-hip = ["mesh-llm-host-runtime/gpu-bench-hip"]
 gpu-bench-intel = ["mesh-llm-host-runtime/gpu-bench-intel"]

@@ -64,6 +64,7 @@ mesh-llm serve --auto --headless
 | Join by invite token | `mesh-llm serve --join <token>` | [docs/MESHES.md](docs/MESHES.md) |
 | Run an API-only client | `mesh-llm client --auto` | [docs/MESHES.md](docs/MESHES.md) |
 | Run a big model with splits | `mesh-llm serve --model hf://meshllm/<repo>@<rev> --split` | [docs/SKIPPY_SPLITS.md](docs/SKIPPY_SPLITS.md) |
+| Serve MLX/safetensors models on Apple Silicon | `just build-mlx` then `mesh-llm serve --model mlx-community/...` | [docs/MLX.md](docs/MLX.md) |
 | Attach a Flash-MoE SSD backend | `mesh-llm serve` with `[[plugin]] name = "flash-moe"` | [docs/plugins/flash-moe.md](docs/plugins/flash-moe.md) |
 | Fan out one prompt to every model in the mesh | `curl ... -d '{"model":"mesh", ...}'` | [docs/design/MOA_GATEWAY.md](docs/design/MOA_GATEWAY.md) |
 | Use Goose, OpenCode, Claude Code, or Pi | `mesh-llm goose`, `mesh-llm opencode`, `mesh-llm claude`, `mesh-llm pi` | [docs/AGENTS.md](docs/AGENTS.md) |
@@ -173,6 +174,7 @@ binary to `invalid`, but default startup still allows it.
 |---|---|
 | [docs/MESHES.md](docs/MESHES.md) | Private meshes, public discovery, publishing, invite tokens, API-only clients |
 | [docs/SKIPPY_SPLITS.md](docs/SKIPPY_SPLITS.md) | Running big models with package-backed Skippy stage splits |
+| [docs/MLX.md](docs/MLX.md) | Apple Silicon MLX/safetensors serving, Ethernet/RDMA transport, and tensor-vs-pipeline choices |
 | [docs/LAYER_PACKAGE_REPOS.md](docs/LAYER_PACKAGE_REPOS.md) | Contributing and publishing layer package repositories |
 | [docs/AGENTS.md](docs/AGENTS.md) | Goose, Claude Code, OpenCode, Pi, curl, and blackboard |
 | [docs/EXO_COMPARISON.md](docs/EXO_COMPARISON.md) | Balanced comparison with Exo |

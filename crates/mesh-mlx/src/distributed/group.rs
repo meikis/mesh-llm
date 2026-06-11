@@ -59,18 +59,19 @@ impl Group {
     /// Initialise the distributed runtime for `backend`. With `strict`, errors
     /// if no real backend is available (rather than silently single-process).
     pub fn init(backend: Backend, strict: bool) -> Result<Self> {
-        let mut raw = unsafe { sys::mlx_distributed_group_new() };
-        let rc = match backend.as_cstr() {
-            None => unsafe { sys::mlx_distributed_init(&mut raw, strict, std::ptr::null()) },
-            Some(c) => unsafe { sys::mlx_distributed_init(&mut raw, strict, c.as_ptr()) },
+        let raw = match backend.as_cstr() {
+            None => unsafe { sys::mlx_distributed_init(strict, std::ptr::null()) },
+            Some(c) => unsafe { sys::mlx_distributed_init(strict, c.as_ptr()) },
         };
-        check(rc, "distributed_init")?;
-        Self::wrap(raw)
+        Self::wrap(raw, "distributed_init")
     }
 
-    fn wrap(raw: sys::mlx_distributed_group) -> Result<Self> {
+    /// Take ownership of a freshly allocated group handle. mlx-c v0.6.0 returns
+    /// a null handle on failure and does not export a public group-free symbol,
+    /// so `Drop` is intentionally a no-op until mlx-c grows that API.
+    fn wrap(raw: sys::mlx_distributed_group, op: &str) -> Result<Self> {
         if raw.ctx.is_null() {
-            return Err(MlxError::Distributed("null group handle".into()));
+            return Err(MlxError::Distributed(format!("{op}: null group handle")));
         }
         let rank = unsafe { sys::mlx_distributed_group_rank(raw) };
         let size = unsafe { sys::mlx_distributed_group_size(raw) };
@@ -89,34 +90,36 @@ impl Group {
 
     /// Split the group into subgroups by `color`, ordered by `key`.
     pub fn split(&self, color: i32, key: i32) -> Result<Group> {
-        let mut raw = unsafe { sys::mlx_distributed_group_new() };
-        let rc = unsafe { sys::mlx_distributed_group_split(&mut raw, self.raw, color, key) };
-        check(rc, "group_split")?;
-        Self::wrap(raw)
+        let raw = unsafe { sys::mlx_distributed_group_split(self.raw, color, key) };
+        Self::wrap(raw, "group_split")
     }
 
     /// All-reduce (sum) `x` across the group. Every rank receives the total.
     pub fn all_sum(&self, x: &Array, s: &Stream) -> Result<Array> {
         let mut res = unsafe { sys::mlx_array_new() };
         let rc = unsafe { sys::mlx_distributed_all_sum(&mut res, x.raw, self.raw, s.raw) };
+        // Take ownership before the check so the handle is freed on error.
+        let res = Array::from_raw(res);
         check(rc, "all_sum")?;
-        Ok(Array::from_raw(res))
+        Ok(res)
     }
 
     /// All-gather `x` across the group along axis 0.
     pub fn all_gather(&self, x: &Array, s: &Stream) -> Result<Array> {
         let mut res = unsafe { sys::mlx_array_new() };
         let rc = unsafe { sys::mlx_distributed_all_gather(&mut res, x.raw, self.raw, s.raw) };
+        let res = Array::from_raw(res);
         check(rc, "all_gather")?;
-        Ok(Array::from_raw(res))
+        Ok(res)
     }
 
     /// Send `x` to `dst`. Returns the (dependency) array MLX produces.
     pub fn send(&self, x: &Array, dst: i32, s: &Stream) -> Result<Array> {
         let mut res = unsafe { sys::mlx_array_new() };
         let rc = unsafe { sys::mlx_distributed_send(&mut res, x.raw, dst, self.raw, s.raw) };
+        let res = Array::from_raw(res);
         check(rc, "send")?;
-        Ok(Array::from_raw(res))
+        Ok(res)
     }
 
     /// Receive an array shaped like `template` from `src`.
@@ -124,18 +127,19 @@ impl Group {
         let mut res = unsafe { sys::mlx_array_new() };
         let rc =
             unsafe { sys::mlx_distributed_recv_like(&mut res, template.raw, src, self.raw, s.raw) };
+        let res = Array::from_raw(res);
         check(rc, "recv_like")?;
-        Ok(Array::from_raw(res))
+        Ok(res)
     }
 }
 
 impl Drop for Group {
     fn drop(&mut self) {
-        if !self.raw.ctx.is_null() {
-            unsafe {
-                sys::mlx_distributed_group_free(self.raw);
-            }
-        }
+        // mlx-c v0.6.0 exposes a private inline `mlx_distributed_group_free_`
+        // helper but no public C symbol for freeing groups. Avoid linking a
+        // non-existent symbol; leaking this process-lifetime distributed handle
+        // is preferable to a broken native build. Revisit when mlx-c exports a
+        // public free function.
     }
 }
 

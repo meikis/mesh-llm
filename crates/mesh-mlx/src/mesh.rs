@@ -43,6 +43,52 @@ impl LatencySample {
     }
 }
 
+/// Operator preference for the parallelism mode, normally from the
+/// `MESH_LLM_MLX_PARALLELISM` env var.
+///
+/// `Auto` (default) lets the latency-aware planner decide. `Tensor` and
+/// `Pipeline` force the mode regardless of measured RTT — e.g. tensor over
+/// plain Ethernet (works, slower per-token than over RDMA, but can still win
+/// on memory-bound decode), or pipeline on a Thunderbolt mesh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParallelismPreference {
+    /// Let the latency-aware planner decide (default).
+    #[default]
+    Auto,
+    /// Force tensor parallelism even on a high-latency fabric.
+    Tensor,
+    /// Force pipeline parallelism even on a low-latency fabric.
+    Pipeline,
+}
+
+impl ParallelismPreference {
+    /// Parse from the `MESH_LLM_MLX_PARALLELISM` env var
+    /// (auto|tensor|pipeline). Unknown/empty values fall back to `Auto`.
+    pub fn from_env() -> Self {
+        Self::parse(&std::env::var("MESH_LLM_MLX_PARALLELISM").unwrap_or_default())
+    }
+
+    /// Parse a preference value (auto|tensor|tp|pipeline|pp, case-insensitive).
+    /// Unknown/empty values fall back to `Auto`.
+    pub fn parse(value: &str) -> Self {
+        match value.to_ascii_lowercase().as_str() {
+            "tensor" | "tp" => ParallelismPreference::Tensor,
+            "pipeline" | "pp" => ParallelismPreference::Pipeline,
+            _ => ParallelismPreference::Auto,
+        }
+    }
+
+    /// The forced [`ParallelismMode`], if this preference is not `Auto`.
+    fn forced_mode(self) -> Option<ParallelismMode> {
+        match self {
+            ParallelismPreference::Auto => None,
+            ParallelismPreference::Tensor => Some(ParallelismMode::Tensor),
+            ParallelismPreference::Pipeline => Some(ParallelismMode::Pipeline),
+        }
+    }
+}
+
 /// Chooses [`ParallelismMode`] from measured inter-node latency.
 #[derive(Debug, Clone, Copy)]
 pub struct ParallelismPlanner {
@@ -76,6 +122,18 @@ impl ParallelismPlanner {
     }
 
     pub fn plan(&self, node_count: usize, samples: &[LatencySample]) -> ParallelismPlan {
+        self.plan_with_preference(node_count, samples, ParallelismPreference::Auto)
+    }
+
+    /// Plan honouring an operator [`ParallelismPreference`]. A forced mode wins
+    /// over the latency heuristic (e.g. tensor over plain Ethernet); single
+    /// node always plans `Single`.
+    pub fn plan_with_preference(
+        &self,
+        node_count: usize,
+        samples: &[LatencySample],
+        pref: ParallelismPreference,
+    ) -> ParallelismPlan {
         if node_count <= 1 {
             return ParallelismPlan {
                 mode: ParallelismMode::Single,
@@ -85,6 +143,14 @@ impl ParallelismPlanner {
             };
         }
         let worst = samples.iter().map(|s| s.rtt).max();
+        if let Some(mode) = pref.forced_mode() {
+            return ParallelismPlan {
+                mode,
+                node_count,
+                worst_rtt: worst,
+                reason: format!("operator preference (MESH_LLM_MLX_PARALLELISM): forced {mode:?}"),
+            };
+        }
         let (mode, reason) = match worst {
             None => (
                 ParallelismMode::Pipeline,
@@ -208,8 +274,17 @@ impl TransportPlan {
         nodes: Vec<NodeEndpoint>,
         pref: TransportPreference,
     ) -> Result<Self, String> {
-        // A usable JACCL mesh needs every node to expose its RDMA device map.
-        let all_have_rdma = !nodes.is_empty() && nodes.iter().all(|n| !n.rdma.is_empty());
+        // A usable JACCL mesh needs every node to expose a complete RDMA device
+        // map: one row per node, with every non-self entry populated. A merely
+        // non-empty row is not enough — a partial map fails at hostfile load.
+        let all_have_rdma = !nodes.is_empty()
+            && nodes.iter().enumerate().all(|(i, n)| {
+                n.rdma.len() == nodes.len()
+                    && n.rdma
+                        .iter()
+                        .enumerate()
+                        .all(|(j, dev)| i == j || dev.is_some())
+            });
         let any_rdma = nodes.iter().any(|n| !n.rdma.is_empty());
 
         let backend = match pref {
@@ -391,6 +466,53 @@ mod tests {
                 .mode,
             ParallelismMode::Pipeline
         );
+    }
+
+    #[test]
+    fn forced_tensor_wins_over_high_rtt() {
+        // Tensor over plain Ethernet: high RTT would normally pick pipeline,
+        // but an explicit operator preference forces tensor.
+        let p = ParallelismPlanner::default();
+        let plan = p.plan_with_preference(
+            2,
+            &[LatencySample::new(0, 1, Duration::from_millis(5))],
+            ParallelismPreference::Tensor,
+        );
+        assert_eq!(plan.mode, ParallelismMode::Tensor);
+        assert!(plan.reason.contains("forced"));
+    }
+
+    #[test]
+    fn forced_pipeline_wins_over_low_rtt() {
+        let p = ParallelismPlanner::default();
+        let plan = p.plan_with_preference(
+            2,
+            &[LatencySample::new(0, 1, Duration::from_micros(500))],
+            ParallelismPreference::Pipeline,
+        );
+        assert_eq!(plan.mode, ParallelismMode::Pipeline);
+    }
+
+    #[test]
+    fn forced_mode_still_single_on_one_node() {
+        let p = ParallelismPlanner::default();
+        let plan = p.plan_with_preference(1, &[], ParallelismPreference::Tensor);
+        assert_eq!(plan.mode, ParallelismMode::Single);
+    }
+
+    #[test]
+    fn parallelism_preference_parses_values() {
+        for (s, want) in [
+            ("tensor", ParallelismPreference::Tensor),
+            ("TP", ParallelismPreference::Tensor),
+            ("pipeline", ParallelismPreference::Pipeline),
+            ("pp", ParallelismPreference::Pipeline),
+            ("auto", ParallelismPreference::Auto),
+            ("", ParallelismPreference::Auto),
+            ("bogus", ParallelismPreference::Auto),
+        ] {
+            assert_eq!(ParallelismPreference::parse(s), want, "value {s:?}");
+        }
     }
 
     #[test]

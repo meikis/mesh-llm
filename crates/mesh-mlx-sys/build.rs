@@ -12,11 +12,12 @@
 //! Environment overrides:
 //!   - `MLX_C_DIR`  — path to a prebuilt/checked-out mlx-c (with CMakeLists).
 //!   - `MLX_C_TAG`  — mlx-c git tag to fetch (default: a known-good pin).
-//!   - `MLX_TAG`    — mlx git tag to fetch (default: matched by mlx-c).
+//!     (mlx itself is pinned transitively by mlx-c's own FetchContent.)
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=MLX_C_DIR");
+    println!("cargo:rerun-if-env-changed=MLX_C_TAG");
 
     if std::env::var("CARGO_FEATURE_LINK_MLX").is_err() {
         // Bindings-only mode: nothing to build or link.

@@ -19,7 +19,7 @@ use anyhow::Result;
 #[allow(unused_imports)]
 pub use mesh_mlx::{
     LatencySample, MlxBackendKind, MlxOrchestrator, NodeEndpoint, ParallelismMode, ParallelismPlan,
-    TransportPlan, TransportPreference, detect_rdma_devices, mlx_supported,
+    ParallelismPreference, TransportPlan, TransportPreference, detect_rdma_devices, mlx_supported,
 };
 
 use crate::mesh::{self, PeerInfo};
@@ -108,58 +108,72 @@ fn peer_endpoint(ssh: String, ips: impl Iterator<Item = std::net::IpAddr>) -> No
 ///
 /// Returns `None` when there are no eligible peers (→ run single-node).
 ///
-/// Rank order: the local node is rank 0, then eligible peers sorted by endpoint
-/// id for a stable, identical ordering on every node (so all nodes build the
-/// same ring).
+/// Rank order: **all** group members — the local node and the eligible peers —
+/// are sorted together by node id, so every node computes the identical rank
+/// order and the rings agree. `local_rank` is this node's position in that
+/// shared order.
 pub async fn plan_group_from_peers(node: &mesh::Node) -> Option<MlxGroupPlan> {
     if !MlxModelHandle::available() {
         return None;
     }
 
     let peers = node.peers().await;
-    let mut eligible: Vec<&PeerInfo> = peers.iter().filter(|p| peer_is_mlx_eligible(p)).collect();
+    let eligible: Vec<&PeerInfo> = peers.iter().filter(|p| peer_is_mlx_eligible(p)).collect();
     if eligible.is_empty() {
         return None;
     }
-    // Stable, deterministic ordering shared by all nodes.
-    eligible.sort_by_key(|p| p.id.to_string());
 
-    // Rank 0 is the local node; its loopback endpoint is replaced by its real
-    // LAN address by the launcher, so advertise the ring port on 0.0.0.0 here.
+    // Stable, deterministic ordering shared by all nodes: the local node sorts
+    // *with* the peers by id, so every member derives the same ring.
     let local_id = node.id().to_string();
-    let mut endpoints = Vec::with_capacity(eligible.len() + 1);
-    endpoints.push(peer_endpoint(
+    let (members, local_rank) = rank_order(
         local_id,
-        std::iter::once(std::net::IpAddr::from([0, 0, 0, 0])),
-    ));
+        eligible.iter().map(|p| (p.id.to_string(), Some(*p))),
+    );
 
+    let mut endpoints = Vec::with_capacity(members.len());
     let mut samples = Vec::new();
-    for (i, peer) in eligible.iter().enumerate() {
-        let rank = i + 1;
-        let ips: Vec<std::net::IpAddr> = peer_direct_ips(peer).map(|sa| sa.ip()).collect();
-        endpoints.push(peer_endpoint(peer.id.to_string(), ips.into_iter()));
-        // RTT from mesh's measurements feeds the tensor-vs-pipeline decision.
-        if let Some(rtt_ms) = peer.current_direct_rtt_ms() {
-            samples.push(LatencySample::new(
-                0,
-                rank,
-                std::time::Duration::from_millis(rtt_ms as u64),
-            ));
+    for (rank, (id, peer)) in members.iter().enumerate() {
+        match peer {
+            // The local node binds its ring port on all interfaces; only this
+            // node reads its own row, so 0.0.0.0 is a listen address here.
+            None => endpoints.push(peer_endpoint(
+                id.clone(),
+                std::iter::once(std::net::IpAddr::from([0, 0, 0, 0])),
+            )),
+            Some(p) => {
+                let ips: Vec<std::net::IpAddr> = peer_direct_ips(p).map(|sa| sa.ip()).collect();
+                endpoints.push(peer_endpoint(id.clone(), ips.into_iter()));
+                // RTT from mesh's measurements feeds the tensor-vs-pipeline
+                // decision (measured local → peer).
+                if let Some(rtt_ms) = p.current_direct_rtt_ms() {
+                    samples.push(LatencySample::new(
+                        local_rank,
+                        rank,
+                        std::time::Duration::from_millis(rtt_ms as u64),
+                    ));
+                }
+            }
         }
     }
 
     // Transport preference (MESH_LLM_MLX_TRANSPORT=auto|ring|jaccl) decides
     // whether we attempt JACCL (RDMA/Thunderbolt) or stay on the TCP ring.
     let pref = TransportPreference::from_env();
-    apply_local_rdma_row(&mut endpoints, pref);
+    apply_local_rdma_row(&mut endpoints, local_rank, pref);
 
-    let parallelism = MlxOrchestrator::default()
-        .planner
-        .plan(endpoints.len(), &samples);
+    // Parallelism preference (MESH_LLM_MLX_PARALLELISM=auto|tensor|pipeline)
+    // can force the mode — e.g. tensor over plain Ethernet — otherwise the
+    // latency-aware planner decides from measured RTT.
+    let parallelism = MlxOrchestrator::default().planner.plan_with_preference(
+        endpoints.len(),
+        &samples,
+        ParallelismPreference::from_env(),
+    );
     let transport = select_transport(parallelism.mode, &endpoints, pref);
 
     Some(MlxGroupPlan {
-        local_rank: 0,
+        local_rank,
         endpoints,
         samples,
         parallelism,
@@ -167,15 +181,38 @@ pub async fn plan_group_from_peers(node: &mesh::Node) -> Option<MlxGroupPlan> {
     })
 }
 
-/// Populate rank 0's RDMA device row from locally-detected devices when JACCL
-/// is wanted (auto/jaccl).
+/// Sort the local node and the eligible peers into the shared rank order.
+///
+/// Every group member runs this with the same set of ids, so all members
+/// derive the identical ring; the returned index is the local node's rank in
+/// that order. Pure so the ordering invariant is unit-testable.
+fn rank_order<'p>(
+    local_id: String,
+    peers: impl Iterator<Item = (String, Option<&'p PeerInfo>)>,
+) -> (Vec<(String, Option<&'p PeerInfo>)>, usize) {
+    let mut members: Vec<(String, Option<&'p PeerInfo>)> = vec![(local_id.clone(), None)];
+    members.extend(peers);
+    members.sort_by(|a, b| a.0.cmp(&b.0));
+    let local_rank = members
+        .iter()
+        .position(|(id, _)| *id == local_id)
+        .expect("local id is in members");
+    (members, local_rank)
+}
+
+/// Populate the local node's RDMA device row from locally-detected devices
+/// when JACCL is wanted (auto/jaccl).
 ///
 /// We can detect *this* node's devices via `ibv_devices`; the peers' device
 /// names must be carried by mesh gossip, which is not yet wired (`PeerInfo` has
-/// no RDMA field). So this fills rank 0's row best-effort; a full JACCL mesh
-/// engages once peer device maps are gossiped. Until then `Auto` detects-but-
-/// falls-back (safe), and explicit `Jaccl` without devices warns.
-fn apply_local_rdma_row(endpoints: &mut [NodeEndpoint], pref: TransportPreference) {
+/// no RDMA field). So this fills the local rank's row best-effort; a full JACCL
+/// mesh engages once peer device maps are gossiped. Until then `Auto`
+/// detects-but-falls-back (safe), and explicit `Jaccl` without devices warns.
+fn apply_local_rdma_row(
+    endpoints: &mut [NodeEndpoint],
+    local_rank: usize,
+    pref: TransportPreference,
+) {
     if !matches!(pref, TransportPreference::Jaccl | TransportPreference::Auto) {
         return;
     }
@@ -195,9 +232,9 @@ fn apply_local_rdma_row(endpoints: &mut [NodeEndpoint], pref: TransportPreferenc
     // Diagonal (self) is null; reuse the first device for each peer link until
     // per-link mapping is gossiped.
     let row: Vec<Option<String>> = (0..n)
-        .map(|j| if j == 0 { None } else { dev.clone() })
+        .map(|j| if j == local_rank { None } else { dev.clone() })
         .collect();
-    endpoints[0].rdma = row;
+    endpoints[local_rank].rdma = row;
     tracing::info!(devices = ?local_rdma, "MLX detected local RDMA devices for JACCL");
 }
 
@@ -487,6 +524,28 @@ mod tests {
         // with_group on a single-node plan attaches no distributed setup.
         let opts = MlxModelLoadOptions::new("m").with_group(&plan);
         assert!(opts.distributed.is_none());
+    }
+
+    #[test]
+    fn rank_order_is_identical_on_every_node() {
+        // Three nodes, each planning with itself as "local" and the other two
+        // as peers: all must derive the same member order, and each must find
+        // itself at its sorted position.
+        let ids = ["node-b", "node-a", "node-c"];
+        let mut orders = Vec::new();
+        for local in ids {
+            let peers = ids
+                .iter()
+                .filter(|id| **id != local)
+                .map(|id| (id.to_string(), None));
+            let (members, local_rank) = rank_order(local.to_string(), peers);
+            let order: Vec<String> = members.into_iter().map(|(id, _)| id).collect();
+            assert_eq!(order[local_rank], local);
+            orders.push(order);
+        }
+        assert_eq!(orders[0], orders[1]);
+        assert_eq!(orders[1], orders[2]);
+        assert_eq!(orders[0], vec!["node-a", "node-b", "node-c"]);
     }
 
     #[test]

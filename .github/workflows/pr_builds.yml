@@ -909,7 +909,7 @@ jobs:
 
   macos_unit_tests:
     needs: [changes, macos_cpu_artifact]
-    if: ${{ needs.macos_cpu_artifact.result == 'success' && needs.changes.outputs.docs_only != 'true' && (needs.changes.outputs.all_rust == 'true' || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'model-artifact') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-llm-host-runtime') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-llm')) }}
+    if: ${{ needs.macos_cpu_artifact.result == 'success' && needs.changes.outputs.docs_only != 'true' && (needs.changes.outputs.all_rust == 'true' || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'model-artifact') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-llm-host-runtime') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-llm') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-mlx') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-mlx-sys')) }}
     name: macOS unit tests
     runs-on: macos-15
     env:
@@ -963,13 +963,52 @@ jobs:
             [ "$ALL_RUST" = "true" ] || jq -e --arg crate "$crate" 'index($crate) != null' <<<"$AFFECTED" >/dev/null
           }
 
-          for c in model-artifact mesh-llm-host-runtime mesh-llm; do
+          for c in model-artifact mesh-llm-host-runtime mesh-llm mesh-mlx-sys mesh-mlx; do
             if should_test "$c"; then
               cargo test -p "$c" --lib
             else
               echo "Skipping $c on macOS (not affected)"
             fi
           done
+
+  macos_mlx_native_smoke:
+    needs: changes
+    if: ${{ github.event_name == 'workflow_dispatch' || needs.changes.outputs.all_rust == 'true' || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-mlx') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-mlx-sys') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-llm-host-runtime') || contains(fromJson(needs.changes.outputs.affected_crates || '[]'), 'mesh-llm') }}
+    name: macOS MLX native smoke
+    runs-on: macos-15
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+        with:
+          workspaces: . -> target
+          cache-bin: "false"
+          prefix-key: ${{ env.CACHE_NAMESPACE }}-rust-${{ runner.os }}-${{ hashFiles('.github/cache-version.txt') }}
+          shared-key: macos-mlx-native
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install MLX build dependencies
+        run: brew install cmake ninja lld
+      - name: Configure macOS Rust linker
+        run: |
+          mkdir -p .cargo
+          lld_prefix="$(brew --prefix lld)"
+          cat > .cargo/config.toml <<EOF
+          [target.aarch64-apple-darwin]
+          rustflags = ["-C", "link-arg=-fuse-ld=$lld_prefix/bin/ld64.lld"]
+
+          [target.x86_64-apple-darwin]
+          rustflags = ["-C", "link-arg=-fuse-ld=$lld_prefix/bin/ld64.lld"]
+          EOF
+      - name: Cache MLX CMake build
+        uses: actions/cache@v5
+        with:
+          path: target/mlx-c
+          key: ${{ env.CACHE_NAMESPACE }}-github-macos-15-mlx-c-${{ hashFiles('crates/mesh-mlx-sys/build.rs', 'crates/mesh-mlx-sys/src/**', '.github/cache-version.txt') }}
+      - name: Native MLX end-to-end generation
+        run: cargo test -p mesh-mlx --features link-mlx --test live_single_node -- --nocapture
 
   windows_targets:
     needs: changes

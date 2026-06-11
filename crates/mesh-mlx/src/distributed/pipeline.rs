@@ -47,6 +47,9 @@ impl Pipeline {
     /// rank gets the first layers, rank 0 gets the last layers.
     pub fn plan(rank: i32, size: i32, total_layers: usize) -> Self {
         let size = size.max(1);
+        // Normalize once and store the normalized rank so layer ownership and
+        // neighbor topology (send_to/recv_from) always agree.
+        let rank = rank.clamp(0, size - 1);
         let n = total_layers;
         let per = n / size as usize;
         let rem = n % size as usize;
@@ -54,7 +57,7 @@ impl Pipeline {
         // Forward chunk index for this rank (rank 0 -> last chunk).
         // chunk i (i in 0..size) covers a contiguous block; reverse so rank 0
         // maps to the last chunk.
-        let chunk = (size - 1 - rank.clamp(0, size - 1)) as usize;
+        let chunk = (size - 1 - rank) as usize;
 
         // Distribute remainder to the earliest chunks for balance.
         let start = chunk * per + chunk.min(rem);

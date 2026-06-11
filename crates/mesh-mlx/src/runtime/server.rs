@@ -219,9 +219,17 @@ async fn chat_completions(
         .map(|m| m.content.clone())
         .unwrap_or_default();
 
-    let backend = state.backend.lock().await;
-    let result = backend.chat(system.as_deref(), &user, req.max_tokens);
-    drop(backend);
+    // Generation is synchronous native work that can run for the full
+    // completion; run it on the blocking pool so Tokio workers stay free. The
+    // mutex is acquired inside the blocking task so the async handler never
+    // holds it across the generation.
+    let backend = state.backend.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let backend = backend.blocking_lock();
+        backend.chat(system.as_deref(), &user, req.max_tokens)
+    })
+    .await
+    .unwrap_or_else(|e| Err(crate::MlxError::Engine(format!("generation task: {e}"))));
 
     match result {
         Ok(text) => Json(ChatResponse {

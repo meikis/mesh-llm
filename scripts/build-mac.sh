@@ -90,22 +90,29 @@ if [[ -d "$MESH_DIR" ]]; then
     fi
 
     configure_rust_cache
+    # Extra cargo feature flags (e.g. MESH_LLM_FEATURES=mlx for the native MLX
+    # Metal engine via `just build-mlx`).
+    feature_args=()
+    if [[ -n "${MESH_LLM_FEATURES:-}" ]]; then
+        feature_args=(--features "$MESH_LLM_FEATURES")
+        echo "Enabling cargo features: $MESH_LLM_FEATURES"
+    fi
     case "$build_profile" in
         dev|debug)
             echo "Building mesh-llm (profile: dev, bin only)..."
             if [[ -n "$rustc_wrapper" ]]; then
-                (cd "$REPO_ROOT" && RUSTC_WRAPPER="$rustc_wrapper" cargo build -p mesh-llm --bin mesh-llm)
+                (cd "$REPO_ROOT" && RUSTC_WRAPPER="$rustc_wrapper" cargo build -p mesh-llm --bin mesh-llm "${feature_args[@]}")
             else
-                (cd "$REPO_ROOT" && cargo build -p mesh-llm --bin mesh-llm)
+                (cd "$REPO_ROOT" && cargo build -p mesh-llm --bin mesh-llm "${feature_args[@]}")
             fi
             echo "Mesh binary: target/debug/mesh-llm"
             ;;
         release)
             echo "Building mesh-llm (profile: release)..."
             if [[ -n "$rustc_wrapper" ]]; then
-                (cd "$REPO_ROOT" && RUSTC_WRAPPER="$rustc_wrapper" cargo build --release -p mesh-llm)
+                (cd "$REPO_ROOT" && RUSTC_WRAPPER="$rustc_wrapper" cargo build --release -p mesh-llm "${feature_args[@]}")
             else
-                (cd "$REPO_ROOT" && cargo build --release -p mesh-llm)
+                (cd "$REPO_ROOT" && cargo build --release -p mesh-llm "${feature_args[@]}")
             fi
             echo "Mesh binary: target/release/mesh-llm"
             ;;

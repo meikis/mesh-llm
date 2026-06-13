@@ -199,6 +199,7 @@ pub(super) struct LocalRuntimeModelStartSpec<'a> {
     pub(super) flash_attention_override: FlashAttentionType,
     pub(super) parallel_override: Option<usize>,
     pub(super) package_speculative_defaults: bool,
+    pub(super) speculative_draft_max_tokens_override: Option<u16>,
     pub(super) planning_profile: RuntimeResourcePlanningProfile,
     pub(super) openai_guardrail_policy: OpenAiGuardrailPolicyHandle,
     pub(super) skippy_telemetry: skippy::SkippyTelemetryOptions,
@@ -779,6 +780,7 @@ pub(super) async fn start_runtime_split_model(
         n_ubatch_override: spec.n_ubatch_override,
         flash_attention_override: spec.flash_attention_override,
         package_speculative_defaults: spec.package_speculative_defaults,
+        speculative_draft_max_tokens_override: spec.speculative_draft_max_tokens_override,
         openai_guardrail_policy: spec.openai_guardrail_policy.clone(),
         pinned_gpu: spec.pinned_gpu,
         slots,
@@ -810,6 +812,7 @@ pub(super) async fn start_runtime_split_model(
         n_ubatch_override: spec.n_ubatch_override,
         flash_attention_override: spec.flash_attention_override,
         package_speculative_defaults: spec.package_speculative_defaults,
+        speculative_draft_max_tokens_override: spec.speculative_draft_max_tokens_override,
         openai_guardrail_policy: spec.openai_guardrail_policy.clone(),
         pinned_gpu: spec.pinned_gpu.cloned(),
         slots,
@@ -1169,6 +1172,7 @@ struct SplitGenerationLoadSpec<'a> {
     n_ubatch_override: Option<u32>,
     flash_attention_override: FlashAttentionType,
     package_speculative_defaults: bool,
+    speculative_draft_max_tokens_override: Option<u16>,
     openai_guardrail_policy: OpenAiGuardrailPolicyHandle,
     skippy_telemetry: skippy::SkippyTelemetryOptions,
     survey_telemetry: survey::SurveyTelemetry,
@@ -1562,7 +1566,12 @@ async fn split_generation_load_settings<'a>(
         resolved.hardware.device = Some(gpu.backend_device.clone());
     }
     if spec.package_speculative_defaults {
-        apply_package_speculative_defaults(&mut resolved, spec.package).await?;
+        apply_package_speculative_defaults(
+            &mut resolved,
+            spec.package,
+            spec.speculative_draft_max_tokens_override,
+        )
+        .await?;
     }
     let embedded_openai = resolved.to_embedded_openai_args(activation_width, true)?;
     let runtime_options = resolved.to_embedded_runtime_options(
@@ -1589,6 +1598,7 @@ async fn split_generation_load_settings<'a>(
 async fn apply_package_speculative_defaults(
     resolved: &mut skippy::ResolvedSkippyConfig,
     package: &skippy::SkippyPackageIdentity,
+    draft_max_tokens_override: Option<u16>,
 ) -> Result<()> {
     if resolved.speculative.explicit || resolved.speculative.mode == "draft" {
         return Ok(());
@@ -1631,7 +1641,8 @@ async fn apply_package_speculative_defaults(
             return Ok(());
         }
     };
-    let window = speculative_strategy_window(strategy)?;
+    let package_window = speculative_strategy_window(strategy)?;
+    let window = package_speculative_window(strategy, draft_max_tokens_override)?;
     let adaptive = strategy
         .window_policy
         .as_ref()
@@ -1648,6 +1659,7 @@ async fn apply_package_speculative_defaults(
         draft_ref,
         draft_path = %draft_path.display(),
         window,
+        package_window,
         adaptive,
         "enabled package-declared draft speculative decoding"
     );
@@ -1675,6 +1687,16 @@ fn speculative_strategy_window(
         .or(policy.fixed_default_window)
         .or(policy.max_window)
         .unwrap_or(0))
+}
+
+fn package_speculative_window(
+    strategy: &skippy_runtime::package::SpeculativeStrategyConfig,
+    draft_max_tokens_override: Option<u16>,
+) -> Result<u32> {
+    let package_window = speculative_strategy_window(strategy)?;
+    Ok(draft_max_tokens_override
+        .map(u32::from)
+        .unwrap_or(package_window))
 }
 
 fn split_generation_load_mode(package: &skippy::SkippyPackageIdentity) -> LoadMode {
@@ -1962,6 +1984,7 @@ struct SplitTopologyCoordinator {
     n_ubatch_override: Option<u32>,
     flash_attention_override: FlashAttentionType,
     package_speculative_defaults: bool,
+    speculative_draft_max_tokens_override: Option<u16>,
     openai_guardrail_policy: OpenAiGuardrailPolicyHandle,
     pinned_gpu: Option<crate::runtime::StartupPinnedGpuTarget>,
     slots: usize,
@@ -2452,6 +2475,7 @@ impl SplitTopologyCoordinator {
             n_ubatch_override: self.n_ubatch_override,
             flash_attention_override: self.flash_attention_override,
             package_speculative_defaults: self.package_speculative_defaults,
+            speculative_draft_max_tokens_override: self.speculative_draft_max_tokens_override,
             openai_guardrail_policy: self.openai_guardrail_policy.clone(),
             pinned_gpu: self.pinned_gpu.as_ref(),
             slots: self.slots,
@@ -3741,7 +3765,12 @@ async fn start_runtime_layer_package_model(
         fallback_projector_path,
     )?;
     if spec.package_speculative_defaults {
-        apply_package_speculative_defaults(&mut resolved, &package).await?;
+        apply_package_speculative_defaults(
+            &mut resolved,
+            &package,
+            spec.speculative_draft_max_tokens_override,
+        )
+        .await?;
     }
     tracing::info!(
         model = model_name,
@@ -3941,6 +3970,20 @@ mod tests {
         let strategy = draft_spec_strategy();
 
         assert_eq!(speculative_strategy_window(&strategy).unwrap(), 16);
+    }
+
+    #[test]
+    fn package_speculative_window_keeps_package_default_without_override() {
+        let strategy = draft_spec_strategy();
+
+        assert_eq!(package_speculative_window(&strategy, None).unwrap(), 16);
+    }
+
+    #[test]
+    fn package_speculative_window_uses_cli_override() {
+        let strategy = draft_spec_strategy();
+
+        assert_eq!(package_speculative_window(&strategy, Some(4)).unwrap(), 4);
     }
 
     fn stage_load_request(load_mode: LoadMode) -> skippy::StageLoadRequest {
@@ -4303,6 +4346,7 @@ stop = ["END"]
             n_ubatch_override: None,
             flash_attention_override: FlashAttentionType::Auto,
             package_speculative_defaults: true,
+            speculative_draft_max_tokens_override: None,
             openai_guardrail_policy: openai_guardrail_policy_handle(
                 openai_frontend::GuardrailMode::Disabled,
             ),
@@ -4402,6 +4446,7 @@ max_tokens = 222
             flash_attention_override: FlashAttentionType::Auto,
             parallel_override: None,
             package_speculative_defaults: true,
+            speculative_draft_max_tokens_override: None,
             planning_profile: RuntimeResourcePlanningProfile::DedicatedLocal,
             openai_guardrail_policy: openai_guardrail_policy_handle(
                 openai_frontend::GuardrailMode::Disabled,
@@ -5584,6 +5629,7 @@ max_tokens = 222
             n_ubatch_override: None,
             flash_attention_override: FlashAttentionType::Auto,
             package_speculative_defaults: true,
+            speculative_draft_max_tokens_override: None,
             openai_guardrail_policy: openai_guardrail_policy_handle(
                 openai_frontend::GuardrailMode::Disabled,
             ),

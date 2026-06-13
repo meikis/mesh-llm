@@ -1281,6 +1281,7 @@ struct StartupLocalModelTask {
     flash_attention: FlashAttentionType,
     parallel_override: Option<usize>,
     package_speculative_defaults: bool,
+    speculative_draft_max_tokens_override: Option<u16>,
     resource_planning_profile: RuntimeResourcePlanningProfile,
     openai_guardrail_policy: OpenAiGuardrailPolicyHandle,
     split: bool,
@@ -1362,6 +1363,7 @@ struct StartupLoopContext<'a> {
     flash_attention: FlashAttentionType,
     parallel_override: Option<usize>,
     package_speculative_defaults: bool,
+    speculative_draft_max_tokens_override: Option<u16>,
     resource_planning_profile: RuntimeResourcePlanningProfile,
     openai_guardrail_policy: OpenAiGuardrailPolicyHandle,
     skippy_telemetry: &'a skippy::SkippyTelemetryOptions,
@@ -1436,6 +1438,7 @@ struct StartupLaunchRuntimeContext<'a> {
     flash_attention: FlashAttentionType,
     parallel_override: Option<usize>,
     package_speculative_defaults: bool,
+    speculative_draft_max_tokens_override: Option<u16>,
     resource_planning_profile: RuntimeResourcePlanningProfile,
     openai_guardrail_policy: OpenAiGuardrailPolicyHandle,
     skippy_telemetry: &'a skippy::SkippyTelemetryOptions,
@@ -1915,6 +1918,7 @@ async fn startup_handle_local_fallback_event(
             flash_attention_override: ctx.flash_attention,
             parallel_override: ctx.parallel_override,
             package_speculative_defaults: ctx.package_speculative_defaults,
+            speculative_draft_max_tokens_override: ctx.speculative_draft_max_tokens_override,
             planning_profile: ctx.resource_planning_profile,
             openai_guardrail_policy: ctx.openai_guardrail_policy.clone(),
             skippy_telemetry: ctx.skippy_telemetry.clone(),
@@ -2249,6 +2253,7 @@ async fn startup_launch_runtime(
         flash_attention,
         parallel_override,
         package_speculative_defaults,
+        speculative_draft_max_tokens_override,
         resource_planning_profile,
         openai_guardrail_policy,
         skippy_telemetry,
@@ -2278,6 +2283,7 @@ async fn startup_launch_runtime(
         flash_attention_override: flash_attention,
         parallel_override,
         package_speculative_defaults,
+        speculative_draft_max_tokens_override,
         planning_profile: resource_planning_profile,
         openai_guardrail_policy: openai_guardrail_policy.clone(),
         skippy_telemetry: skippy_telemetry.clone(),
@@ -2393,6 +2399,7 @@ async fn startup_local_model_loop(params: StartupLocalModelTask) {
         flash_attention,
         parallel_override,
         package_speculative_defaults,
+        speculative_draft_max_tokens_override,
         resource_planning_profile,
         openai_guardrail_policy,
         split,
@@ -2454,6 +2461,7 @@ async fn startup_local_model_loop(params: StartupLocalModelTask) {
             flash_attention,
             parallel_override,
             package_speculative_defaults,
+            speculative_draft_max_tokens_override,
             resource_planning_profile,
             openai_guardrail_policy: openai_guardrail_policy.clone(),
             skippy_telemetry: &skippy_telemetry,
@@ -2510,6 +2518,7 @@ async fn startup_local_model_loop(params: StartupLocalModelTask) {
         flash_attention,
         parallel_override,
         package_speculative_defaults,
+        speculative_draft_max_tokens_override,
         resource_planning_profile,
         openai_guardrail_policy,
         skippy_telemetry: &skippy_telemetry,
@@ -3471,6 +3480,9 @@ fn log_nostr_auto_candidates(meshes: &[nostr::DiscoveredMesh], target_name: Opti
 fn validate_runtime_cli_model_options(options: &RuntimeOptions) -> Result<()> {
     if options.client && (!options.model.is_empty() || !options.gguf.is_empty()) {
         anyhow::bail!("--client and --model are mutually exclusive");
+    }
+    if options.draft_max == Some(0) {
+        anyhow::bail!("--draft-max must be greater than 0; use --no-draft to disable drafting");
     }
     if let Some(mmproj) = &options.mmproj {
         anyhow::ensure!(!options.client, "--mmproj cannot be used with --client");
@@ -6882,6 +6894,7 @@ async fn spawn_run_auto_startup_model_tasks(
         flash_attention: primary_flash_attention,
         parallel_override: primary_parallel_override,
         package_speculative_defaults: !options.no_draft,
+        speculative_draft_max_tokens_override: options.draft_max,
         resource_planning_profile,
         openai_guardrail_policy: runtime_state.openai_guardrail_policy.clone(),
         split: options.split,
@@ -7184,6 +7197,7 @@ async fn run_auto_load_runtime_model(
                 .unwrap_or(FlashAttentionType::Auto),
             parallel_override,
             package_speculative_defaults: !ctx.options.no_draft,
+            speculative_draft_max_tokens_override: ctx.options.draft_max,
             planning_profile: runtime_resource_planning_profile(ctx.options),
             openai_guardrail_policy: ctx.openai_guardrail_policy.clone(),
             skippy_telemetry: skippy_telemetry_options(ctx.options),
@@ -8002,6 +8016,7 @@ async fn spawn_run_auto_additional_model_tasks(ctx: RunAutoAdditionalModelsConte
             flash_attention: extra_model.flash_attention,
             parallel_override: extra_model.parallel.or(ctx.config.gpu.parallel),
             package_speculative_defaults: !ctx.options.no_draft,
+            speculative_draft_max_tokens_override: ctx.options.draft_max,
             resource_planning_profile: runtime_resource_planning_profile(ctx.options),
             openai_guardrail_policy: ctx.openai_guardrail_policy.clone(),
             split: ctx.options.split,

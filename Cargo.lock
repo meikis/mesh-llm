@@ -3859,11 +3859,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mesh-llm-build-info"
+version = "0.68.0"
+
+[[package]]
 name = "mesh-llm-cli"
 version = "0.68.0"
 dependencies = [
  "anyhow",
  "clap",
+ "mesh-llm-build-info",
  "mesh-llm-events",
  "serde",
 ]
@@ -3910,6 +3915,7 @@ dependencies = [
  "hf-hub",
  "iroh",
  "json5",
+ "mesh-llm-build-info",
  "mesh-llm-cli",
  "mesh-llm-identity",
  "mesh-llm-native-runtime",
@@ -4044,6 +4050,7 @@ dependencies = [
  "libc",
  "mdns-sd",
  "mesh-llm-api-server",
+ "mesh-llm-build-info",
  "mesh-llm-client",
  "mesh-llm-config",
  "mesh-llm-events",
@@ -4225,6 +4232,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "hex",
+ "mesh-llm-build-info",
  "mesh-llm-hardware-profile",
  "mesh-llm-native-runtime",
  "reqwest 0.12.28",
@@ -4273,6 +4281,7 @@ dependencies = [
  "dirs",
  "hex",
  "libc",
+ "mesh-llm-build-info",
  "mesh-llm-gpu-bench",
  "reqwest 0.12.28",
  "semver",

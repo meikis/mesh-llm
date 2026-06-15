@@ -813,7 +813,7 @@ impl StageOpenAiBackend {
                 {
                     break;
                 }
-                let mut token_timer = PhaseTimer::start();
+                let token_timer = PhaseTimer::start();
                 let native_mtp_remaining =
                     (request.max_tokens as usize).saturating_sub(decoded_tokens);
                 if native_mtp_batched_verify
@@ -832,7 +832,7 @@ impl StageOpenAiBackend {
                             pos_start: prefill_token_count + decoded_tokens,
                             decode_step: decoded_tokens,
                             tokens: &verify_inputs,
-                            checkpoint: true,
+                            checkpoint: false,
                         },
                     )?;
                     let verify = self.execute_embedded_stage_message(
@@ -862,8 +862,6 @@ impl StageOpenAiBackend {
                     let mut commit_tokens = vec![target_token];
                     if accepted {
                         commit_tokens.push(after_draft_token);
-                    } else {
-                        commit_tokens.clear();
                     }
                     let consumed_positions = verify_inputs.len();
                     let mut committed_positions = 0usize;
@@ -882,16 +880,18 @@ impl StageOpenAiBackend {
                             break;
                         }
                     }
-                    let mut restore_control = None;
-                    if !accepted {
-                        let restore = self.restore_embedded_stage_session(
+                    let mut trim_control = None;
+                    if committed_positions < consumed_positions {
+                        let target_token_count = prefill_token_count + decoded_tokens;
+                        let trim = self.trim_embedded_stage_session(
                             &request,
                             downstream,
                             &session_key,
                             request_id,
                             session_id,
+                            target_token_count,
                         )?;
-                        restore_control = Some(restore);
+                        trim_control = Some(trim);
                     }
                     decode_stage0_compute_ms += verify.stats.stage0_compute_ms;
                     decode_runtime_lock_wait_ms += verify.stats.runtime_lock_wait_ms;
@@ -939,22 +939,22 @@ impl StageOpenAiBackend {
                         "llama_stage.native_mtp.committed_positions".to_string(),
                         json!(committed_positions),
                     );
-                    if let Some(restore) = restore_control {
+                    if let Some(trim) = trim_control {
                         token_attrs.insert(
-                            "llama_stage.native_mtp.restore_ms".to_string(),
-                            json!(restore.elapsed_ms),
+                            "llama_stage.native_mtp.trim_ms".to_string(),
+                            json!(trim.elapsed_ms),
                         );
                         token_attrs.insert(
-                            "llama_stage.native_mtp.restore_local_ms".to_string(),
-                            json!(restore.local_ms),
+                            "llama_stage.native_mtp.trim_local_ms".to_string(),
+                            json!(trim.local_ms),
                         );
                         token_attrs.insert(
-                            "llama_stage.native_mtp.restore_downstream_write_ms".to_string(),
-                            json!(restore.downstream_write_ms),
+                            "llama_stage.native_mtp.trim_downstream_write_ms".to_string(),
+                            json!(trim.downstream_write_ms),
                         );
                         token_attrs.insert(
-                            "llama_stage.native_mtp.restore_downstream_wait_ms".to_string(),
-                            json!(restore.downstream_wait_ms),
+                            "llama_stage.native_mtp.trim_downstream_wait_ms".to_string(),
+                            json!(trim.downstream_wait_ms),
                         );
                     }
                     token_attrs.insert(
@@ -994,13 +994,10 @@ impl StageOpenAiBackend {
                         batched_token_timer,
                         token_attrs,
                     );
-                    if accepted {
-                        if reached_stop {
-                            break;
-                        }
-                        continue;
+                    if reached_stop {
+                        break;
                     }
-                    token_timer = PhaseTimer::start();
+                    continue;
                 }
                 if draft_guard.is_some() {
                     let remaining = (request.max_tokens as usize).saturating_sub(decoded_tokens);

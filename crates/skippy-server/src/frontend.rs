@@ -221,6 +221,7 @@ pub struct EmbeddedOpenAiArgs {
     pub prefill_adaptive_step: usize,
     pub prefill_adaptive_max: usize,
     pub draft_model_path: Option<PathBuf>,
+    pub draft_self_layers: Option<u32>,
     pub speculative_window: usize,
     pub adaptive_speculative_window: bool,
     pub draft_n_gpu_layers: Option<i32>,
@@ -462,8 +463,11 @@ pub fn embedded_openai_backend(args: EmbeddedOpenAiArgs) -> Result<EmbeddedOpenA
         args.config.lane_count,
         "--openai-generation-concurrency",
     )?;
-    if args.draft_model_path.is_some() && args.speculative_window == 0 {
-        bail!("--openai-speculative-window must be greater than zero when a draft model is set");
+    let speculative_enabled = args.draft_model_path.is_some() || args.draft_self_layers.is_some();
+    if speculative_enabled && args.speculative_window == 0 {
+        bail!(
+            "--openai-speculative-window must be greater than zero when speculative drafting is set"
+        );
     }
     if args.config.stage_index != 0 || args.config.layer_start != 0 {
         bail!("embedded OpenAI serving is only supported on stage 0");
@@ -473,6 +477,7 @@ pub fn embedded_openai_backend(args: EmbeddedOpenAiArgs) -> Result<EmbeddedOpenA
         &args.config,
         args.draft_n_gpu_layers,
         args.speculative_window,
+        args.draft_self_layers,
     )?;
     let model_id = ModelId::new(
         args.model_id
@@ -1205,9 +1210,32 @@ struct GenerationMetrics {
     eog_check_ms: f64,
 }
 
+/// Where a draft proposer's tokens come from.
+///
+/// `SeparateModel` is the classic target/draft pairing: an independent smaller
+/// GGUF. `SelfPrefix` is the speculative-pipeline-style self-draft: the target's
+/// own early layer range (`0..draft_layers`) opened with an output head, so the
+/// model's first pipeline stage drafts for itself. See
+/// `docs/design/SPECULATIVE_PIPELINE_DECODING.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DraftSource {
+    SeparateModel,
+    SelfPrefix { draft_layers: u32 },
+}
+
+impl DraftSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::SeparateModel => "draft-model",
+            Self::SelfPrefix { .. } => "early-exit-self",
+        }
+    }
+}
+
 struct DraftRunner {
     path: PathBuf,
     window: usize,
+    source: DraftSource,
     _model: StageModel,
     session: StageSession,
 }
@@ -1223,12 +1251,139 @@ impl DraftRunner {
             bail!("draft model does not exist: {}", path.display());
         }
         let layer_count = model_layer_count(path)?;
+        Self::open_with_layers(
+            path,
+            config,
+            n_gpu_layers,
+            window,
+            0,
+            layer_count,
+            DraftSource::SeparateModel,
+        )
+    }
+
+    /// Open the target model's own layer prefix (`0..draft_layers`) as a
+    /// self-draft proposer. The slice keeps embeddings and the output head so it
+    /// can emit logits via early exit. Lossless is still guaranteed downstream by
+    /// the full-target `VerifySpan`; this slice only proposes.
+    fn open_self_prefix(
+        target_path: &Path,
+        config: &StageConfig,
+        n_gpu_layers: Option<i32>,
+        window: usize,
+        draft_layers: u32,
+    ) -> Result<Self> {
+        if draft_layers == 0 {
+            bail!("self-draft layer count must be greater than zero");
+        }
+        // Package-backed stages (the production split path) load the target as
+        // ordered per-layer parts. Select the first `draft_layers` parts (with
+        // embeddings + output head) so the self-draft is a genuine early-exit
+        // slice of the target. Raw single-file GGUF stages fall back to the
+        // single-file slice path.
+        if matches!(config.load_mode, skippy_protocol::LoadMode::LayerPackage) {
+            return Self::open_self_prefix_from_package(config, n_gpu_layers, window, draft_layers);
+        }
+        if !target_path.is_file() {
+            bail!(
+                "self-draft target model does not exist: {}",
+                target_path.display()
+            );
+        }
+        let layer_count = model_layer_count(target_path)?;
+        if draft_layers >= layer_count {
+            bail!(
+                "self-draft layer count {draft_layers} must be less than the target layer count {layer_count}"
+            );
+        }
+        Self::open_with_layers(
+            target_path,
+            config,
+            n_gpu_layers,
+            window,
+            0,
+            draft_layers,
+            DraftSource::SelfPrefix { draft_layers },
+        )
+    }
+
+    /// Open a self-draft from the first `draft_layers` parts of a layer package.
+    fn open_self_prefix_from_package(
+        config: &StageConfig,
+        n_gpu_layers: Option<i32>,
+        window: usize,
+        draft_layers: u32,
+    ) -> Result<Self> {
+        let package_ref = config.model_path.as_deref().ok_or_else(|| {
+            anyhow!("self-draft layer-package stage requires model_path to point at a package")
+        })?;
+        let selected = skippy_runtime::package::select_layer_package_parts(
+            &skippy_runtime::package::PackageStageRequest {
+                model_id: config.model_id.clone(),
+                topology_id: config.topology_id.clone(),
+                package_ref: package_ref.to_string(),
+                stage_id: format!("{}-self-draft", config.stage_id),
+                layer_start: 0,
+                layer_end: draft_layers,
+                include_embeddings: true,
+                include_output: true,
+            },
+        )
+        .context("select self-draft layer package parts")?;
+        let runtime_config = RuntimeConfig {
+            stage_index: 0,
+            layer_start: 0,
+            layer_end: draft_layers,
+            ctx_size: config.ctx_size,
+            lane_count: 1,
+            n_batch: None,
+            n_ubatch: None,
+            n_threads: None,
+            n_threads_batch: None,
+            n_gpu_layers: n_gpu_layers.unwrap_or(config.n_gpu_layers),
+            selected_backend_device: config
+                .selected_device
+                .as_ref()
+                .map(|device| device.backend_device.clone()),
+            cache_type_k: skippy_runtime::GGML_TYPE_F16,
+            cache_type_v: skippy_runtime::GGML_TYPE_F16,
+            flash_attn_type: RuntimeFlashAttentionType::Auto,
+            load_mode: RuntimeLoadMode::LayerPackage,
+            projector_path: None,
+            include_embeddings: true,
+            include_output: true,
+            filter_tensors_on_load: true,
+        };
+        let model = StageModel::open_from_parts(&selected.absolute_paths, &runtime_config)
+            .context("open self-draft layer package parts")?;
+        let session = model
+            .create_session()
+            .context("create self-draft session")?;
+        Ok(Self {
+            path: PathBuf::from(package_ref),
+            window,
+            source: DraftSource::SelfPrefix { draft_layers },
+            _model: model,
+            session,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_with_layers(
+        path: &Path,
+        config: &StageConfig,
+        n_gpu_layers: Option<i32>,
+        window: usize,
+        layer_start: u32,
+        layer_end: u32,
+        source: DraftSource,
+    ) -> Result<Self> {
         let model = StageModel::open(
             path,
             &RuntimeConfig {
                 stage_index: 0,
-                layer_start: 0,
-                layer_end: layer_count,
+                layer_start,
+                layer_end,
                 ctx_size: config.ctx_size,
                 lane_count: 1,
                 n_batch: None,
@@ -1250,11 +1405,12 @@ impl DraftRunner {
                 filter_tensors_on_load: false,
             },
         )
-        .with_context(|| format!("open draft model {}", path.display()))?;
+        .with_context(|| format!("open draft model {} ({})", path.display(), source.label()))?;
         let session = model.create_session().context("create draft session")?;
         Ok(Self {
             path: path.to_path_buf(),
             window,
+            source,
             _model: model,
             session,
         })
@@ -1281,6 +1437,23 @@ impl DraftRunner {
         }
         Ok(tokens)
     }
+
+    fn source_label(&self) -> &'static str {
+        self.source.label()
+    }
+}
+
+/// Resolve a local GGUF path the self-draft can open the target model from.
+///
+/// Stage 0 in the embedded path loads the target from one of these config
+/// fields; the self-draft reuses the same file restricted to a layer prefix.
+fn target_model_path(config: &StageConfig) -> Option<PathBuf> {
+    config
+        .model_path
+        .as_ref()
+        .or(config.materialized_path.as_ref())
+        .or(config.source_model_path.as_ref())
+        .map(PathBuf::from)
 }
 
 fn open_draft_runner(
@@ -1288,7 +1461,25 @@ fn open_draft_runner(
     config: &StageConfig,
     n_gpu_layers: Option<i32>,
     window: usize,
+    self_layers: Option<u32>,
 ) -> Result<Option<Arc<Mutex<DraftRunner>>>> {
+    if let Some(draft_layers) = self_layers {
+        if path.is_some() {
+            bail!(
+                "set either a draft model path or a self-draft layer count, not both (draft self-layers={draft_layers})"
+            );
+        }
+        let target_path = target_model_path(config).ok_or_else(|| {
+            anyhow!("self-draft requires a local target model path in the stage config")
+        })?;
+        return Ok(Some(Arc::new(Mutex::new(DraftRunner::open_self_prefix(
+            &target_path,
+            config,
+            n_gpu_layers,
+            window,
+            draft_layers,
+        )?))));
+    }
     let Some(path) = path else {
         return Ok(None);
     };

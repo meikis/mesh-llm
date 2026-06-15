@@ -122,6 +122,11 @@ pub struct ServeBinaryArgs {
         help = "Draft GGUF to use for speculative decoding in the embedded stage-0 OpenAI surface."
     )]
     pub openai_draft_model_path: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Speculative-pipeline self-draft: use the target model's own first N layers (with output head) as the draft proposer. Mutually exclusive with --openai-draft-model-path. See docs/design/SPECULATIVE_PIPELINE_DECODING.md."
+    )]
+    pub openai_draft_self_layers: Option<u32>,
     #[arg(long, default_value_t = 4)]
     pub openai_speculative_window: usize,
     #[arg(long)]

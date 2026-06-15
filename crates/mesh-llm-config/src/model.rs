@@ -396,6 +396,13 @@ pub struct SkippyConfig {
     pub prefill_chunk_size: Option<u32>,
     #[serde(default)]
     pub prefill_chunk_schedule: Option<String>,
+    /// Artificial downstream activation transport delay in milliseconds per
+    /// stage message. Simulates multi-peer stage cost on a single machine.
+    #[serde(default)]
+    pub downstream_wire_delay_ms: Option<f64>,
+    /// Artificial downstream activation bandwidth cap in megabits per second.
+    #[serde(default)]
+    pub downstream_wire_mbps: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -437,6 +444,11 @@ pub struct SpeculativeConfig {
     pub ngram_max: Option<u32>,
     #[serde(default)]
     pub spec_default: Option<BoolOrAuto>,
+    /// Speculative-pipeline self-draft: target model's own first N layers act as
+    /// the draft proposer. Requires `mode = "self"`. See
+    /// `docs/design/SPECULATIVE_PIPELINE_DECODING.md`.
+    #[serde(default)]
+    pub draft_self_layers: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]

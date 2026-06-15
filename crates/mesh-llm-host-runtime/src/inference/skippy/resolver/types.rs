@@ -83,12 +83,18 @@ pub(crate) struct ResolvedSkippyExecutionConfig {
     pub(crate) lifecycle_startup_timeout_ms: Option<u64>,
     pub(crate) lifecycle_readiness_interval_ms: Option<u64>,
     pub(crate) lifecycle_health_interval_ms: Option<u64>,
+    /// Artificial downstream activation transport delay/bandwidth, used to
+    /// simulate multi-peer stage cost on a single machine.
+    pub(crate) downstream_wire_delay_ms: f64,
+    pub(crate) downstream_wire_mbps: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ResolvedSpeculativeConfig {
     pub(crate) mode: String,
     pub(crate) draft_model_path: Option<PathBuf>,
+    /// Self-draft (speculative-pipeline) layer prefix count for `mode = "self"`.
+    pub(crate) draft_self_layers: Option<u32>,
     pub(crate) pairing_fault: String,
     pub(crate) draft_max_tokens: u32,
     pub(crate) explicit: bool,
@@ -145,6 +151,7 @@ pub(crate) struct ResolvedEmbeddedOpenAiArgs {
     pub(crate) prefill_adaptive_step: usize,
     pub(crate) prefill_adaptive_max: usize,
     pub(crate) draft_model_path: Option<PathBuf>,
+    pub(crate) draft_self_layers: Option<u32>,
     pub(crate) speculative_window: usize,
     pub(crate) adaptive_speculative_window: bool,
     pub(crate) draft_n_gpu_layers: Option<i32>,
@@ -152,4 +159,8 @@ pub(crate) struct ResolvedEmbeddedOpenAiArgs {
     pub(crate) wire_dtype: skippy_protocol::binary::WireActivationDType,
     pub(crate) reply_credit_limit: Option<usize>,
     pub(crate) downstream_connect_timeout_secs: u64,
+    /// Artificial downstream activation transport delay/bandwidth, used to
+    /// simulate multi-peer stage cost on a single machine.
+    pub(crate) downstream_wire_delay_ms: f64,
+    pub(crate) downstream_wire_mbps: Option<f64>,
 }

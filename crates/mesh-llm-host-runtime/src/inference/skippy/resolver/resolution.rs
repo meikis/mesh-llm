@@ -501,5 +501,14 @@ fn resolve_execution_config(
             model_skippy.and_then(|skippy| skippy.lifecycle_health_interval_ms),
             global_skippy.and_then(|skippy| skippy.lifecycle_health_interval_ms),
         ),
+        downstream_wire_delay_ms: pick_owned(
+            model_skippy.and_then(|skippy| skippy.downstream_wire_delay_ms),
+            global_skippy.and_then(|skippy| skippy.downstream_wire_delay_ms),
+        )
+        .unwrap_or(0.0),
+        downstream_wire_mbps: pick_owned(
+            model_skippy.and_then(|skippy| skippy.downstream_wire_mbps),
+            global_skippy.and_then(|skippy| skippy.downstream_wire_mbps),
+        ),
     }
 }

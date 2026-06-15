@@ -408,6 +408,30 @@ impl StageOpenAiBackend {
             let emit_token_debug = self.telemetry.is_debug_enabled();
             let mut post_prefill_hook_checked = false;
             let mut last_mid_generation_hook_at = None;
+            // Single-stage self-draft speculative path: the target model's own
+            // early layers (opened as `self.draft`) propose a window; the full
+            // local target verifies it in one batched `verify_tokens` call. This
+            // exercises the speculative-pipeline self-draft without a downstream
+            // stage. See docs/design/SPECULATIVE_PIPELINE_DECODING.md.
+            if self.draft.is_some()
+                && self.speculative_window > 0
+                && !self.generation_hooks_active(&hook_request, hook_runtime.as_ref())
+            {
+                self.run_local_self_draft(
+                    LocalSelfDraft {
+                        session_id: &session_id,
+                        ids: request.ids,
+                        sampling: request.sampling,
+                        max_tokens: request.max_tokens,
+                        cancellation: request.cancellation,
+                        prompt_token_ids: request.prompt_token_ids,
+                    },
+                    current,
+                    &mut decoded_tokens,
+                    &mut on_token,
+                )?;
+                return Ok(());
+            }
             while decoded_tokens < request.max_tokens as usize {
                 if request
                     .cancellation
@@ -600,5 +624,207 @@ impl StageOpenAiBackend {
         }
         result?;
         Ok(cache_stats)
+    }
+
+    /// Single-stage self-draft speculative decode loop.
+    ///
+    /// Proposes a window from `self.draft` (the target's own early layers),
+    /// verifies it against the full local target with one batched
+    /// `verify_tokens`, commits the accepted prefix plus one corrected token,
+    /// and trims the session KV back on partial accept. Greedy verification is
+    /// exact; this path is intended for `temperature = 0` measurement runs.
+    fn run_local_self_draft(
+        &self,
+        ctx: LocalSelfDraft<'_>,
+        mut current: i32,
+        decoded_tokens: &mut usize,
+        on_token: &mut impl FnMut(i32) -> OpenAiResult<TokenControl>,
+    ) -> OpenAiResult<()> {
+        let draft = self
+            .draft
+            .as_ref()
+            .ok_or_else(|| OpenAiError::backend("self-draft path entered without a draft"))?;
+        let max_tokens = ctx.max_tokens as usize;
+        let mut stats = OpenAiSpeculativeStats {
+            adaptive_window_enabled: false,
+            ..OpenAiSpeculativeStats::default()
+        };
+
+        // Full committed context (prompt + accepted tokens). The draft prefills
+        // `context[..len-1]` and drafts continuations of the last token, so its
+        // KV matches the target's committed context exactly.
+        let mut context_tokens = ctx.prompt_token_ids.to_vec();
+        {
+            let mut draft = draft
+                .lock()
+                .map_err(|_| OpenAiError::backend("draft lock poisoned"))?;
+            let reset_timer = PhaseTimer::start();
+            draft
+                .reset_to_context(&context_tokens)
+                .map_err(openai_backend_error)?;
+            stats.draft_reset_ms += reset_timer.elapsed_ms();
+        }
+
+        while *decoded_tokens < max_tokens {
+            if ctx
+                .cancellation
+                .is_some_and(openai_frontend::CancellationToken::is_cancelled)
+            {
+                break;
+            }
+            let remaining = max_tokens - *decoded_tokens;
+            let window = self.speculative_window.min(remaining);
+
+            let propose_timer = PhaseTimer::start();
+            let draft_tokens = {
+                let mut draft = draft
+                    .lock()
+                    .map_err(|_| OpenAiError::backend("draft lock poisoned"))?;
+                let window = window.min(draft.window);
+                draft
+                    .propose(current, window)
+                    .map_err(openai_backend_error)?
+            };
+            stats.draft_propose_ms += propose_timer.elapsed_ms();
+            if draft_tokens.is_empty() {
+                // No proposal: fall back to a single committed decode step.
+                let next = {
+                    let mut runtime = self
+                        .runtime
+                        .lock()
+                        .map_err(|_| OpenAiError::backend("runtime lock poisoned"))?;
+                    runtime
+                        .decode_sampled(ctx.session_id, current, ctx.sampling_opt())
+                        .map_err(openai_backend_error)?
+                };
+                *decoded_tokens += 1;
+                current = next;
+                context_tokens.push(next);
+                {
+                    let mut draft = draft
+                        .lock()
+                        .map_err(|_| OpenAiError::backend("draft lock poisoned"))?;
+                    draft
+                        .reset_to_context(&context_tokens)
+                        .map_err(openai_backend_error)?;
+                }
+                if on_token(next)? == TokenControl::Stop {
+                    break;
+                }
+                continue;
+            }
+
+            let verify_inputs = verify_inputs_for_proposals(current, &draft_tokens);
+            let verify_timer = PhaseTimer::start();
+            let (predicted, pre_verify_tokens) = {
+                let mut runtime = self
+                    .runtime
+                    .lock()
+                    .map_err(|_| OpenAiError::backend("runtime lock poisoned"))?;
+                let before = runtime.session_token_count(ctx.session_id);
+                let predicted = runtime
+                    .verify_tokens(ctx.session_id, &verify_inputs)
+                    .map_err(openai_backend_error)?;
+                (predicted, before)
+            };
+            stats.primary_verify_elapsed_ms += verify_timer.elapsed_ms();
+            stats.windows += 1;
+            stats.draft_tokens += draft_tokens.len();
+            stats.primary_verify_requests += 1;
+            stats.primary_verify_tokens += verify_inputs.len();
+
+            let decision = classify_verify_span(
+                &draft_tokens,
+                &predicted,
+                *decoded_tokens,
+                max_tokens,
+                |token| token_is_eog_with_runtime(&self.runtime, token),
+            )?;
+            let mut adaptive_window = self.speculative_window;
+            stats.observe_verify_decision(
+                decision,
+                &mut adaptive_window,
+                false,
+                self.speculative_window,
+            );
+
+            // `verify_tokens` advanced the session by all verify inputs; trim
+            // back to the accepted prefix so committed KV matches output.
+            let commit_count = decision.commit_count;
+            let accepted_target_tokens = predicted[..commit_count].to_vec();
+            let trim_to = pre_verify_tokens + commit_count as u64;
+            {
+                let mut runtime = self
+                    .runtime
+                    .lock()
+                    .map_err(|_| OpenAiError::backend("runtime lock poisoned"))?;
+                if trim_to < pre_verify_tokens + verify_inputs.len() as u64 {
+                    runtime
+                        .trim_session(ctx.session_id, trim_to)
+                        .map_err(openai_backend_error)?;
+                }
+            }
+
+            let mut reached_stop = false;
+            for &token in &accepted_target_tokens {
+                *decoded_tokens += 1;
+                current = token;
+                context_tokens.push(token);
+                if on_token(token)? == TokenControl::Stop {
+                    reached_stop = true;
+                    break;
+                }
+                if *decoded_tokens >= max_tokens {
+                    break;
+                }
+            }
+
+            // Resync the draft to the freshly committed context before the next
+            // window, mirroring the embedded reset-on-commit behavior.
+            {
+                let mut draft = draft
+                    .lock()
+                    .map_err(|_| OpenAiError::backend("draft lock poisoned"))?;
+                let reset_timer = PhaseTimer::start();
+                draft
+                    .reset_to_context(&context_tokens)
+                    .map_err(openai_backend_error)?;
+                stats.draft_reset_ms += reset_timer.elapsed_ms();
+            }
+
+            if reached_stop {
+                break;
+            }
+        }
+
+        let mut attrs = self.openai_attrs(ctx.ids);
+        attrs.insert(
+            "llama_stage.spec.proposal_source".to_string(),
+            json!(
+                draft
+                    .lock()
+                    .map(|d| d.source_label())
+                    .unwrap_or("early-exit-self")
+            ),
+        );
+        stats.insert_attrs(&mut attrs);
+        self.telemetry
+            .emit("stage.openai_self_draft_summary", attrs);
+        Ok(())
+    }
+}
+
+struct LocalSelfDraft<'a> {
+    session_id: &'a str,
+    ids: &'a OpenAiGenerationIds,
+    sampling: &'a SamplingConfig,
+    max_tokens: u32,
+    cancellation: Option<&'a openai_frontend::CancellationToken>,
+    prompt_token_ids: &'a [i32],
+}
+
+impl LocalSelfDraft<'_> {
+    fn sampling_opt(&self) -> Option<&SamplingConfig> {
+        self.sampling.enabled.then_some(self.sampling)
     }
 }

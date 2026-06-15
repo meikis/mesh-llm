@@ -229,10 +229,15 @@ impl ResolvedSkippyConfig {
             } else {
                 None
             },
-            speculative_window: if mode == "draft" {
+            speculative_window: if mode == "draft" || mode == "self" {
                 self.speculative.draft_max_tokens as usize
             } else {
                 0
+            },
+            draft_self_layers: if mode == "self" {
+                self.speculative.draft_self_layers
+            } else {
+                None
             },
             adaptive_speculative_window: false,
             draft_n_gpu_layers: if mode == "draft" {
@@ -244,6 +249,8 @@ impl ResolvedSkippyConfig {
             wire_dtype: self.skippy.activation_wire_dtype.into(),
             reply_credit_limit: None,
             downstream_connect_timeout_secs: 30,
+            downstream_wire_delay_ms: self.skippy.downstream_wire_delay_ms,
+            downstream_wire_mbps: self.skippy.downstream_wire_mbps,
         })
     }
 
@@ -275,6 +282,8 @@ impl ResolvedSkippyConfig {
         }
         if self.speculative.mode == "draft" && self.speculative.draft_model_path.is_some() {
             "draft"
+        } else if self.speculative.mode == "self" && self.speculative.draft_self_layers.is_some() {
+            "self"
         } else {
             "disabled"
         }
@@ -339,6 +348,7 @@ impl ResolvedEmbeddedOpenAiArgs {
             prefill_adaptive_step: BUILTIN_PREFILL_ADAPTIVE_STEP,
             prefill_adaptive_max: BUILTIN_PREFILL_ADAPTIVE_MAX,
             draft_model_path: None,
+            draft_self_layers: None,
             speculative_window: 0,
             adaptive_speculative_window: false,
             draft_n_gpu_layers: None,
@@ -346,6 +356,8 @@ impl ResolvedEmbeddedOpenAiArgs {
             wire_dtype,
             reply_credit_limit: None,
             downstream_connect_timeout_secs: 30,
+            downstream_wire_delay_ms: 0.0,
+            downstream_wire_mbps: None,
         }
     }
 
@@ -368,6 +380,7 @@ impl ResolvedEmbeddedOpenAiArgs {
             prefill_adaptive_step: BUILTIN_PREFILL_ADAPTIVE_STEP,
             prefill_adaptive_max: BUILTIN_PREFILL_ADAPTIVE_MAX,
             draft_model_path: None,
+            draft_self_layers: None,
             speculative_window: 0,
             adaptive_speculative_window: false,
             draft_n_gpu_layers: None,
@@ -375,6 +388,8 @@ impl ResolvedEmbeddedOpenAiArgs {
             wire_dtype,
             reply_credit_limit: None,
             downstream_connect_timeout_secs: 30,
+            downstream_wire_delay_ms: 0.0,
+            downstream_wire_mbps: None,
         }
     }
 
@@ -401,6 +416,7 @@ impl ResolvedEmbeddedOpenAiArgs {
             prefill_adaptive_step: self.prefill_adaptive_step,
             prefill_adaptive_max: self.prefill_adaptive_max,
             draft_model_path: self.draft_model_path,
+            draft_self_layers: self.draft_self_layers,
             speculative_window: self.speculative_window,
             adaptive_speculative_window: self.adaptive_speculative_window,
             draft_n_gpu_layers: self.draft_n_gpu_layers,
@@ -409,9 +425,10 @@ impl ResolvedEmbeddedOpenAiArgs {
             reply_credit_limit: self.reply_credit_limit,
             downstream_connect_timeout_secs: self.downstream_connect_timeout_secs,
             downstream_wire_condition: skippy_server::binary_transport::WireCondition::new(
-                0.0, None,
+                self.downstream_wire_delay_ms,
+                self.downstream_wire_mbps,
             )
-            .expect("static downstream wire condition should construct"),
+            .expect("downstream wire condition should construct"),
             prediction_returns: None,
             telemetry,
             hook_policy,

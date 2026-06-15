@@ -163,6 +163,26 @@ impl RuntimeState {
         Ok(token)
     }
 
+    /// Batched span verification: feed `token_ids` (typically `[current, d0,
+    /// d1, ...]`) and return the model's predicted next token at each position.
+    /// Advances the session by `token_ids.len()` tokens; callers roll back with
+    /// `trim_session` after deciding the accepted prefix. Used by the
+    /// single-stage self-draft speculative path.
+    pub fn verify_tokens(&mut self, session_id: &str, token_ids: &[i32]) -> Result<Vec<i32>> {
+        let predicted = self.session(session_id)?.verify_tokens(token_ids)?;
+        self.add_session_tokens(session_id, token_ids.len() as u64);
+        Ok(predicted)
+    }
+
+    /// Current committed token count for a session, used to compute the trim
+    /// target when rolling back a partially accepted speculative span.
+    pub fn session_token_count(&self, session_id: &str) -> u64 {
+        self.session_token_counts
+            .get(session_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
     pub fn session_batch_size(&mut self, session_id: &str) -> Result<usize> {
         self.active_session(session_id)?.batch_size()
     }

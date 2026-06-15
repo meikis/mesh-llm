@@ -109,6 +109,10 @@ pub(super) fn resolve_speculative_config(
         model_config.and_then(|config| config.draft_gpu_layers),
         global_config.and_then(|config| config.draft_gpu_layers),
     );
+    let draft_self_layers = pick_owned(
+        model_config.and_then(|config| config.draft_self_layers),
+        global_config.and_then(|config| config.draft_self_layers),
+    );
     let pairing_fault = normalize_pairing_fault(pick_string(
         model_config.and_then(|config| config.pairing_fault.as_deref()),
         global_config.and_then(|config| config.pairing_fault.as_deref()),
@@ -116,10 +120,34 @@ pub(super) fn resolve_speculative_config(
     ));
     let explicit = mode != "auto"
         || draft_model_path.is_some()
+        || draft_self_layers.is_some()
         || draft_max_tokens > 0
         || draft_n_gpu_layers.is_some();
     if mode == "disabled" && draft_model_path.is_some() {
         bail!("skippy speculative draft source cannot be set when speculative.mode = \"disabled\"");
+    }
+    if mode == "self" {
+        // Speculative-pipeline self-draft: target's own early layers propose.
+        if draft_self_layers.unwrap_or(0) == 0 {
+            bail!("skippy speculative.mode = \"self\" requires draft_self_layers > 0");
+        }
+        if draft_model_path.is_some() {
+            bail!(
+                "skippy speculative.mode = \"self\" cannot also set a draft_model_path; the target model drafts for itself"
+            );
+        }
+        if draft_max_tokens == 0 {
+            bail!("skippy speculative.mode = \"self\" requires draft_max_tokens > 0");
+        }
+        return Ok(ResolvedSpeculativeConfig {
+            mode,
+            draft_model_path: None,
+            draft_self_layers,
+            pairing_fault,
+            draft_max_tokens,
+            explicit,
+            draft_n_gpu_layers,
+        });
     }
     if mode == "draft" || (mode == "auto" && draft_model_path.is_some()) {
         if draft_model_path.is_none() {
@@ -148,6 +176,7 @@ pub(super) fn resolve_speculative_config(
     Ok(ResolvedSpeculativeConfig {
         mode,
         draft_model_path,
+        draft_self_layers: None,
         pairing_fault,
         draft_max_tokens,
         explicit,
@@ -179,4 +208,75 @@ fn incompatible_draft_pair_reason(
 fn infer_family_from_path_string(path: &Path) -> Option<String> {
     infer_family_capability(&path.display().to_string(), 0, 0)
         .map(|capability| capability.family_id.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn self_draft_config(layers: Option<u32>, max_tokens: Option<u32>) -> SpeculativeConfig {
+        SpeculativeConfig {
+            mode: Some("self".to_string()),
+            draft_self_layers: layers,
+            draft_max_tokens: max_tokens,
+            ..SpeculativeConfig::default()
+        }
+    }
+
+    #[test]
+    fn resolves_self_draft_mode() {
+        let cfg = self_draft_config(Some(9), Some(4));
+        let resolved = resolve_speculative_config(
+            Some(&cfg),
+            None,
+            "Qwen/Qwen3-0.6B",
+            Path::new("model.gguf"),
+        )
+        .expect("self mode should resolve");
+        assert_eq!(resolved.mode, "self");
+        assert_eq!(resolved.draft_self_layers, Some(9));
+        assert_eq!(resolved.draft_max_tokens, 4);
+        assert!(resolved.draft_model_path.is_none());
+        assert!(resolved.explicit);
+    }
+
+    #[test]
+    fn self_draft_requires_layers() {
+        let cfg = self_draft_config(None, Some(4));
+        let err = resolve_speculative_config(
+            Some(&cfg),
+            None,
+            "Qwen/Qwen3-0.6B",
+            Path::new("model.gguf"),
+        )
+        .expect_err("self mode without layers should fail");
+        assert!(err.to_string().contains("draft_self_layers"));
+    }
+
+    #[test]
+    fn self_draft_requires_max_tokens() {
+        let cfg = self_draft_config(Some(9), Some(0));
+        let err = resolve_speculative_config(
+            Some(&cfg),
+            None,
+            "Qwen/Qwen3-0.6B",
+            Path::new("model.gguf"),
+        )
+        .expect_err("self mode without max tokens should fail");
+        assert!(err.to_string().contains("draft_max_tokens"));
+    }
+
+    #[test]
+    fn self_draft_rejects_draft_model_path() {
+        let mut cfg = self_draft_config(Some(9), Some(4));
+        cfg.draft_model_path = Some("draft.gguf".to_string());
+        let err = resolve_speculative_config(
+            Some(&cfg),
+            None,
+            "Qwen/Qwen3-0.6B",
+            Path::new("model.gguf"),
+        )
+        .expect_err("self mode with draft model path should fail");
+        assert!(err.to_string().contains("draft_model_path"));
+    }
 }

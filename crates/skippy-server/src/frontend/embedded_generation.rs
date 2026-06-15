@@ -806,7 +806,7 @@ impl StageOpenAiBackend {
                             .propose(current, proposal_limit)
                             .map_err(openai_backend_error)?;
                         if !draft_tokens.is_empty() {
-                            proposal_source = "draft-model";
+                            proposal_source = draft.source_label();
                         }
                     }
                     let draft_propose_ms = propose_timer.elapsed_ms();
@@ -1013,8 +1013,11 @@ impl StageOpenAiBackend {
                             }
                         }
                         speculative_stats.adaptive_window_final = adaptive_window;
-                        if proposal_source == "draft-model" && (decision.rejected() || reached_stop)
-                        {
+                        // Session-backed proposers (separate draft model or
+                        // early-exit self-draft) must resync their KV to the
+                        // committed context after a reject or stop. n-gram
+                        // proposals do not flow through `draft_guard`.
+                        if proposal_source != "none" && (decision.rejected() || reached_stop) {
                             let draft_reset_timer = PhaseTimer::start();
                             if let Some(draft) = draft_guard.as_deref_mut() {
                                 draft

@@ -3,7 +3,7 @@ mod dynamic {
     use crate::system::native_runtime_install::{
         NativeRuntimeInstallOptions, NativeRuntimeInstallOutcome,
     };
-    use anyhow::{Context, Result};
+    use anyhow::{Context, Result, anyhow};
     use mesh_llm_native_runtime::{
         HostRuntimeProfile, NativeRuntimeArtifact, NativeRuntimeCache, NativeRuntimeLoadPlan,
         NativeRuntimeReleaseManifest, RuntimeSelection, select_native_runtime,
@@ -259,11 +259,25 @@ mod dynamic {
     fn default_install_executor(
         options: NativeRuntimeInstallOptions,
     ) -> Result<NativeRuntimeInstallOutcome> {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("build native runtime startup install executor")?
-            .block_on(crate::system::native_runtime_install::install_native_runtime(options))
+        // This may be invoked from within an existing Tokio runtime (startup
+        // runs inside the host async runtime). Building a current-thread runtime
+        // and calling `block_on` directly panics with "Cannot start a runtime
+        // from within a runtime". Drive the one-shot install on a dedicated OS
+        // thread so its runtime is not nested inside the caller's.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .context("build native runtime startup install executor")?
+                        .block_on(
+                            crate::system::native_runtime_install::install_native_runtime(options),
+                        )
+                })
+                .join()
+                .map_err(|_| anyhow!("native runtime startup install thread panicked"))?
+        })
     }
 
     #[cfg(test)]

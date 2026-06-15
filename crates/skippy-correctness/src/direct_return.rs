@@ -158,3 +158,59 @@ fn handle_correctness_direct_return_connection(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use skippy_protocol::binary::{
+        StageStateHeader, StageWireMessage, WireActivationDType, recv_ready, send_reply_predicted,
+        write_stage_message,
+    };
+
+    fn prediction_return_open(request_id: u64, session_id: u64) -> StageWireMessage {
+        StageWireMessage {
+            kind: WireMessageKind::PredictionReturnOpen,
+            pos_start: 0,
+            token_count: 0,
+            state: StageStateHeader::new(
+                WireMessageKind::PredictionReturnOpen,
+                WireActivationDType::F32,
+            ),
+            request_id,
+            session_id,
+            sampling: None,
+            chat_sampling_metadata: None,
+            tokens: Vec::new(),
+            positions: Vec::new(),
+            activation: Vec::new(),
+            raw_bytes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn registered_receiver_accepts_multiple_replies_for_same_generation() {
+        let server = CorrectnessDirectReturnServer::start("127.0.0.1:0").expect("server");
+        let receiver = server.register(7, 9).expect("receiver");
+        let mut stream = TcpStream::connect(server.local_addr).expect("connect");
+        recv_ready(&mut stream).expect("ready");
+        write_stage_message(
+            &mut stream,
+            &prediction_return_open(7, 9),
+            WireActivationDType::F32,
+        )
+        .expect("open direct return");
+
+        send_reply_predicted(&mut stream, 101).expect("first reply");
+        send_reply_predicted(&mut stream, 202).expect("second reply");
+
+        let first = receiver
+            .recv_expected(WireReplyKind::PredictedToken)
+            .expect("first received");
+        let second = receiver
+            .recv_expected(WireReplyKind::PredictedToken)
+            .expect("second received");
+
+        assert_eq!(first.predicted, 101);
+        assert_eq!(second.predicted, 202);
+    }
+}

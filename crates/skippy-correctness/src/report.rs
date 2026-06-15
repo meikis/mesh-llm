@@ -287,6 +287,10 @@ pub struct NativeMtpOpenAiCaseReport {
     pub topology_config: String,
     pub stage0_log: String,
     pub stage1_log: String,
+    pub stage1_launch_mode: String,
+    pub stage1_remote_config: Option<String>,
+    pub stage1_remote_topology: Option<String>,
+    pub stage1_remote_log: Option<String>,
     pub metrics: NativeMtpOpenAiMetricsReport,
 }
 

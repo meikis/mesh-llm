@@ -17,7 +17,7 @@ pub enum CommandKind {
     SplitScan(SplitScanArgs),
     DtypeMatrix(DtypeMatrixArgs),
     StateHandoff(StateHandoffArgs),
-    NativeMtpOpenAiAb(NativeMtpOpenAiAbArgs),
+    NativeMtpOpenAiAb(Box<NativeMtpOpenAiAbArgs>),
 }
 
 #[derive(Args, Clone)]
@@ -240,6 +240,16 @@ pub struct NativeMtpOpenAiAbArgs {
     pub stage1_model: Option<PathBuf>,
     #[arg(long)]
     pub case_root: Option<PathBuf>,
+    #[arg(long)]
+    pub external_stage1: bool,
+    #[arg(long)]
+    pub stage1_ssh_host: Option<String>,
+    #[arg(long)]
+    pub stage1_remote_stage_server_bin: Option<String>,
+    #[arg(long, default_value = "/tmp/skippy-native-mtp-openai-ab")]
+    pub stage1_remote_root: String,
+    #[arg(long)]
+    pub stage1_remote_workdir: Option<String>,
     #[arg(long, default_value_t = 10)]
     pub batched_port_offset: u16,
     #[arg(long, default_value_t = 2048)]

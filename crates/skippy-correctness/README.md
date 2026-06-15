@@ -103,6 +103,9 @@ skippy-correctness native-mtp-open-ai-ab \
   --model /Volumes/External/models/huggingface/.../model.gguf \
   --model-id org/repo:Q4_K_M \
   --stage1-model /Volumes/models/huggingface/.../model.gguf \
+  --stage1-ssh-host micstudio \
+  --stage1-remote-workdir /Users/micn/src/mesh-llm-codex \
+  --stage1-remote-stage-server-bin target/debug/skippy-server \
   --openai-bind-addr 192.168.0.5:19170 \
   --stage0-bind-addr 192.168.0.5:19171 \
   --stage0-endpoint-addr 192.168.0.5:19171 \
@@ -216,9 +219,15 @@ same activation/cache contracts without requiring a monolithic full GGUF.
 - For lab split config generation, use `--stage0-endpoint-addr` and
   `--stage1-endpoint-addr` when the address a peer should dial differs from the
   local bind. Use `--stage0-model` and `--stage1-model` when the same model is
-  mounted at different paths on each host. The harness still launches stages
-  from the local process; a true two-host lab run needs the remote stage started
-  separately from the generated stage config.
+  mounted at different paths on each host.
+- For harness-owned lab splits, pass `--stage1-ssh-host`,
+  `--stage1-remote-workdir`, and `--stage1-remote-stage-server-bin`. The harness
+  copies the generated stage-1 config/topology to the remote host, launches
+  `serve-binary` there for each baseline/n=1/batched case, waits for the binary
+  endpoint, and collects the remote log back into the report directory.
+- For manually managed lab splits, pass `--external-stage1`. The harness writes
+  the stage configs and waits for the configured stage-1 endpoint, but it does
+  not start or stop the remote process.
 - Requires a built `skippy-server` binary for binary transport checks.
 - Uses the same llama-backed runtime ABI as the server.
 - The default build statically links llama from

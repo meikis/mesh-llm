@@ -21,6 +21,6 @@ fn main() -> Result<()> {
         CommandKind::SplitScan(args) => split_scan(args),
         CommandKind::DtypeMatrix(args) => dtype_matrix(args),
         CommandKind::StateHandoff(args) => state_handoff(args),
-        CommandKind::NativeMtpOpenAiAb(args) => native_mtp_openai_ab(args),
+        CommandKind::NativeMtpOpenAiAb(args) => native_mtp_openai_ab(*args),
     }
 }

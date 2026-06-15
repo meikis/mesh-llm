@@ -115,6 +115,19 @@ pub(super) struct NativeMtpN1Verifier {
 }
 
 impl NativeMtpN1Verifier {
+    pub(super) fn take_pending_draft(&mut self) -> Option<i32> {
+        self.pending.take().map(|pending| pending.token)
+    }
+
+    pub(super) fn observe_taken_draft_verification(
+        &mut self,
+        draft_token: i32,
+        target_token: i32,
+        verification_compute_us: i64,
+    ) -> NativeMtpVerification {
+        self.record_verification(draft_token, target_token, verification_compute_us)
+    }
+
     pub(super) fn observe_target_token(
         &mut self,
         target_token: i32,
@@ -141,21 +154,30 @@ impl NativeMtpN1Verifier {
             return NativeMtpVerification::NoPending;
         };
 
+        self.record_verification(pending.token, target_token, verification_compute_us)
+    }
+
+    fn record_verification(
+        &mut self,
+        draft_token: i32,
+        target_token: i32,
+        verification_compute_us: i64,
+    ) -> NativeMtpVerification {
         self.stats.verification_count += 1;
         self.stats.verification_compute_us = self
             .stats
             .verification_compute_us
             .saturating_add(verification_compute_us);
-        if pending.token == target_token {
+        if draft_token == target_token {
             self.stats.accepted_tokens += 1;
             NativeMtpVerification::Accepted {
-                draft: pending.token,
+                draft: draft_token,
                 target: target_token,
             }
         } else {
             self.stats.rejected_tokens += 1;
             NativeMtpVerification::Rejected {
-                draft: pending.token,
+                draft: draft_token,
                 target: target_token,
             }
         }
@@ -303,6 +325,62 @@ mod tests {
                 pending_tokens: 1,
                 verification_count: 1,
                 proposal_compute_us: 14,
+                verification_compute_us: 9,
+                ..NativeMtpN1Stats::default()
+            }
+        );
+    }
+
+    #[test]
+    fn taken_pending_draft_can_be_recorded_as_batched_accept() {
+        let mut verifier = NativeMtpN1Verifier::default();
+        verifier.observe_target_token(11, 5, Some(draft(12)));
+
+        let pending = verifier.take_pending_draft();
+        let decision = verifier.observe_taken_draft_verification(pending.unwrap(), 12, 9);
+
+        assert_eq!(
+            decision,
+            NativeMtpVerification::Accepted {
+                draft: 12,
+                target: 12,
+            }
+        );
+        assert_eq!(
+            verifier.stats(),
+            NativeMtpN1Stats {
+                drafted_tokens: 1,
+                accepted_tokens: 1,
+                verification_count: 1,
+                proposal_compute_us: 7,
+                verification_compute_us: 9,
+                ..NativeMtpN1Stats::default()
+            }
+        );
+    }
+
+    #[test]
+    fn taken_pending_draft_can_be_recorded_as_batched_reject() {
+        let mut verifier = NativeMtpN1Verifier::default();
+        verifier.observe_target_token(11, 5, Some(draft(12)));
+
+        let pending = verifier.take_pending_draft();
+        let decision = verifier.observe_taken_draft_verification(pending.unwrap(), 13, 9);
+
+        assert_eq!(
+            decision,
+            NativeMtpVerification::Rejected {
+                draft: 12,
+                target: 13,
+            }
+        );
+        assert_eq!(
+            verifier.stats(),
+            NativeMtpN1Stats {
+                drafted_tokens: 1,
+                rejected_tokens: 1,
+                verification_count: 1,
+                proposal_compute_us: 7,
                 verification_compute_us: 9,
                 ..NativeMtpN1Stats::default()
             }

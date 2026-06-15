@@ -789,6 +789,188 @@ impl StageOpenAiBackend {
                     break;
                 }
                 let token_timer = PhaseTimer::start();
+                let native_mtp_remaining = request.max_tokens as usize - decoded_tokens;
+                if draft_guard.is_none()
+                    && native_mtp_remaining >= 2
+                    && let Some(native_mtp_draft_token) = native_mtp.take_pending_draft()
+                {
+                    let verify_inputs = [current, native_mtp_draft_token];
+                    let message = embedded_verify_message(
+                        request.wire_dtype,
+                        VerifySpanMessageArgs {
+                            request_id,
+                            session_id,
+                            prompt_token_count: request.prompt_token_ids.len(),
+                            pos_start: prefill_token_count + decoded_tokens,
+                            decode_step: decoded_tokens,
+                            tokens: &verify_inputs,
+                            checkpoint: false,
+                        },
+                    )?;
+                    let verify = self.execute_embedded_stage_message(
+                        &request,
+                        downstream,
+                        &session_key,
+                        &message,
+                        &verify_inputs,
+                        WireReplyKind::PredictedTokens,
+                    )?;
+                    if verify.reply.predicted_tokens.len() < verify_inputs.len() {
+                        return Err(OpenAiError::backend(format!(
+                            "native MTP verify span returned too few tokens: got {} expected {}",
+                            verify.reply.predicted_tokens.len(),
+                            verify_inputs.len()
+                        )));
+                    }
+                    let target_token = verify.reply.predicted_tokens[0];
+                    let after_draft_token = verify.reply.predicted_tokens[1];
+                    let native_mtp_decision = native_mtp.observe_taken_draft_verification(
+                        native_mtp_draft_token,
+                        target_token,
+                        ms_to_us(verify.elapsed_ms),
+                    );
+                    let accepted =
+                        matches!(native_mtp_decision, NativeMtpVerification::Accepted { .. });
+                    let mut commit_tokens = vec![target_token];
+                    if accepted {
+                        commit_tokens.push(after_draft_token);
+                    }
+                    let consumed_positions = verify_inputs.len();
+                    let mut committed_positions = 0usize;
+                    let mut reached_stop = false;
+                    for token in commit_tokens {
+                        current = token;
+                        decoded_tokens += 1;
+                        committed_positions += 1;
+                        exact_replay_tokens.push(current);
+                        context_tokens.push(current);
+                        if on_token(current)? == TokenControl::Stop {
+                            reached_stop = true;
+                            break;
+                        }
+                        if decoded_tokens >= request.max_tokens as usize {
+                            break;
+                        }
+                    }
+                    let mut trim_control = None;
+                    if committed_positions < consumed_positions {
+                        let target_token_count = prefill_token_count + decoded_tokens;
+                        let trim = self.trim_embedded_stage_session(
+                            &request,
+                            downstream,
+                            &session_key,
+                            request_id,
+                            session_id,
+                            target_token_count,
+                        )?;
+                        trim_control = Some(trim);
+                    }
+                    decode_stage0_compute_ms += verify.stats.stage0_compute_ms;
+                    decode_runtime_lock_wait_ms += verify.stats.runtime_lock_wait_ms;
+                    decode_runtime_lock_wait_max_ms =
+                        decode_runtime_lock_wait_max_ms.max(verify.stats.runtime_lock_wait_ms);
+                    decode_runtime_lock_hold_ms += verify.stats.runtime_lock_hold_ms;
+                    decode_runtime_lock_hold_max_ms =
+                        decode_runtime_lock_hold_max_ms.max(verify.stats.runtime_lock_hold_ms);
+                    decode_runtime_lock_acquires += 1;
+                    decode_forward_activation_encode_ms += verify.stats.activation_encode_ms;
+                    decode_output_activation_bytes = decode_output_activation_bytes
+                        .saturating_add(verify.stats.output_activation_bytes);
+                    decode_forward_activation_bytes = decode_forward_activation_bytes
+                        .saturating_add(verify.stats.forward_activation_bytes);
+                    decode_forward_write_ms += verify.stats.forward_write_ms;
+                    decode_downstream_wait_ms += verify.stats.downstream_wait_ms;
+                    let mut token_attrs = self.openai_attrs(request.ids);
+                    token_attrs.insert("llama_stage.decode_step".to_string(), json!(decode_step));
+                    token_attrs.insert("llama_stage.message_kind".to_string(), json!("VerifySpan"));
+                    token_attrs.insert(
+                        "llama_stage.native_mtp.batched_verification".to_string(),
+                        json!(true),
+                    );
+                    token_attrs.insert(
+                        "llama_stage.native_mtp.verification".to_string(),
+                        json!(native_mtp_decision.label()),
+                    );
+                    token_attrs.insert(
+                        "llama_stage.native_mtp.draft_token".to_string(),
+                        json!(native_mtp_draft_token),
+                    );
+                    token_attrs.insert(
+                        "llama_stage.native_mtp.target_token".to_string(),
+                        json!(target_token),
+                    );
+                    token_attrs.insert(
+                        "llama_stage.native_mtp.after_draft_token".to_string(),
+                        json!(after_draft_token),
+                    );
+                    token_attrs.insert(
+                        "llama_stage.native_mtp.consumed_positions".to_string(),
+                        json!(consumed_positions),
+                    );
+                    token_attrs.insert(
+                        "llama_stage.native_mtp.committed_positions".to_string(),
+                        json!(committed_positions),
+                    );
+                    if let Some(trim) = trim_control {
+                        token_attrs.insert(
+                            "llama_stage.native_mtp.trim_ms".to_string(),
+                            json!(trim.elapsed_ms),
+                        );
+                        token_attrs.insert(
+                            "llama_stage.native_mtp.trim_local_ms".to_string(),
+                            json!(trim.local_ms),
+                        );
+                        token_attrs.insert(
+                            "llama_stage.native_mtp.trim_downstream_write_ms".to_string(),
+                            json!(trim.downstream_write_ms),
+                        );
+                        token_attrs.insert(
+                            "llama_stage.native_mtp.trim_downstream_wait_ms".to_string(),
+                            json!(trim.downstream_wait_ms),
+                        );
+                    }
+                    token_attrs.insert(
+                        "llama_stage.stage0_compute_ms".to_string(),
+                        json!(verify.stats.stage0_compute_ms),
+                    );
+                    token_attrs.insert(
+                        "llama_stage.runtime_lock_wait_ms".to_string(),
+                        json!(verify.stats.runtime_lock_wait_ms),
+                    );
+                    token_attrs.insert(
+                        "llama_stage.runtime_lock_hold_ms".to_string(),
+                        json!(verify.stats.runtime_lock_hold_ms),
+                    );
+                    token_attrs.insert(
+                        "llama_stage.activation_encode_ms".to_string(),
+                        json!(verify.stats.activation_encode_ms),
+                    );
+                    token_attrs.insert(
+                        "llama_stage.forward_write_ms".to_string(),
+                        json!(verify.stats.forward_write_ms),
+                    );
+                    token_attrs.insert(
+                        "llama_stage.downstream_wait_ms".to_string(),
+                        json!(verify.stats.downstream_wait_ms),
+                    );
+                    token_attrs.insert(
+                        "llama_stage.output_activation_bytes".to_string(),
+                        json!(verify.stats.output_activation_bytes),
+                    );
+                    token_attrs.insert(
+                        "llama_stage.forward_activation_bytes".to_string(),
+                        json!(verify.stats.forward_activation_bytes),
+                    );
+                    self.emit_openai_phase(
+                        "stage.openai_native_mtp_verify",
+                        token_timer,
+                        token_attrs,
+                    );
+                    if reached_stop {
+                        break;
+                    }
+                    continue;
+                }
                 if draft_guard.is_some() {
                     let remaining = request.max_tokens as usize - decoded_tokens;
                     if remaining == 0 {

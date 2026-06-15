@@ -14,12 +14,21 @@ correctness is proven.
 
 ## Current GLM-4.7 Evidence
 
-HF metadata checked on 2026-06-15 shows `unsloth/GLM-4.7-Flash-GGUF` publishes
-the Skippy-certified GLM-4.7 Flash GGUF artifact:
+HF metadata checked on 2026-06-15 shows `zai-org/GLM-4.7-Flash` is the native
+MTP source checkpoint and `unsloth/GLM-4.7-Flash-GGUF` publishes the existing
+Skippy-certified public GGUF:
 
 - base model: `zai-org/GLM-4.7-Flash`;
 - model class: 30B-A3B MoE;
-- recommended Skippy artifact: `unsloth/GLM-4.7-Flash-GGUF:Q4_K_M`;
+- checkpoint architecture: `Glm4MoeLiteForCausalLM`;
+- checkpoint config: `num_hidden_layers = 47`,
+  `num_nextn_predict_layers = 1`, `hidden_size = 2048`;
+- checkpoint MTP tensors live at layer `47`:
+  - `model.layers.47.eh_proj.weight`;
+  - `model.layers.47.enorm.weight`;
+  - `model.layers.47.hnorm.weight`;
+- existing public Skippy artifact:
+  `unsloth/GLM-4.7-Flash-GGUF:Q4_K_M`;
 - Skippy certified split plan: `layer_end=47`, `splits=15,31`, activation
   width `2048`;
 - Skippy wire dtype: `f16` by default, with q8 already validated for the
@@ -30,23 +39,34 @@ the Skippy-certified GLM-4.7 Flash GGUF artifact:
 
 That makes GLM-4.7 Flash the right first target for native `n=1` MTP in Skippy:
 it is small enough to exercise locally, already certified for stage splitting,
-and has an upstream native one-token MTP path to compare against. The remaining
-artifact question is whether the published GGUF preserves the native MTP tensors
-needed by llama.cpp. The first local proof should therefore fail closed unless
-the final stage returns a native MTP draft sideband.
+and has an upstream native one-token MTP path to compare against.
+
+The public `GLM-4.7-Flash-Q4_K_M.gguf` is not enough for this milestone. Its
+GGUF metadata reports `general.architecture = "deepseek2"` and
+`deepseek2.block_count = 47`, and a tensor-name scan found no `next`, `mtp`,
+`eh_proj`, `enorm`, or `hnorm` tensors. The checkpoint has the native MTP
+tensors, but the public GGUF appears to have dropped them. Phase 1 therefore
+needs a custom GLM-4.7 GGUF quantization from checkpoint that preserves the
+layer-47 MTP tensors, then a Skippy layer package built from that GGUF.
 
 The model-backed Step 1 gate should use the correctness harness with a required
 draft sideband:
 
 ```bash
 skippy-correctness chain \
-  --model /path/to/GLM-4.7-Flash-Q4_K_M.gguf \
-  --model-id unsloth/GLM-4.7-Flash-GGUF:Q4_K_M \
-  --layer-end 47 \
+  --model /path/to/GLM-4.7-Flash-Q4_K_M-mtp.gguf \
+  --model-id mesh-llm/GLM-4.7-Flash-Q4_K_M-MTP-GGUF:Q4_K_M \
+  --layer-end 48 \
   --splits 15,31 \
   --activation-wire-dtype f16 \
   --require-native-mtp-draft
 ```
+
+Use the layer count from the MTP-preserving GGUF/package when setting
+`--layer-end`. If the converter stores 47 authoritative target layers plus one
+NextN layer, the Skippy proof command should use `--layer-end 48`; if the layer
+package exposes only authoritative target layers and attaches MTP as sidecar
+metadata, use the package topology instead.
 
 The important invariant is that the report must show
 `matches = true`, `native_mtp.sideband_present = true`, and

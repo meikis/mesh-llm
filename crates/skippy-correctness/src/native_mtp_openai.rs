@@ -311,10 +311,12 @@ fn run_openai_case(
         case.native_mtp_enabled,
         case.batched_verify_enabled,
     )?;
-    drop(
-        connect_ready(case.stage1_endpoint_addr, args.server.startup_timeout_secs)
-            .context("stage 1 binary server did not become ready")?,
-    );
+    wait_stage1_ready(
+        &stage1,
+        case.stage1_endpoint_addr,
+        args.server.startup_timeout_secs,
+    )
+    .context("stage 1 binary server did not become ready")?;
     let _stage0 = spawn_stage(
         args,
         &stage0_config_path,
@@ -660,7 +662,54 @@ impl StageHandle {
     }
 }
 
+fn wait_stage1_ready(stage1: &StageHandle, addr: SocketAddr, timeout_secs: u64) -> Result<()> {
+    match stage1 {
+        StageHandle::Local(_) | StageHandle::External => {
+            drop(connect_ready(addr, timeout_secs)?);
+            Ok(())
+        }
+        StageHandle::Remote(guard) => guard.wait_ready(timeout_secs),
+    }
+}
+
 impl RemoteStageGuard {
+    fn wait_ready(&self, timeout_secs: u64) -> Result<()> {
+        let Some(pid) = self.pid else {
+            bail!("remote stage 1 has no pid");
+        };
+        let attempts = timeout_secs.saturating_mul(2).max(1);
+        let log = shell_quote(&self.remote_log);
+        let mut last_stderr = String::new();
+        for _ in 0..attempts {
+            let command = format!(
+                "if ! kill -0 {pid} 2>/dev/null; then echo dead; exit 2; fi; \
+                 grep -q 'skippy-server listening:' {log}"
+            );
+            let output = Command::new("ssh")
+                .arg(&self.host)
+                .arg(&command)
+                .output()
+                .with_context(|| format!("check remote stage 1 readiness on {}", self.host))?;
+            if output.status.success() {
+                return Ok(());
+            }
+            if output.status.code() == Some(2) {
+                bail!("remote stage 1 on {} exited before readiness", self.host);
+            }
+            last_stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            thread::sleep(Duration::from_millis(500));
+        }
+        bail!(
+            "timed out waiting for remote stage 1 on {} to log readiness{}",
+            self.host,
+            if last_stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {last_stderr}")
+            }
+        )
+    }
+
     fn stop_and_collect(&mut self, local_log: &Path) -> Result<()> {
         self.terminate();
         match scp_from(&self.host, &self.remote_log, local_log) {

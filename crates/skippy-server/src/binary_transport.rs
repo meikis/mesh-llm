@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     env,
     future::Future,
-    io,
+    io::{self, Write},
     net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
     sync::{
         Arc, Mutex,
@@ -297,6 +297,10 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
         };
         prepare_binary_stage_connection(&upstream)?;
         let peer_addr = upstream.peer_addr().ok();
+        eprintln!(
+            "binary accepted connection: stage_id={} peer={peer_addr:?}",
+            config.stage_id
+        );
         let config = config.clone();
         let topology = topology.clone();
         let runtime = runtime.clone();
@@ -306,7 +310,16 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
         let prediction_returns = prediction_returns.clone();
         thread::spawn(move || {
             let connection_result = (|| -> Result<()> {
+                eprintln!(
+                    "binary sending ready: stage_id={} peer={peer_addr:?}",
+                    config.stage_id
+                );
                 send_ready(&mut upstream).context("failed to send binary ready")?;
+                upstream.flush().ok();
+                eprintln!(
+                    "binary sent ready: stage_id={} peer={peer_addr:?}",
+                    config.stage_id
+                );
                 let first_message = match read_stage_message(&mut upstream, activation_width) {
                     Ok(message) => message,
                     Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),

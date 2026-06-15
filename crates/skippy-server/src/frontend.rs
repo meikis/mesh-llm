@@ -1051,7 +1051,17 @@ impl PersistentStageLanePool {
         let timer = PhaseTimer::start();
         let mut stream = connect_binary_downstream(&self.config, self.timeout_secs)?
             .ok_or_else(|| anyhow!("embedded stage0 has no downstream"))?;
+        let local_addr = stream.local_addr().ok();
+        let peer_addr = stream.peer_addr().ok();
+        eprintln!(
+            "openai downstream lane waiting ready: stage_id={} lane_id={lane_id} local={local_addr:?} peer={peer_addr:?}",
+            self.config.stage_id
+        );
         recv_ready(&mut stream).context("persistent downstream lane did not become ready")?;
+        eprintln!(
+            "openai downstream lane received ready: stage_id={} lane_id={lane_id} local={local_addr:?} peer={peer_addr:?}",
+            self.config.stage_id
+        );
         let mut attrs = lifecycle_attrs(&self.config);
         attrs.insert(
             "llama_stage.openai_downstream_lane_id".to_string(),

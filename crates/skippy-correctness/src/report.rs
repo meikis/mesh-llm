@@ -247,3 +247,56 @@ pub struct StatePayloadBlockDigestReport {
     pub bytes: usize,
     pub sha256: String,
 }
+
+#[derive(Debug, Serialize)]
+pub struct NativeMtpOpenAiAbReport {
+    pub mode: &'static str,
+    pub status: &'static str,
+    pub model_id: String,
+    pub model_path: String,
+    pub prompt: String,
+    pub max_tokens: u32,
+    pub split_layer: u32,
+    pub layer_end: u32,
+    pub activation_width: i32,
+    pub activation_wire_dtype: String,
+    pub exact_content_match: bool,
+    pub batched_events_required: bool,
+    pub batched_events_present: bool,
+    pub matches: bool,
+    pub n1: NativeMtpOpenAiCaseReport,
+    pub batched: NativeMtpOpenAiCaseReport,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NativeMtpOpenAiCaseReport {
+    pub case: &'static str,
+    pub batched_verify_enabled: bool,
+    pub http_status: u16,
+    pub content: String,
+    pub completion_tokens: Option<u64>,
+    pub openai_bind_addr: String,
+    pub stage0_bind_addr: String,
+    pub stage1_bind_addr: String,
+    pub stage0_log: String,
+    pub stage1_log: String,
+    pub metrics: NativeMtpOpenAiMetricsReport,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct NativeMtpOpenAiMetricsReport {
+    pub native_mtp_enabled: bool,
+    pub drafted_tokens: u64,
+    pub accepted_tokens: u64,
+    pub rejected_tokens: u64,
+    pub pending_tokens: u64,
+    pub verification_count: u64,
+    pub accept_rate: f64,
+    pub proposal_compute_us: i64,
+    pub verification_compute_us: i64,
+    pub decode_token_events: u64,
+    pub batched_verify_events: u64,
+    pub batched_accepted_events: u64,
+    pub batched_rejected_events: u64,
+    pub fatal_error_events: u64,
+}

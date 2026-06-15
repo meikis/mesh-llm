@@ -17,6 +17,7 @@ pub enum CommandKind {
     SplitScan(SplitScanArgs),
     DtypeMatrix(DtypeMatrixArgs),
     StateHandoff(StateHandoffArgs),
+    NativeMtpOpenAiAb(NativeMtpOpenAiAbArgs),
 }
 
 #[derive(Args, Clone)]
@@ -209,6 +210,38 @@ pub struct StateHandoffArgs {
     pub synthetic_input_activation: bool,
     #[arg(long)]
     pub binary_control: bool,
+    #[arg(long)]
+    pub allow_mismatch: bool,
+}
+
+#[derive(Args)]
+pub struct NativeMtpOpenAiAbArgs {
+    #[command(flatten)]
+    pub runtime: RuntimeArgs,
+    #[command(flatten)]
+    pub server: ServerArgs,
+    #[command(flatten)]
+    pub output: OutputArgs,
+    #[arg(long, default_value_t = 24)]
+    pub split_layer: u32,
+    #[arg(long, default_value = "127.0.0.1:19170")]
+    pub openai_bind_addr: SocketAddr,
+    #[arg(long, default_value = "127.0.0.1:19171")]
+    pub stage0_bind_addr: SocketAddr,
+    #[arg(long, default_value = "127.0.0.1:19172")]
+    pub stage1_bind_addr: SocketAddr,
+    #[arg(long, default_value_t = 10)]
+    pub batched_port_offset: u16,
+    #[arg(long, default_value_t = 2048)]
+    pub activation_width: i32,
+    #[arg(long, default_value = "f16")]
+    pub activation_wire_dtype: String,
+    #[arg(long, default_value_t = 12)]
+    pub max_tokens: u32,
+    #[arg(long, default_value_t = 60)]
+    pub request_timeout_secs: u64,
+    #[arg(long)]
+    pub allow_missing_batched_events: bool,
     #[arg(long)]
     pub allow_mismatch: bool,
 }

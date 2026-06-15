@@ -83,6 +83,21 @@ skippy-correctness state-handoff \
   --cache-hit-repeats 3 \
   --n-gpu-layers=-1 \
   --report-out reports/state-handoff.json
+
+skippy-correctness native-mtp-open-ai-ab \
+  --model model.gguf \
+  --model-id org/repo:Q4_K_M \
+  --prompt 'Write a Python function named add_one that returns x + 1.' \
+  --layer-end 48 \
+  --split-layer 24 \
+  --ctx-size 128 \
+  --n-batch 128 \
+  --n-ubatch 128 \
+  --n-gpu-layers 999 \
+  --activation-width 2048 \
+  --activation-wire-dtype f16 \
+  --max-tokens 12 \
+  --report-out reports/native-mtp-openai-ab.json
 ```
 
 All commands emit JSON, optionally write the same JSON with `--report-out`, and
@@ -178,6 +193,13 @@ same activation/cache contracts without requiring a monolithic full GGUF.
   `--cache-hit-repeats` to repeatedly attach the exported state and decode the
   same continuation, producing a recompute-vs-cache-hit speedup estimate. Use
   `--allow-mismatch` only for diagnostic payloads such as recurrent-only.
+- `native-mtp-open-ai-ab` launches a real two-stage `skippy-server
+  serve-binary` split twice through the embedded OpenAI frontend. The first run
+  sets `SKIPPY_NATIVE_MTP_BATCHED_VERIFY=0` to prove native MTP n=1 behavior;
+  the second run uses the default batched verification path. The command fails
+  unless both responses are HTTP 200, native MTP metrics are observed, output
+  content is byte-identical, and the batched run emits
+  `stage.openai_native_mtp_verify` events.
 - Requires a built `skippy-server` binary for binary transport checks.
 - Uses the same llama-backed runtime ABI as the server.
 - The default build statically links llama from

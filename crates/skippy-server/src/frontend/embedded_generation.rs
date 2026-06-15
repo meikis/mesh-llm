@@ -782,6 +782,9 @@ impl StageOpenAiBackend {
                 if fused_reached_stop {
                     break;
                 }
+                if decoded_tokens >= request.max_tokens as usize {
+                    break;
+                }
                 if request
                     .cancellation
                     .is_some_and(openai_frontend::CancellationToken::is_cancelled)
@@ -789,7 +792,8 @@ impl StageOpenAiBackend {
                     break;
                 }
                 let token_timer = PhaseTimer::start();
-                let native_mtp_remaining = request.max_tokens as usize - decoded_tokens;
+                let native_mtp_remaining =
+                    (request.max_tokens as usize).saturating_sub(decoded_tokens);
                 if draft_guard.is_none()
                     && native_mtp_remaining >= 2
                     && let Some(native_mtp_draft_token) = native_mtp.take_pending_draft()
@@ -972,7 +976,7 @@ impl StageOpenAiBackend {
                     continue;
                 }
                 if draft_guard.is_some() {
-                    let remaining = request.max_tokens as usize - decoded_tokens;
+                    let remaining = (request.max_tokens as usize).saturating_sub(decoded_tokens);
                     if remaining == 0 {
                         break;
                     }

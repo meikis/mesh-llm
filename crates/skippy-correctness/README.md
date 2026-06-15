@@ -98,6 +98,18 @@ skippy-correctness native-mtp-open-ai-ab \
   --activation-wire-dtype f16 \
   --max-tokens 12 \
   --report-out reports/native-mtp-openai-ab.json
+
+skippy-correctness native-mtp-open-ai-ab \
+  --model /Volumes/External/models/huggingface/.../model.gguf \
+  --model-id org/repo:Q4_K_M \
+  --stage1-model /Volumes/models/huggingface/.../model.gguf \
+  --openai-bind-addr 192.168.0.5:19170 \
+  --stage0-bind-addr 192.168.0.5:19171 \
+  --stage0-endpoint-addr 192.168.0.5:19171 \
+  --stage1-bind-addr 192.168.0.10:19172 \
+  --stage1-endpoint-addr 192.168.0.10:19172 \
+  --layer-end 48 \
+  --split-layer 24
 ```
 
 All commands emit JSON, optionally write the same JSON with `--report-out`, and
@@ -201,6 +213,12 @@ same activation/cache contracts without requiring a monolithic full GGUF.
   HTTP 200, baseline/n=1/batched output content is byte-identical, native MTP
   metrics are observed for n=1 and batched runs, and the batched run emits
   `stage.openai_native_mtp_verify` events.
+- For lab split config generation, use `--stage0-endpoint-addr` and
+  `--stage1-endpoint-addr` when the address a peer should dial differs from the
+  local bind. Use `--stage0-model` and `--stage1-model` when the same model is
+  mounted at different paths on each host. The harness still launches stages
+  from the local process; a true two-host lab run needs the remote stage started
+  separately from the generated stage config.
 - Requires a built `skippy-server` binary for binary transport checks.
 - Uses the same llama-backed runtime ABI as the server.
 - The default build statically links llama from

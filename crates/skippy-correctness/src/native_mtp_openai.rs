@@ -28,7 +28,9 @@ struct OpenAiCaseConfig {
     root: PathBuf,
     openai_bind_addr: SocketAddr,
     stage0_bind_addr: SocketAddr,
+    stage0_endpoint_addr: SocketAddr,
     stage1_bind_addr: SocketAddr,
+    stage1_endpoint_addr: SocketAddr,
 }
 
 struct OpenAiStageConfig<'a> {
@@ -60,7 +62,10 @@ pub fn native_mtp_openai_ab(args: NativeMtpOpenAiAbArgs) -> Result<()> {
             .unwrap_or("local-model")
             .to_string()
     });
-    let root = std::env::temp_dir().join(generate_run_id());
+    let root = args
+        .case_root
+        .clone()
+        .unwrap_or_else(|| std::env::temp_dir().join(generate_run_id()));
     fs::create_dir_all(&root).with_context(|| format!("failed to create {}", root.display()))?;
     let client = Client::builder()
         .timeout(Duration::from_secs(args.request_timeout_secs.max(1)))
@@ -77,9 +82,19 @@ pub fn native_mtp_openai_ab(args: NativeMtpOpenAiAbArgs) -> Result<()> {
             batched_verify_enabled: false,
             run_id: format!("{}-baseline", generate_run_id()),
             root: root.join("baseline"),
-            openai_bind_addr: args.openai_bind_addr,
-            stage0_bind_addr: args.stage0_bind_addr,
-            stage1_bind_addr: args.stage1_bind_addr,
+            openai_bind_addr: case_addr(args.openai_bind_addr, args.batched_port_offset, 0)?,
+            stage0_bind_addr: case_addr(args.stage0_bind_addr, args.batched_port_offset, 0)?,
+            stage0_endpoint_addr: case_addr(
+                args.stage0_endpoint_addr.unwrap_or(args.stage0_bind_addr),
+                args.batched_port_offset,
+                0,
+            )?,
+            stage1_bind_addr: case_addr(args.stage1_bind_addr, args.batched_port_offset, 0)?,
+            stage1_endpoint_addr: case_addr(
+                args.stage1_endpoint_addr.unwrap_or(args.stage1_bind_addr),
+                args.batched_port_offset,
+                0,
+            )?,
         },
     )?;
     let n1 = run_openai_case(
@@ -92,9 +107,19 @@ pub fn native_mtp_openai_ab(args: NativeMtpOpenAiAbArgs) -> Result<()> {
             batched_verify_enabled: false,
             run_id: format!("{}-n1", generate_run_id()),
             root: root.join("n1"),
-            openai_bind_addr: offset_port(args.openai_bind_addr, args.batched_port_offset)?,
-            stage0_bind_addr: offset_port(args.stage0_bind_addr, args.batched_port_offset)?,
-            stage1_bind_addr: offset_port(args.stage1_bind_addr, args.batched_port_offset)?,
+            openai_bind_addr: case_addr(args.openai_bind_addr, args.batched_port_offset, 1)?,
+            stage0_bind_addr: case_addr(args.stage0_bind_addr, args.batched_port_offset, 1)?,
+            stage0_endpoint_addr: case_addr(
+                args.stage0_endpoint_addr.unwrap_or(args.stage0_bind_addr),
+                args.batched_port_offset,
+                1,
+            )?,
+            stage1_bind_addr: case_addr(args.stage1_bind_addr, args.batched_port_offset, 1)?,
+            stage1_endpoint_addr: case_addr(
+                args.stage1_endpoint_addr.unwrap_or(args.stage1_bind_addr),
+                args.batched_port_offset,
+                1,
+            )?,
         },
     )?;
     let batched = run_openai_case(
@@ -107,17 +132,18 @@ pub fn native_mtp_openai_ab(args: NativeMtpOpenAiAbArgs) -> Result<()> {
             batched_verify_enabled: true,
             run_id: format!("{}-batched", generate_run_id()),
             root: root.join("batched"),
-            openai_bind_addr: offset_port(
-                args.openai_bind_addr,
-                args.batched_port_offset.saturating_mul(2),
+            openai_bind_addr: case_addr(args.openai_bind_addr, args.batched_port_offset, 2)?,
+            stage0_bind_addr: case_addr(args.stage0_bind_addr, args.batched_port_offset, 2)?,
+            stage0_endpoint_addr: case_addr(
+                args.stage0_endpoint_addr.unwrap_or(args.stage0_bind_addr),
+                args.batched_port_offset,
+                2,
             )?,
-            stage0_bind_addr: offset_port(
-                args.stage0_bind_addr,
-                args.batched_port_offset.saturating_mul(2),
-            )?,
-            stage1_bind_addr: offset_port(
-                args.stage1_bind_addr,
-                args.batched_port_offset.saturating_mul(2),
+            stage1_bind_addr: case_addr(args.stage1_bind_addr, args.batched_port_offset, 2)?,
+            stage1_endpoint_addr: case_addr(
+                args.stage1_endpoint_addr.unwrap_or(args.stage1_bind_addr),
+                args.batched_port_offset,
+                2,
             )?,
         },
     )?;
@@ -176,6 +202,8 @@ fn run_openai_case(
     let topology_path = case.root.join("topology.json");
     let stage0_log = case.root.join("stage0.log");
     let stage1_log = case.root.join("stage1.log");
+    let stage0_model_path = args.stage0_model.as_deref().unwrap_or(&args.runtime.model);
+    let stage1_model_path = args.stage1_model.as_deref().unwrap_or(&args.runtime.model);
 
     write_stage_config(
         &stage0_config_path,
@@ -184,7 +212,7 @@ fn run_openai_case(
             OpenAiStageConfig {
                 run_id: &case.run_id,
                 model_id,
-                model_path: &args.runtime.model,
+                model_path: stage0_model_path,
                 stage_id: "stage-0",
                 stage_index: 0,
                 layer_start: 0,
@@ -194,7 +222,7 @@ fn run_openai_case(
                 downstream: Some(json!({
                     "stage_id": "stage-1",
                     "stage_index": 1,
-                    "endpoint": format!("tcp://{}", case.stage1_bind_addr),
+                    "endpoint": format!("tcp://{}", case.stage1_endpoint_addr),
                 })),
             },
         ),
@@ -206,7 +234,7 @@ fn run_openai_case(
             OpenAiStageConfig {
                 run_id: &case.run_id,
                 model_id,
-                model_path: &args.runtime.model,
+                model_path: stage1_model_path,
                 stage_id: "stage-1",
                 stage_index: 1,
                 layer_start: args.split_layer,
@@ -215,7 +243,7 @@ fn run_openai_case(
                 upstream: Some(json!({
                     "stage_id": "stage-0",
                     "stage_index": 0,
-                    "endpoint": format!("tcp://{}", case.stage0_bind_addr),
+                    "endpoint": format!("tcp://{}", case.stage0_endpoint_addr),
                 })),
                 downstream: None,
             },
@@ -231,7 +259,7 @@ fn run_openai_case(
                     "stage_id": "stage-0",
                     "stage_index": 0,
                     "host": "localhost",
-                    "endpoint": format!("tcp://{}", case.stage0_bind_addr),
+                    "endpoint": format!("tcp://{}", case.stage0_endpoint_addr),
                     "layer_start": 0,
                     "layer_end": args.split_layer,
                     "load_mode": "runtime-slice",
@@ -240,7 +268,7 @@ fn run_openai_case(
                     "stage_id": "stage-1",
                     "stage_index": 1,
                     "host": "localhost",
-                    "endpoint": format!("tcp://{}", case.stage1_bind_addr),
+                    "endpoint": format!("tcp://{}", case.stage1_endpoint_addr),
                     "layer_start": args.split_layer,
                     "layer_end": args.runtime.layer_end,
                     "load_mode": "runtime-slice",
@@ -259,7 +287,7 @@ fn run_openai_case(
         case.batched_verify_enabled,
     )?;
     drop(
-        connect_ready(case.stage1_bind_addr, args.server.startup_timeout_secs)
+        connect_ready(case.stage1_endpoint_addr, args.server.startup_timeout_secs)
             .context("stage 1 binary server did not become ready")?,
     );
     let _stage0 = spawn_stage(
@@ -320,7 +348,12 @@ fn run_openai_case(
         completion_tokens,
         openai_bind_addr: case.openai_bind_addr.to_string(),
         stage0_bind_addr: case.stage0_bind_addr.to_string(),
+        stage0_endpoint_addr: case.stage0_endpoint_addr.to_string(),
         stage1_bind_addr: case.stage1_bind_addr.to_string(),
+        stage1_endpoint_addr: case.stage1_endpoint_addr.to_string(),
+        stage0_config: stage0_config_path.display().to_string(),
+        stage1_config: stage1_config_path.display().to_string(),
+        topology_config: topology_path.display().to_string(),
         stage0_log: stage0_log.display().to_string(),
         stage1_log: stage1_log.display().to_string(),
         metrics,
@@ -537,6 +570,13 @@ fn attr_u64(attrs: &Value, key: &str) -> Option<u64> {
 
 fn attr_i64(attrs: &Value, key: &str) -> Option<i64> {
     attrs.get(key).and_then(Value::as_i64)
+}
+
+fn case_addr(addr: SocketAddr, port_offset: u16, case_index: u16) -> Result<SocketAddr> {
+    let offset = port_offset
+        .checked_mul(case_index)
+        .context("case port offset exceeds u16")?;
+    offset_port(addr, offset)
 }
 
 fn offset_port(mut addr: SocketAddr, offset: u16) -> Result<SocketAddr> {

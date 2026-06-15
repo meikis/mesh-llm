@@ -228,8 +228,18 @@ pub struct NativeMtpOpenAiAbArgs {
     pub openai_bind_addr: SocketAddr,
     #[arg(long, default_value = "127.0.0.1:19171")]
     pub stage0_bind_addr: SocketAddr,
+    #[arg(long)]
+    pub stage0_endpoint_addr: Option<SocketAddr>,
     #[arg(long, default_value = "127.0.0.1:19172")]
     pub stage1_bind_addr: SocketAddr,
+    #[arg(long)]
+    pub stage1_endpoint_addr: Option<SocketAddr>,
+    #[arg(long)]
+    pub stage0_model: Option<PathBuf>,
+    #[arg(long)]
+    pub stage1_model: Option<PathBuf>,
+    #[arg(long)]
+    pub case_root: Option<PathBuf>,
     #[arg(long, default_value_t = 10)]
     pub batched_port_offset: u16,
     #[arg(long, default_value_t = 2048)]

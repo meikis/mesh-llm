@@ -13,6 +13,7 @@ const REJECT_RECOVERY_SERIAL_ACCEPTS_ENV: &str = "SKIPPY_NATIVE_MTP_REJECT_RECOV
 const VERIFY_NEXT_DRAFT_MIN_MARGIN_ENV: &str = "SKIPPY_NATIVE_MTP_VERIFY_NEXT_DRAFT_MIN_MARGIN";
 const DEFER_REJECT_TRIM_ENV: &str = "SKIPPY_NATIVE_MTP_DEFER_REJECT_TRIM";
 const SUPPRESS_COOLDOWN_DRAFTS_ENV: &str = "SKIPPY_NATIVE_MTP_SUPPRESS_COOLDOWN_DRAFTS";
+const SUPPRESS_COOLDOWN_DRAFT_LIMIT_ENV: &str = "SKIPPY_NATIVE_MTP_SUPPRESS_COOLDOWN_DRAFT_LIMIT";
 const MTP_DRAFT_MARGIN_SCALE: f32 = 1000.0;
 const DEFAULT_ADAPTIVE_DISABLE_MIN_VERIFY: u64 = 32;
 const DEFAULT_ADAPTIVE_DISABLE_THRESHOLD: f64 = 0.70;
@@ -69,6 +70,10 @@ pub(super) fn native_mtp_suppress_cooldown_drafts_enabled() -> bool {
     native_mtp_suppress_cooldown_drafts_enabled_from(
         std::env::var(SUPPRESS_COOLDOWN_DRAFTS_ENV).ok().as_deref(),
     )
+}
+
+pub(super) fn native_mtp_suppress_cooldown_draft_limit() -> usize {
+    parse_usize_env(SUPPRESS_COOLDOWN_DRAFT_LIMIT_ENV, 0)
 }
 
 fn native_mtp_batched_verify_enabled_from(value: Option<&str>) -> bool {
@@ -861,5 +866,13 @@ mod tests {
         assert!(!native_mtp_suppress_cooldown_drafts_enabled_from(Some(
             "false"
         )));
+    }
+
+    #[test]
+    fn suppress_cooldown_draft_limit_defaults_zero() {
+        assert_eq!(
+            parse_usize_env("SKIPPY_TEST_MISSING_SUPPRESS_COOLDOWN_LIMIT", 0),
+            0
+        );
     }
 }

@@ -386,15 +386,19 @@ Recorded bounded local OpenAI request-path proof:
   `1.28s`
 
 That request-path result proves correct integration with target verification,
-not speed. The next engineering step is to replace replayed taps with inline
-tap capture and then run ordinary split serving and SPD serving against a
-larger shared prompt set with injected and real hop latency.
+not speed. The next engineering step is to schedule proposal generation around
+freshly returned inline taps and then run ordinary split serving and SPD serving
+against a larger shared prompt set with injected and real hop latency.
 
-Current inline-tap progress: embedded stage-0 serving now records stage-0
-boundary activation rows into an SPD-positioned tap cache and `spd-replay`
-overlays complete cached boundary frames before falling back to local replay.
-The remaining production work is downstream tap return plus scheduling proposal
-generation after the in-flight current-token taps exist.
+Current inline-tap progress: embedded stage-0 serving records stage-0 boundary
+activation rows into an SPD-positioned tap cache, downstream binary stages can
+return tap frames over the direct-return side channel for SPD-marked requests,
+and `spd-replay` overlays complete cached boundary frames before falling back to
+local replay. A one-token Qwen3.5-4B smoke on seven local CPU stages returned
+the required `10`, `20`, and `31` rows with no tap-return failures. The
+remaining production work is scheduling proposal generation after the in-flight
+current-token taps exist, then measuring ordinary split serving against
+inline-tap SPD serving.
 
 ## Validate Hidden Tap Compatibility
 
@@ -457,8 +461,8 @@ The tap-row-to-`cur_in` projection bridge lives in
 2. For the first live proof, prefer the tap-aligned over-split unless the
    hidden-tap ABI is already available.
 3. Replace `spd-replay` with inline tap capture in `skippy-server`. Stage-0
-   positioned tap caching exists; downstream tap return and in-flight proposal
-   scheduling remain.
+   positioned tap caching and downstream direct-return tap transport exist for
+   the tap-aligned local proof; in-flight proposal scheduling remains.
 4. Verify every accepted token through the normal target stages.
 5. Benchmark against ordinary split serving with both injected hop latency and a
    real multi-node topology.

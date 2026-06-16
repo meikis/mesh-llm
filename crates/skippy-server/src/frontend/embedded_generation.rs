@@ -180,7 +180,7 @@ impl StageOpenAiBackend {
                     let chunk = &prefill_tokens[pos_start..end];
                     prefill_min_chunk_size = prefill_min_chunk_size.min(chunk.len());
                     prefill_max_chunk_size = prefill_max_chunk_size.max(chunk.len());
-                    let message = embedded_prefill_message(
+                    let mut message = embedded_prefill_message(
                         request.wire_dtype,
                         OpenAiPrefillChunk {
                             seq_id: chunk_index,
@@ -191,6 +191,7 @@ impl StageOpenAiBackend {
                             session_id,
                         },
                     )?;
+                    self.mark_spd_tap_return(&request, &mut message);
                     let stage0_timer = PhaseTimer::start();
                     let pending_prefill_replies_before = pending_prefill_replies;
                     let mut output = self.restore_embedded_stage0_prefill(
@@ -618,6 +619,9 @@ impl StageOpenAiBackend {
                     sideband_capacity: skippy_protocol::binary::MAX_STAGE_SIDEBAND_VALUES,
                 },
             )?;
+            if request.spd.is_some() {
+                decode_message.enable_spd_tap_return();
+            }
             let mut fused_reached_stop = false;
             if let Some(fused) = fused_first_decode.take() {
                 current = fused.predicted;
@@ -1233,13 +1237,8 @@ impl StageOpenAiBackend {
                 let forward_write_ms = write_timer.elapsed_ms();
                 decode_forward_write_ms += forward_write_ms;
                 let wait_timer = PhaseTimer::start();
-                let reply = request
-                    .prediction_return
-                    .as_ref()
-                    .ok_or_else(|| {
-                        OpenAiError::backend("missing direct prediction return receiver")
-                    })?
-                    .recv_expected(WireReplyKind::PredictedToken)
+                let reply = self
+                    .recv_spd_aware_prediction_return(&request, WireReplyKind::PredictedToken)
                     .map_err(openai_backend_error)?;
                 let downstream_wait_ms = wait_timer.elapsed_ms();
                 decode_downstream_wait_ms += downstream_wait_ms;

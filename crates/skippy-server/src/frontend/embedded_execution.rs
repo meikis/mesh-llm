@@ -11,6 +11,9 @@ impl StageOpenAiBackend {
         expected_reply: WireReplyKind,
     ) -> OpenAiResult<EmbeddedStageExecution> {
         let timer = PhaseTimer::start();
+        let mut message = message.clone();
+        self.mark_spd_tap_return(request, &mut message);
+        let message = &message;
         let mut stats = StageReplyStats::default();
         let stage0_timer = PhaseTimer::start();
         let output = {
@@ -78,11 +81,8 @@ impl StageOpenAiBackend {
         .map_err(openai_io_error)?;
         let forward_write_ms = write_timer.elapsed_ms();
         let wait_timer = PhaseTimer::start();
-        let reply = request
-            .prediction_return
-            .as_ref()
-            .ok_or_else(|| OpenAiError::backend("missing direct prediction return receiver"))?
-            .recv_expected(expected_reply)
+        let reply = self
+            .recv_spd_aware_prediction_return(request, expected_reply)
             .map_err(openai_backend_error)?;
         let downstream_wait_ms = wait_timer.elapsed_ms();
         stats.merge(reply.stats);

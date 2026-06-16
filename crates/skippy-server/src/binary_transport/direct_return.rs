@@ -18,7 +18,7 @@ use skippy_protocol::{
         StageReply, StageStateHeader, StageWireMessage, WireActivationDType, WireMessageKind,
         WireReplyKind, read_stage_message, recv_ready, recv_reply, send_ready,
         send_reply_ack_with_stats, send_reply_predicted_tokens_with_stats,
-        send_reply_predicted_with_stats, write_stage_message,
+        send_reply_predicted_with_stats, send_reply_spd_tap_with_stats, write_stage_message,
     },
 };
 
@@ -274,6 +274,14 @@ pub(crate) fn send_direct_prediction_return(
         }
         WireReplyKind::Ack => {
             send_reply_ack_with_stats(stream, reply.stats).context("send direct ACK return")
+        }
+        WireReplyKind::SpdTap => {
+            let tap = reply
+                .spd_tap
+                .as_ref()
+                .context("missing SPD tap reply payload")?;
+            send_reply_spd_tap_with_stats(stream, tap, reply.stats)
+                .context("send direct SPD tap return")
         }
     }
 }

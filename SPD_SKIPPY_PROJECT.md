@@ -326,26 +326,39 @@ feed proposals into Skippy's verifier, accept/reject per token, and preserve
 ordinary greedy output. It is still not a serving throughput measurement:
 `spd-replay` recomputes taps through local `StageModel` slices and runs the head
 on CPU for each proposal. Use the trace latency simulator for current speedup
-estimates until inline tap capture exists.
+estimates until proposal scheduling consumes inline taps without replay.
 
-The first inline-tap plumbing is now in place. During embedded stage-0 serving,
-Skippy records stage-0 boundary activation frames into an SPD-positioned tap
-cache keyed by hidden-state index and token position. `spd-replay` overlays any
-complete cached tap frame before falling back to local replay, and emits debug
-telemetry when stage-0 SPD tap rows are recorded. This does not yet remove the
-replay cost for the full Qwen3.5-4B SPD head, because deeper boundary taps still
-need to be returned from downstream stage processes and the proposal order still
-needs to be rearranged around in-flight current-token taps.
+Inline tap transport now works for the tap-aligned local proof topology. During
+embedded stage-0 serving, Skippy records stage-0 boundary activation frames into
+an SPD-positioned tap cache keyed by hidden-state index and token position.
+Downstream binary stages can return SPD tap frames over the direct-return side
+channel when stage 0 marks an SPD request. A one-token Qwen3.5-4B smoke on
+seven local CPU stages returned and recorded required hidden-state rows for
+`10`, `20`, and `31` with no tap-return failures:
+
+- response content: `<think>\nThinking`
+- wall time: `23.646s`
+- stage-0 local tap records: `hf_index=8`, rows `17` and `1`, `required=false`
+- downstream required tap records:
+  - `hf_index=10`, producer stage `1`, rows `17` and `1`, `required=true`
+  - `hf_index=20`, producer stage `3`, rows `17` and `1`, `required=true`
+  - `hf_index=31`, producer stage `5`, rows `17` and `1`, `required=true`
+- downstream non-required tap records: `16` and `24`, rows `17` and `1`
+
+This still does not make `spd-replay` a speed path. Proposal generation still
+starts before the in-flight current-token target pass has produced the taps that
+the next proposal needs, so the source can still fall back to replay. The next
+serving milestone is proposal scheduling around freshly returned current-token
+taps, then measuring ordinary split serving against inline-tap SPD serving.
 
 ## What Does Not Work Yet
 
 - The `spd-replay` request path is a correctness bridge, not a speed path. It
   replays taps through local stage slices before feeding proposals into the
   existing verify/repair/rollback loop.
-- Inline hidden-tap capture and transport are still needed before SPD can hide
-  real Skippy pipeline bubbles instead of adding replay overhead. Stage-0
-  positioned tap caching exists; downstream tap return and proposal scheduling
-  still need implementation.
+- Inline hidden-tap capture and direct-return transport work for the local
+  tap-aligned proof. Proposal scheduling still needs to consume freshly returned
+  current-token taps before `spd-replay` can stop replaying missing rows.
 - Request-path acceptance has been proven on a bounded four-token smoke, but a
   larger local request-path acceptance/latency sweep is still needed.
 - No larger-than-4B head has been trained by us yet.
@@ -673,8 +686,9 @@ Tasks:
    for one bounded local smoke; still needed as a broader sweep.
 7. Replace replayed local tap collection with inline hidden-tap capture and
    transport so performance can match the SPD pipeline design. Stage-0
-   positioned tap cache/overlay is in place; downstream stage tap return and
-   in-flight proposal scheduling remain.
+   positioned tap cache/overlay and downstream direct-return tap transport are
+   in place for the tap-aligned local proof; in-flight proposal scheduling
+   remains.
 
 Exit criteria:
 

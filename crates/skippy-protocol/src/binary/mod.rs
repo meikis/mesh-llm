@@ -10,7 +10,7 @@ pub use activation::{
 pub use codec::{
     read_stage_message, recv_ready, recv_reply, send_ready, send_reply_ack,
     send_reply_ack_with_stats, send_reply_predicted, send_reply_predicted_tokens_with_stats,
-    send_reply_predicted_with_stats, write_stage_message,
+    send_reply_predicted_with_stats, send_reply_spd_tap_with_stats, write_stage_message,
 };
 pub use types::{
     ACTIVATION_FLAG_GEMMA3N_ALTUP, ACTIVATION_FLAG_RWKV7_V_FIRST, LLAMA_TOKEN_NULL,
@@ -19,8 +19,8 @@ pub use types::{
     MAX_STAGE_SIDEBAND_VALUES, MAX_STAGE_STATE_IMPORT_BYTES, READY_MAGIC,
     STAGE_LOGIT_BIAS_WIRE_BYTES, STAGE_SAMPLING_CONFIG_BASE_BYTES, STAGE_STATE_HEADER_BYTES,
     STAGE_STATE_VERSION, STAGE_WIRE_FIXED_HEADER_BYTES, StageLogitBias, StageReply,
-    StageReplyStats, StageRequestEpoch, StageSamplingConfig, StageStateHeader, StageWireMessage,
-    WireActivationDType, WireMessageKind, WireReplyKind, WireStagePhase,
+    StageReplySpdTap, StageReplyStats, StageRequestEpoch, StageSamplingConfig, StageStateHeader,
+    StageWireMessage, WireActivationDType, WireMessageKind, WireReplyKind, WireStagePhase,
     activation_frame_flags_from_state_flags, activation_state_flags_from_frame_flags, state_flags,
 };
 
@@ -102,6 +102,32 @@ mod tests {
         assert_eq!(reply.kind, WireReplyKind::PredictedToken);
         assert_eq!(reply.predicted, 42);
         assert_eq!(reply.predicted_tokens, vec![42]);
+        assert_eq!(reply.spd_tap, None);
+    }
+
+    #[test]
+    fn spd_tap_reply_round_trips() {
+        let tap = StageReplySpdTap {
+            hf_index: 10,
+            producer_stage_index: 1,
+            layer_start: 8,
+            layer_end: 10,
+            token_count: 2,
+            sequence_count: 1,
+            dtype: 1,
+            layout: 1,
+            flags: 0,
+            positions: vec![7, 8],
+            payload: vec![1, 2, 3, 4, 5, 6, 7, 8],
+        };
+        let mut bytes = Vec::new();
+        send_reply_spd_tap_with_stats(&mut bytes, &tap, StageReplyStats::default()).unwrap();
+
+        let reply = recv_reply(Cursor::new(bytes)).unwrap();
+
+        assert_eq!(reply.kind, WireReplyKind::SpdTap);
+        assert_eq!(reply.predicted_tokens, Vec::<i32>::new());
+        assert_eq!(reply.spd_tap.as_ref(), Some(&tap));
     }
 
     #[test]

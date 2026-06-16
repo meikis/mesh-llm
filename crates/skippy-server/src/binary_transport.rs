@@ -26,8 +26,8 @@ use skippy_metrics::{attr, metric};
 use skippy_protocol::{
     MessageBase, SCHEMA_VERSION, StageConfig, StageTopology,
     binary::{
-        StageReply, StageReplyStats, StageSamplingConfig, StageStateHeader, StageWireMessage,
-        WireActivationDType, WireMessageKind, WireReplyKind,
+        StageReply, StageReplySpdTap, StageReplyStats, StageSamplingConfig, StageStateHeader,
+        StageWireMessage, WireActivationDType, WireMessageKind, WireReplyKind,
         activation_frame_flags_from_state_flags, read_stage_message, recv_reply, send_ready,
         send_reply_ack, send_reply_ack_with_stats, state_flags,
     },
@@ -1073,6 +1073,16 @@ fn handle_binary_connection(
             add_binary_record_stats(&mut message_reply_stats, config, &record);
         }
 
+        maybe_send_spd_tap_return(
+            config,
+            topology,
+            telemetry,
+            &message,
+            wire_dtype,
+            downstream_connect_timeout_secs,
+            &output,
+        );
+
         let mut forward_write_ms = 0.0;
         let mut forward_activation_encode_ms = 0.0;
         let mut forward_activation_bytes = 0usize;
@@ -1310,6 +1320,7 @@ fn handle_binary_connection(
                     kind: reply_kind,
                     predicted: predicted_token,
                     predicted_tokens,
+                    spd_tap: None,
                     stats: message_reply_stats,
                 },
             )?;
@@ -1569,6 +1580,7 @@ fn estimated_reply_wire_bytes(reply_kind: WireReplyKind, predicted_token_count: 
         WireReplyKind::Ack => 0,
         WireReplyKind::PredictedToken => 1,
         WireReplyKind::PredictedTokens => predicted_token_count,
+        WireReplyKind::SpdTap => 0,
     };
     REPLY_HEADER_BYTES + token_count * std::mem::size_of::<i32>() + REPLY_STATS_BYTES
 }
@@ -2111,6 +2123,7 @@ fn handle_binary_restore_prefill_decode_control(
                 kind: WireReplyKind::Ack,
                 predicted: 0,
                 predicted_tokens: Vec::new(),
+                spd_tap: None,
                 stats: control_stats,
             },
         )?;
@@ -2247,6 +2260,7 @@ fn handle_binary_restore_prefill_decode_control(
             kind: WireReplyKind::PredictedToken,
             predicted: predicted_token,
             predicted_tokens: vec![predicted_token],
+            spd_tap: None,
             stats: control_stats,
         },
     )?;
@@ -2270,6 +2284,108 @@ fn send_one_off_direct_return(
         downstream_connect_timeout_secs,
     )?;
     direct_return::send_direct_prediction_return(&mut stream, reply)
+}
+
+fn maybe_send_spd_tap_return(
+    config: &StageConfig,
+    topology: Option<&StageTopology>,
+    telemetry: &Telemetry,
+    message: &StageWireMessage,
+    wire_dtype: WireActivationDType,
+    downstream_connect_timeout_secs: u64,
+    output: &ActivationFrame,
+) {
+    if config.stage_index == 0 || (message.state.flags & state_flags::SPD_TAP_RETURN) == 0 {
+        return;
+    }
+    if output.payload.is_empty() {
+        return;
+    }
+    let result = spd_tap_reply(config, message, output).and_then(|reply| {
+        send_one_off_direct_return(
+            config,
+            topology,
+            message,
+            wire_dtype,
+            downstream_connect_timeout_secs,
+            reply,
+        )
+    });
+    let mut attrs = binary_message_attrs(config, message.session_id, message);
+    attrs.insert(
+        "llama_stage.spd_tap_return_hf_index".to_string(),
+        json!(config.layer_end),
+    );
+    attrs.insert(
+        "llama_stage.spd_tap_return_payload_bytes".to_string(),
+        json!(output.payload.len()),
+    );
+    match result {
+        Ok(()) => telemetry.emit_debug("stage.binary_spd_tap_return", attrs),
+        Err(error) => {
+            attrs.insert(
+                "llama_stage.spd_tap_return_error".to_string(),
+                json!(error.to_string()),
+            );
+            telemetry.emit_debug("stage.binary_spd_tap_return_failed", attrs);
+        }
+    }
+}
+
+fn spd_tap_reply(
+    config: &StageConfig,
+    message: &StageWireMessage,
+    output: &ActivationFrame,
+) -> Result<StageReply> {
+    if output.desc.dtype != RuntimeActivationDType::F32 {
+        bail!("SPD tap output activation must be f32");
+    }
+    if output.desc.layout != RuntimeActivationLayout::TokenMajor {
+        bail!("SPD tap output activation must be token-major");
+    }
+    let positions = spd_tap_positions(message, output.desc.token_count)?;
+    Ok(StageReply {
+        kind: WireReplyKind::SpdTap,
+        predicted: 0,
+        predicted_tokens: Vec::new(),
+        spd_tap: Some(StageReplySpdTap {
+            hf_index: config.layer_end,
+            producer_stage_index: output.desc.producer_stage_index,
+            layer_start: output.desc.layer_start,
+            layer_end: output.desc.layer_end,
+            token_count: output.desc.token_count,
+            sequence_count: output.desc.sequence_count,
+            dtype: output.desc.dtype as i32,
+            layout: output.desc.layout as i32,
+            flags: output.desc.flags,
+            positions,
+            payload: output.payload.clone(),
+        }),
+        stats: StageReplyStats::default(),
+    })
+}
+
+fn spd_tap_positions(message: &StageWireMessage, token_count: u32) -> Result<Vec<i32>> {
+    let token_count = usize::try_from(token_count).context("SPD tap token_count exceeds usize")?;
+    if message.positions.len() == token_count {
+        return Ok(message.positions.clone());
+    }
+    if !message.positions.is_empty() {
+        bail!(
+            "SPD tap positions length {} does not match token_count {}",
+            message.positions.len(),
+            token_count
+        );
+    }
+    (0..token_count)
+        .map(|offset| {
+            let offset = i32::try_from(offset).context("SPD tap offset exceeds i32")?;
+            message
+                .pos_start
+                .checked_add(offset)
+                .context("SPD tap position overflow")
+        })
+        .collect()
 }
 
 fn restore_decode_sideband(message: &StageWireMessage) -> Result<(&[i32], i32)> {

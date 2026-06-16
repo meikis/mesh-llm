@@ -99,6 +99,10 @@ impl ReusableDecodeMessage {
         self.update_at_pos(decode_step, pos_start, current, tokens)
     }
 
+    pub(super) fn enable_spd_tap_return(&mut self) {
+        self.message.state.flags |= state_flags::SPD_TAP_RETURN;
+    }
+
     fn update_at_pos(
         &mut self,
         decode_step: usize,

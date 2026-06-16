@@ -156,6 +156,7 @@ pub enum WireReplyKind {
     Ack = 1,
     PredictedToken = 2,
     PredictedTokens = 3,
+    SpdTap = 4,
 }
 
 impl TryFrom<i32> for WireReplyKind {
@@ -166,6 +167,7 @@ impl TryFrom<i32> for WireReplyKind {
             1 => Ok(Self::Ack),
             2 => Ok(Self::PredictedToken),
             3 => Ok(Self::PredictedTokens),
+            4 => Ok(Self::SpdTap),
             _ => Err(invalid_data("unknown stage reply kind")),
         }
     }
@@ -189,6 +191,7 @@ pub mod state_flags {
     pub const CHAT_SAMPLING_METADATA: i32 = 1 << 5;
     pub const RWKV7_V_FIRST_SIDEBAND: i32 = 1 << 6;
     pub const GEMMA3N_ALTUP_SIDEBAND: i32 = 1 << 7;
+    pub const SPD_TAP_RETURN: i32 = 1 << 8;
 }
 
 pub const ACTIVATION_FLAG_RWKV7_V_FIRST: u64 = 1 << 0;
@@ -538,7 +541,23 @@ pub struct StageReply {
     pub kind: WireReplyKind,
     pub predicted: i32,
     pub predicted_tokens: Vec<i32>,
+    pub spd_tap: Option<StageReplySpdTap>,
     pub stats: StageReplyStats,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageReplySpdTap {
+    pub hf_index: u32,
+    pub producer_stage_index: i32,
+    pub layer_start: i32,
+    pub layer_end: i32,
+    pub token_count: u32,
+    pub sequence_count: u32,
+    pub dtype: i32,
+    pub layout: i32,
+    pub flags: u64,
+    pub positions: Vec<i32>,
+    pub payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

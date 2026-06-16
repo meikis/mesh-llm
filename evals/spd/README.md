@@ -23,6 +23,8 @@ Rust.
   selected tensor payload reads.
 - `skippy-runtime` can run the pretrained `Qwen/Qwen3.5-4B` SPD head over a
   recorded Python fixture and match Python top-k draft candidates.
+- `skippy-runtime` can reconstruct the SPD `cur_in` rows from raw recorded
+  hidden-state tap inputs using `g0_proj` and `stage_projs.*`.
 - `skippy-model-package` can plan, write, and preflight explicit tap-aligned
   layer splits for the `Qwen/Qwen3.5-4B` S4/L4 proof head.
 - `skippy-bench local-split-chain-binary` can run the `Qwen/Qwen3.5-4B` GGUF
@@ -241,9 +243,10 @@ python3 evals/spd/export_parity_fixture.py \
   --top-k 8
 ```
 
-This writes real SPD inference rows, position ids, base final-norm weight,
-Python intermediate states, Python logits, Python top-k draft indices, and
-Python top-k full token ids. Validate the fixture container through Rust with:
+This writes real SPD inference rows, raw hidden-state tap rows, position ids,
+base final-norm weight, Python intermediate states, Python logits, Python top-k
+draft indices, and Python top-k full token ids. Validate the fixture container
+through Rust with:
 
 ```bash
 SKIPPY_SPD_PARITY_FIXTURE=/tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/<run-id>/train/spd-parity-fixture.safetensors \
@@ -258,9 +261,24 @@ SKIPPY_SPD_PARITY_FIXTURE=/tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/<r
   cargo test --release -p skippy-runtime qwen3_fixture_forward_matches_python_topk_when_env_is_set
 ```
 
-Recorded parity result: Rust matched Python top-k draft indices
-`[135, 23, 17, 21, 16, 22, 24, 2598]`, which map to full token ids
-`[220, 23, 17, 21, 16, 22, 24, 2972]`.
+Or run the combined bench report:
+
+```bash
+cargo run -p skippy-bench -- spd-fixture-parity \
+  --manifest /tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/<run-id>/train/skippy-spd-head.json \
+  --fixture /tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/<run-id>/train/spd-parity-fixture.safetensors \
+  --top-k 8
+```
+
+Recorded parity result from the regenerated `Hello` fixture:
+
+- tap input reconstruction max absolute diff: `7.62939453125e-6`
+- Rust matched Python top-k draft indices
+  `[7728, 15014, 38999, 10036, 11235, 13293, 15953, 0]`
+- full token ids
+  `[9419, 21251, 109266, 12675, 14556, 18103, 23066, 0]`
+- spec-query max absolute diff: `0.03125`
+- final-hidden max absolute diff: `0.125`
 
 ## Validate Hidden Tap Compatibility
 
@@ -313,6 +331,8 @@ Safetensors parsing and BF16/F32/I64 payload reads live in
 `crates/skippy-runtime/src/spd/safetensors.rs`.
 The constrained Qwen fixture forward path lives in
 `crates/skippy-runtime/src/spd/qwen.rs`.
+The tap-row-to-`cur_in` projection bridge lives in
+`crates/skippy-runtime/src/spd/tap_input.rs`.
 
 ## Next Engineering Steps
 

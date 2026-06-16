@@ -5,6 +5,7 @@ mod distributed;
 mod local_single;
 mod local_split;
 mod model_identity;
+mod spd;
 mod support;
 mod token_lengths;
 
@@ -19,6 +20,7 @@ use crate::{
     local_split::{
         local_split_binary, local_split_chain_binary, local_split_compare, local_split_inprocess,
     },
+    spd::spd_fixture_parity,
     token_lengths::token_lengths,
 };
 
@@ -31,6 +33,7 @@ fn main() -> Result<()> {
         CommandKind::LocalSplitChainBinary(args) => local_split_chain_binary(args),
         CommandKind::ChatCorpus(args) => chat_corpus(args),
         CommandKind::TokenLengths(args) => token_lengths(args),
+        CommandKind::SpdFixtureParity(args) => spd_fixture_parity(args),
         CommandKind::FocusedRuntime(args) => focused_runtime(args),
         CommandKind::Run(args) => run_distributed(args),
     }

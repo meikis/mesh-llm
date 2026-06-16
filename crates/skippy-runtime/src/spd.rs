@@ -1,5 +1,6 @@
 mod qwen;
 mod safetensors;
+mod tap_input;
 mod tap_plan;
 
 use std::{
@@ -16,6 +17,10 @@ pub use qwen::{
     run_qwen3_fixture_parity,
 };
 pub use safetensors::{SpdSafetensorsFile, SpdSafetensorsIndex, SpdSafetensorsTensor};
+pub use tap_input::{
+    SpdTapInputFixtureParity, SpdTapInputFixtureRowParity, SpdTapInputProjection,
+    project_spd_tap_input_row, run_spd_tap_input_fixture_parity,
+};
 pub use tap_plan::{
     SpdHiddenStateRequirement, SpdHiddenStateSource, SpdHiddenTapPlan, SpdStageLayerRange,
     plan_hidden_state_taps,
@@ -765,6 +770,27 @@ mod tests {
             parity.diagnostics.final_hidden_max_abs_diff <= 0.125,
             "diagnostics: {:?}",
             parity.diagnostics
+        );
+    }
+
+    #[test]
+    fn tap_input_fixture_reconstructs_cur_in_when_env_is_set() {
+        let (Ok(manifest_path), Ok(fixture_path)) = (
+            std::env::var("SKIPPY_SPD_MANIFEST"),
+            std::env::var("SKIPPY_SPD_PARITY_FIXTURE"),
+        ) else {
+            return;
+        };
+        let fixture_file = SpdSafetensorsFile::open(PathBuf::from(&fixture_path)).unwrap();
+        if !fixture_file.index.tensors.contains_key("tap_row_0_concat") {
+            return;
+        }
+        let parity =
+            tap_input::run_spd_tap_input_fixture_parity(manifest_path, fixture_path).unwrap();
+        assert!(
+            parity.max_abs_diff <= 0.125,
+            "tap input parity: {:?}",
+            parity
         );
     }
 

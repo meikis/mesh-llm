@@ -24,6 +24,8 @@ pub enum CommandKind {
     ChatCorpus(ChatCorpusArgs),
     #[command(name = "token-lengths")]
     TokenLengths(TokenLengthsArgs),
+    #[command(name = "spd-fixture-parity")]
+    SpdFixtureParity(SpdFixtureParityArgs),
     #[command(name = "focused-runtime")]
     FocusedRuntime(FocusedRuntimeArgs),
     Run(RunArgs),
@@ -86,6 +88,18 @@ pub struct TokenLengthsArgs {
     pub output_tsv: PathBuf,
     #[arg(long)]
     pub summary_json: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+pub struct SpdFixtureParityArgs {
+    #[arg(long)]
+    pub manifest: PathBuf,
+    #[arg(long)]
+    pub fixture: PathBuf,
+    #[arg(long, default_value_t = 8)]
+    pub top_k: usize,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -427,6 +441,8 @@ pub struct LocalSplitChainBinaryArgs {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use clap::Parser;
 
     use super::{Cli, CommandKind, FocusedRuntimeScenario};
@@ -507,5 +523,31 @@ mod tests {
         assert_eq!(args.splits, vec![8, 10, 16, 20, 24, 31]);
         assert_eq!(args.layer_end, 32);
         assert_eq!(args.stage_bind_base_port, 19131);
+    }
+
+    #[test]
+    fn parses_spd_fixture_parity() {
+        let cli = Cli::try_parse_from([
+            "skippy-bench",
+            "spd-fixture-parity",
+            "--manifest",
+            "skippy-spd-head.json",
+            "--fixture",
+            "spd-parity-fixture.safetensors",
+            "--top-k",
+            "4",
+        ])
+        .unwrap();
+
+        let CommandKind::SpdFixtureParity(args) = cli.command else {
+            panic!("expected spd-fixture-parity subcommand");
+        };
+
+        assert_eq!(args.manifest, PathBuf::from("skippy-spd-head.json"));
+        assert_eq!(
+            args.fixture,
+            PathBuf::from("spd-parity-fixture.safetensors")
+        );
+        assert_eq!(args.top_k, 4);
     }
 }

@@ -124,8 +124,9 @@ head artifacts:
 `evals/spd/export_spd_head.py` exports the reference `.pt` checkpoint into
 `spd-head.safetensors` and updates the manifest with a `serving_checkpoint`
 section. Skippy can inspect the serving artifact and read tensor payloads. The
-constrained Rust Qwen fixture path can execute the head against recorded
-fixtures, but live Skippy hidden-state integration is not wired yet.
+constrained Rust Qwen fixture path can reconstruct SPD input rows from recorded
+hidden-state taps and execute the head against recorded fixtures, but live
+Skippy hidden-state integration is not wired yet.
 
 ### 5. Rust Hidden-Tap Planning
 
@@ -206,6 +207,29 @@ binary chain, activation width `2560`, first boundary payload `10240` bytes /
 `5120` f16 wire bytes, prompt token id `9419`, predicted token `11`. A
 `local-split-compare` run against the same GGUF and prompt matched the unsplit
 full-model predicted token `11`.
+
+The Rust SPD fixture path now validates the missing bridge between Skippy taps
+and the pretrained head input. `evals/spd/export_parity_fixture.py` records raw
+tap-row tensors (`tap_row_*_concat` plus `tap_row_*_hf_indices`) before Python
+applies `g0_proj` or `stage_projs.*`; `skippy-runtime` reconstructs the same
+`cur_in` from those rows. Recorded real-artifact command:
+
+```bash
+cargo run -p skippy-bench -- spd-fixture-parity \
+  --manifest /tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/<run-id>/train/skippy-spd-head.json \
+  --fixture /tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/<run-id>/train/spd-parity-fixture.safetensors \
+  --top-k 8
+```
+
+Recorded result for the regenerated `Hello` fixture:
+
+- tap input reconstruction max abs diff: `7.62939453125e-6`
+- Rust/Python draft indices:
+  `[7728,15014,38999,10036,11235,13293,15953,0]`
+- full token ids:
+  `[9419,21251,109266,12675,14556,18103,23066,0]`
+- spec-query max abs diff: `0.03125`
+- final-hidden max abs diff: `0.125`
 
 ## What Does Not Work Yet
 
@@ -373,6 +397,17 @@ python3 evals/spd/export_parity_fixture.py \
   --top-k 8
 ```
 
+The fixture includes raw hidden-state tap rows used to build SPD `cur_in`.
+Use `skippy-bench spd-fixture-parity` for one JSON report covering tap-row
+projection parity and Qwen SPD forward/top-k parity:
+
+```bash
+cargo run -p skippy-bench -- spd-fixture-parity \
+  --manifest /tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/<run-id>/train/skippy-spd-head.json \
+  --fixture /tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/<run-id>/train/spd-parity-fixture.safetensors \
+  --top-k 8
+```
+
 ### Simulate Split Latency From Trace
 
 ```bash
@@ -421,27 +456,44 @@ Tasks:
 
 1. Record hidden-state tap fixtures from Python reference execution. Fixture
    export is implemented in `evals/spd/export_parity_fixture.py`.
+   It now records raw tap-row tensors before Python applies `g0_proj` or
+   `stage_projs.*`.
 2. Implement the Qwen3.5-4B SPD head forward pass in Rust. Done for the
    recorded fixture path in `crates/skippy-runtime/src/spd/qwen.rs`.
 3. Compare Rust top-k draft candidates against Python top-k on the same hidden
    states. Done for the pretrained Qwen3.5-4B fixture.
 4. Add focused tests with small fixture tensors and opt-in real-artifact tests.
    Done in `skippy-runtime` tests.
+5. Reconstruct SPD `cur_in` from raw tap rows in Rust before running the head.
+   Done in `crates/skippy-runtime/src/spd/tap_input.rs` and exposed through
+   `skippy-bench spd-fixture-parity`.
 
 Exit criteria:
 
 - Rust top-k proposals match Python within tolerance on recorded fixtures.
 - No Skippy serving integration is required for this milestone.
 - Recorded real-artifact parity:
-  - Rust/Python draft indices: `[135, 23, 17, 21, 16, 22, 24, 2598]`
-  - Full token ids: `[220, 23, 17, 21, 16, 22, 24, 2972]`
+  - Tap input reconstruction max absolute diff: `7.62939453125e-6`
+  - Rust/Python draft indices:
+    `[7728, 15014, 38999, 10036, 11235, 13293, 15953, 0]`
+  - Full token ids:
+    `[9419, 21251, 109266, 12675, 14556, 18103, 23066, 0]`
   - Spec-query max absolute diff: `0.03125`
-  - Final-hidden max absolute diff: `0.0625`
+  - Final-hidden max absolute diff: `0.125`
 
 ```bash
 SKIPPY_SPD_MANIFEST=/tmp/.../train/skippy-spd-head.json \
 SKIPPY_SPD_PARITY_FIXTURE=/tmp/.../train/spd-parity-fixture.safetensors \
   cargo test --release -p skippy-runtime qwen3_fixture_forward_matches_python_topk_when_env_is_set
+```
+
+Or run the single bench report:
+
+```bash
+cargo run -p skippy-bench -- spd-fixture-parity \
+  --manifest /tmp/.../train/skippy-spd-head.json \
+  --fixture /tmp/.../train/spd-parity-fixture.safetensors \
+  --top-k 8
 ```
 
 ### Milestone 3: Skippy Hidden-State Taps
@@ -536,6 +588,7 @@ python3 -m py_compile evals/spd/hf_train_eval_qwen06.py evals/spd/simulate_laten
 cargo fmt --all -- --check
 cargo test -p skippy-runtime spd
 SKIPPY_SPD_MANIFEST=/tmp/.../train/skippy-spd-head.json SKIPPY_SPD_PARITY_FIXTURE=/tmp/.../train/spd-parity-fixture.safetensors cargo test --release -p skippy-runtime qwen3_fixture_forward_matches_python_topk_when_env_is_set
+cargo run -p skippy-bench -- spd-fixture-parity --manifest /tmp/.../train/skippy-spd-head.json --fixture /tmp/.../train/spd-parity-fixture.safetensors --top-k 8
 cargo clippy -p skippy-runtime --all-targets -- -D warnings
 ```
 

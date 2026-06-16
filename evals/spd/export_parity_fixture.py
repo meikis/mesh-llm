@@ -21,6 +21,7 @@ from typing import Any
 
 
 FIXTURE_SCHEMA = "skippy-spd-parity-fixture/v1"
+TAP_INPUT_SCHEMA = "skippy-spd-tap-input-fixture/v1"
 
 
 def parse_args() -> argparse.Namespace:
@@ -110,6 +111,8 @@ def main() -> None:
         "num_spec_layers": str(int(pipeline.num_spec_layers)),
         "prompt_json": json.dumps(args.prompt),
         "row_kinds_json": json.dumps(fixture.row_kinds),
+        "tap_input_schema": TAP_INPUT_SCHEMA,
+        "tap_row_count": str(fixture.tap_row_count),
         "use_deepest": str(bool(getattr(pipeline, "trained_with_use_deepest", False))).lower(),
     }
     save_file(fixture.tensors, out_path, metadata=metadata)
@@ -137,9 +140,15 @@ def patch_reference_checkout(reference_dir: Path) -> None:
 
 
 class Fixture:
-    def __init__(self, tensors: dict[str, Any], row_kinds: list[str]) -> None:
+    def __init__(
+        self,
+        tensors: dict[str, Any],
+        row_kinds: list[str],
+        tap_row_count: int,
+    ) -> None:
         self.tensors = tensors
         self.row_kinds = row_kinds
+        self.tap_row_count = tap_row_count
 
 
 def build_fixture(
@@ -180,14 +189,18 @@ def build_fixture(
         row_positions: list[int] = []
         row_i_stages: list[int] = []
         row_kinds: list[str] = []
+        tap_inputs: list[Any] = []
+        tap_hf_indices: list[list[int]] = []
 
         for pos in range(oldest_needed, newest_pos + 1):
             i_nominal_pipe = newest_pos - pos
             if i_nominal_pipe == 0:
                 token = input_ids[:, pos : pos + 1]
-                row = pipeline._build_inference_g0_row_from_hs(pipeline.embed_tokens(token))  # noqa: SLF001
+                tap_input = pipeline.embed_tokens(token)
+                row = pipeline._build_inference_g0_row_from_hs(tap_input)  # noqa: SLF001
                 i_stages = 0
                 row_kind = "g0"
+                hf_indices = [0]
             else:
                 snap = completed_snaps[pos]
                 i_stages = pipeline._choose_inference_i_stages_for_snap(  # noqa: SLF001
@@ -196,12 +209,19 @@ def build_fixture(
                     use_deepest,
                     search_hi=None,
                 )
+                block = int(pipeline.num_stages) - int(i_stages)
+                hf_indices = [
+                    int(idx) for idx in pipeline.shallow_hidden_layer_indices[block]
+                ]
+                tap_input = torch.cat([snap[int(idx)] for idx in hf_indices], dim=-1)
                 row = pipeline._build_inference_row_from_snap(snap, i_stages)  # noqa: SLF001
                 row_kind = f"g{i_stages}"
             rows.append(row)
             row_positions.append(pos)
             row_i_stages.append(int(i_stages))
             row_kinds.append(row_kind)
+            tap_inputs.append(tap_input)
+            tap_hf_indices.append(hf_indices)
 
         cur_in = torch.cat(rows, dim=1)
         position_ids = torch.tensor([row_positions], device=device, dtype=torch.long)
@@ -263,7 +283,11 @@ def build_fixture(
         tensors[f"python_layer_{idx}_query"] = value
     for idx, value in enumerate(layer_inputs):
         tensors[f"python_layer_{idx}_full_in"] = value
-    return Fixture(tensors=tensors, row_kinds=row_kinds)
+    for idx, value in enumerate(tap_inputs):
+        tensors[f"tap_row_{idx}_concat"] = value.detach().cpu().contiguous()
+    for idx, indices in enumerate(tap_hf_indices):
+        tensors[f"tap_row_{idx}_hf_indices"] = torch.tensor(indices, dtype=torch.long)
+    return Fixture(tensors=tensors, row_kinds=row_kinds, tap_row_count=len(tap_inputs))
 
 
 def resolve_newest_pos(seq_len: int, num_stages: int, newest_pos_arg: int) -> int:

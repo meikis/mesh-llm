@@ -53,6 +53,7 @@ skippy-bench local-split-binary --model-path model.gguf --model-id org/repo:Q4_K
 skippy-bench local-split-compare --model-path model.gguf --model-id org/repo:Q4_K_M
 skippy-bench local-split-chain-binary --model-path model.gguf --model-id org/repo:Q4_K_M
 skippy-bench local-split-chain-binary --model-path model.gguf --model-id org/repo:Q4_K_M --splits 8,10,16,20,24,31 --layer-end 32
+skippy-bench spd-fixture-parity --manifest skippy-spd-head.json --fixture spd-parity-fixture.safetensors
 skippy-bench chat-corpus --base-url http://127.0.0.1:9337/v1 --model org/repo:Q4_K_M --prompt-corpus target/bench-corpora/smoke/corpus.jsonl --max-tokens 64 --stream
 skippy-bench token-lengths --model-path model.gguf --prompt-corpus target/bench-corpora/long/corpus.jsonl --ctx-size 8192 --generation-limit 512 --output-tsv target/bench-corpora/long/prompt-lengths.tsv
 skippy-bench focused-runtime --schema-smoke --hosts host-a,host-b --splits 1 --layer-end 2
@@ -65,6 +66,12 @@ ABI backend names such as `MTL0` or `CPU0`.
 and launches one binary stage for each range after the in-process first stage.
 Use `--stage-bind-base-port` when multiple local chain runs need separate
 listener ranges.
+
+`spd-fixture-parity` validates a converted pretrained SPD head against a
+Python-exported fixture. It reconstructs `cur_in` from raw hidden-state tap rows
+using `g0_proj` and `stage_projs.*`, then runs the Rust Qwen SPD forward path
+and reports Python/Rust top-k and max-diff diagnostics. Use it before wiring a
+head into live staged serving.
 
 The old standalone `kv-stage-integration` and `kv-hit-regression` commands are
 intentionally absent. Mesh does not carry the legacy standalone cache sidecar

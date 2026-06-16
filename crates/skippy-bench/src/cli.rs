@@ -319,6 +319,8 @@ pub struct LocalSplitInprocessArgs {
     pub ctx_size: u32,
     #[arg(long, default_value_t = 0)]
     pub n_gpu_layers: i32,
+    #[arg(long)]
+    pub selected_backend_device: Option<String>,
     #[arg(long, default_value = "Hello")]
     pub prompt: String,
 }
@@ -339,6 +341,8 @@ pub struct LocalSplitBinaryArgs {
     pub ctx_size: u32,
     #[arg(long, default_value_t = 0)]
     pub n_gpu_layers: i32,
+    #[arg(long)]
+    pub selected_backend_device: Option<String>,
     #[arg(long, default_value = "Hello")]
     pub prompt: String,
     #[arg(long, default_value = "127.0.0.1:19011")]
@@ -367,6 +371,8 @@ pub struct LocalSplitCompareArgs {
     pub ctx_size: u32,
     #[arg(long, default_value_t = 0)]
     pub n_gpu_layers: i32,
+    #[arg(long)]
+    pub selected_backend_device: Option<String>,
     #[arg(long, default_value = "Hello")]
     pub prompt: String,
     #[arg(long, default_value = "127.0.0.1:19021")]
@@ -399,6 +405,8 @@ pub struct LocalSplitChainBinaryArgs {
     pub ctx_size: u32,
     #[arg(long, default_value_t = 0)]
     pub n_gpu_layers: i32,
+    #[arg(long)]
+    pub selected_backend_device: Option<String>,
     #[arg(long, default_value = "Hello")]
     pub prompt: String,
     #[arg(long, default_value = "127.0.0.1:19031")]

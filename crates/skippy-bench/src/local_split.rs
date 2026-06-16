@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use model_artifact::ModelIdentity;
-use serde_json::json;
+use serde_json::{Value, json};
 use skippy_protocol::binary::{
     StageStateHeader, StageWireMessage, WireMessageKind, WireReplyKind, recv_reply,
     write_stage_message,
@@ -65,6 +65,7 @@ pub fn local_split_binary(args: LocalSplitBinaryArgs) -> Result<()> {
         layer_end: args.layer_end,
         ctx_size: args.ctx_size,
         n_gpu_layers: args.n_gpu_layers,
+        selected_backend_device: args.selected_backend_device,
         prompt: args.prompt,
         stage1_bind_addr: args.stage1_bind_addr,
         activation_wire_dtype: args.activation_wire_dtype,
@@ -101,6 +102,7 @@ pub fn local_split_compare(args: LocalSplitCompareArgs) -> Result<()> {
         args.layer_end,
         args.ctx_size,
         args.n_gpu_layers,
+        args.selected_backend_device.clone(),
         &args.prompt,
     )?;
     let split = run_binary_split(BinarySplitConfig {
@@ -111,6 +113,7 @@ pub fn local_split_compare(args: LocalSplitCompareArgs) -> Result<()> {
         layer_end: args.layer_end,
         ctx_size: args.ctx_size,
         n_gpu_layers: args.n_gpu_layers,
+        selected_backend_device: args.selected_backend_device,
         prompt: args.prompt,
         stage1_bind_addr: args.stage1_bind_addr,
         activation_wire_dtype: args.activation_wire_dtype,
@@ -202,6 +205,7 @@ fn run_full_model_decode(
     layer_end: u32,
     ctx_size: u32,
     n_gpu_layers: i32,
+    selected_backend_device: Option<String>,
     prompt: &str,
 ) -> Result<FullModelResult> {
     let config = RuntimeConfig {
@@ -215,7 +219,7 @@ fn run_full_model_decode(
         n_threads: None,
         n_threads_batch: None,
         n_gpu_layers,
-        selected_backend_device: None,
+        selected_backend_device,
         cache_type_k: skippy_runtime::GGML_TYPE_F16,
         cache_type_v: skippy_runtime::GGML_TYPE_F16,
         flash_attn_type: skippy_runtime::FlashAttentionType::Auto,
@@ -251,6 +255,7 @@ struct BinarySplitConfig {
     layer_end: u32,
     ctx_size: u32,
     n_gpu_layers: i32,
+    selected_backend_device: Option<String>,
     prompt: String,
     stage1_bind_addr: std::net::SocketAddr,
     activation_wire_dtype: String,
@@ -282,7 +287,7 @@ fn run_binary_split(args: BinarySplitConfig) -> Result<BinarySplitResult> {
         n_threads: None,
         n_threads_batch: None,
         n_gpu_layers: args.n_gpu_layers,
-        selected_backend_device: None,
+        selected_backend_device: args.selected_backend_device.clone(),
         cache_type_k: skippy_runtime::GGML_TYPE_F16,
         cache_type_v: skippy_runtime::GGML_TYPE_F16,
         flash_attn_type: skippy_runtime::FlashAttentionType::Auto,
@@ -324,6 +329,7 @@ fn run_binary_split(args: BinarySplitConfig) -> Result<BinarySplitResult> {
         "layer_end": args.layer_end,
         "ctx_size": args.ctx_size,
         "n_gpu_layers": args.n_gpu_layers,
+        "selected_device": selected_device_config(&args.selected_backend_device),
         "filter_tensors_on_load": true,
         "load_mode": "runtime-slice",
         "bind_addr": args.stage1_bind_addr,
@@ -469,7 +475,7 @@ fn run_binary_chain(args: LocalSplitChainBinaryArgs) -> Result<BinaryChainResult
         n_threads: None,
         n_threads_batch: None,
         n_gpu_layers: args.n_gpu_layers,
-        selected_backend_device: None,
+        selected_backend_device: args.selected_backend_device.clone(),
         cache_type_k: skippy_runtime::GGML_TYPE_F16,
         cache_type_v: skippy_runtime::GGML_TYPE_F16,
         flash_attn_type: skippy_runtime::FlashAttentionType::Auto,
@@ -512,6 +518,7 @@ fn run_binary_chain(args: LocalSplitChainBinaryArgs) -> Result<BinaryChainResult
         "layer_end": args.layer_end,
         "ctx_size": args.ctx_size,
         "n_gpu_layers": args.n_gpu_layers,
+        "selected_device": selected_device_config(&args.selected_backend_device),
         "filter_tensors_on_load": true,
         "load_mode": "runtime-slice",
         "bind_addr": args.stage2_bind_addr,
@@ -533,6 +540,7 @@ fn run_binary_chain(args: LocalSplitChainBinaryArgs) -> Result<BinaryChainResult
         "layer_end": args.split_layer_2,
         "ctx_size": args.ctx_size,
         "n_gpu_layers": args.n_gpu_layers,
+        "selected_device": selected_device_config(&args.selected_backend_device),
         "filter_tensors_on_load": true,
         "load_mode": "runtime-slice",
         "bind_addr": args.stage1_bind_addr,
@@ -811,6 +819,12 @@ fn configure_child_logs(command: &mut Command, child_logs: bool) {
     }
 }
 
+fn selected_device_config(selected_backend_device: &Option<String>) -> Option<Value> {
+    selected_backend_device
+        .as_ref()
+        .map(|backend_device| json!({ "backend_device": backend_device }))
+}
+
 pub fn local_split_inprocess(args: LocalSplitInprocessArgs) -> Result<()> {
     if args.split_layer == 0 || args.split_layer >= args.layer_end {
         bail!("split_layer must be greater than zero and less than layer_end");
@@ -827,7 +841,7 @@ pub fn local_split_inprocess(args: LocalSplitInprocessArgs) -> Result<()> {
         n_threads: None,
         n_threads_batch: None,
         n_gpu_layers: args.n_gpu_layers,
-        selected_backend_device: None,
+        selected_backend_device: args.selected_backend_device.clone(),
         cache_type_k: skippy_runtime::GGML_TYPE_F16,
         cache_type_v: skippy_runtime::GGML_TYPE_F16,
         flash_attn_type: skippy_runtime::FlashAttentionType::Auto,
@@ -848,7 +862,7 @@ pub fn local_split_inprocess(args: LocalSplitInprocessArgs) -> Result<()> {
         n_threads: None,
         n_threads_batch: None,
         n_gpu_layers: args.n_gpu_layers,
-        selected_backend_device: None,
+        selected_backend_device: args.selected_backend_device.clone(),
         cache_type_k: skippy_runtime::GGML_TYPE_F16,
         cache_type_v: skippy_runtime::GGML_TYPE_F16,
         flash_attn_type: skippy_runtime::FlashAttentionType::Auto,

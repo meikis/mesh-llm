@@ -159,10 +159,13 @@ proof that the pretrained head can drive live Skippy proposals.
 `skippy-model-package` now supports explicit split boundaries for this proof:
 
 ```bash
+hf download unsloth/Qwen3.5-4B-GGUF Qwen3.5-4B-Q4_K_M.gguf \
+  --local-dir .artifacts/spd/qwen35-4b-gguf/
 skippy-model-package plan model.gguf --splits 8,10,16,20,24,31
 skippy-model-package write-stages model.gguf \
   --splits 8,10,16,20,24,31 \
   --out-dir /tmp/qwen35-spd-tap-slices/
+skippy-model-package validate model.gguf /tmp/qwen35-spd-tap-slices/stage-*.gguf
 skippy-model-package preflight model-package/ --splits 8,10,16,20,24,31
 ```
 
@@ -172,10 +175,27 @@ SPD live in Skippy by itself; it removes the artifact-generation blocker for a
 tap-aligned local proof that can use normal stage-boundary activation frames
 before adding a production hidden-tap ABI.
 
+Recorded local artifact result with
+`unsloth/Qwen3.5-4B-GGUF:Qwen3.5-4B-Q4_K_M.gguf`:
+
+- source size: `2.6G`
+- source sha256: `00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4`
+- plan: `32` layers, `7` tap-aligned stages
+- validation: all `426` owned tensors present exactly once across the seven
+  slices; no missing or duplicate owned tensors
+
+The current local live-chain smoke gets as far as loading and tensor-filtering
+the Qwen3.5 GGUF, then fails during llama.cpp context creation because backend
+auto-selection initializes Metal with an empty backend device and cannot create
+a command queue on this machine. That is a Skippy backend/device-selection
+blocker, not an SPD head or package artifact blocker.
+
 ## What Does Not Work Yet
 
 - Skippy does not yet expose live hidden-state taps for SPD.
 - No live Skippy request has used trained SPD proposals.
+- Local live Skippy smoke for Qwen3.5-4B is blocked on backend selection on this
+  machine; the real tap-aligned stage artifacts validate structurally.
 - No larger-than-4B head has been trained by us yet.
 
 ## Correctness Contract

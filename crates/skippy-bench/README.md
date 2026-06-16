@@ -57,6 +57,10 @@ skippy-bench token-lengths --model-path model.gguf --prompt-corpus target/bench-
 skippy-bench focused-runtime --schema-smoke --hosts host-a,host-b --splits 1 --layer-end 2
 ```
 
+Local split smoke commands accept `--selected-backend-device` for diagnostic
+runs that need to bypass llama.cpp auto device ordering. Values are the staged
+ABI backend names such as `MTL0` or `CPU0`.
+
 The old standalone `kv-stage-integration` and `kv-hit-regression` commands are
 intentionally absent. Mesh does not carry the legacy standalone cache sidecar
 path; exact cache work should be reintroduced through the embedded runtime and

@@ -177,15 +177,22 @@ For the pretrained `Qwen/Qwen3.5-4B` S4/L4 head, the tap-aligned Skippy proof
 split is:
 
 ```bash
-skippy-model-package plan model.gguf --splits 8,10,16,20,24,31
-skippy-model-package write-stages model.gguf \
+hf download unsloth/Qwen3.5-4B-GGUF Qwen3.5-4B-Q4_K_M.gguf \
+  --local-dir .artifacts/spd/qwen35-4b-gguf/
+skippy-model-package plan .artifacts/spd/qwen35-4b-gguf/Qwen3.5-4B-Q4_K_M.gguf \
+  --splits 8,10,16,20,24,31
+skippy-model-package write-stages .artifacts/spd/qwen35-4b-gguf/Qwen3.5-4B-Q4_K_M.gguf \
   --splits 8,10,16,20,24,31 \
   --out-dir /tmp/qwen35-spd-tap-slices/
+skippy-model-package validate .artifacts/spd/qwen35-4b-gguf/Qwen3.5-4B-Q4_K_M.gguf \
+  /tmp/qwen35-spd-tap-slices/stage-*.gguf
 ```
 
 Those split boundaries produce ranges
 `0..8, 8..10, 10..16, 16..20, 20..24, 24..31, 31..32`, exposing every hidden
 state required by the pretrained head as a stage boundary for the local proof.
+The recorded local artifact validation used `Qwen3.5-4B-Q4_K_M.gguf` and found
+all `426` owned tensors exactly once across the seven slices.
 
 Validate an exported local head through Rust with:
 

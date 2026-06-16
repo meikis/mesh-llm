@@ -4,6 +4,7 @@ llama.cpp-rpc-b2b/
 .deps/
 target/
 .build/
+.artifacts/
 llama.cpp.bak/
 private-note.txt
 mesh-bundle.tar.gz

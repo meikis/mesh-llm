@@ -11,7 +11,7 @@ impl StageOpenAiBackend {
         let result = (|| {
             let mut prompt_prefill_sample = None;
             let mut chat_sampling_configured = false;
-            if request.prompt_token_ids.len() > 1 && self.kv.is_none() {
+            if request.max_tokens > 0 && request.prompt_token_ids.len() > 1 && self.kv.is_none() {
                 if let Some(metadata) = request.chat_sampling_metadata {
                     let mut runtime = self
                         .runtime

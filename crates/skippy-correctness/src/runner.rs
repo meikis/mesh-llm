@@ -31,7 +31,6 @@ use crate::{
         ChainArgs, DtypeMatrixArgs, FlashAttentionArg, NativeMtpArgs, RuntimeArgs, ServerArgs,
         SingleStepArgs, SplitScanArgs, StageLoadMode, StateHandoffArgs, StatePayloadKind,
     },
-    direct_return::CorrectnessDirectReturnServer,
     report::{
         BaselineReport, BoundaryReport, ChainReport, ChainStageReport, DtypeMatrixReport,
         NativeMtpN1VerificationReport, NativeMtpSidebandReport, PackagePartReport,
@@ -786,6 +785,13 @@ fn binary_decode_message(args: BinaryDecodeMessageArgs<'_>) -> Result<StageWireM
     })
 }
 
+fn ensure_reply_kind(reply: &StageReply, expected: WireReplyKind) -> Result<()> {
+    if reply.kind != expected {
+        bail!("expected {expected:?} reply, got {:?}", reply.kind);
+    }
+    Ok(())
+}
+
 fn run_binary_split(args: BinarySplitConfig) -> Result<BinarySplitResult> {
     if args.split_layer == 0 || args.split_layer >= args.layer_end {
         bail!("split_layer must be greater than zero and less than layer_end");
@@ -861,7 +867,6 @@ fn run_binary_split(args: BinarySplitConfig) -> Result<BinarySplitResult> {
     }
     let activation_width = activation_width(&boundary)?;
 
-    let direct_returns = CorrectnessDirectReturnServer::start("127.0.0.1:0")?;
     let run_id = generate_run_id();
     let model_id = args.model_identity.model_id.clone();
     let config_path = temp_config_path_for(&run_id, "stage-1");
@@ -891,7 +896,7 @@ fn run_binary_split(args: BinarySplitConfig) -> Result<BinarySplitResult> {
         "upstream": {
             "stage_id": "stage-0",
             "stage_index": 0,
-            "endpoint": format!("tcp://{}", direct_returns.endpoint())
+            "endpoint": "driver"
         },
         "downstream": null
     });
@@ -902,7 +907,7 @@ fn run_binary_split(args: BinarySplitConfig) -> Result<BinarySplitResult> {
             CorrectnessTopologyStage {
                 stage_id: "stage-0",
                 stage_index: 0,
-                endpoint: format!("tcp://{}", direct_returns.endpoint()),
+                endpoint: "driver".to_string(),
                 layer_start: 0,
                 layer_end: args.split_layer,
                 load_mode: protocol_load_mode(args.stage_load_mode),
@@ -947,7 +952,6 @@ fn run_binary_split(args: BinarySplitConfig) -> Result<BinarySplitResult> {
         .context("stage 1 binary server did not become ready")?;
     let request_id = 1;
     let session_id = 1;
-    let direct_return = direct_returns.register(request_id, session_id)?;
     send_generation_config(&mut stream, wire_dtype, request_id, session_id, 1)
         .context("send binary generation config")?;
     let message = binary_decode_message(BinaryDecodeMessageArgs {
@@ -961,9 +965,8 @@ fn run_binary_split(args: BinarySplitConfig) -> Result<BinarySplitResult> {
         session_id,
     })?;
     write_stage_message(&mut stream, &message, wire_dtype).context("send binary decode")?;
-    let reply = direct_return
-        .recv_expected(WireReplyKind::PredictedToken)
-        .context("receive direct binary reply")?;
+    let reply = recv_reply(&mut stream).context("receive binary prediction reply")?;
+    ensure_reply_kind(&reply, WireReplyKind::PredictedToken)?;
     let native_mtp = native_mtp_sideband_report(&reply);
     let (second_predicted_token, native_mtp_verification_compute_us) =
         if args.native_mtp_verification {
@@ -983,9 +986,9 @@ fn run_binary_split(args: BinarySplitConfig) -> Result<BinarySplitResult> {
             })?;
             write_stage_message(&mut stream, &second_message, wire_dtype)
                 .context("send second binary decode")?;
-            let second_reply = direct_return
-                .recv_expected(WireReplyKind::PredictedToken)
-                .context("receive second direct binary reply")?;
+            let second_reply =
+                recv_reply(&mut stream).context("receive second binary prediction reply")?;
+            ensure_reply_kind(&second_reply, WireReplyKind::PredictedToken)?;
             (
                 Some(second_reply.predicted),
                 Some(elapsed_us(verification_timer)),
@@ -1108,7 +1111,6 @@ fn run_binary_chain(args: BinaryChainConfig) -> Result<BinaryChainResult> {
     }
     let activation_width = activation_width(&boundary)?;
 
-    let direct_returns = CorrectnessDirectReturnServer::start("127.0.0.1:0")?;
     let run_id = generate_run_id();
     let model_id = args.model_identity.model_id.clone();
     let stage1_config_path = temp_config_path_for(&run_id, "stage-1");
@@ -1168,7 +1170,7 @@ fn run_binary_chain(args: BinaryChainConfig) -> Result<BinaryChainResult> {
         "upstream": {
             "stage_id": "stage-0",
             "stage_index": 0,
-            "endpoint": format!("tcp://{}", direct_returns.endpoint())
+            "endpoint": "driver"
         },
         "downstream": {
             "stage_id": "stage-2",
@@ -1183,7 +1185,7 @@ fn run_binary_chain(args: BinaryChainConfig) -> Result<BinaryChainResult> {
             CorrectnessTopologyStage {
                 stage_id: "stage-0",
                 stage_index: 0,
-                endpoint: format!("tcp://{}", direct_returns.endpoint()),
+                endpoint: "driver".to_string(),
                 layer_start: 0,
                 layer_end: args.split_layer_1,
                 load_mode: protocol_load_mode(args.stage_load_mode),
@@ -1269,7 +1271,6 @@ fn run_binary_chain(args: BinaryChainConfig) -> Result<BinaryChainResult> {
         .context("stage 1 binary server did not become ready")?;
     let request_id = 2;
     let session_id = 2;
-    let direct_return = direct_returns.register(request_id, session_id)?;
     send_generation_config(&mut stream, wire_dtype, request_id, session_id, 1)
         .context("send binary chain generation config")?;
     let message = binary_decode_message(BinaryDecodeMessageArgs {
@@ -1283,9 +1284,8 @@ fn run_binary_chain(args: BinaryChainConfig) -> Result<BinaryChainResult> {
         session_id,
     })?;
     write_stage_message(&mut stream, &message, wire_dtype).context("send binary chain decode")?;
-    let reply = direct_return
-        .recv_expected(WireReplyKind::PredictedToken)
-        .context("receive direct binary chain reply")?;
+    let reply = recv_reply(&mut stream).context("receive binary chain prediction reply")?;
+    ensure_reply_kind(&reply, WireReplyKind::PredictedToken)?;
     let native_mtp = native_mtp_sideband_report(&reply);
     let (second_predicted_token, native_mtp_verification_compute_us) =
         if args.native_mtp_verification {
@@ -1305,9 +1305,9 @@ fn run_binary_chain(args: BinaryChainConfig) -> Result<BinaryChainResult> {
             })?;
             write_stage_message(&mut stream, &second_message, wire_dtype)
                 .context("send second binary chain decode")?;
-            let second_reply = direct_return
-                .recv_expected(WireReplyKind::PredictedToken)
-                .context("receive second direct binary chain reply")?;
+            let second_reply =
+                recv_reply(&mut stream).context("receive second binary chain prediction reply")?;
+            ensure_reply_kind(&second_reply, WireReplyKind::PredictedToken)?;
             (
                 Some(second_reply.predicted),
                 Some(elapsed_us(verification_timer)),

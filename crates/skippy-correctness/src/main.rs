@@ -1,5 +1,4 @@
 mod cli;
-mod direct_return;
 mod native_mtp_openai;
 mod report;
 mod runner;

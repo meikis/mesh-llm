@@ -90,7 +90,7 @@ hf jobs uv run \
 Current Jianyang reference wrapper:
 
 ```text
-/Users/jdumay/code/lab-experiments/jianyang/hf-jobs/glm51_quant_gguf.py
+<lab-experiments>/jianyang/hf-jobs/glm51_quant_gguf.py
 ```
 
 Use it as the behavior reference for other models, but parameterize model names,

@@ -1,4 +1,5 @@
 use super::*;
+use skippy_runtime::RuntimeActivationDType;
 
 fn combine_activation_frames(frames: &[ActivationFrame]) -> OpenAiResult<ActivationFrame> {
     let Some(first) = frames.first() else {
@@ -62,15 +63,14 @@ impl ActivationFrameComparison {
             }
         }
 
-        let row_bytes = usize::try_from(activation_width)
-            .ok()
-            .and_then(|width| width.checked_mul(std::mem::size_of::<f32>()));
+        let value_metrics =
+            activation_value_metrics(batched.desc.dtype, &batched.payload, &serial.payload);
+        let row_bytes = activation_row_bytes(batched.desc.dtype, activation_width);
         let first_diff_row = first_diff_byte
             .zip(row_bytes)
             .and_then(|(byte, bytes)| (bytes > 0).then_some(byte / bytes));
-        let (f32_compared, f32_max_abs_diff, f32_mean_abs_diff) =
-            compare_activation_f32_payloads(&batched.payload, &serial.payload);
         let row_metrics = row_activation_metrics(
+            batched.desc.dtype,
             &batched.payload,
             &serial.payload,
             row_bytes,
@@ -85,9 +85,9 @@ impl ActivationFrameComparison {
             byte_diff_count,
             first_diff_byte,
             first_diff_row,
-            f32_compared,
-            f32_max_abs_diff,
-            f32_mean_abs_diff,
+            f32_compared: value_metrics.f32_compared,
+            f32_max_abs_diff: value_metrics.f32_max_abs_diff,
+            f32_mean_abs_diff: value_metrics.f32_mean_abs_diff,
             row_byte_diff_counts: row_metrics
                 .iter()
                 .map(|metrics| metrics.byte_diff_count)
@@ -185,6 +185,7 @@ struct ActivationRowMetrics {
 }
 
 fn row_activation_metrics(
+    dtype: RuntimeActivationDType,
     batched: &[u8],
     serial: &[u8],
     row_bytes: Option<usize>,
@@ -204,19 +205,54 @@ fn row_activation_metrics(
                 .zip(&serial[row_start..row_end])
                 .filter(|(left, right)| left != right)
                 .count();
-            let (f32_compared, f32_max_abs_diff, f32_mean_abs_diff) =
-                compare_activation_f32_payloads(
-                    &batched[row_start..row_end],
-                    &serial[row_start..row_end],
-                );
+            let value_metrics = activation_value_metrics(
+                dtype,
+                &batched[row_start..row_end],
+                &serial[row_start..row_end],
+            );
             ActivationRowMetrics {
                 byte_diff_count,
-                f32_compared,
-                f32_max_abs_diff,
-                f32_mean_abs_diff,
+                f32_compared: value_metrics.f32_compared,
+                f32_max_abs_diff: value_metrics.f32_max_abs_diff,
+                f32_mean_abs_diff: value_metrics.f32_mean_abs_diff,
             }
         })
         .collect()
+}
+
+#[derive(Default)]
+struct ActivationValueMetrics {
+    f32_compared: usize,
+    f32_max_abs_diff: f32,
+    f32_mean_abs_diff: f64,
+}
+
+fn activation_row_bytes(dtype: RuntimeActivationDType, activation_width: i32) -> Option<usize> {
+    let element_bytes = match dtype {
+        RuntimeActivationDType::F32 => std::mem::size_of::<f32>(),
+        RuntimeActivationDType::F16 => std::mem::size_of::<u16>(),
+        _ => return None,
+    };
+    usize::try_from(activation_width)
+        .ok()
+        .and_then(|width| width.checked_mul(element_bytes))
+}
+
+fn activation_value_metrics(
+    dtype: RuntimeActivationDType,
+    batched: &[u8],
+    serial: &[u8],
+) -> ActivationValueMetrics {
+    if dtype != RuntimeActivationDType::F32 {
+        return ActivationValueMetrics::default();
+    }
+    let (f32_compared, f32_max_abs_diff, f32_mean_abs_diff) =
+        compare_activation_f32_payloads(batched, serial);
+    ActivationValueMetrics {
+        f32_compared,
+        f32_max_abs_diff,
+        f32_mean_abs_diff,
+    }
 }
 
 fn compare_activation_f32_payloads(batched: &[u8], serial: &[u8]) -> (usize, f32, f64) {

@@ -185,7 +185,7 @@ index 7d909a9e..04c0afb4 100644
      if (out_token_count != nullptr) {
          *out_token_count = 0;
      }
-@@ -3843,7 +3916,40 @@ enum skippy_status skippy_verify_tokens_frame(
+@@ -3843,7 +3916,31 @@ enum skippy_status skippy_verify_tokens_frame(
      if (session->stage_model->config.include_output) {
          const int32_t n_tokens = static_cast<int32_t>(token_count);
          for (int32_t i = 0; i < n_tokens; ++i) {
@@ -208,20 +208,11 @@ index 7d909a9e..04c0afb4 100644
 +                        std::max<int64_t>(mtp_draft.proposal_compute_us, 0),
 +                        std::numeric_limits<llama_token>::max()));
 +                *out_token_count = token_count + 2;
-+                if (output_token_capacity >= token_count + 3) {
-+                    skippy_token_signal mtp_signal = {};
-+                    if (skippy_compute_token_signal_context(
-+                                session->stage_model->model,
-+                                session->stage_model->mtp_ctx,
-+                                -1,
-+                                &mtp_signal)) {
-+                        const int64_t margin_milli = static_cast<int64_t>(std::llround(
-+                                static_cast<double>(mtp_signal.margin) * 1000.0));
-+                        output_tokens[token_count + 2] = static_cast<llama_token>(std::min<int64_t>(
-+                                std::max<int64_t>(margin_milli, std::numeric_limits<llama_token>::min()),
-+                                std::numeric_limits<llama_token>::max()));
-+                        *out_token_count = token_count + 3;
-+                    }
++                if (skippy_mtp_decode_margin_enabled() && output_token_capacity >= token_count + 3) {
++                    output_tokens[token_count + 2] = static_cast<llama_token>(std::min<int64_t>(
++                            std::max<int64_t>(mtp_draft.margin_milli, std::numeric_limits<llama_token>::min()),
++                            std::numeric_limits<llama_token>::max()));
++                    *out_token_count = token_count + 3;
 +                }
 +            }
          }
@@ -229,4 +220,3 @@ index 7d909a9e..04c0afb4 100644
  
 -- 
 2.54.0 (Apple Git-156)
-

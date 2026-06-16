@@ -82,13 +82,17 @@ index f707f29d..52ee3d31 100644
      def write_tensor_data(self, tensor: np.ndarray[Any, Any], tensor_endianess: GGUFEndian | None = None) -> None:
          if self.state is not WriterState.TI_DATA and self.state is not WriterState.WEIGHTS:
              raise ValueError(f'Expected output file to contain tensor info or weights, got {self.state}')
-@@ -476,7 +486,35 @@ class GGUFWriter:
+@@ -476,7 +486,39 @@ class GGUFWriter:
          else:
              self.temp_file.seek(0)
  
 -            shutil.copyfileobj(self.temp_file, self.fout[0 if not self.small_first_shard else 1])
-+            if len(self.fout) == 1:
-+                shutil.copyfileobj(self.temp_file, self.fout[0 if not self.small_first_shard else 1])
++            data_fout = self.fout[1:] if self.small_first_shard else self.fout
++            if len(data_fout) != len(self.tensors):
++                raise ValueError(f'Expected {len(self.tensors)} data shards, got {len(data_fout)}')
++
++            if len(data_fout) == 1:
++                shutil.copyfileobj(self.temp_file, data_fout[0])
 +            else:
 +                shard_bar = None
 +                bar = None
@@ -97,12 +101,12 @@ index f707f29d..52ee3d31 100644
 +                    from tqdm import tqdm
 +
 +                    total_bytes = sum(ti.nbytes for t in self.tensors for ti in t.values())
-+                    shard_bar = tqdm(desc=f"Shard (0/{len(self.fout)})", total=None, unit="byte", unit_scale=True)
++                    shard_bar = tqdm(desc=f"Shard (0/{len(data_fout)})", total=None, unit="byte", unit_scale=True)
 +                    bar = tqdm(desc="Writing", total=total_bytes, unit="byte", unit_scale=True)
 +
-+                for i, (fout, tensors) in enumerate(zip(self.fout, self.tensors)):
++                for i, (fout, tensors) in enumerate(zip(data_fout, self.tensors)):
 +                    if shard_bar is not None:
-+                        shard_bar.set_description(f"Shard ({i + 1}/{len(self.fout)})")
++                        shard_bar.set_description(f"Shard ({i + 1}/{len(data_fout)})")
 +                        total = sum(ti.nbytes for ti in tensors.values())
 +                        shard_bar.reset(total=(total if total > 0 else None))
 +
@@ -707,4 +711,3 @@ index 4dcd0d96..20cff23f 100644
              llama_model_loader_set_stage_filter(filter);
 -- 
 2.54.0 (Apple Git-156)
-

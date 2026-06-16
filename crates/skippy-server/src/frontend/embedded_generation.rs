@@ -1737,7 +1737,12 @@ impl StageOpenAiBackend {
                 let stage0_timer = PhaseTimer::start();
                 let batch_outcome = self
                     .decode_frame_batcher
-                    .decode(&session_key, current, Some(request.sampling), None)
+                    .decode(
+                        &session_key,
+                        current,
+                        request.sampling.enabled.then_some(request.sampling),
+                        None,
+                    )
                     .map_err(openai_backend_error)?;
                 let token_runtime_lock_wait_ms = batch_outcome.runtime_lock_wait_ms;
                 let token_runtime_lock_hold_ms = batch_outcome.runtime_lock_hold_ms;

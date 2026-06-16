@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use skippy_protocol::{
     StageConfig,
     binary::{StageWireMessage, WireActivationDType, activation_state_flags_from_frame_flags},
@@ -76,23 +76,47 @@ fn encode_output_activation_payload(
     output: &ActivationFrame,
     activation_width: i32,
     state_flags: i32,
-) -> Result<Vec<u8>, std::io::Error> {
+) -> Result<Vec<u8>> {
     match (output.desc.dtype, wire_dtype) {
-        (RuntimeActivationDType::F32, _) => {
+        (RuntimeActivationDType::F32, _) => Ok(
             skippy_protocol::binary::encode_f32_activation_payload_with_state_flags(
                 wire_dtype,
                 incoming.token_count,
                 activation_width,
                 &output.payload,
                 state_flags,
-            )
+            )?,
+        ),
+        (RuntimeActivationDType::F16, WireActivationDType::F16) => {
+            validate_f16_passthrough_payload(incoming, output, activation_width, state_flags)?;
+            Ok(output.payload.clone())
         }
-        (RuntimeActivationDType::F16, WireActivationDType::F16) => Ok(output.payload.clone()),
-        (dtype, wire_dtype) => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("unsupported activation dtype conversion: {dtype:?} to {wire_dtype:?}"),
-        )),
+        (dtype, wire_dtype) => {
+            bail!("unsupported activation dtype conversion: {dtype:?} to {wire_dtype:?}")
+        }
     }
+}
+
+fn validate_f16_passthrough_payload(
+    incoming: &StageWireMessage,
+    output: &ActivationFrame,
+    activation_width: i32,
+    state_flags: i32,
+) -> Result<()> {
+    if output.payload.len() as u64 != output.desc.payload_bytes {
+        bail!("F16 activation payload length does not match frame descriptor");
+    }
+    let expected = skippy_protocol::binary::activation_wire_bytes_with_state_flags(
+        WireActivationDType::F16,
+        incoming.token_count,
+        activation_width,
+        state_flags,
+    )
+    .context("compute expected F16 activation payload size")?;
+    if output.payload.len() != expected {
+        bail!("F16 activation payload size mismatch");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -270,5 +294,27 @@ mod tests {
             forwarded.message.state.reserved,
             WireActivationDType::F16 as i32
         );
+    }
+
+    #[test]
+    fn forwarded_stage_message_rejects_bad_f16_passthrough_size() {
+        let mut incoming = incoming_message();
+        incoming.token_count = 2;
+        let mut output = f16_frame();
+        output.payload.pop();
+        output.desc.payload_bytes = output.payload.len() as u64;
+
+        let error = match forwarded_stage_message_timed(
+            &stage_config(),
+            &incoming,
+            &output,
+            WireActivationDType::F16,
+            2,
+        ) {
+            Ok(_) => panic!("expected bad F16 passthrough payload to fail"),
+            Err(error) => error,
+        };
+
+        assert!(format!("{error:#}").contains("F16 activation payload size mismatch"));
     }
 }

@@ -285,8 +285,9 @@ Rust validation lives in `crates/skippy-runtime/src/spd.rs`.
    Python reference on the same taps.
 4. Wire live proposal generation into `skippy-server`.
 5. Verify every accepted token through the normal target stages.
-6. Benchmark against ordinary split serving with both injected hop latency and a
-   real multi-node topology.
+6. Use the Speedy benchmark for the final vanilla target versus verified
+   target+SPD sidecar comparison; keep latency simulation as supporting
+   analysis only.
 
 ## Next Research Steps
 

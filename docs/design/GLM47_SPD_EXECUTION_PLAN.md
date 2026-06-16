@@ -4,8 +4,9 @@ This plan combines the local GLM 4.7 checkpoint, the GLM llama.cpp/Skippy work
 on `feat/jianyang-glm-llama-patches`, the Skippy SPD proof handoff in PR #859,
 and the reference implementation at `yuyijiong/speculative_pipeline_decoding`.
 
-The goal is to train a GLM 4.7 SPD sidecar model and benchmark vanilla GLM
-decode against GLM decode with the verified SPD sidecar enabled.
+The goal is to train a GLM 4.7 SPD sidecar model and use the Speedy benchmark
+to compare vanilla GLM decode against GLM decode with the verified SPD sidecar
+enabled.
 
 ## Scope
 
@@ -56,15 +57,16 @@ integration gaps:
 GLM 4.7 Flash topology uses stage boundaries `15,31,47`, matching the 47-layer
 target model without relying on equal layer division.
 
-## Phase 3: Baseline
+## Phase 3: Speedy Baseline
 
 After the GLM code path exists, establish the vanilla GLM baseline:
 
-1. Run vanilla GLM decode from the local checkpoint or Skippy package.
-2. Freeze prompts, generation settings, tokenizer, temperature, max tokens, and
-   hardware.
-3. Record throughput, latency distribution, generated token counts, and output
-   text.
+1. Run the Speedy benchmark against vanilla GLM decode from the local checkpoint
+   or Skippy package.
+2. Freeze Speedy prompt set, generation settings, tokenizer, temperature, max
+   tokens, hardware, and runtime build.
+3. Record Speedy throughput, latency distribution, generated token counts, and
+   output text.
 4. If using Skippy, validate vanilla split correctness against non-split GLM.
 
 This baseline is the only performance comparison target for SPD.
@@ -103,13 +105,14 @@ equivalent accept length, theoretical gain, summaries, and raw traces.
 
 Compare exactly two paths:
 
-- vanilla GLM target decode
-- GLM target decode with verified SPD sidecar
+- Speedy benchmark on vanilla GLM target decode
+- Speedy benchmark on GLM target decode with verified SPD sidecar
 
 ## Phase 6: Serving Decision
 
-Only wire the trained SPD head into live Skippy if it is materially faster than
-vanilla GLM while preserving target-equivalent verified output.
+Only wire the trained SPD head into live Skippy if the Speedy benchmark shows
+it is materially faster than vanilla GLM while preserving target-equivalent
+verified output.
 
 Serving integration then needs:
 

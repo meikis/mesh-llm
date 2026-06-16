@@ -1488,6 +1488,30 @@ fn handle_binary_connection(
 
         let message_end_unix_nanos = now_unix_nanos() as u64;
         let message_elapsed_ms = elapsed_ms(message_started);
+        let verify_span_pre_compute_ms = if message.kind == WireMessageKind::VerifySpan {
+            nanos_delta_ms(message_start_unix_nanos, compute_start_unix_nanos)
+        } else {
+            0.0
+        };
+        let verify_span_post_compute_ms = if message.kind == WireMessageKind::VerifySpan {
+            nanos_delta_ms(compute_end_unix_nanos, message_end_unix_nanos)
+        } else {
+            0.0
+        };
+        let verify_span_pre_reply_ms = if message.kind == WireMessageKind::VerifySpan {
+            upstream_reply_start_unix_nanos
+                .map(|reply_start| nanos_delta_ms(compute_end_unix_nanos, reply_start))
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        let verify_span_after_reply_ms = if message.kind == WireMessageKind::VerifySpan {
+            upstream_reply_end_unix_nanos
+                .map(|reply_end| nanos_delta_ms(reply_end, message_end_unix_nanos))
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
         request_summary.observe(BinaryMessageObservation {
             config,
             message: &message,
@@ -1507,6 +1531,10 @@ fn handle_binary_connection(
             pending_prefill_replies_after: pending_prefill_replies,
             credit_wait_count,
             deferred_prefill_replies_drained,
+            verify_span_pre_compute_ms,
+            verify_span_post_compute_ms,
+            verify_span_pre_reply_ms,
+            verify_span_after_reply_ms,
         });
 
         if telemetry.is_debug_enabled() {
@@ -1969,6 +1997,10 @@ fn record_verify_span_timing(
 
 fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.0
+}
+
+fn nanos_delta_ms(start_unix_nanos: u64, end_unix_nanos: u64) -> f64 {
+    end_unix_nanos.saturating_sub(start_unix_nanos) as f64 / 1_000_000.0
 }
 
 fn elapsed_us(started: Instant) -> i64 {
@@ -3108,6 +3140,11 @@ struct BinaryRequestSummary {
     prefill_credit_wait_count: usize,
     prefill_deferred_replies_drained: usize,
     prefill_pending_replies_max: usize,
+    verify_span_count: usize,
+    verify_span_pre_compute_ms: f64,
+    verify_span_post_compute_ms: f64,
+    verify_span_pre_reply_ms: f64,
+    verify_span_after_reply_ms: f64,
     reply_stats: StageReplyStats,
 }
 
@@ -3130,6 +3167,10 @@ struct BinaryMessageObservation<'a> {
     pending_prefill_replies_after: usize,
     credit_wait_count: usize,
     deferred_prefill_replies_drained: usize,
+    verify_span_pre_compute_ms: f64,
+    verify_span_post_compute_ms: f64,
+    verify_span_pre_reply_ms: f64,
+    verify_span_after_reply_ms: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -3278,6 +3319,13 @@ impl BinaryRequestSummary {
             .prefill_pending_replies_max
             .max(observation.pending_prefill_replies_before)
             .max(observation.pending_prefill_replies_after);
+        if message.kind == WireMessageKind::VerifySpan {
+            self.verify_span_count += 1;
+            self.verify_span_pre_compute_ms += observation.verify_span_pre_compute_ms;
+            self.verify_span_post_compute_ms += observation.verify_span_post_compute_ms;
+            self.verify_span_pre_reply_ms += observation.verify_span_pre_reply_ms;
+            self.verify_span_after_reply_ms += observation.verify_span_after_reply_ms;
+        }
         self.reply_stats.merge(observation.reply_stats);
     }
 
@@ -3384,6 +3432,45 @@ impl BinaryRequestSummary {
             "skippy.prefill_pending_replies_max".to_string(),
             json!(self.prefill_pending_replies_max),
         );
+        attrs.insert(
+            "skippy.verify_span_count".to_string(),
+            json!(self.verify_span_count),
+        );
+        attrs.insert(
+            "skippy.verify_span_pre_compute_ms".to_string(),
+            json!(self.verify_span_pre_compute_ms),
+        );
+        attrs.insert(
+            "skippy.verify_span_post_compute_ms".to_string(),
+            json!(self.verify_span_post_compute_ms),
+        );
+        attrs.insert(
+            "skippy.verify_span_pre_reply_ms".to_string(),
+            json!(self.verify_span_pre_reply_ms),
+        );
+        attrs.insert(
+            "skippy.verify_span_after_reply_ms".to_string(),
+            json!(self.verify_span_after_reply_ms),
+        );
+        if self.verify_span_count > 0 {
+            let verify_span_count = self.verify_span_count as f64;
+            attrs.insert(
+                "skippy.verify_span_pre_compute_ms_avg".to_string(),
+                json!(self.verify_span_pre_compute_ms / verify_span_count),
+            );
+            attrs.insert(
+                "skippy.verify_span_post_compute_ms_avg".to_string(),
+                json!(self.verify_span_post_compute_ms / verify_span_count),
+            );
+            attrs.insert(
+                "skippy.verify_span_pre_reply_ms_avg".to_string(),
+                json!(self.verify_span_pre_reply_ms / verify_span_count),
+            );
+            attrs.insert(
+                "skippy.verify_span_after_reply_ms_avg".to_string(),
+                json!(self.verify_span_after_reply_ms / verify_span_count),
+            );
+        }
         let lookups = self.reply_stats.kv_lookup_hits + self.reply_stats.kv_lookup_misses;
         let hit_rate = if lookups > 0 {
             self.reply_stats.kv_lookup_hits as f64 / lookups as f64

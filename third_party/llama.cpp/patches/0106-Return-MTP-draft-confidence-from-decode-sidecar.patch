@@ -1,4 +1,4 @@
-From 67bb2ac206e1848be89d7e8de67d84ed33ae8825 Mon Sep 17 00:00:00 2001
+From faaae17bc5473b0089050a79211468a63cc27f97 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Wed, 17 Jun 2026 04:01:24 +1000
 Subject: [PATCH] Return MTP draft confidence from decode sidecar
@@ -6,8 +6,8 @@ Subject: [PATCH] Return MTP draft confidence from decode sidecar
 ---
  include/skippy.h        |  1 +
  include/skippy/common.h |  2 +-
- src/skippy.cpp          | 14 ++++++++++++++
- 3 files changed, 16 insertions(+), 1 deletion(-)
+ src/skippy.cpp          | 26 ++++++++++++++++++++++++++
+ 3 files changed, 28 insertions(+), 1 deletion(-)
 
 diff --git a/include/skippy.h b/include/skippy.h
 index 8d52c199..8360f40d 100644
@@ -35,10 +35,28 @@ index 31211268..a3f3cf61 100644
  enum skippy_feature {
      SKIPPY_FEATURE_RUNTIME_SLICE          = 1 << 0,
 diff --git a/src/skippy.cpp b/src/skippy.cpp
-index 66fd0901..a6855196 100644
+index 66fd0901..e4a854e2 100644
 --- a/src/skippy.cpp
 +++ b/src/skippy.cpp
-@@ -1963,6 +1963,7 @@ static enum skippy_status skippy_mtp_propose_next(
+@@ -1241,6 +1241,17 @@ static bool skippy_mtp_available(const skippy_session * session) {
+            session->stage_model->config.include_output;
+ }
+ 
++static bool skippy_mtp_decode_margin_enabled() {
++    const char * value = std::getenv("SKIPPY_NATIVE_MTP_SERIAL_AFTER_GAP_DRAFT_MIN_MARGIN");
++    if (value == nullptr || value[0] == '\0') {
++        return false;
++    }
++    return std::strcmp(value, "0") != 0 &&
++           std::strcmp(value, "false") != 0 &&
++           std::strcmp(value, "off") != 0 &&
++           std::strcmp(value, "no") != 0;
++}
++
+ static void skippy_mtp_clear_session_state(skippy_session * session) {
+     if (session == nullptr) {
+         return;
+@@ -1963,6 +1974,7 @@ static enum skippy_status skippy_mtp_propose_next(
              false,
              -1,
              0,
@@ -46,12 +64,13 @@ index 66fd0901..a6855196 100644
          };
      }
      if (!skippy_mtp_available(session) || predicted_token < 0 || !session->mtp_has_pending_h) {
-@@ -2006,6 +2007,18 @@ static enum skippy_status skippy_mtp_propose_next(
+@@ -2006,6 +2018,19 @@ static enum skippy_status skippy_mtp_propose_next(
          out_mtp_draft->available = true;
          out_mtp_draft->token_id = skippy_greedy_sample_context(session->stage_model->model, mtp_ctx, -1);
          out_mtp_draft->proposal_compute_us = elapsed_us;
 +        skippy_token_signal mtp_signal = {};
-+        if (skippy_compute_token_signal_context(
++        if (skippy_mtp_decode_margin_enabled() &&
++                skippy_compute_token_signal_context(
 +                    session->stage_model->model,
 +                    mtp_ctx,
 +                    -1,
@@ -65,7 +84,7 @@ index 66fd0901..a6855196 100644
      }
      return skippy_success(out_error);
  }
-@@ -3637,6 +3650,7 @@ enum skippy_status skippy_decode_step_frame_sampled_mtp_n1(
+@@ -3637,6 +3662,7 @@ enum skippy_status skippy_decode_step_frame_sampled_mtp_n1(
              false,
              -1,
              0,

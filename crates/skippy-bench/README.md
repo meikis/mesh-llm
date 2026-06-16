@@ -77,8 +77,10 @@ head into live staged serving.
 `spd-live-tap-parity` drives the fixture prompt token ids through live Skippy
 runtime slices, including an embedding-only side tap for hidden-state index
 `0`, assembles the pretrained head input from real activation frames, and runs
-the Rust Qwen SPD head from those live taps. It is a proof/diagnostic command,
-not request-path serving.
+the Rust Qwen SPD head from those live taps. It also verifies the live top-1
+proposal against a full target Skippy session and compares the committed token
+with ordinary greedy decoding. It is a proof/diagnostic command, not
+request-path serving.
 
 The old standalone `kv-stage-integration` and `kv-hit-regression` commands are
 intentionally absent. Mesh does not carry the legacy standalone cache sidecar

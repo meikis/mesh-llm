@@ -32,8 +32,9 @@ Rust.
   `CPU0` to bypass local Metal auto-selection.
 - `skippy-bench spd-live-tap-parity` can assemble the pretrained Qwen3.5-4B
   SPD head input from live Skippy activation frames, including an
-  embedding-only side tap for hidden-state index `0`, and run the Rust SPD head
-  from those live taps.
+  embedding-only side tap for hidden-state index `0`, run the Rust SPD head
+  from those live taps, and verify the live top-1 proposal with the Skippy
+  target verifier.
 
 ## What Does Not Work Yet
 
@@ -314,11 +315,18 @@ Recorded local result:
   `[9419, 21251, 109266, 14556, 23066, 18103, 12675, 0]`
 - fixture top-8 token ids:
   `[9419, 21251, 109266, 12675, 14556, 18103, 23066, 0]`
+- target verifier input token: `271`
+- target verifier predicted token: `9419`
+- accepted live SPD top-1 proposal: `true`
+- verifier checkpoint restored to token count `12`
+- ordinary non-SPD greedy token: `9419`
+- verified committed output matches ordinary non-SPD greedy output: `true`
 
 The live proof uses the Q4_K_M GGUF, while the fixture was exported from the HF
 BF16 model. The deeper-row drift is therefore expected; the current result says
 the Skippy tap/head plumbing works and the best proposal survives quantization
-for this prompt. It does not yet measure serving-path acceptance.
+for this prompt. It also proves one real target-verifier acceptance window, but
+does not yet measure serving-path acceptance over repeated generation.
 
 ## Validate Hidden Tap Compatibility
 

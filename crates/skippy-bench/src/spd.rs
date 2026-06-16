@@ -114,6 +114,9 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
         args.top_k,
     )?;
     let fixture_forward = run_qwen3_fixture_parity(&args.manifest, &args.fixture, args.top_k)?;
+    let target_verification =
+        verify_live_top1_proposal(&args, &prompt_tokens, &live_topk.token_ids)
+            .context("verify live SPD top-1 proposal against target model")?;
     let report = json!({
         "mode": "spd-live-tap-parity",
         "manifest": args.manifest,
@@ -148,7 +151,8 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
                 "token_ids": fixture_forward.python.token_ids,
                 "logits": fixture_forward.python.logits,
             }
-        }
+        },
+        "target_verification": target_verification,
     });
     let json = serde_json::to_vec_pretty(&report)?;
     if let Some(output) = args.output {
@@ -156,6 +160,110 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
             .with_context(|| format!("failed to write {}", output.display()))?;
     }
     println!("{}", String::from_utf8(json)?);
+    Ok(())
+}
+
+fn verify_live_top1_proposal(
+    args: &SpdLiveTapParityArgs,
+    prompt_tokens: &[i32],
+    proposal_token_ids: &[i64],
+) -> Result<serde_json::Value> {
+    let proposal_token = proposal_token_ids
+        .first()
+        .copied()
+        .context("live SPD head returned no proposal tokens")
+        .and_then(|token| i32::try_from(token).context("live SPD proposal token exceeds i32"))?;
+    let current = *prompt_tokens
+        .last()
+        .context("SPD fixture prompt produced no current token")?;
+    let prefix = prompt_tokens
+        .get(..prompt_tokens.len().saturating_sub(1))
+        .context("failed to split prompt prefix")?;
+    let target = open_full_target_model(args)?;
+
+    let mut target_session = target
+        .create_session()
+        .context("create target verification session")?;
+    prefill_target_prefix(&mut target_session, prefix)?;
+    let verifier_token_count_before = target_session.token_count();
+    let verify_inputs = vec![current];
+    let predicted_tokens = target_session
+        .verify_tokens_rewound(&verify_inputs)
+        .context("target verifier rejected SPD proposal window")?;
+    let verifier_token_count_after_rewind = target_session.token_count();
+    let target_token = *predicted_tokens
+        .first()
+        .context("target verifier returned no predicted token")?;
+    let accepted = target_token == proposal_token;
+    let committed_token = if accepted {
+        proposal_token
+    } else {
+        target_token
+    };
+
+    let baseline_token = target_session
+        .decode_step(current)
+        .context("target greedy baseline decode failed")?;
+    let baseline_token_count_after = target_session.token_count();
+
+    Ok(json!({
+        "proposal_source": "live_skippy_top1",
+        "proposal_tokens": [proposal_token],
+        "verify_inputs": verify_inputs,
+        "target_predicted_tokens": predicted_tokens,
+        "accepted": accepted,
+        "accepted_count": usize::from(accepted),
+        "rejected_count": usize::from(!accepted),
+        "committed_tokens": [committed_token],
+        "baseline_greedy_token": baseline_token,
+        "baseline_matches_verifier": baseline_token == target_token,
+        "greedy_output_matches_non_spd": committed_token == baseline_token,
+        "verifier_rewound": verifier_token_count_after_rewind == verifier_token_count_before,
+        "verifier_token_count_before": verifier_token_count_before,
+        "verifier_token_count_after_rewind": verifier_token_count_after_rewind,
+        "baseline_token_count_after": baseline_token_count_after,
+    }))
+}
+
+fn open_full_target_model(args: &SpdLiveTapParityArgs) -> Result<StageModel> {
+    let config = RuntimeConfig {
+        stage_index: 0,
+        layer_start: 0,
+        layer_end: args.layer_end,
+        ctx_size: args.ctx_size,
+        lane_count: 1,
+        n_batch: None,
+        n_ubatch: None,
+        n_threads: None,
+        n_threads_batch: None,
+        n_gpu_layers: args.n_gpu_layers,
+        selected_backend_device: args.selected_backend_device.clone(),
+        cache_type_k: GGML_TYPE_F16,
+        cache_type_v: GGML_TYPE_F16,
+        flash_attn_type: skippy_runtime::FlashAttentionType::Auto,
+        load_mode: RuntimeLoadMode::RuntimeSlice,
+        projector_path: None,
+        include_embeddings: true,
+        include_output: true,
+        filter_tensors_on_load: false,
+    };
+    StageModel::open(&args.model_path, &config).with_context(|| {
+        format!(
+            "open full target model {} for SPD verification",
+            args.model_path.display()
+        )
+    })
+}
+
+fn prefill_target_prefix(
+    session: &mut skippy_runtime::StageSession,
+    prefix_tokens: &[i32],
+) -> Result<()> {
+    if !prefix_tokens.is_empty() {
+        session
+            .prefill_chunked(prefix_tokens)
+            .context("prefill target verifier prefix")?;
+    }
     Ok(())
 }
 

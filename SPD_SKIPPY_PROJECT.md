@@ -236,7 +236,8 @@ The branch now also proves the trained head can consume live Skippy-produced
 tap frames for the same Qwen3.5-4B fixture. The proof command drives the
 fixture prompt token ids through tap-aligned runtime slices, adds an
 embedding-only side tap for HF hidden-state index `0`, assembles `cur_in` from
-real activation frames, and runs the Rust Qwen SPD head:
+real activation frames, runs the Rust Qwen SPD head, and verifies the live
+top-1 proposal with Skippy's target verifier:
 
 ```bash
 cargo run -p skippy-bench -- spd-live-tap-parity \
@@ -263,16 +264,25 @@ Recorded local live-tap result against `Qwen3.5-4B-Q4_K_M.gguf`:
   `[9419,21251,109266,14556,23066,18103,12675,0]`
 - fixture top-8 token ids:
   `[9419,21251,109266,12675,14556,18103,23066,0]`
+- target verifier input token: `271`
+- target verifier predicted token: `9419`
+- accepted live SPD top-1 proposal: `true`
+- verifier checkpoint restored to token count `12`
+- ordinary non-SPD greedy token: `9419`
+- verified committed output matches ordinary non-SPD greedy output: `true`
 
 The top-8 set is the same, with lower-ranked candidates reordered by GGUF
-quantization/runtime drift. This is a real Skippy tap/head proof, but it is
-still not integrated into the serving request path or verifier.
+quantization/runtime drift. This is a real Skippy tap/head/target-verifier
+proof for one proposal window, but it is still not integrated into the serving
+request path.
 
 ## What Does Not Work Yet
 
 - No live Skippy request has used trained SPD proposals.
 - The tap-aligned Qwen3.5-4B proof now proves live Skippy tap capture and SPD
-  proposal from those taps, but not request-path verification/rollback serving.
+  proposal from those taps plus target verification for one top-1 proposal, but
+  not repeated request-path proposal windows, rollback integration, or serving
+  metrics.
 - No larger-than-4B head has been trained by us yet.
 
 ## Correctness Contract

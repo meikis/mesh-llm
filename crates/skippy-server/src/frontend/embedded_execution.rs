@@ -32,6 +32,130 @@ fn combine_activation_frames(frames: &[ActivationFrame]) -> OpenAiResult<Activat
     Ok(ActivationFrame { desc, payload })
 }
 
+#[derive(Debug)]
+struct ActivationFrameComparison {
+    desc_equal: bool,
+    payload_equal: bool,
+    batched_payload_bytes: usize,
+    serial_payload_bytes: usize,
+    byte_diff_count: usize,
+    first_diff_byte: Option<usize>,
+    first_diff_row: Option<usize>,
+    f32_compared: usize,
+    f32_max_abs_diff: f32,
+    f32_mean_abs_diff: f64,
+}
+
+impl ActivationFrameComparison {
+    fn compare(batched: &ActivationFrame, serial: &ActivationFrame, activation_width: i32) -> Self {
+        let compared_bytes = batched.payload.len().min(serial.payload.len());
+        let mut byte_diff_count = batched.payload.len().abs_diff(serial.payload.len());
+        let mut first_diff_byte = None;
+        for index in 0..compared_bytes {
+            if batched.payload[index] != serial.payload[index] {
+                byte_diff_count += 1;
+                first_diff_byte.get_or_insert(index);
+            }
+        }
+
+        let row_bytes = usize::try_from(activation_width)
+            .ok()
+            .and_then(|width| width.checked_mul(std::mem::size_of::<f32>()));
+        let first_diff_row = first_diff_byte
+            .zip(row_bytes)
+            .and_then(|(byte, bytes)| (bytes > 0).then_some(byte / bytes));
+        let (f32_compared, f32_max_abs_diff, f32_mean_abs_diff) =
+            compare_activation_f32_payloads(&batched.payload, &serial.payload);
+
+        Self {
+            desc_equal: batched.desc == serial.desc,
+            payload_equal: batched.payload == serial.payload,
+            batched_payload_bytes: batched.payload.len(),
+            serial_payload_bytes: serial.payload.len(),
+            byte_diff_count,
+            first_diff_byte,
+            first_diff_row,
+            f32_compared,
+            f32_max_abs_diff,
+            f32_mean_abs_diff,
+        }
+    }
+
+    fn insert_attrs(&self, attrs: &mut BTreeMap<String, Value>) {
+        attrs.insert(
+            "llama_stage.native_mtp.stage0_compare.desc_equal".to_string(),
+            json!(self.desc_equal),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.stage0_compare.payload_equal".to_string(),
+            json!(self.payload_equal),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.stage0_compare.batched_payload_bytes".to_string(),
+            json!(self.batched_payload_bytes),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.stage0_compare.serial_payload_bytes".to_string(),
+            json!(self.serial_payload_bytes),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.stage0_compare.byte_diff_count".to_string(),
+            json!(self.byte_diff_count),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.stage0_compare.f32_compared".to_string(),
+            json!(self.f32_compared),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.stage0_compare.f32_max_abs_diff".to_string(),
+            json!(self.f32_max_abs_diff),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.stage0_compare.f32_mean_abs_diff".to_string(),
+            json!(self.f32_mean_abs_diff),
+        );
+        if let Some(first_diff_byte) = self.first_diff_byte {
+            attrs.insert(
+                "llama_stage.native_mtp.stage0_compare.first_diff_byte".to_string(),
+                json!(first_diff_byte),
+            );
+        }
+        if let Some(first_diff_row) = self.first_diff_row {
+            attrs.insert(
+                "llama_stage.native_mtp.stage0_compare.first_diff_row".to_string(),
+                json!(first_diff_row),
+            );
+        }
+    }
+}
+
+fn compare_activation_f32_payloads(batched: &[u8], serial: &[u8]) -> (usize, f32, f64) {
+    let compared_f32 = batched.len().min(serial.len()) / std::mem::size_of::<f32>();
+    if compared_f32 == 0 {
+        return (0, 0.0, 0.0);
+    }
+
+    let mut max_abs = 0.0f32;
+    let mut sum_abs = 0.0f64;
+    for index in 0..compared_f32 {
+        let byte_index = index * std::mem::size_of::<f32>();
+        let batched_value = f32::from_ne_bytes(
+            batched[byte_index..byte_index + std::mem::size_of::<f32>()]
+                .try_into()
+                .expect("slice length checked"),
+        );
+        let serial_value = f32::from_ne_bytes(
+            serial[byte_index..byte_index + std::mem::size_of::<f32>()]
+                .try_into()
+                .expect("slice length checked"),
+        );
+        let abs = (batched_value - serial_value).abs();
+        max_abs = max_abs.max(abs);
+        sum_abs += f64::from(abs);
+    }
+    (compared_f32, max_abs, sum_abs / compared_f32 as f64)
+}
+
 impl StageOpenAiBackend {
     pub(super) fn execute_embedded_stage_message(
         &self,
@@ -170,8 +294,16 @@ impl StageOpenAiBackend {
         let mut stats = StageReplyStats::default();
         stats.verify_span_skip_checkpoint_requests += 1;
         let stage0_timer = PhaseTimer::start();
-        let output =
-            self.run_serial_stage0_verify_tokens(request, session_key, message, token_ids)?;
+        let output = if native_mtp_compare_stage0_verify_enabled() {
+            self.run_serial_stage0_verify_tokens_with_compare(
+                request,
+                session_key,
+                message,
+                token_ids,
+            )?
+        } else {
+            self.run_serial_stage0_verify_tokens(request, session_key, message, token_ids)?
+        };
         let stage0_compute_ms = stage0_timer.elapsed_ms();
         let forwarded = forwarded_stage_message_timed(
             request.config,
@@ -240,6 +372,85 @@ impl StageOpenAiBackend {
             .map_err(|_| OpenAiError::backend("runtime lock poisoned"))?;
         let runtime_lock_wait_ms = lock_timer.elapsed_ms();
         let hold_timer = PhaseTimer::start();
+        let output = Self::run_serial_stage0_verify_tokens_locked(
+            request,
+            &mut runtime,
+            session_key,
+            message,
+            token_ids,
+        )?;
+        let runtime_lock_hold_ms = hold_timer.elapsed_ms();
+        Ok(EmbeddedLocalOutput {
+            output,
+            runtime_lock_wait_ms,
+            runtime_lock_hold_ms,
+        })
+    }
+
+    fn run_serial_stage0_verify_tokens_with_compare(
+        &self,
+        request: &EmbeddedStageZeroGeneration<'_>,
+        session_key: &str,
+        message: &StageWireMessage,
+        token_ids: &[i32],
+    ) -> OpenAiResult<EmbeddedLocalOutput> {
+        let lock_timer = PhaseTimer::start();
+        let mut runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| OpenAiError::backend("runtime lock poisoned"))?;
+        let runtime_lock_wait_ms = lock_timer.elapsed_ms();
+        let hold_timer = PhaseTimer::start();
+        runtime
+            .checkpoint_session(session_key)
+            .map_err(openai_backend_error)?;
+        let output_capacity = stage_output_activation_capacity(
+            request.config,
+            message.token_count,
+            request.activation_width,
+        )
+        .map_err(openai_backend_error)?;
+        let batched = run_binary_stage_message(
+            &mut runtime,
+            session_key,
+            message,
+            token_ids,
+            None,
+            false,
+            output_capacity,
+        )
+        .map_err(openai_backend_error)?
+        .2;
+        runtime
+            .restore_session(session_key)
+            .map_err(openai_backend_error)?;
+        let serial = Self::run_serial_stage0_verify_tokens_locked(
+            request,
+            &mut runtime,
+            session_key,
+            message,
+            token_ids,
+        )?;
+        let comparison =
+            ActivationFrameComparison::compare(&batched, &serial, request.activation_width);
+        let runtime_lock_hold_ms = hold_timer.elapsed_ms();
+        drop(runtime);
+
+        self.emit_stage0_verify_comparison(request, message, token_ids, &comparison);
+        Ok(EmbeddedLocalOutput {
+            output: serial,
+            runtime_lock_wait_ms,
+            runtime_lock_hold_ms,
+        })
+    }
+
+    fn run_serial_stage0_verify_tokens_locked(
+        request: &EmbeddedStageZeroGeneration<'_>,
+        runtime: &mut RuntimeState,
+        session_key: &str,
+        message: &StageWireMessage,
+        token_ids: &[i32],
+    ) -> OpenAiResult<ActivationFrame> {
         let mut frames = Vec::with_capacity(token_ids.len());
         for (index, token) in token_ids.iter().copied().enumerate() {
             let pos_start = usize::try_from(message.pos_start)
@@ -264,7 +475,7 @@ impl StageOpenAiBackend {
                 },
             )?;
             let output = run_binary_stage_message(
-                &mut runtime,
+                runtime,
                 session_key,
                 &decode_message,
                 &[token],
@@ -277,12 +488,36 @@ impl StageOpenAiBackend {
             .2;
             frames.push(output);
         }
-        let runtime_lock_hold_ms = hold_timer.elapsed_ms();
-        Ok(EmbeddedLocalOutput {
-            output: combine_activation_frames(&frames)?,
-            runtime_lock_wait_ms,
-            runtime_lock_hold_ms,
-        })
+        combine_activation_frames(&frames)
+    }
+
+    fn emit_stage0_verify_comparison(
+        &self,
+        request: &EmbeddedStageZeroGeneration<'_>,
+        message: &StageWireMessage,
+        token_ids: &[i32],
+        comparison: &ActivationFrameComparison,
+    ) {
+        if !self.telemetry.is_debug_enabled() {
+            return;
+        }
+        let mut attrs = self.openai_attrs(request.ids);
+        attrs.insert("llama_stage.message_kind".to_string(), json!("VerifySpan"));
+        attrs.insert(
+            "llama_stage.decode_step".to_string(),
+            json!(message.state.decode_step),
+        );
+        attrs.insert(
+            "llama_stage.token_count".to_string(),
+            json!(token_ids.len()),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.stage0_compare.enabled".to_string(),
+            json!(true),
+        );
+        comparison.insert_attrs(&mut attrs);
+        self.telemetry
+            .emit_debug("stage.openai_native_mtp_stage0_compare", attrs);
     }
 
     pub(super) fn restore_embedded_stage_session(

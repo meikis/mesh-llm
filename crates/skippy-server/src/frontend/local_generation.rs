@@ -451,21 +451,22 @@ impl StageOpenAiBackend {
                     return Err(openai_backend_error(error));
                 }
             }
-            if !chat_sampling_configured {
-                if let Some(metadata) = request.chat_sampling_metadata {
-                    let mut runtime = self
-                        .runtime
-                        .lock()
-                        .map_err(|_| OpenAiError::backend("runtime lock poisoned"))?;
-                    runtime
-                        .configure_chat_sampling(
-                            &session_id,
-                            metadata,
-                            request.prompt_token_ids.len() as u64,
-                            request.sampling.enabled.then_some(request.sampling),
-                        )
-                        .map_err(openai_backend_error)?;
-                }
+            let chat_sampling_metadata = (!chat_sampling_configured)
+                .then_some(request.chat_sampling_metadata)
+                .flatten();
+            if let Some(metadata) = chat_sampling_metadata {
+                let mut runtime = self
+                    .runtime
+                    .lock()
+                    .map_err(|_| OpenAiError::backend("runtime lock poisoned"))?;
+                runtime
+                    .configure_chat_sampling(
+                        &session_id,
+                        metadata,
+                        request.prompt_token_ids.len() as u64,
+                        request.sampling.enabled.then_some(request.sampling),
+                    )
+                    .map_err(openai_backend_error)?;
             }
             let decode_timer = PhaseTimer::start();
             let mut decoded_tokens = 0usize;

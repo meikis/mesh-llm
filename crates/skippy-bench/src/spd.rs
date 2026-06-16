@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs};
+use std::{collections::BTreeMap, fs, time::Instant};
 
 use anyhow::{Context, Result, bail};
 use serde_json::json;
@@ -87,9 +87,14 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
         );
     }
 
+    if args.verify_steps == 0 {
+        bail!("--verify-steps must be greater than zero");
+    }
+
     let hidden_size =
         usize::try_from(manifest.topology.hidden_size).context("SPD hidden_size exceeds usize")?;
-    let taps = collect_live_taps(&args, &prompt_tokens, &ranges)?;
+    let live_runner = LiveTapRunner::open(&args, &ranges)?;
+    let taps = live_runner.collect_taps(&prompt_tokens)?;
     let live_rows = assemble_live_cur_in(
         &manifest,
         &serving,
@@ -109,14 +114,30 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
             cur_in: live_rows.cur_in.clone(),
             seq_len: row_count,
             position_ids,
-            final_norm_weight,
+            final_norm_weight: final_norm_weight.clone(),
         },
         args.top_k,
     )?;
     let fixture_forward = run_qwen3_fixture_parity(&args.manifest, &args.fixture, args.top_k)?;
-    let target_verification =
-        verify_live_top1_proposal(&args, &prompt_tokens, &live_topk.token_ids)
-            .context("verify live SPD top-1 proposal against target model")?;
+    let verified_generation = run_verified_generation(
+        &args,
+        &manifest,
+        &serving,
+        &fixture,
+        &live_runner,
+        VerifiedGenerationInputs {
+            prompt_tokens: &prompt_tokens,
+            row_i_stages: &row_i_stages,
+            final_norm_weight: &final_norm_weight,
+            row_count,
+            hidden_size,
+        },
+    )
+    .context("run repeated live SPD target verification")?;
+    let target_verification = verified_generation
+        .first_step
+        .clone()
+        .context("verified SPD generation produced no steps")?;
     let report = json!({
         "mode": "spd-live-tap-parity",
         "manifest": args.manifest,
@@ -153,6 +174,7 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
             }
         },
         "target_verification": target_verification,
+        "verified_generation": verified_generation.report,
     });
     let json = serde_json::to_vec_pretty(&report)?;
     if let Some(output) = args.output {
@@ -163,66 +185,193 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
     Ok(())
 }
 
-fn verify_live_top1_proposal(
+struct VerifiedGenerationReport {
+    first_step: Option<serde_json::Value>,
+    report: serde_json::Value,
+}
+
+struct VerifiedGenerationInputs<'a> {
+    prompt_tokens: &'a [i32],
+    row_i_stages: &'a [i64],
+    final_norm_weight: &'a [f32],
+    row_count: usize,
+    hidden_size: usize,
+}
+
+fn run_verified_generation(
     args: &SpdLiveTapParityArgs,
-    prompt_tokens: &[i32],
-    proposal_token_ids: &[i64],
-) -> Result<serde_json::Value> {
-    let proposal_token = proposal_token_ids
-        .first()
-        .copied()
-        .context("live SPD head returned no proposal tokens")
-        .and_then(|token| i32::try_from(token).context("live SPD proposal token exceeds i32"))?;
-    let current = *prompt_tokens
-        .last()
-        .context("SPD fixture prompt produced no current token")?;
-    let prefix = prompt_tokens
-        .get(..prompt_tokens.len().saturating_sub(1))
+    manifest: &SpdHeadManifest,
+    serving: &SpdSafetensorsFile,
+    fixture: &SpdSafetensorsFile,
+    live_runner: &LiveTapRunner,
+    inputs: VerifiedGenerationInputs<'_>,
+) -> Result<VerifiedGenerationReport> {
+    if inputs.prompt_tokens.len() < inputs.row_count {
+        bail!(
+            "SPD verified generation prompt length {} is shorter than row count {}",
+            inputs.prompt_tokens.len(),
+            inputs.row_count
+        );
+    }
+    let prefix = inputs
+        .prompt_tokens
+        .get(..inputs.prompt_tokens.len().saturating_sub(1))
         .context("failed to split prompt prefix")?;
     let target = open_full_target_model(args)?;
-
     let mut target_session = target
         .create_session()
         .context("create target verification session")?;
     prefill_target_prefix(&mut target_session, prefix)?;
-    let verifier_token_count_before = target_session.token_count();
-    let verify_inputs = vec![current];
-    let predicted_tokens = target_session
-        .verify_tokens_rewound(&verify_inputs)
-        .context("target verifier rejected SPD proposal window")?;
-    let verifier_token_count_after_rewind = target_session.token_count();
-    let target_token = *predicted_tokens
-        .first()
-        .context("target verifier returned no predicted token")?;
-    let accepted = target_token == proposal_token;
-    let committed_token = if accepted {
-        proposal_token
-    } else {
-        target_token
-    };
 
-    let baseline_token = target_session
-        .decode_step(current)
-        .context("target greedy baseline decode failed")?;
-    let baseline_token_count_after = target_session.token_count();
+    let total_timer = Instant::now();
+    let mut context_tokens = inputs.prompt_tokens.to_vec();
+    let mut steps = Vec::with_capacity(args.verify_steps);
+    let mut accepted_count = 0usize;
+    let mut rejected_count = 0usize;
+    for step_index in 0..args.verify_steps {
+        let step_timer = Instant::now();
+        let current = *context_tokens
+            .last()
+            .context("verified SPD generation context is empty")?;
+        let row_positions = sliding_row_positions(context_tokens.len(), inputs.row_count)?;
 
-    Ok(json!({
-        "proposal_source": "live_skippy_top1",
-        "proposal_tokens": [proposal_token],
-        "verify_inputs": verify_inputs,
-        "target_predicted_tokens": predicted_tokens,
-        "accepted": accepted,
-        "accepted_count": usize::from(accepted),
-        "rejected_count": usize::from(!accepted),
-        "committed_tokens": [committed_token],
-        "baseline_greedy_token": baseline_token,
-        "baseline_matches_verifier": baseline_token == target_token,
-        "greedy_output_matches_non_spd": committed_token == baseline_token,
-        "verifier_rewound": verifier_token_count_after_rewind == verifier_token_count_before,
-        "verifier_token_count_before": verifier_token_count_before,
-        "verifier_token_count_after_rewind": verifier_token_count_after_rewind,
-        "baseline_token_count_after": baseline_token_count_after,
-    }))
+        let tap_timer = Instant::now();
+        let taps = live_runner.collect_taps(&context_tokens)?;
+        let tap_ms = elapsed_ms(tap_timer);
+
+        let assemble_timer = Instant::now();
+        let live_rows = assemble_live_cur_in_for_positions(
+            manifest,
+            serving,
+            fixture,
+            &taps,
+            DynamicLiveRowInputs {
+                row_positions: &row_positions,
+                row_i_stages: inputs.row_i_stages,
+                hidden_size: inputs.hidden_size,
+            },
+        )?;
+        let assemble_ms = elapsed_ms(assemble_timer);
+
+        let head_timer = Instant::now();
+        let live_topk = run_qwen3_forward_from_inputs(
+            &args.manifest,
+            SpdQwen3ForwardInput {
+                cur_in: live_rows.cur_in,
+                seq_len: inputs.row_count,
+                position_ids: row_positions.clone(),
+                final_norm_weight: inputs.final_norm_weight.to_vec(),
+            },
+            args.top_k,
+        )?;
+        let head_ms = elapsed_ms(head_timer);
+        let proposal_token = live_topk
+            .token_ids
+            .first()
+            .copied()
+            .context("live SPD head returned no proposal tokens")
+            .and_then(|token| {
+                i32::try_from(token).context("live SPD proposal token exceeds i32")
+            })?;
+
+        let verify_inputs = vec![current];
+        let verifier_token_count_before = target_session.token_count();
+        let verify_timer = Instant::now();
+        let predicted_tokens = target_session
+            .verify_tokens_rewound(&verify_inputs)
+            .context("target verifier rejected SPD proposal window")?;
+        let verify_ms = elapsed_ms(verify_timer);
+        let verifier_token_count_after_rewind = target_session.token_count();
+        let target_token = *predicted_tokens
+            .first()
+            .context("target verifier returned no predicted token")?;
+        let accepted = target_token == proposal_token;
+        accepted_count += usize::from(accepted);
+        rejected_count += usize::from(!accepted);
+        let committed_token = if accepted {
+            proposal_token
+        } else {
+            target_token
+        };
+
+        let decode_timer = Instant::now();
+        let baseline_token = target_session
+            .decode_step(current)
+            .context("target greedy baseline decode failed")?;
+        let decode_ms = elapsed_ms(decode_timer);
+        let baseline_token_count_after = target_session.token_count();
+        context_tokens.push(committed_token);
+
+        steps.push(json!({
+            "step_index": step_index,
+            "context_token_count_before": context_tokens.len() - 1,
+            "current_token": current,
+            "row_positions": row_positions,
+            "row_stage_ids": inputs.row_i_stages,
+            "proposal_source": "live_skippy_top1",
+            "proposal_tokens": [proposal_token],
+            "proposal_top_k": {
+                "draft_indices": live_topk.draft_indices,
+                "token_ids": live_topk.token_ids,
+                "logits": live_topk.logits,
+            },
+            "verify_inputs": verify_inputs,
+            "target_predicted_tokens": predicted_tokens,
+            "accepted": accepted,
+            "accepted_count": usize::from(accepted),
+            "rejected_count": usize::from(!accepted),
+            "committed_tokens": [committed_token],
+            "baseline_greedy_token": baseline_token,
+            "baseline_matches_verifier": baseline_token == target_token,
+            "greedy_output_matches_non_spd": committed_token == baseline_token,
+            "verifier_rewound": verifier_token_count_after_rewind == verifier_token_count_before,
+            "verifier_token_count_before": verifier_token_count_before,
+            "verifier_token_count_after_rewind": verifier_token_count_after_rewind,
+            "baseline_token_count_after": baseline_token_count_after,
+            "timing_ms": {
+                "tap_replay": tap_ms,
+                "assemble_cur_in": assemble_ms,
+                "spd_head": head_ms,
+                "target_verify_rewound": verify_ms,
+                "target_greedy_decode": decode_ms,
+                "total": elapsed_ms(step_timer),
+            },
+        }));
+    }
+
+    let generated_tokens = context_tokens[inputs.prompt_tokens.len()..].to_vec();
+    let all_match = steps
+        .iter()
+        .all(|step| step["greedy_output_matches_non_spd"].as_bool() == Some(true));
+    let all_rewound = steps
+        .iter()
+        .all(|step| step["verifier_rewound"].as_bool() == Some(true));
+    let report = json!({
+        "steps_requested": args.verify_steps,
+        "steps_completed": steps.len(),
+        "generated_tokens": generated_tokens,
+        "accepted_count": accepted_count,
+        "rejected_count": rejected_count,
+        "acceptance_rate": if steps.is_empty() {
+            0.0
+        } else {
+            accepted_count as f64 / steps.len() as f64
+        },
+        "top1_acceptance_rate": if steps.is_empty() {
+            0.0
+        } else {
+            accepted_count as f64 / steps.len() as f64
+        },
+        "greedy_output_matches_non_spd": all_match,
+        "all_verifier_windows_rewound": all_rewound,
+        "total_elapsed_ms": elapsed_ms(total_timer),
+        "steps": steps,
+    });
+    let first_step = report["steps"]
+        .as_array()
+        .and_then(|steps| steps.first())
+        .cloned();
+    Ok(VerifiedGenerationReport { first_step, report })
 }
 
 fn open_full_target_model(args: &SpdLiveTapParityArgs) -> Result<StageModel> {
@@ -273,12 +422,94 @@ struct LiveRows {
     max_abs_diff: f32,
 }
 
+struct DynamicLiveRows {
+    cur_in: Vec<f32>,
+}
+
 struct LiveRowInputs<'a> {
     row_count: usize,
     row_positions: &'a [i64],
     row_i_stages: &'a [i64],
     fixture_cur_in: &'a [f32],
     hidden_size: usize,
+}
+
+struct DynamicLiveRowInputs<'a> {
+    row_positions: &'a [i64],
+    row_i_stages: &'a [i64],
+    hidden_size: usize,
+}
+
+struct LiveTapRunner {
+    h0: StageModel,
+    stages: Vec<LiveStage>,
+}
+
+struct LiveStage {
+    stage_index: u32,
+    layer_start: u32,
+    layer_end: u32,
+    include_output: bool,
+    model: StageModel,
+}
+
+impl LiveTapRunner {
+    fn open(args: &SpdLiveTapParityArgs, ranges: &[SpdStageLayerRange]) -> Result<Self> {
+        let h0 = open_live_stage_model(args, 0, 0, 0, false, true)
+            .context("open embedding-only h0 tap stage")?;
+        let stages = ranges
+            .iter()
+            .map(|range| {
+                let include_output = range.layer_end == args.layer_end;
+                let model = open_live_stage_model(
+                    args,
+                    range.stage_index,
+                    range.layer_start,
+                    range.layer_end,
+                    include_output,
+                    false,
+                )?;
+                Ok(LiveStage {
+                    stage_index: range.stage_index,
+                    layer_start: range.layer_start,
+                    layer_end: range.layer_end,
+                    include_output,
+                    model,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { h0, stages })
+    }
+
+    fn collect_taps(&self, prompt_tokens: &[i32]) -> Result<BTreeMap<u32, ActivationFrame>> {
+        let mut taps = BTreeMap::new();
+        let h0 = run_live_stage_model(&self.h0, 0, 0, 0, prompt_tokens, None)
+            .context("run embedding-only h0 tap")?;
+        taps.insert(0, h0);
+
+        let mut input = None;
+        for stage in &self.stages {
+            let output = run_live_stage_model(
+                &stage.model,
+                stage.stage_index,
+                stage.layer_start,
+                stage.layer_end,
+                prompt_tokens,
+                input.as_ref(),
+            )
+            .with_context(|| {
+                format!(
+                    "run live Skippy stage {} {}..{}",
+                    stage.stage_index, stage.layer_start, stage.layer_end
+                )
+            })?;
+            if !stage.include_output {
+                taps.insert(stage.layer_end, output.clone());
+                input = Some(output);
+            }
+        }
+        Ok(taps)
+    }
 }
 
 fn fixture_prompt_tokens(fixture: &SpdSafetensorsFile) -> Result<Vec<i32>> {
@@ -344,54 +575,14 @@ fn live_stage_ranges(args: &SpdLiveTapParityArgs) -> Result<Vec<SpdStageLayerRan
         .collect())
 }
 
-fn collect_live_taps(
-    args: &SpdLiveTapParityArgs,
-    prompt_tokens: &[i32],
-    ranges: &[SpdStageLayerRange],
-) -> Result<BTreeMap<u32, ActivationFrame>> {
-    let mut taps = BTreeMap::new();
-    let h0 = run_live_stage(args, 0, 0, 0, prompt_tokens, None, false, true)
-        .context("run embedding-only h0 tap")?;
-    taps.insert(0, h0);
-
-    let mut input = None;
-    for range in ranges {
-        let include_output = range.layer_end == args.layer_end;
-        let output = run_live_stage(
-            args,
-            range.stage_index,
-            range.layer_start,
-            range.layer_end,
-            prompt_tokens,
-            input.as_ref(),
-            include_output,
-            false,
-        )
-        .with_context(|| {
-            format!(
-                "run live Skippy stage {} {}..{}",
-                range.stage_index, range.layer_start, range.layer_end
-            )
-        })?;
-        if !include_output {
-            taps.insert(range.layer_end, output.clone());
-            input = Some(output);
-        }
-    }
-    Ok(taps)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_live_stage(
+fn open_live_stage_model(
     args: &SpdLiveTapParityArgs,
     stage_index: u32,
     layer_start: u32,
     layer_end: u32,
-    prompt_tokens: &[i32],
-    input: Option<&ActivationFrame>,
     include_output: bool,
     embedding_only: bool,
-) -> Result<ActivationFrame> {
+) -> Result<StageModel> {
     let config = RuntimeConfig {
         stage_index,
         layer_start,
@@ -413,12 +604,21 @@ fn run_live_stage(
         include_output,
         filter_tensors_on_load: true,
     };
-    let model = StageModel::open(&args.model_path, &config).with_context(|| {
-        format!("open live Skippy stage {stage_index} {layer_start}..{layer_end}")
+    StageModel::open(&args.model_path, &config)
+        .with_context(|| format!("open live Skippy stage {stage_index} {layer_start}..{layer_end}"))
+}
+
+fn run_live_stage_model(
+    model: &StageModel,
+    stage_index: u32,
+    layer_start: u32,
+    layer_end: u32,
+    prompt_tokens: &[i32],
+    input: Option<&ActivationFrame>,
+) -> Result<ActivationFrame> {
+    let mut session = model.create_session().with_context(|| {
+        format!("create live Skippy stage {stage_index} {layer_start}..{layer_end} session")
     })?;
-    let mut session = model
-        .create_session()
-        .with_context(|| format!("create live Skippy stage {stage_index} session"))?;
     let positions = sequential_positions(prompt_tokens.len())?;
     session.prefill_chunk_frame_with_positions(prompt_tokens, &positions, input, 0)
 }
@@ -470,6 +670,39 @@ fn assemble_live_cur_in(
         rows,
         max_abs_diff: max_diff,
     })
+}
+
+fn assemble_live_cur_in_for_positions(
+    manifest: &SpdHeadManifest,
+    serving: &SpdSafetensorsFile,
+    fixture: &SpdSafetensorsFile,
+    taps: &BTreeMap<u32, ActivationFrame>,
+    inputs: DynamicLiveRowInputs<'_>,
+) -> Result<DynamicLiveRows> {
+    if inputs.row_positions.len() != inputs.row_i_stages.len() {
+        bail!(
+            "dynamic SPD row metadata length mismatch: positions {}, stages {}",
+            inputs.row_positions.len(),
+            inputs.row_i_stages.len()
+        );
+    }
+    let mut cur_in = Vec::with_capacity(inputs.row_positions.len() * inputs.hidden_size);
+    for row_index in 0..inputs.row_positions.len() {
+        let position = inputs.row_positions[row_index];
+        let stage_id = u32::try_from(inputs.row_i_stages[row_index])
+            .with_context(|| format!("SPD dynamic row {row_index} has negative stage id"))?;
+        let hf_indices = fixture_hf_indices(fixture, row_index)?;
+        let concat_hidden = concat_live_hidden(taps, &hf_indices, position, inputs.hidden_size)?;
+        let projection = project_spd_tap_input_row(
+            &manifest.topology,
+            serving,
+            stage_id,
+            &hf_indices,
+            &concat_hidden,
+        )?;
+        cur_in.extend_from_slice(&projection.projected);
+    }
+    Ok(DynamicLiveRows { cur_in })
 }
 
 fn fixture_hf_indices(fixture: &SpdSafetensorsFile, row_index: usize) -> Result<Vec<u32>> {
@@ -555,4 +788,18 @@ fn live_tap_report(taps: &BTreeMap<u32, ActivationFrame>) -> Vec<serde_json::Val
             })
         })
         .collect()
+}
+
+fn sliding_row_positions(context_len: usize, row_count: usize) -> Result<Vec<i64>> {
+    if context_len < row_count {
+        bail!("context length {context_len} is shorter than SPD row count {row_count}");
+    }
+    let start = context_len - row_count;
+    (start..context_len)
+        .map(|position| i64::try_from(position).context("SPD row position exceeds i64"))
+        .collect()
+}
+
+fn elapsed_ms(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1_000.0
 }

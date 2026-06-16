@@ -55,6 +55,7 @@ skippy-bench local-split-chain-binary --model-path model.gguf --model-id org/rep
 skippy-bench local-split-chain-binary --model-path model.gguf --model-id org/repo:Q4_K_M --splits 8,10,16,20,24,31 --layer-end 32
 skippy-bench spd-fixture-parity --manifest skippy-spd-head.json --fixture spd-parity-fixture.safetensors
 skippy-bench spd-live-tap-parity --manifest skippy-spd-head.json --fixture spd-parity-fixture.safetensors --model-path model.gguf --splits 8,10,16,20,24,31 --layer-end 32
+skippy-bench spd-live-tap-parity --manifest skippy-spd-head.json --fixture spd-parity-fixture.safetensors --model-path model.gguf --splits 8,10,16,20,24,31 --layer-end 32 --verify-steps 3
 skippy-bench chat-corpus --base-url http://127.0.0.1:9337/v1 --model org/repo:Q4_K_M --prompt-corpus target/bench-corpora/smoke/corpus.jsonl --max-tokens 64 --stream
 skippy-bench token-lengths --model-path model.gguf --prompt-corpus target/bench-corpora/long/corpus.jsonl --ctx-size 8192 --generation-limit 512 --output-tsv target/bench-corpora/long/prompt-lengths.tsv
 skippy-bench focused-runtime --schema-smoke --hosts host-a,host-b --splits 1 --layer-end 2
@@ -79,7 +80,10 @@ runtime slices, including an embedding-only side tap for hidden-state index
 `0`, assembles the pretrained head input from real activation frames, and runs
 the Rust Qwen SPD head from those live taps. It also verifies the live top-1
 proposal against a full target Skippy session and compares the committed token
-with ordinary greedy decoding. It is a proof/diagnostic command, not
+with ordinary greedy decoding. Pass `--verify-steps` to repeat live
+tap/head/target-verifier windows over generated context; the recorded
+Qwen3.5-4B proof accepted `3 / 3` top-1 proposals and matched ordinary greedy
+decoding for every committed token. It is a proof/diagnostic command, not
 request-path serving.
 
 The old standalone `kv-stage-integration` and `kv-hit-regression` commands are

@@ -42,7 +42,10 @@ simulator reports the same equivalent accept length as a paper-like `2.470x`
 ratio (`+147.04%`) under its aggregate-cycle formula. Feeding that same real
 trace into a four-stage Skippy latency model with `4ms` per stage estimated
 `9.882x` SPD-vs-serial split throughput at `0ms` hop, `8.117x` at `10ms` hop,
-and `7.752x` at `25ms` hop.
+and `7.752x` at `25ms` hop. The Rust live-tap harness now also proves three
+consecutive Qwen3.5-4B top-1 SPD proposals from live Skippy activation frames:
+all three were accepted by the target verifier, every verifier window rewound,
+and the committed token stream matched ordinary non-SPD greedy decoding.
 
 ## What Works Today
 
@@ -249,7 +252,8 @@ cargo run -p skippy-bench -- spd-live-tap-parity \
   --ctx-size 128 \
   --n-gpu-layers 0 \
   --selected-backend-device CPU0 \
-  --top-k 8
+  --top-k 8 \
+  --verify-steps 3
 ```
 
 Recorded local live-tap result against `Qwen3.5-4B-Q4_K_M.gguf`:
@@ -271,18 +275,29 @@ Recorded local live-tap result against `Qwen3.5-4B-Q4_K_M.gguf`:
 - ordinary non-SPD greedy token: `9419`
 - verified committed output matches ordinary non-SPD greedy output: `true`
 
+Recorded repeated verifier run with `--verify-steps 3`:
+
+- generated committed tokens: `[9419,0,2500]`
+- accepted live SPD top-1 proposals: `3 / 3`
+- rejected proposals: `0 / 3`
+- top-1 acceptance rate for this diagnostic prompt: `1.0`
+- every target verifier window rewound to the pre-verify token count: `true`
+- every committed token matched ordinary non-SPD greedy decoding: `true`
+
 The top-8 set is the same, with lower-ranked candidates reordered by GGUF
 quantization/runtime drift. This is a real Skippy tap/head/target-verifier
-proof for one proposal window, but it is still not integrated into the serving
-request path.
+proof over repeated proposal windows, but it is still a diagnostic harness and
+not integrated into the serving request path. The per-step timings from this
+CPU diagnostic path are not throughput numbers; use the trace latency simulator
+for current speedup estimates until request-path SPD exists.
 
 ## What Does Not Work Yet
 
 - No live Skippy request has used trained SPD proposals.
 - The tap-aligned Qwen3.5-4B proof now proves live Skippy tap capture and SPD
-  proposal from those taps plus target verification for one top-1 proposal, but
-  not repeated request-path proposal windows, rollback integration, or serving
-  metrics.
+  proposal from those taps plus repeated target verification in a diagnostic
+  harness, but not request-path proposal windows, rollback integration, or
+  serving metrics.
 - No larger-than-4B head has been trained by us yet.
 
 ## Correctness Contract

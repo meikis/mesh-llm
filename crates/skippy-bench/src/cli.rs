@@ -124,6 +124,8 @@ pub struct SpdLiveTapParityArgs {
     pub selected_backend_device: Option<String>,
     #[arg(long, default_value_t = 8)]
     pub top_k: usize,
+    #[arg(long, default_value_t = 1)]
+    pub verify_steps: usize,
     #[arg(long)]
     pub output: Option<PathBuf>,
 }
@@ -610,5 +612,6 @@ mod tests {
         assert_eq!(args.splits, vec![8, 10, 16, 20, 24, 31]);
         assert_eq!(args.layer_end, 32);
         assert_eq!(args.selected_backend_device.as_deref(), Some("CPU0"));
+        assert_eq!(args.verify_steps, 1);
     }
 }

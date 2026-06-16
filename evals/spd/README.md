@@ -33,8 +33,8 @@ Rust.
 - `skippy-bench spd-live-tap-parity` can assemble the pretrained Qwen3.5-4B
   SPD head input from live Skippy activation frames, including an
   embedding-only side tap for hidden-state index `0`, run the Rust SPD head
-  from those live taps, and verify the live top-1 proposal with the Skippy
-  target verifier.
+  from those live taps, and verify repeated live top-1 proposals with the
+  Skippy target verifier.
 
 ## What Does Not Work Yet
 
@@ -300,7 +300,8 @@ cargo run -p skippy-bench -- spd-live-tap-parity \
   --ctx-size 128 \
   --n-gpu-layers 0 \
   --selected-backend-device CPU0 \
-  --top-k 8
+  --top-k 8 \
+  --verify-steps 3
 ```
 
 Recorded local result:
@@ -322,11 +323,21 @@ Recorded local result:
 - ordinary non-SPD greedy token: `9419`
 - verified committed output matches ordinary non-SPD greedy output: `true`
 
+Recorded repeated verifier run with `--verify-steps 3`:
+
+- generated committed tokens: `[9419, 0, 2500]`
+- accepted live SPD top-1 proposals: `3 / 3`
+- rejected proposals: `0 / 3`
+- top-1 acceptance rate for this diagnostic prompt: `1.0`
+- every target verifier window rewound to the pre-verify token count: `true`
+- every committed token matched ordinary non-SPD greedy decoding: `true`
+
 The live proof uses the Q4_K_M GGUF, while the fixture was exported from the HF
 BF16 model. The deeper-row drift is therefore expected; the current result says
 the Skippy tap/head plumbing works and the best proposal survives quantization
-for this prompt. It also proves one real target-verifier acceptance window, but
-does not yet measure serving-path acceptance over repeated generation.
+for this prompt. It also proves repeated real target-verifier acceptance
+windows in a diagnostic harness, but does not yet measure request-path SPD
+serving throughput.
 
 ## Validate Hidden Tap Compatibility
 

@@ -640,6 +640,13 @@ impl StageOpenAiBackend {
             let mut native_mtp_deferred_reject_trim_count = 0usize;
             let mut native_mtp_deferred_reject_trim_local_ms = 0.0_f64;
             let mut native_mtp_suppressed_cooldown_draft_count = 0usize;
+            let mut native_mtp_batched_verification_count = 0usize;
+            let mut native_mtp_initial_serial_verification_count = 0usize;
+            let mut native_mtp_initial_serial_accepted_count = 0usize;
+            let mut native_mtp_serial_after_gap_verification_count = 0usize;
+            let mut native_mtp_serial_after_gap_accepted_count = 0usize;
+            let mut native_mtp_verify_next_verification_count = 0usize;
+            let mut native_mtp_verify_next_accepted_count = 0usize;
             let mut native_mtp_verify_next_draft_available_count = 0usize;
             let mut native_mtp_verify_next_draft_adopted_count = 0usize;
             let mut native_mtp_verify_next_draft_margin_value_count = 0usize;
@@ -675,6 +682,7 @@ impl StageOpenAiBackend {
                             current,
                             ms_to_us(fused.execution.downstream_wait_ms),
                             fused.native_mtp_draft,
+                            NativeMtpDraftOrigin::InitialSerial,
                         )
                     } else {
                         NativeMtpVerification::NoPending
@@ -850,11 +858,13 @@ impl StageOpenAiBackend {
                     && native_mtp_reject_recovery_remaining == 0
                     && draft_guard.is_none()
                     && native_mtp_remaining >= 2;
-                let native_mtp_draft_token = should_run_native_mtp_batched_verify
+                let pending_native_mtp_draft = should_run_native_mtp_batched_verify
                     .then(|| native_mtp.take_pending_draft())
                     .flatten();
-                if let Some(native_mtp_draft_token) = native_mtp_draft_token {
+                if let Some(pending_native_mtp_draft) = pending_native_mtp_draft {
                     let batched_token_timer = PhaseTimer::start();
+                    let native_mtp_draft_token = pending_native_mtp_draft.token;
+                    let native_mtp_draft_origin = pending_native_mtp_draft.origin;
                     let verify_inputs = [current, native_mtp_draft_token];
                     let message = embedded_verify_message(
                         request.wire_dtype,
@@ -913,6 +923,27 @@ impl StageOpenAiBackend {
                     }
                     let accepted =
                         matches!(native_mtp_decision, NativeMtpVerification::Accepted { .. });
+                    native_mtp_batched_verification_count += 1;
+                    match native_mtp_draft_origin {
+                        NativeMtpDraftOrigin::InitialSerial => {
+                            native_mtp_initial_serial_verification_count += 1;
+                            if accepted {
+                                native_mtp_initial_serial_accepted_count += 1;
+                            }
+                        }
+                        NativeMtpDraftOrigin::SerialAfterGap => {
+                            native_mtp_serial_after_gap_verification_count += 1;
+                            if accepted {
+                                native_mtp_serial_after_gap_accepted_count += 1;
+                            }
+                        }
+                        NativeMtpDraftOrigin::VerifyNext => {
+                            native_mtp_verify_next_verification_count += 1;
+                            if accepted {
+                                native_mtp_verify_next_accepted_count += 1;
+                            }
+                        }
+                    }
                     let mut commit_tokens = vec![target_token];
                     if accepted {
                         commit_tokens.push(after_draft_token);
@@ -984,7 +1015,10 @@ impl StageOpenAiBackend {
                         }
                     }
                     if verify_next_mtp_draft_adopted {
-                        native_mtp.observe_next_draft(verify_next_mtp_draft);
+                        native_mtp.observe_next_draft(
+                            verify_next_mtp_draft,
+                            NativeMtpDraftOrigin::VerifyNext,
+                        );
                     }
                     let mut trim_control = None;
                     if committed_positions < consumed_positions {
@@ -1043,6 +1077,10 @@ impl StageOpenAiBackend {
                     token_attrs.insert(
                         "llama_stage.native_mtp.draft_token".to_string(),
                         json!(native_mtp_draft_token),
+                    );
+                    token_attrs.insert(
+                        "llama_stage.native_mtp.pending_origin".to_string(),
+                        json!(native_mtp_draft_origin.label()),
                     );
                     token_attrs.insert(
                         "llama_stage.native_mtp.target_token".to_string(),
@@ -1609,6 +1647,11 @@ impl StageOpenAiBackend {
                     current,
                     ms_to_us(downstream_wait_ms),
                     native_mtp_draft,
+                    if native_mtp_batched_verification_count == 0 {
+                        NativeMtpDraftOrigin::InitialSerial
+                    } else {
+                        NativeMtpDraftOrigin::SerialAfterGap
+                    },
                 );
                 if native_mtp_reject_recovery_remaining > 0 {
                     match native_mtp_decision {
@@ -1782,6 +1825,34 @@ impl StageOpenAiBackend {
             decode_attrs.insert(
                 "llama_stage.native_mtp.suppressed_cooldown_draft_count".to_string(),
                 json!(native_mtp_suppressed_cooldown_draft_count),
+            );
+            decode_attrs.insert(
+                "llama_stage.native_mtp.batched_verification_count".to_string(),
+                json!(native_mtp_batched_verification_count),
+            );
+            decode_attrs.insert(
+                "llama_stage.native_mtp.initial_serial_verification_count".to_string(),
+                json!(native_mtp_initial_serial_verification_count),
+            );
+            decode_attrs.insert(
+                "llama_stage.native_mtp.initial_serial_accepted_count".to_string(),
+                json!(native_mtp_initial_serial_accepted_count),
+            );
+            decode_attrs.insert(
+                "llama_stage.native_mtp.serial_after_gap_verification_count".to_string(),
+                json!(native_mtp_serial_after_gap_verification_count),
+            );
+            decode_attrs.insert(
+                "llama_stage.native_mtp.serial_after_gap_accepted_count".to_string(),
+                json!(native_mtp_serial_after_gap_accepted_count),
+            );
+            decode_attrs.insert(
+                "llama_stage.native_mtp.verify_next_verification_count".to_string(),
+                json!(native_mtp_verify_next_verification_count),
+            );
+            decode_attrs.insert(
+                "llama_stage.native_mtp.verify_next_accepted_count".to_string(),
+                json!(native_mtp_verify_next_accepted_count),
             );
             decode_attrs.insert(
                 "llama_stage.native_mtp.deferred_reject_trim_count".to_string(),

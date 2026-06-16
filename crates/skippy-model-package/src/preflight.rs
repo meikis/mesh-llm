@@ -6,9 +6,10 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct PackagePreflightOptions {
     pub stages: Option<usize>,
+    pub splits: Option<Vec<u32>>,
     pub verify_sha256: bool,
 }
 
@@ -182,7 +183,7 @@ pub(crate) fn preflight_package(
     let artifacts = collect_artifacts(&manifest);
     validate_layer_coverage(&manifest, &mut report);
     validate_artifacts(package, &artifacts, options.verify_sha256, &mut report);
-    build_stage_reports(&manifest, options.stages, &mut report);
+    build_stage_reports(&manifest, options, &mut report);
     report.finalize()
 }
 
@@ -610,12 +611,51 @@ fn artifact_output(
 
 fn build_stage_reports(
     manifest: &PackageManifest,
-    stages: Option<usize>,
+    options: &PackagePreflightOptions,
     report: &mut PackagePreflightReport,
 ) {
-    let Some(stage_count) = stages else {
+    let Some(ranges) = stage_ranges(manifest, options, report) else {
         return;
     };
+    let stage_count = ranges.len();
+    let artifact_map = stage_artifacts(report);
+    for (stage_index, (layer_start, layer_end)) in ranges.into_iter().enumerate() {
+        report.stages.push(stage_report(
+            stage_index,
+            layer_start,
+            layer_end,
+            stage_count,
+            &artifact_map,
+        ));
+    }
+}
+
+fn stage_ranges(
+    manifest: &PackageManifest,
+    options: &PackagePreflightOptions,
+    report: &mut PackagePreflightReport,
+) -> Option<Vec<(u32, u32)>> {
+    match (&options.stages, &options.splits) {
+        (None, None) => None,
+        (Some(_), Some(_)) => {
+            report.error(
+                "conflicting_stage_layout",
+                "use either --stages or --splits, not both",
+                Some("model-package.json".to_string()),
+                "choose one stage layout for split preflight",
+            );
+            None
+        }
+        (Some(stage_count), None) => stage_ranges_from_count(manifest, *stage_count, report),
+        (None, Some(splits)) => stage_ranges_from_splits(manifest, splits, report),
+    }
+}
+
+fn stage_ranges_from_count(
+    manifest: &PackageManifest,
+    stage_count: usize,
+    report: &mut PackagePreflightReport,
+) -> Option<Vec<(u32, u32)>> {
     if stage_count == 0 {
         report.error(
             "invalid_stage_count",
@@ -623,7 +663,7 @@ fn build_stage_reports(
             Some("model-package.json".to_string()),
             "choose a positive stage count for split preflight",
         );
-        return;
+        return None;
     }
     if stage_count as u32 > manifest.layer_count {
         report.error(
@@ -635,22 +675,63 @@ fn build_stage_reports(
             Some("model-package.json".to_string()),
             "use at most one split stage per transformer layer",
         );
-        return;
+        return None;
     }
-    let artifact_map = stage_artifacts(report);
-    for (stage_index, (layer_start, layer_end)) in
-        partition_layers(manifest.layer_count, stage_count)
-            .into_iter()
-            .enumerate()
+    Some(partition_layers(manifest.layer_count, stage_count))
+}
+
+fn stage_ranges_from_splits(
+    manifest: &PackageManifest,
+    splits: &[u32],
+    report: &mut PackagePreflightReport,
+) -> Option<Vec<(u32, u32)>> {
+    if splits.is_empty() {
+        report.error(
+            "invalid_stage_splits",
+            "--splits must contain at least one layer boundary",
+            Some("model-package.json".to_string()),
+            "choose strictly ascending split boundaries inside the package layer range",
+        );
+        return None;
+    }
+    let mut previous = 0;
+    for &split in splits {
+        if split <= previous {
+            report.error(
+                "invalid_stage_splits",
+                "--splits values must be strictly ascending positive layer boundaries",
+                Some("model-package.json".to_string()),
+                "choose strictly ascending split boundaries inside the package layer range",
+            );
+            return None;
+        }
+        previous = split;
+    }
+    if splits
+        .last()
+        .is_some_and(|last| *last >= manifest.layer_count)
     {
-        report.stages.push(stage_report(
-            stage_index,
-            layer_start,
-            layer_end,
-            stage_count,
-            &artifact_map,
-        ));
+        report.error(
+            "stage_splits_exceed_layer_count",
+            format!(
+                "--splits values must be less than package layer_count {}",
+                manifest.layer_count
+            ),
+            Some("model-package.json".to_string()),
+            "choose split boundaries before the final layer boundary",
+        );
+        return None;
     }
+    let mut boundaries = Vec::with_capacity(splits.len() + 2);
+    boundaries.push(0);
+    boundaries.extend_from_slice(splits);
+    boundaries.push(manifest.layer_count);
+    Some(
+        boundaries
+            .windows(2)
+            .map(|pair| (pair[0], pair[1]))
+            .collect(),
+    )
 }
 
 fn stage_report(
@@ -826,6 +907,7 @@ mod tests {
             &package,
             &PackagePreflightOptions {
                 stages: Some(2),
+                splits: None,
                 verify_sha256: true,
             },
         );
@@ -843,6 +925,31 @@ mod tests {
     }
 
     #[test]
+    fn preflight_reports_explicit_split_stage_parts() {
+        let dir = unique_test_dir("explicit-splits");
+        let package = write_package_fixture_with_layers(&dir, true, 4);
+
+        let report = preflight_package(
+            &package,
+            &PackagePreflightOptions {
+                stages: None,
+                splits: Some(vec![1, 3]),
+                verify_sha256: false,
+            },
+        );
+
+        assert!(report.valid, "{:?}", report.issues);
+        assert_eq!(report.stages.len(), 3);
+        assert_eq!(
+            report.stages[0].parts,
+            ["metadata", "embeddings", "layer:0"]
+        );
+        assert_eq!(report.stages[1].parts, ["metadata", "layer:1", "layer:2"]);
+        assert_eq!(report.stages[2].parts, ["metadata", "layer:3", "output"]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn preflight_rejects_missing_activation_width() {
         let dir = unique_test_dir("missing-width");
         let package = write_package_fixture(&dir, false);
@@ -851,6 +958,7 @@ mod tests {
             &package,
             &PackagePreflightOptions {
                 stages: None,
+                splits: None,
                 verify_sha256: false,
             },
         );
@@ -870,6 +978,7 @@ mod tests {
             &package,
             &PackagePreflightOptions {
                 stages: Some(2),
+                splits: None,
                 verify_sha256: false,
             },
         );
@@ -898,6 +1007,7 @@ mod tests {
             &package,
             &PackagePreflightOptions {
                 stages: None,
+                splits: None,
                 verify_sha256: true,
             },
         );
@@ -939,12 +1049,32 @@ mod tests {
             &package,
             &PackagePreflightOptions {
                 stages: Some(3),
+                splits: None,
                 verify_sha256: false,
             },
         );
 
         assert!(!report.valid);
         assert_issue(&report, "stage_count_exceeds_layer_count");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preflight_rejects_split_boundaries_at_layer_end() {
+        let dir = unique_test_dir("bad-splits");
+        let package = write_package_fixture(&dir, true);
+
+        let report = preflight_package(
+            &package,
+            &PackagePreflightOptions {
+                stages: None,
+                splits: Some(vec![1, 2]),
+                verify_sha256: false,
+            },
+        );
+
+        assert!(!report.valid);
+        assert_issue(&report, "stage_splits_exceed_layer_count");
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -957,14 +1087,27 @@ mod tests {
     }
 
     fn write_package_fixture(root: &Path, include_activation_width: bool) -> PathBuf {
+        write_package_fixture_with_layers(root, include_activation_width, 2)
+    }
+
+    fn write_package_fixture_with_layers(
+        root: &Path,
+        include_activation_width: bool,
+        layer_count: u32,
+    ) -> PathBuf {
         let package = root.join("package");
         fs::create_dir_all(package.join("shared")).unwrap();
         fs::create_dir_all(package.join("layers")).unwrap();
         write_artifact(&package, "shared/metadata.gguf", b"metadata");
         write_artifact(&package, "shared/embeddings.gguf", b"embeddings");
         write_artifact(&package, "shared/output.gguf", b"output");
-        write_artifact(&package, "layers/layer-000.gguf", b"layer0");
-        write_artifact(&package, "layers/layer-001.gguf", b"layer1");
+        let mut layers = Vec::new();
+        for layer_index in 0..layer_count {
+            let path = format!("layers/layer-{layer_index:03}.gguf");
+            let bytes = format!("layer{layer_index}");
+            write_artifact(&package, &path, bytes.as_bytes());
+            layers.push(layer_json(&package, layer_index, &path, bytes.as_bytes()));
+        }
         let mut manifest = serde_json::json!({
             "schema_version": 1,
             "model_id": "meshllm/test-model-layers",
@@ -973,16 +1116,13 @@ mod tests {
                 "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             },
             "format": "layer-package",
-            "layer_count": 2,
+            "layer_count": layer_count,
             "shared": {
                 "metadata": artifact_json(&package, "shared/metadata.gguf", b"metadata"),
                 "embeddings": artifact_json(&package, "shared/embeddings.gguf", b"embeddings"),
                 "output": artifact_json(&package, "shared/output.gguf", b"output")
             },
-            "layers": [
-                layer_json(&package, 0, "layers/layer-000.gguf", b"layer0"),
-                layer_json(&package, 1, "layers/layer-001.gguf", b"layer1")
-            ],
+            "layers": layers,
             "skippy_abi_version": "1.0.0"
         });
         if include_activation_width {

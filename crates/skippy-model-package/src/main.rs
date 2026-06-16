@@ -34,8 +34,10 @@ enum Command {
     },
     Plan {
         model: PathBuf,
-        #[arg(long)]
-        stages: usize,
+        #[arg(long, conflicts_with = "splits", required_unless_present = "splits")]
+        stages: Option<usize>,
+        #[arg(long, value_name = "LAYER_BOUNDARIES")]
+        splits: Option<String>,
     },
     Write {
         model: PathBuf,
@@ -54,8 +56,10 @@ enum Command {
     },
     WriteStages {
         model: PathBuf,
-        #[arg(long)]
-        stages: usize,
+        #[arg(long, conflicts_with = "splits", required_unless_present = "splits")]
+        stages: Option<usize>,
+        #[arg(long, value_name = "LAYER_BOUNDARIES")]
+        splits: Option<String>,
         #[arg(long)]
         out_dir: PathBuf,
     },
@@ -86,8 +90,10 @@ enum Command {
     },
     Preflight {
         package: PathBuf,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "splits")]
         stages: Option<usize>,
+        #[arg(long, value_name = "LAYER_BOUNDARIES")]
+        splits: Option<String>,
         #[arg(long)]
         verify_sha256: bool,
     },
@@ -125,6 +131,12 @@ struct StagePlan {
     includes_output: bool,
     tensor_count: usize,
     tensor_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+enum StageLayout {
+    Stages(usize),
+    Splits(Vec<u32>),
 }
 
 #[derive(Debug, Serialize)]
@@ -340,7 +352,11 @@ fn main() -> Result<()> {
     let args = Args::parse();
     match args.command {
         Command::Inspect { model } => inspect(model),
-        Command::Plan { model, stages } => plan(model, stages),
+        Command::Plan {
+            model,
+            stages,
+            splits,
+        } => plan(model, stages, splits),
         Command::Write {
             model,
             layers,
@@ -361,8 +377,9 @@ fn main() -> Result<()> {
         Command::WriteStages {
             model,
             stages,
+            splits,
             out_dir,
-        } => write_stages(model, stages, out_dir),
+        } => write_stages(model, stages, splits, out_dir),
         Command::WritePackage {
             model,
             out_dir,
@@ -391,8 +408,9 @@ fn main() -> Result<()> {
         Command::Preflight {
             package,
             stages,
+            splits,
             verify_sha256,
-        } => run_preflight(package, stages, verify_sha256),
+        } => run_preflight(package, stages, splits, verify_sha256),
     }
 }
 
@@ -407,8 +425,9 @@ fn inspect(model: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn plan(model: PathBuf, stages: usize) -> Result<()> {
-    let output = build_plan(&model, stages)?;
+fn plan(model: PathBuf, stages: Option<usize>, splits: Option<String>) -> Result<()> {
+    let layout = parse_required_stage_layout(stages, splits)?;
+    let output = build_plan(&model, &layout)?;
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }
@@ -451,16 +470,19 @@ fn write_one(
     Ok(())
 }
 
-fn write_stages(model: PathBuf, stages: usize, out_dir: PathBuf) -> Result<()> {
-    if stages == 0 {
-        bail!("--stages must be greater than zero");
-    }
+fn write_stages(
+    model: PathBuf,
+    stages: Option<usize>,
+    splits: Option<String>,
+    out_dir: PathBuf,
+) -> Result<()> {
+    let layout = parse_required_stage_layout(stages, splits)?;
     fs::create_dir_all(&out_dir)
         .with_context(|| format!("create output directory {}", out_dir.display()))?;
 
     let source = ModelSource::open(&model)?;
     let tensors = &source.tensors;
-    let plan = build_plan_from_tensors(stages, tensors)?;
+    let plan = build_plan_from_tensors(&layout, tensors)?;
     let mut written = Vec::new();
     for stage in plan.stages {
         let path = out_dir.join(format!("stage-{:03}.gguf", stage.stage_index));
@@ -962,11 +984,18 @@ fn validate_package(full: PathBuf, package: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn run_preflight(package: PathBuf, stages: Option<usize>, verify_sha256: bool) -> Result<()> {
+fn run_preflight(
+    package: PathBuf,
+    stages: Option<usize>,
+    splits: Option<String>,
+    verify_sha256: bool,
+) -> Result<()> {
+    let splits = splits.as_deref().map(parse_split_boundaries).transpose()?;
     let report = preflight::preflight_package(
         &package,
         &preflight::PackagePreflightOptions {
             stages,
+            splits,
             verify_sha256,
         },
     );
@@ -1043,32 +1072,37 @@ fn validate_package_projector(
     })
 }
 
-fn build_plan(model: &Path, stages: usize) -> Result<PlanOutput> {
-    if stages == 0 {
-        bail!("--stages must be greater than zero");
-    }
+fn build_plan(model: &Path, layout: &StageLayout) -> Result<PlanOutput> {
     let source = ModelSource::open(model)?;
-    build_plan_from_tensors(stages, &source.tensors)
+    build_plan_from_tensors(layout, &source.tensors)
 }
 
-fn build_plan_from_tensors(stages: usize, tensors: &[TensorInfo]) -> Result<PlanOutput> {
+fn build_plan_from_tensors(layout: &StageLayout, tensors: &[TensorInfo]) -> Result<PlanOutput> {
     let layer_count = layer_count(tensors)?;
-    if stages as u32 > layer_count {
-        bail!("--stages must not exceed model layer count {layer_count}");
-    }
-    let ranges = partition_layers(layer_count, stages);
+    let ranges = stage_ranges(layout, layer_count)?;
+    Ok(build_plan_from_ranges(layer_count, ranges, tensors))
+}
+
+fn build_plan_from_ranges(
+    layer_count: u32,
+    ranges: Vec<(u32, u32)>,
+    tensors: &[TensorInfo],
+) -> PlanOutput {
+    let stage_count = ranges.len();
     let mut stage_tensors: BTreeMap<usize, Vec<&TensorInfo>> = BTreeMap::new();
     for (stage_index, (layer_start, layer_end)) in ranges.iter().copied().enumerate() {
         let tensors_for_stage = tensors
             .iter()
-            .filter(|tensor| tensor_in_stage(tensor, stage_index, stages, layer_start, layer_end))
+            .filter(|tensor| {
+                tensor_in_stage(tensor, stage_index, stage_count, layer_start, layer_end)
+            })
             .collect();
         stage_tensors.insert(stage_index, tensors_for_stage);
     }
 
-    Ok(PlanOutput {
+    PlanOutput {
         schema_version: 1,
-        stage_count: stages,
+        stage_count,
         layer_count,
         stages: ranges
             .into_iter()
@@ -1080,13 +1114,13 @@ fn build_plan_from_tensors(stages: usize, tensors: &[TensorInfo]) -> Result<Plan
                     layer_start,
                     layer_end,
                     includes_embeddings: stage_index == 0,
-                    includes_output: stage_index + 1 == stages,
+                    includes_output: stage_index + 1 == stage_count,
                     tensor_count: tensors.len(),
                     tensor_bytes: tensors.iter().map(|tensor| tensor.byte_size).sum(),
                 }
             })
             .collect(),
-    })
+    }
 }
 
 fn write_stage_artifact(source: &ModelSource, stage: &StagePlan, out: &Path) -> Result<()> {
@@ -1728,6 +1762,84 @@ fn parse_layer_range(layers: &str) -> Result<(u32, u32)> {
     Ok((start, end))
 }
 
+fn parse_required_stage_layout(
+    stages: Option<usize>,
+    splits: Option<String>,
+) -> Result<StageLayout> {
+    match (stages, splits) {
+        (Some(_), Some(_)) => bail!("use either --stages or --splits, not both"),
+        (Some(stages), None) => {
+            if stages == 0 {
+                bail!("--stages must be greater than zero");
+            }
+            Ok(StageLayout::Stages(stages))
+        }
+        (None, Some(splits)) => Ok(StageLayout::Splits(parse_split_boundaries(&splits)?)),
+        (None, None) => bail!("one of --stages or --splits is required"),
+    }
+}
+
+fn parse_split_boundaries(splits: &str) -> Result<Vec<u32>> {
+    let boundaries = splits
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .with_context(|| format!("invalid split {value}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if boundaries.is_empty() {
+        bail!("--splits must contain at least one layer boundary");
+    }
+    validate_split_boundaries(&boundaries)?;
+    Ok(boundaries)
+}
+
+fn validate_split_boundaries(splits: &[u32]) -> Result<()> {
+    let mut previous = 0;
+    for &split in splits {
+        if split <= previous {
+            bail!("--splits values must be strictly ascending positive layer boundaries");
+        }
+        previous = split;
+    }
+    Ok(())
+}
+
+fn stage_ranges(layout: &StageLayout, layer_count: u32) -> Result<Vec<(u32, u32)>> {
+    match layout {
+        StageLayout::Stages(stages) => {
+            if *stages == 0 {
+                bail!("--stages must be greater than zero");
+            }
+            if *stages as u32 > layer_count {
+                bail!("--stages must not exceed model layer count {layer_count}");
+            }
+            Ok(partition_layers(layer_count, *stages))
+        }
+        StageLayout::Splits(splits) => stage_ranges_from_splits(splits, layer_count),
+    }
+}
+
+fn stage_ranges_from_splits(splits: &[u32], layer_count: u32) -> Result<Vec<(u32, u32)>> {
+    validate_split_boundaries(splits)?;
+    if let Some(&last) = splits.last()
+        && last >= layer_count
+    {
+        bail!("--splits values must be less than model layer count {layer_count}");
+    }
+    let mut boundaries = Vec::with_capacity(splits.len() + 2);
+    boundaries.push(0);
+    boundaries.extend_from_slice(splits);
+    boundaries.push(layer_count);
+    Ok(boundaries
+        .windows(2)
+        .map(|pair| (pair[0], pair[1]))
+        .collect())
+}
+
 fn partition_layers(layer_count: u32, stages: usize) -> Vec<(u32, u32)> {
     let base = layer_count / stages as u32;
     let extra = layer_count % stages as u32;
@@ -1824,8 +1936,9 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExplicitSourceIdentity, activation_width, local_artifact_files, model_distribution_id,
-        resolve_gguf_shard_paths, resolve_local_package_input,
+        ExplicitSourceIdentity, StageLayout, activation_width, local_artifact_files,
+        model_distribution_id, parse_required_stage_layout, parse_split_boundaries,
+        resolve_gguf_shard_paths, resolve_local_package_input, stage_ranges,
     };
     use std::path::{Path, PathBuf};
 
@@ -2021,6 +2134,35 @@ mod tests {
         let error = activation_width(&model).unwrap_err().to_string();
         assert!(error.contains("array nesting exceeds"), "{error}");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn split_boundaries_build_spd_tap_aligned_stage_ranges() {
+        let splits = parse_split_boundaries("8,10,16,20,24,31").unwrap();
+        let ranges = stage_ranges(&StageLayout::Splits(splits), 32).unwrap();
+
+        assert_eq!(
+            ranges,
+            vec![
+                (0, 8),
+                (8, 10),
+                (10, 16),
+                (16, 20),
+                (20, 24),
+                (24, 31),
+                (31, 32)
+            ]
+        );
+    }
+
+    #[test]
+    fn split_boundaries_must_be_internal_and_ascending() {
+        let error = parse_split_boundaries("8,8").unwrap_err().to_string();
+        assert!(error.contains("strictly ascending"), "{error}");
+
+        let layout = parse_required_stage_layout(None, Some("8,10,32".to_string())).unwrap();
+        let error = stage_ranges(&layout, 32).unwrap_err().to_string();
+        assert!(error.contains("less than model layer count 32"), "{error}");
     }
 
     fn gguf_header(kv_count: u64) -> Vec<u8> {

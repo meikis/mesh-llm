@@ -23,6 +23,8 @@ Rust.
   selected tensor payload reads.
 - `skippy-runtime` can run the pretrained `Qwen/Qwen3.5-4B` SPD head over a
   recorded Python fixture and match Python top-k draft candidates.
+- `skippy-model-package` can plan, write, and preflight explicit tap-aligned
+  layer splits for the `Qwen/Qwen3.5-4B` S4/L4 proof head.
 
 ## What Does Not Work Yet
 
@@ -170,6 +172,20 @@ python3 evals/spd/export_spd_head.py \
 The exporter writes `spd-head.safetensors` next to the manifest and adds an
 optional `serving_checkpoint` section to `skippy-spd-head.json`. The original
 `.pt` checkpoint remains referenced for provenance.
+
+For the pretrained `Qwen/Qwen3.5-4B` S4/L4 head, the tap-aligned Skippy proof
+split is:
+
+```bash
+skippy-model-package plan model.gguf --splits 8,10,16,20,24,31
+skippy-model-package write-stages model.gguf \
+  --splits 8,10,16,20,24,31 \
+  --out-dir /tmp/qwen35-spd-tap-slices/
+```
+
+Those split boundaries produce ranges
+`0..8, 8..10, 10..16, 16..20, 20..24, 24..31, 31..32`, exposing every hidden
+state required by the pretrained head as a stage boundary for the local proof.
 
 Validate an exported local head through Rust with:
 

@@ -40,10 +40,13 @@ model id.
 ```bash
 skippy-model-package inspect model.gguf
 skippy-model-package plan model.gguf --stages 4
+skippy-model-package plan model.gguf --splits 8,10,16,20,24,31
 skippy-model-package write model.gguf --layers 0..12 --out stage-0.gguf --manifest stage-0.json
 skippy-model-package write-stages model.gguf --stages 4 --out-dir slices/
+skippy-model-package write-stages model.gguf --splits 8,10,16,20,24,31 --out-dir spd-slices/
 skippy-model-package write-package org/repo:Q4_K_M --out-dir model-package/
 skippy-model-package write-package org/repo:Q4_K_M --projector mmproj-model-f16.gguf --out-dir model-package/
+skippy-model-package preflight model-package/ --splits 8,10,16,20,24,31
 skippy-model-package validate model.gguf slices/stage-*.gguf
 skippy-model-package validate-package model.gguf model-package/
 ```
@@ -52,6 +55,13 @@ skippy-model-package validate-package model.gguf model-package/
 writer code for artifact metadata and streams selected tensor bytes from the
 source model. The Rust CLI owns planning, manifests, file checksums, and
 validation reports.
+
+`plan`, `write-stages`, and `preflight` accept either balanced `--stages N` or
+explicit internal layer boundaries through `--splits a,b,c`. Explicit splits are
+useful when a proof needs stage boundaries to expose hidden states at specific
+layers. For example, the Qwen3.5-4B SPD proof uses
+`--splits 8,10,16,20,24,31` to materialize ranges
+`0..8,8..10,10..16,16..20,20..24,24..31,31..32`.
 
 `validate` checks that every owned tensor from the source model appears exactly
 once across the supplied artifact slices, with no unknown tensors and no

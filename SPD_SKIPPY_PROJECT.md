@@ -156,6 +156,22 @@ This gives two implementation options: add a narrow internal hidden-tap ABI for
 normal four-stage serving, or use a tap-aligned over-split as the fastest local
 proof that the pretrained head can drive live Skippy proposals.
 
+`skippy-model-package` now supports explicit split boundaries for this proof:
+
+```bash
+skippy-model-package plan model.gguf --splits 8,10,16,20,24,31
+skippy-model-package write-stages model.gguf \
+  --splits 8,10,16,20,24,31 \
+  --out-dir /tmp/qwen35-spd-tap-slices/
+skippy-model-package preflight model-package/ --splits 8,10,16,20,24,31
+```
+
+For a 32-layer Qwen3.5 model, those boundaries materialize the ranges
+`0..8, 8..10, 10..16, 16..20, 20..24, 24..31, 31..32`. This does not yet make
+SPD live in Skippy by itself; it removes the artifact-generation blocker for a
+tap-aligned local proof that can use normal stage-boundary activation frames
+before adding a production hidden-tap ABI.
+
 ## What Does Not Work Yet
 
 - Skippy does not yet expose live hidden-state taps for SPD.

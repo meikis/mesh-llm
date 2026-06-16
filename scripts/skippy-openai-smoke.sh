@@ -1,7 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LLAMA_BUILD_DIR="${LLAMA_STAGE_BUILD_DIR:-.deps/llama-build/build-stage-abi-static}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+resolve_llama_build_dir() {
+  if [[ -n "${LLAMA_STAGE_BUILD_DIR:-}" ]]; then
+    printf '%s\n' "$LLAMA_STAGE_BUILD_DIR"
+    return
+  fi
+  if [[ -n "${SKIPPY_LLAMA_BUILD_DIR:-}" ]]; then
+    printf '%s\n' "$SKIPPY_LLAMA_BUILD_DIR"
+    return
+  fi
+  if [[ "$(uname -s)" == "Darwin" && -d "$ROOT/.deps/llama-build/build-stage-abi-metal" ]]; then
+    printf '%s\n' "$ROOT/.deps/llama-build/build-stage-abi-metal"
+    return
+  fi
+  printf '%s\n' "$ROOT/.deps/llama-build/build-stage-abi-static"
+}
+
+LLAMA_BUILD_DIR="$(resolve_llama_build_dir)"
 MODEL_REPO="${MODEL_REPO:-jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF}"
 MODEL_FILE="${MODEL_FILE:-SmolLM2-135M-Instruct.Q4_K_M.gguf}"
 MODEL_SELECTOR="${MODEL_SELECTOR:-Q4_K_M}"
@@ -15,6 +33,7 @@ PORT="${PORT:-9337}"
 BASE_URL="http://${HOST}:${PORT}/v1"
 CTX_SIZE="${CTX_SIZE:-256}"
 DEFAULT_MAX_TOKENS="${DEFAULT_MAX_TOKENS:-2}"
+N_GPU_LAYERS="${N_GPU_LAYERS:-0}"
 RUN_BENCHY="${RUN_BENCHY:-0}"
 KEEP_SERVER="${KEEP_SERVER:-0}"
 
@@ -85,11 +104,11 @@ if [[ -z "$LAYER_END" || "$LAYER_END" == "null" ]]; then
 fi
 
 CONFIG_PATH="${WORK_DIR}/stage-openai-smoke.json"
-python3 - "$CONFIG_PATH" "$MODEL_ID" "$MODEL_PATH" "$LAYER_END" "$CTX_SIZE" <<'PY'
+python3 - "$CONFIG_PATH" "$MODEL_ID" "$MODEL_PATH" "$LAYER_END" "$CTX_SIZE" "$N_GPU_LAYERS" <<'PY'
 import json
 import sys
 
-config_path, model_id, model_path, layer_end, ctx_size = sys.argv[1:]
+config_path, model_id, model_path, layer_end, ctx_size, n_gpu_layers = sys.argv[1:]
 config = {
     "run_id": "openai-smoke",
     "topology_id": "openai-smoke-single-stage",
@@ -100,7 +119,7 @@ config = {
     "layer_start": 0,
     "layer_end": int(layer_end),
     "ctx_size": int(ctx_size),
-    "n_gpu_layers": 0,
+    "n_gpu_layers": int(n_gpu_layers),
     "filter_tensors_on_load": False,
     "load_mode": "runtime-slice",
     "bind_addr": "127.0.0.1:19000",

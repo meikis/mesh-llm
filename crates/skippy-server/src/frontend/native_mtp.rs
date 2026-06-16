@@ -12,6 +12,7 @@ const REJECT_COOLDOWN_TOKENS_ENV: &str = "SKIPPY_NATIVE_MTP_REJECT_COOLDOWN_TOKE
 const REJECT_RECOVERY_SERIAL_ACCEPTS_ENV: &str = "SKIPPY_NATIVE_MTP_REJECT_RECOVERY_SERIAL_ACCEPTS";
 const VERIFY_NEXT_DRAFT_MIN_MARGIN_ENV: &str = "SKIPPY_NATIVE_MTP_VERIFY_NEXT_DRAFT_MIN_MARGIN";
 const DEFER_REJECT_TRIM_ENV: &str = "SKIPPY_NATIVE_MTP_DEFER_REJECT_TRIM";
+const SUPPRESS_COOLDOWN_DRAFTS_ENV: &str = "SKIPPY_NATIVE_MTP_SUPPRESS_COOLDOWN_DRAFTS";
 const MTP_DRAFT_MARGIN_SCALE: f32 = 1000.0;
 const DEFAULT_ADAPTIVE_DISABLE_MIN_VERIFY: u64 = 32;
 const DEFAULT_ADAPTIVE_DISABLE_THRESHOLD: f64 = 0.70;
@@ -64,6 +65,12 @@ pub(super) fn native_mtp_defer_reject_trim_enabled() -> bool {
     native_mtp_defer_reject_trim_enabled_from(std::env::var(DEFER_REJECT_TRIM_ENV).ok().as_deref())
 }
 
+pub(super) fn native_mtp_suppress_cooldown_drafts_enabled() -> bool {
+    native_mtp_suppress_cooldown_drafts_enabled_from(
+        std::env::var(SUPPRESS_COOLDOWN_DRAFTS_ENV).ok().as_deref(),
+    )
+}
+
 fn native_mtp_batched_verify_enabled_from(value: Option<&str>) -> bool {
     !matches!(
         value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
@@ -93,6 +100,13 @@ fn native_mtp_adaptive_disable_enabled_from(value: Option<&str>) -> bool {
 }
 
 fn native_mtp_defer_reject_trim_enabled_from(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "on" | "enable" | "enabled" | "yes")
+    )
+}
+
+fn native_mtp_suppress_cooldown_drafts_enabled_from(value: Option<&str>) -> bool {
     matches!(
         value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
         Some("1" | "true" | "on" | "enable" | "enabled" | "yes")
@@ -831,5 +845,21 @@ mod tests {
         assert!(native_mtp_defer_reject_trim_enabled_from(Some(" enabled ")));
         assert!(!native_mtp_defer_reject_trim_enabled_from(Some("0")));
         assert!(!native_mtp_defer_reject_trim_enabled_from(Some("false")));
+    }
+
+    #[test]
+    fn suppress_cooldown_drafts_flag_defaults_off_and_accepts_true_values() {
+        assert!(!native_mtp_suppress_cooldown_drafts_enabled_from(None));
+        assert!(native_mtp_suppress_cooldown_drafts_enabled_from(Some("1")));
+        assert!(native_mtp_suppress_cooldown_drafts_enabled_from(Some(
+            "true"
+        )));
+        assert!(native_mtp_suppress_cooldown_drafts_enabled_from(Some(
+            " enabled "
+        )));
+        assert!(!native_mtp_suppress_cooldown_drafts_enabled_from(Some("0")));
+        assert!(!native_mtp_suppress_cooldown_drafts_enabled_from(Some(
+            "false"
+        )));
     }
 }

@@ -631,10 +631,12 @@ impl StageOpenAiBackend {
                 native_mtp_reject_recovery_serial_accepts();
             let native_mtp_verify_next_draft_min_margin = native_mtp_verify_next_draft_min_margin();
             let native_mtp_defer_reject_trim = native_mtp_defer_reject_trim_enabled();
+            let native_mtp_suppress_cooldown_drafts = native_mtp_suppress_cooldown_drafts_enabled();
             let mut native_mtp_reject_cooldown_remaining = 0usize;
             let mut native_mtp_reject_recovery_remaining = 0usize;
             let mut native_mtp_deferred_reject_trim_count = 0usize;
             let mut native_mtp_deferred_reject_trim_local_ms = 0.0_f64;
+            let mut native_mtp_suppressed_cooldown_draft_count = 0usize;
             let mut native_mtp_verify_next_draft_available_count = 0usize;
             let mut native_mtp_verify_next_draft_adopted_count = 0usize;
             let mut native_mtp_verify_next_draft_margin_value_count = 0usize;
@@ -1580,11 +1582,18 @@ impl StageOpenAiBackend {
                     )?;
                 }
                 current = reply.predicted;
-                let native_mtp_draft = if native_mtp_adaptive_disable.disabled() {
-                    None
-                } else {
-                    NativeMtpDraft::from_prediction_tokens(&reply.predicted_tokens)
-                };
+                let suppress_cooldown_draft =
+                    native_mtp_suppress_cooldown_drafts && native_mtp_reject_cooldown_remaining > 0;
+                let native_mtp_draft =
+                    if native_mtp_adaptive_disable.disabled() || suppress_cooldown_draft {
+                        None
+                    } else {
+                        NativeMtpDraft::from_prediction_tokens(&reply.predicted_tokens)
+                    };
+                if suppress_cooldown_draft {
+                    native_mtp.clear_pending_draft();
+                    native_mtp_suppressed_cooldown_draft_count += 1;
+                }
                 let native_mtp_decision = native_mtp.observe_target_token(
                     current,
                     ms_to_us(downstream_wait_ms),
@@ -1660,6 +1669,14 @@ impl StageOpenAiBackend {
                     token_attrs.insert(
                         "llama_stage.native_mtp.verification".to_string(),
                         json!(native_mtp_decision.label()),
+                    );
+                    token_attrs.insert(
+                        "llama_stage.native_mtp.suppress_cooldown_drafts".to_string(),
+                        json!(native_mtp_suppress_cooldown_drafts),
+                    );
+                    token_attrs.insert(
+                        "llama_stage.native_mtp.cooldown_draft_suppressed".to_string(),
+                        json!(suppress_cooldown_draft),
                     );
                     self.emit_openai_phase("stage.openai_decode_token", token_timer, token_attrs);
                 }
@@ -1738,6 +1755,14 @@ impl StageOpenAiBackend {
             decode_attrs.insert(
                 "llama_stage.native_mtp.defer_reject_trim".to_string(),
                 json!(native_mtp_defer_reject_trim),
+            );
+            decode_attrs.insert(
+                "llama_stage.native_mtp.suppress_cooldown_drafts".to_string(),
+                json!(native_mtp_suppress_cooldown_drafts),
+            );
+            decode_attrs.insert(
+                "llama_stage.native_mtp.suppressed_cooldown_draft_count".to_string(),
+                json!(native_mtp_suppressed_cooldown_draft_count),
             );
             decode_attrs.insert(
                 "llama_stage.native_mtp.deferred_reject_trim_count".to_string(),

@@ -44,7 +44,7 @@ index c4da8e28..8360f40d 100644
          struct skippy_session * session,
          size_t token_count,
 diff --git a/src/skippy.cpp b/src/skippy.cpp
-index 7d909a9e..04c0afb4 100644
+index f8c07856..8ecb890c 100644
 --- a/src/skippy.cpp
 +++ b/src/skippy.cpp
 @@ -1239,6 +1239,17 @@ static bool skippy_mtp_available(const skippy_session * session) {
@@ -118,7 +118,7 @@ index 7d909a9e..04c0afb4 100644
          };
      }
      if (!skippy_mtp_available(session) || predicted_token < 0 || !session->mtp_has_pending_h) {
-@@ -1934,6 +1961,19 @@ static enum skippy_status skippy_mtp_propose_next(
+@@ -1958,9 +1958,22 @@ static enum skippy_status skippy_mtp_propose_next(
          out_mtp_draft->available = true;
          out_mtp_draft->token_id = skippy_greedy_sample_context(session->stage_model->model, mtp_ctx, -1);
          out_mtp_draft->proposal_compute_us = elapsed_us;
@@ -135,6 +135,9 @@ index 7d909a9e..04c0afb4 100644
 +                    std::max<int64_t>(margin_milli, std::numeric_limits<int32_t>::min()),
 +                    std::numeric_limits<int32_t>::max()));
 +        }
+         session->mtp_has_pending_draft = true;
+         session->mtp_pending_draft_pos = session->n_past;
+         session->mtp_pending_draft_token = out_mtp_draft->token_id;
      }
      return skippy_success(out_error);
  }

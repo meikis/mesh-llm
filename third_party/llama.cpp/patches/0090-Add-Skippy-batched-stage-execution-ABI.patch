@@ -254,7 +254,7 @@ index 20cff23f..4707be19 100644
  enum skippy_status skippy_verify_tokens(
          struct skippy_session * session,
          const llama_token * token_ids,
-@@ -3246,6 +3314,180 @@ enum skippy_status skippy_decode_step_frame_sampled(
+@@ -3246,6 +3314,181 @@ enum skippy_status skippy_decode_step_frame_sampled(
      return skippy_copy_output_activation_frame(session, 1, output_payload, input_desc, input_payload, out_error);
  }
  
@@ -297,6 +297,7 @@ index 20cff23f..4707be19 100644
 +    const int32_t n_pos_per_embd = first->stage_model->model->hparams.n_pos_per_embd();
 +    const bool activation_input = skippy_is_filtered(first) && first->stage_model->config.layer_start > 0;
 +    const bool request_logits = first->stage_model->config.include_output;
++    const bool request_embeddings = skippy_emits_activation_frame(first);
 +
 +    if (activation_input && (input_descs == nullptr || input_payloads == nullptr)) {
 +        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "batched downstream decode requires activation frame inputs");
@@ -368,7 +369,7 @@ index 20cff23f..4707be19 100644
 +        skippy_session * session = sessions[i];
 +        seq_id_values[i] = session->seq_id;
 +        seq_id_storage[i] = &seq_id_values[i];
-+        logits_storage[i] = request_logits ? 1 : 0;
++        logits_storage[i] = (request_logits || request_embeddings) ? 1 : 0;
 +        if (n_pos_per_embd == 4) {
 +            const llama_pos position = session->n_past;
 +            pos_storage[               i] = position;
@@ -437,4 +438,3 @@ index 20cff23f..4707be19 100644
          const llama_token * token_ids,
 -- 
 2.54.0 (Apple Git-156)
-

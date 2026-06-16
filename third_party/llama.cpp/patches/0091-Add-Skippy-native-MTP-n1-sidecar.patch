@@ -80,17 +80,20 @@ index 4707be19..7d909a9e 100644
      skippy_runtime_config config = {};
      bool executable = true;
      uint32_t lane_count = 1;
-@@ -73,6 +75,9 @@ struct skippy_session {
+@@ -73,6 +75,12 @@ struct skippy_session {
      std::string chat_sampling_metadata;
      uint64_t grammar_generated_start = 0;
      size_t sampling_accepted_token_count = 0;
 +    int32_t mtp_next_pos = 0;
 +    bool mtp_has_pending_h = false;
 +    std::vector<float> mtp_pending_h;
++    bool mtp_has_pending_draft = false;
++    llama_pos mtp_pending_draft_pos = 0;
++    llama_token mtp_pending_draft_token = -1;
  };
  
  struct skippy_tensor_meta {
-@@ -1227,6 +1232,113 @@ static enum skippy_status skippy_decode_batch(
+@@ -1227,6 +1232,135 @@ static enum skippy_status skippy_decode_batch(
      return skippy_success(out_error);
  }
  
@@ -108,6 +111,9 @@ index 4707be19..7d909a9e 100644
 +    session->mtp_next_pos = session->n_past;
 +    session->mtp_has_pending_h = false;
 +    session->mtp_pending_h.clear();
++    session->mtp_has_pending_draft = false;
++    session->mtp_pending_draft_pos = 0;
++    session->mtp_pending_draft_token = -1;
 +    if (skippy_mtp_available(session)) {
 +        if (llama_memory_t memory = session->stage_model->mtp_ctx->get_memory()) {
 +            llama_memory_seq_rm(memory, session->seq_id, -1, -1);
@@ -135,6 +141,25 @@ index 4707be19..7d909a9e 100644
 +    if (session->mtp_pending_h.size() != static_cast<size_t>(n_embd)) {
 +        session->mtp_pending_h.assign(static_cast<size_t>(n_embd), 0.0f);
 +        session->mtp_has_pending_h = false;
++    }
++
++    if (session->mtp_has_pending_draft) {
++        const llama_pos token_end = token_start + static_cast<llama_pos>(token_count);
++        if (session->mtp_pending_draft_pos >= token_start &&
++                session->mtp_pending_draft_pos < token_end) {
++            const size_t draft_index = static_cast<size_t>(session->mtp_pending_draft_pos - token_start);
++            if (token_ids[draft_index] == session->mtp_pending_draft_token) {
++                session->mtp_next_pos = std::max(session->mtp_next_pos, session->mtp_pending_draft_pos + 1);
++            } else {
++                if (llama_memory_t memory = mtp_ctx->get_memory()) {
++                    llama_memory_seq_rm(memory, session->seq_id, session->mtp_pending_draft_pos, -1);
++                }
++                session->mtp_next_pos = std::min(session->mtp_next_pos, static_cast<int32_t>(session->mtp_pending_draft_pos));
++            }
++        }
++        session->mtp_has_pending_draft = false;
++        session->mtp_pending_draft_pos = 0;
++        session->mtp_pending_draft_token = -1;
 +    }
 +
 +    size_t first_index = 0;
@@ -262,7 +287,7 @@ index 4707be19..7d909a9e 100644
  static llama_token skippy_greedy_sample(skippy_session * session) {
      return skippy_greedy_sample_ith(session, -1);
  }
-@@ -1751,6 +1880,64 @@ static llama_token skippy_sample_token(
+@@ -1751,6 +1880,66 @@ static llama_token skippy_sample_token(
      return skippy_sample_token_ith(session, sampling, -1);
  }
  
@@ -314,12 +339,14 @@ index 4707be19..7d909a9e 100644
 +        return SKIPPY_STATUS_RUNTIME_ERROR;
 +    }
 +
-+    session->mtp_next_pos = session->n_past + 1;
 +    if (out_mtp_draft != nullptr) {
 +        out_mtp_draft->version = 1;
 +        out_mtp_draft->available = true;
 +        out_mtp_draft->token_id = skippy_greedy_sample_context(session->stage_model->model, mtp_ctx, -1);
 +        out_mtp_draft->proposal_compute_us = elapsed_us;
++        session->mtp_has_pending_draft = true;
++        session->mtp_pending_draft_pos = session->n_past;
++        session->mtp_pending_draft_token = out_mtp_draft->token_id;
 +    }
 +    return skippy_success(out_error);
 +}
@@ -537,4 +564,3 @@ index 4707be19..7d909a9e 100644
      return skippy_success(out_error);
 -- 
 2.54.0 (Apple Git-156)
-

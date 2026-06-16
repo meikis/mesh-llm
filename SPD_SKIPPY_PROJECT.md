@@ -184,18 +184,35 @@ Recorded local artifact result with
 - validation: all `426` owned tensors present exactly once across the seven
   slices; no missing or duplicate owned tensors
 
-The current local live-chain smoke gets as far as loading and tensor-filtering
-the Qwen3.5 GGUF, then fails during llama.cpp context creation because backend
-auto-selection initializes Metal with an empty backend device and cannot create
-a command queue on this machine. That is a Skippy backend/device-selection
-blocker, not an SPD head or package artifact blocker.
+The local live-chain smoke now runs the same tap-aligned shape through real
+Skippy binary stage transport by selecting the CPU backend explicitly:
+
+```bash
+cargo run -p skippy-bench -- local-split-chain-binary \
+  --model-path .artifacts/spd/qwen35-4b-gguf/Qwen3.5-4B-Q4_K_M.gguf \
+  --model-id unsloth/Qwen3.5-4B-GGUF:Q4_K_M \
+  --splits 8,10,16,20,24,31 \
+  --layer-end 32 \
+  --ctx-size 128 \
+  --n-gpu-layers 0 \
+  --selected-backend-device CPU0 \
+  --stage-bind-base-port 19131 \
+  --prompt Hello
+```
+
+Recorded result: all seven ranges
+`0..8, 8..10, 10..16, 16..20, 20..24, 24..31, 31..32` forwarded over the
+binary chain, activation width `2560`, first boundary payload `10240` bytes /
+`5120` f16 wire bytes, prompt token id `9419`, predicted token `11`. A
+`local-split-compare` run against the same GGUF and prompt matched the unsplit
+full-model predicted token `11`.
 
 ## What Does Not Work Yet
 
 - Skippy does not yet expose live hidden-state taps for SPD.
 - No live Skippy request has used trained SPD proposals.
-- Local live Skippy smoke for Qwen3.5-4B is blocked on backend selection on this
-  machine; the real tap-aligned stage artifacts validate structurally.
+- The tap-aligned Qwen3.5-4B proof proves live stage forwarding, not live SPD
+  proposal/verification serving.
 - No larger-than-4B head has been trained by us yet.
 
 ## Correctness Contract
@@ -437,7 +454,7 @@ Tasks:
    `skippy-runtime` tap-planning tests.
 2. Decide proof topology:
    - fastest proof: tap-aligned over-split so required taps are ordinary stage
-     boundaries
+     boundaries. Done for the local Qwen3.5 seven-stage binary chain.
    - production path: add an internal hidden-tap ABI so ordinary four-stage
      serving can expose taps `10,20,31`
 3. Add a hidden-state sideband/tap path in the staged runtime if not using the

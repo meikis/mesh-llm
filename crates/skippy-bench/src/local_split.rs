@@ -1,5 +1,6 @@
 use std::{
     fs,
+    net::SocketAddr,
     process::{Command, Stdio},
 };
 
@@ -49,11 +50,17 @@ struct BinaryChainResult {
     predicted_token: i32,
     activation_width: i32,
     wire_dtype: String,
-    stage0_wire_payload_bytes: usize,
-    stage0_payload_bytes: u64,
-    split_layer_1: u32,
-    split_layer_2: u32,
+    stages: Vec<BinaryChainStageResult>,
+}
+
+struct BinaryChainStageResult {
+    stage_index: u32,
+    layer_start: u32,
     layer_end: u32,
+    payload_bytes: Option<u64>,
+    wire_payload_bytes: Option<usize>,
+    forwarded_over_binary: bool,
+    returned_predicted_token: bool,
 }
 
 pub fn local_split_binary(args: LocalSplitBinaryArgs) -> Result<()> {
@@ -169,27 +176,17 @@ pub fn local_split_chain_binary(args: LocalSplitChainBinaryArgs) -> Result<()> {
             "predicted_token": result.predicted_token,
             "activation_width": result.activation_width,
             "wire_dtype": result.wire_dtype,
-            "stages": [
-                {
-                    "stage_index": 0,
-                    "layer_start": 0,
-                    "layer_end": result.split_layer_1,
-                    "payload_bytes": result.stage0_payload_bytes,
-                    "wire_payload_bytes": result.stage0_wire_payload_bytes,
-                },
-                {
-                    "stage_index": 1,
-                    "layer_start": result.split_layer_1,
-                    "layer_end": result.split_layer_2,
-                    "forwarded_over_binary": true,
-                },
-                {
-                    "stage_index": 2,
-                    "layer_start": result.split_layer_2,
-                    "layer_end": result.layer_end,
-                    "returned_predicted_token": true,
-                }
-            ]
+            "stages": result.stages.iter().map(|stage| {
+                json!({
+                    "stage_index": stage.stage_index,
+                    "layer_start": stage.layer_start,
+                    "layer_end": stage.layer_end,
+                    "payload_bytes": stage.payload_bytes,
+                    "wire_payload_bytes": stage.wire_payload_bytes,
+                    "forwarded_over_binary": stage.forwarded_over_binary,
+                    "returned_predicted_token": stage.returned_predicted_token,
+                })
+            }).collect::<Vec<_>>()
         }))?
     );
     Ok(())
@@ -345,14 +342,14 @@ fn run_binary_split(args: BinarySplitConfig) -> Result<BinarySplitResult> {
         &model_identity.model_id,
         &[
             LocalSplitTopologyStage {
-                stage_id: "stage-0",
+                stage_id: "stage-0".to_string(),
                 stage_index: 0,
                 endpoint: format!("tcp://{}", direct_returns.endpoint()),
                 layer_start: 0,
                 layer_end: args.split_layer,
             },
             LocalSplitTopologyStage {
-                stage_id: "stage-1",
+                stage_id: "stage-1".to_string(),
                 stage_index: 1,
                 endpoint: format!("tcp://{}", args.stage1_bind_addr),
                 layer_start: args.split_layer,
@@ -449,17 +446,14 @@ fn run_binary_split(args: BinarySplitConfig) -> Result<BinarySplitResult> {
 }
 
 fn run_binary_chain(args: LocalSplitChainBinaryArgs) -> Result<BinaryChainResult> {
-    if args.split_layer_1 == 0
-        || args.split_layer_1 >= args.split_layer_2
-        || args.split_layer_2 >= args.layer_end
-    {
-        bail!("split_layer_1 and split_layer_2 must partition 0..layer_end in ascending order");
-    }
+    let splits = chain_splits(&args)?;
+    let ranges = chain_ranges(&splits, args.layer_end);
+    let bind_addrs = chain_bind_addrs(&args, ranges.len())?;
     validate_local_topology_plan(
         &args.model_path,
         args.layer_end,
-        &[args.split_layer_1, args.split_layer_2],
-        3,
+        &splits,
+        ranges.len(),
         &args.activation_wire_dtype,
     )?;
     let wire_dtype = parse_wire_dtype(&args.activation_wire_dtype)?;
@@ -467,7 +461,7 @@ fn run_binary_chain(args: LocalSplitChainBinaryArgs) -> Result<BinaryChainResult
     let stage0_config = RuntimeConfig {
         stage_index: 0,
         layer_start: 0,
-        layer_end: args.split_layer_1,
+        layer_end: ranges[0].1,
         ctx_size: args.ctx_size,
         lane_count: 1,
         n_batch: None,
@@ -504,136 +498,83 @@ fn run_binary_chain(args: LocalSplitChainBinaryArgs) -> Result<BinaryChainResult
     let direct_returns = BenchDirectReturnServer::start("127.0.0.1:0")?;
 
     let run_id = generate_run_id();
-    let stage1_config_path = temp_config_path_for(&run_id, "stage-1");
-    let stage2_config_path = temp_config_path_for(&run_id, "stage-2");
     let topology_path = temp_config_path_for(&run_id, "topology");
-    let stage2_config = json!({
-        "run_id": run_id,
-        "topology_id": "local-split-chain-binary",
-        "model_id": model_identity.model_id,
-        "model_path": args.model_path,
-        "stage_id": "stage-2",
-        "stage_index": 2,
-        "layer_start": args.split_layer_2,
-        "layer_end": args.layer_end,
-        "ctx_size": args.ctx_size,
-        "n_gpu_layers": args.n_gpu_layers,
-        "selected_device": selected_device_config(&args.selected_backend_device),
-        "filter_tensors_on_load": true,
-        "load_mode": "runtime-slice",
-        "bind_addr": args.stage2_bind_addr,
-        "upstream": {
-            "stage_id": "stage-1",
-            "stage_index": 1,
-            "endpoint": format!("tcp://{}", args.stage1_bind_addr)
-        },
-        "downstream": null
-    });
-    let stage1_config = json!({
-        "run_id": run_id,
-        "topology_id": "local-split-chain-binary",
-        "model_id": model_identity.model_id,
-        "model_path": args.model_path,
-        "stage_id": "stage-1",
-        "stage_index": 1,
-        "layer_start": args.split_layer_1,
-        "layer_end": args.split_layer_2,
-        "ctx_size": args.ctx_size,
-        "n_gpu_layers": args.n_gpu_layers,
-        "selected_device": selected_device_config(&args.selected_backend_device),
-        "filter_tensors_on_load": true,
-        "load_mode": "runtime-slice",
-        "bind_addr": args.stage1_bind_addr,
-        "upstream": {
-            "stage_id": "stage-0",
-            "stage_index": 0,
-            "endpoint": "driver"
-        },
-        "downstream": {
-            "stage_id": "stage-2",
-            "stage_index": 2,
-            "endpoint": format!("tcp://{}", args.stage2_bind_addr)
-        }
-    });
-    fs::write(
-        &stage2_config_path,
-        serde_json::to_vec_pretty(&stage2_config)?,
-    )
-    .with_context(|| format!("failed to write {}", stage2_config_path.display()))?;
-    fs::write(
-        &stage1_config_path,
-        serde_json::to_vec_pretty(&stage1_config)?,
-    )
-    .with_context(|| format!("failed to write {}", stage1_config_path.display()))?;
+    let mut config_paths = Vec::new();
+    for stage_index in 1..ranges.len() {
+        let current_stage_id = stage_id(stage_index);
+        let config_path = temp_config_path_for(&run_id, &current_stage_id);
+        let upstream_endpoint = if stage_index == 1 {
+            "driver".to_string()
+        } else {
+            format!("tcp://{}", bind_addrs[stage_index - 2])
+        };
+        let downstream = if stage_index + 1 == ranges.len() {
+            Value::Null
+        } else {
+            json!({
+                "stage_id": stage_id(stage_index + 1),
+                "stage_index": stage_index + 1,
+                "endpoint": format!("tcp://{}", bind_addrs[stage_index])
+            })
+        };
+        let config = json!({
+            "run_id": run_id,
+            "topology_id": "local-split-chain-binary",
+            "model_id": model_identity.model_id,
+            "model_path": args.model_path,
+            "stage_id": current_stage_id,
+            "stage_index": stage_index,
+            "layer_start": ranges[stage_index].0,
+            "layer_end": ranges[stage_index].1,
+            "ctx_size": args.ctx_size,
+            "n_gpu_layers": args.n_gpu_layers,
+            "selected_device": selected_device_config(&args.selected_backend_device),
+            "filter_tensors_on_load": true,
+            "load_mode": "runtime-slice",
+            "bind_addr": bind_addrs[stage_index - 1],
+            "upstream": {
+                "stage_id": stage_id(stage_index - 1),
+                "stage_index": stage_index - 1,
+                "endpoint": upstream_endpoint
+            },
+            "downstream": downstream
+        });
+        fs::write(&config_path, serde_json::to_vec_pretty(&config)?)
+            .with_context(|| format!("failed to write {}", config_path.display()))?;
+        config_paths.push((stage_index, config_path));
+    }
+    let topology_stages = chain_topology_stages(&ranges, &bind_addrs, direct_returns.endpoint());
     let topology = local_split_topology(
         "local-split-chain-binary",
         &model_identity.model_id,
-        &[
-            LocalSplitTopologyStage {
-                stage_id: "stage-0",
-                stage_index: 0,
-                endpoint: format!("tcp://{}", direct_returns.endpoint()),
-                layer_start: 0,
-                layer_end: args.split_layer_1,
-            },
-            LocalSplitTopologyStage {
-                stage_id: "stage-1",
-                stage_index: 1,
-                endpoint: format!("tcp://{}", args.stage1_bind_addr),
-                layer_start: args.split_layer_1,
-                layer_end: args.split_layer_2,
-            },
-            LocalSplitTopologyStage {
-                stage_id: "stage-2",
-                stage_index: 2,
-                endpoint: format!("tcp://{}", args.stage2_bind_addr),
-                layer_start: args.split_layer_2,
-                layer_end: args.layer_end,
-            },
-        ],
+        &topology_stages,
     );
     fs::write(&topology_path, serde_json::to_vec_pretty(&topology)?)
         .with_context(|| format!("failed to write {}", topology_path.display()))?;
 
-    let mut stage2_command = Command::new(&args.stage_server_bin);
-    stage2_command.args([
-        "serve-binary",
-        "--config",
-        stage2_config_path
-            .to_str()
-            .context("stage 2 config path is not valid UTF-8")?,
-        "--topology",
-        topology_path
-            .to_str()
-            .context("stage topology path is not valid UTF-8")?,
-        "--activation-width",
-        &activation_width.to_string(),
-        "--activation-wire-dtype",
-        &args.activation_wire_dtype,
-    ]);
-    configure_child_logs(&mut stage2_command, args.child_logs);
-    let _stage2 = ChildGuard::spawn(stage2_command)?;
+    let mut stage_processes = Vec::new();
+    for (stage_index, config_path) in config_paths.iter().rev() {
+        let mut stage_command = Command::new(&args.stage_server_bin);
+        stage_command.args([
+            "serve-binary",
+            "--config",
+            config_path
+                .to_str()
+                .with_context(|| format!("stage {stage_index} config path is not valid UTF-8"))?,
+            "--topology",
+            topology_path
+                .to_str()
+                .context("stage topology path is not valid UTF-8")?,
+            "--activation-width",
+            &activation_width.to_string(),
+            "--activation-wire-dtype",
+            &args.activation_wire_dtype,
+        ]);
+        configure_child_logs(&mut stage_command, args.child_logs);
+        stage_processes.push(ChildGuard::spawn(stage_command)?);
+    }
 
-    let mut stage1_command = Command::new(&args.stage_server_bin);
-    stage1_command.args([
-        "serve-binary",
-        "--config",
-        stage1_config_path
-            .to_str()
-            .context("stage 1 config path is not valid UTF-8")?,
-        "--topology",
-        topology_path
-            .to_str()
-            .context("stage topology path is not valid UTF-8")?,
-        "--activation-width",
-        &activation_width.to_string(),
-        "--activation-wire-dtype",
-        &args.activation_wire_dtype,
-    ]);
-    configure_child_logs(&mut stage1_command, args.child_logs);
-    let _stage1 = ChildGuard::spawn(stage1_command)?;
-
-    let mut stream = connect_ready(args.stage1_bind_addr, args.startup_timeout_secs)
+    let mut stream = connect_ready(bind_addrs[0], args.startup_timeout_secs)
         .context("stage 1 binary server did not become ready")?;
     let request_id = 2;
     let session_id = 2;
@@ -682,16 +623,110 @@ fn run_binary_chain(args: LocalSplitChainBinaryArgs) -> Result<BinaryChainResult
         predicted_token: reply.predicted,
         activation_width,
         wire_dtype: args.activation_wire_dtype,
-        stage0_wire_payload_bytes: message.activation.len(),
-        stage0_payload_bytes: boundary.desc.payload_bytes,
-        split_layer_1: args.split_layer_1,
-        split_layer_2: args.split_layer_2,
-        layer_end: args.layer_end,
+        stages: chain_stage_results(
+            &ranges,
+            boundary.desc.payload_bytes,
+            message.activation.len(),
+        ),
     })
 }
 
-struct LocalSplitTopologyStage<'a> {
-    stage_id: &'a str,
+fn chain_splits(args: &LocalSplitChainBinaryArgs) -> Result<Vec<u32>> {
+    let splits = if args.splits.is_empty() {
+        vec![args.split_layer_1, args.split_layer_2]
+    } else {
+        args.splits.clone()
+    };
+    let mut previous = 0;
+    for split in &splits {
+        if *split <= previous || *split >= args.layer_end {
+            bail!("splits must partition 0..layer_end in strictly ascending order");
+        }
+        previous = *split;
+    }
+    Ok(splits)
+}
+
+fn chain_ranges(splits: &[u32], layer_end: u32) -> Vec<(u32, u32)> {
+    let mut bounds = Vec::with_capacity(splits.len() + 2);
+    bounds.push(0);
+    bounds.extend_from_slice(splits);
+    bounds.push(layer_end);
+    bounds
+        .windows(2)
+        .map(|pair| (pair[0], pair[1]))
+        .collect::<Vec<_>>()
+}
+
+fn chain_bind_addrs(
+    args: &LocalSplitChainBinaryArgs,
+    stage_count: usize,
+) -> Result<Vec<SocketAddr>> {
+    if args.splits.is_empty() && stage_count == 3 {
+        return Ok(vec![args.stage1_bind_addr, args.stage2_bind_addr]);
+    }
+    (0..stage_count - 1)
+        .map(|offset| {
+            let offset = u16::try_from(offset).context("stage count exceeds u16")?;
+            let port = args
+                .stage_bind_base_port
+                .checked_add(offset)
+                .context("stage bind port range overflows u16")?;
+            Ok(SocketAddr::from(([127, 0, 0, 1], port)))
+        })
+        .collect()
+}
+
+fn chain_topology_stages(
+    ranges: &[(u32, u32)],
+    bind_addrs: &[SocketAddr],
+    direct_return_endpoint: String,
+) -> Vec<LocalSplitTopologyStage> {
+    ranges
+        .iter()
+        .enumerate()
+        .map(
+            |(index, (layer_start, layer_end))| LocalSplitTopologyStage {
+                stage_id: stage_id(index),
+                stage_index: index as u32,
+                endpoint: if index == 0 {
+                    format!("tcp://{direct_return_endpoint}")
+                } else {
+                    format!("tcp://{}", bind_addrs[index - 1])
+                },
+                layer_start: *layer_start,
+                layer_end: *layer_end,
+            },
+        )
+        .collect()
+}
+
+fn chain_stage_results(
+    ranges: &[(u32, u32)],
+    stage0_payload_bytes: u64,
+    stage0_wire_payload_bytes: usize,
+) -> Vec<BinaryChainStageResult> {
+    ranges
+        .iter()
+        .enumerate()
+        .map(|(index, (layer_start, layer_end))| BinaryChainStageResult {
+            stage_index: index as u32,
+            layer_start: *layer_start,
+            layer_end: *layer_end,
+            payload_bytes: (index == 0).then_some(stage0_payload_bytes),
+            wire_payload_bytes: (index == 0).then_some(stage0_wire_payload_bytes),
+            forwarded_over_binary: index > 0,
+            returned_predicted_token: index + 1 == ranges.len(),
+        })
+        .collect()
+}
+
+fn stage_id(stage_index: usize) -> String {
+    format!("stage-{stage_index}")
+}
+
+struct LocalSplitTopologyStage {
+    stage_id: String,
     stage_index: u32,
     endpoint: String,
     layer_start: u32,
@@ -701,14 +736,14 @@ struct LocalSplitTopologyStage<'a> {
 fn local_split_topology(
     topology_id: &str,
     model_id: &str,
-    stages: &[LocalSplitTopologyStage<'_>],
+    stages: &[LocalSplitTopologyStage],
 ) -> serde_json::Value {
     json!({
         "topology_id": topology_id,
         "model_id": model_id,
         "stages": stages.iter().map(|stage| {
             json!({
-                "stage_id": stage.stage_id,
+                "stage_id": &stage.stage_id,
                 "stage_index": stage.stage_index,
                 "host": "localhost",
                 "endpoint": stage.endpoint,

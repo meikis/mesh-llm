@@ -25,6 +25,9 @@ Rust.
   recorded Python fixture and match Python top-k draft candidates.
 - `skippy-model-package` can plan, write, and preflight explicit tap-aligned
   layer splits for the `Qwen/Qwen3.5-4B` S4/L4 proof head.
+- `skippy-bench local-split-chain-binary` can run the `Qwen/Qwen3.5-4B` GGUF
+  through the full tap-aligned seven-stage Skippy binary chain locally, using
+  `CPU0` to bypass local Metal auto-selection.
 
 ## What Does Not Work Yet
 
@@ -193,6 +196,28 @@ Those split boundaries produce ranges
 state required by the pretrained head as a stage boundary for the local proof.
 The recorded local artifact validation used `Qwen3.5-4B-Q4_K_M.gguf` and found
 all `426` owned tensors exactly once across the seven slices.
+
+The same split shape has also been exercised through live Skippy binary stage
+transport against the full GGUF:
+
+```bash
+cargo run -p skippy-bench -- local-split-chain-binary \
+  --model-path .artifacts/spd/qwen35-4b-gguf/Qwen3.5-4B-Q4_K_M.gguf \
+  --model-id unsloth/Qwen3.5-4B-GGUF:Q4_K_M \
+  --splits 8,10,16,20,24,31 \
+  --layer-end 32 \
+  --ctx-size 128 \
+  --n-gpu-layers 0 \
+  --selected-backend-device CPU0 \
+  --stage-bind-base-port 19131 \
+  --prompt Hello
+```
+
+Recorded result: stage ranges
+`0..8, 8..10, 10..16, 16..20, 20..24, 24..31, 31..32`, activation width
+`2560`, first boundary payload `10240` bytes / `5120` f16 wire bytes, prompt
+token id `9419`, predicted token `11`. A `local-split-compare` run on the same
+GGUF and prompt matched the unsplit full-model token `11`.
 
 Validate an exported local head through Rust with:
 

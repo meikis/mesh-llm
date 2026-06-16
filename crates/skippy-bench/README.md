@@ -52,6 +52,7 @@ skippy-bench local-single --model-path model.gguf --model-id org/repo:Q4_K_M
 skippy-bench local-split-binary --model-path model.gguf --model-id org/repo:Q4_K_M
 skippy-bench local-split-compare --model-path model.gguf --model-id org/repo:Q4_K_M
 skippy-bench local-split-chain-binary --model-path model.gguf --model-id org/repo:Q4_K_M
+skippy-bench local-split-chain-binary --model-path model.gguf --model-id org/repo:Q4_K_M --splits 8,10,16,20,24,31 --layer-end 32
 skippy-bench chat-corpus --base-url http://127.0.0.1:9337/v1 --model org/repo:Q4_K_M --prompt-corpus target/bench-corpora/smoke/corpus.jsonl --max-tokens 64 --stream
 skippy-bench token-lengths --model-path model.gguf --prompt-corpus target/bench-corpora/long/corpus.jsonl --ctx-size 8192 --generation-limit 512 --output-tsv target/bench-corpora/long/prompt-lengths.tsv
 skippy-bench focused-runtime --schema-smoke --hosts host-a,host-b --splits 1 --layer-end 2
@@ -60,6 +61,10 @@ skippy-bench focused-runtime --schema-smoke --hosts host-a,host-b --splits 1 --l
 Local split smoke commands accept `--selected-backend-device` for diagnostic
 runs that need to bypass llama.cpp auto device ordering. Values are the staged
 ABI backend names such as `MTL0` or `CPU0`.
+`local-split-chain-binary --splits` accepts comma-delimited split boundaries
+and launches one binary stage for each range after the in-process first stage.
+Use `--stage-bind-base-port` when multiple local chain runs need separate
+listener ranges.
 
 The old standalone `kv-stage-integration` and `kv-hit-regression` commands are
 intentionally absent. Mesh does not carry the legacy standalone cache sidecar

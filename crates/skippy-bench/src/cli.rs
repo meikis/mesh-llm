@@ -399,6 +399,8 @@ pub struct LocalSplitChainBinaryArgs {
     pub split_layer_1: u32,
     #[arg(long, default_value_t = 20)]
     pub split_layer_2: u32,
+    #[arg(long, value_delimiter = ',')]
+    pub splits: Vec<u32>,
     #[arg(long, default_value_t = 30)]
     pub layer_end: u32,
     #[arg(long, default_value_t = 128)]
@@ -413,6 +415,8 @@ pub struct LocalSplitChainBinaryArgs {
     pub stage1_bind_addr: SocketAddr,
     #[arg(long, default_value = "127.0.0.1:19032")]
     pub stage2_bind_addr: SocketAddr,
+    #[arg(long, default_value_t = 19031)]
+    pub stage_bind_base_port: u16,
     #[arg(long, default_value = "f16")]
     pub activation_wire_dtype: String,
     #[arg(long)]
@@ -478,5 +482,30 @@ mod tests {
         };
 
         assert_eq!(args.run.max_new_tokens, None);
+    }
+
+    #[test]
+    fn parses_local_split_chain_splits() {
+        let cli = Cli::try_parse_from([
+            "skippy-bench",
+            "local-split-chain-binary",
+            "--model-path",
+            "model.gguf",
+            "--splits",
+            "8,10,16,20,24,31",
+            "--layer-end",
+            "32",
+            "--stage-bind-base-port",
+            "19131",
+        ])
+        .unwrap();
+
+        let CommandKind::LocalSplitChainBinary(args) = cli.command else {
+            panic!("expected local-split-chain-binary subcommand");
+        };
+
+        assert_eq!(args.splits, vec![8, 10, 16, 20, 24, 31]);
+        assert_eq!(args.layer_end, 32);
+        assert_eq!(args.stage_bind_base_port, 19131);
     }
 }

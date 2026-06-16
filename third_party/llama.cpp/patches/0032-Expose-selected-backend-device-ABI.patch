@@ -5,8 +5,8 @@ Subject: [PATCH 32/82] Expose selected backend device ABI
 
 ---
  include/skippy.h |  5 +++++
- src/skippy.cpp   | 51 ++++++++++++++++++++++++++++++++++++++++++++++++
- 2 files changed, 56 insertions(+)
+ src/skippy.cpp   | 54 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 59 insertions(+)
 
 diff --git a/include/skippy.h b/include/skippy.h
 index 4f1c8805d..2f8f84669 100644
@@ -28,7 +28,7 @@ diff --git a/src/skippy.cpp b/src/skippy.cpp
 index 4b4bf8ebd..3c714effe 100644
 --- a/src/skippy.cpp
 +++ b/src/skippy.cpp
-@@ -471,6 +471,41 @@ static bool skippy_is_full_model_config(const struct skippy_runtime_config * con
+@@ -471,6 +471,44 @@ static bool skippy_is_full_model_config(const struct skippy_runtime_config * con
      return !config->filter_tensors_on_load && config->layer_start == 0;
  }
  
@@ -42,19 +42,22 @@ index 4b4bf8ebd..3c714effe 100644
 +    }
 +
 +    const std::string device_name(config->selected_backend_device);
++    ggml_backend_dev_t dev = nullptr;
 +    if (device_name == "CPU" || device_name == "CPU0") {
-+        params.devices = nullptr;
-+        params.main_gpu = -1;
++        dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
++        if (dev == nullptr) {
++            skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, "CPU backend device is unavailable");
++            return SKIPPY_STATUS_INVALID_ARGUMENT;
++        }
 +        params.n_gpu_layers = 0;
-+        return SKIPPY_STATUS_OK;
++    } else {
++        dev = ggml_backend_dev_by_name(device_name.c_str());
 +    }
-+
-+    ggml_backend_dev_t dev = ggml_backend_dev_by_name(device_name.c_str());
 +    if (dev == nullptr) {
 +        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, ("unknown selected backend device: " + device_name).c_str());
 +        return SKIPPY_STATUS_INVALID_ARGUMENT;
 +    }
-+    if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU) {
++    if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU && device_name != "CPU" && device_name != "CPU0") {
 +        skippy_set_error(out_error, SKIPPY_STATUS_INVALID_ARGUMENT, ("selected backend device is CPU; use CPU or CPU0: " + device_name).c_str());
 +        return SKIPPY_STATUS_INVALID_ARGUMENT;
 +    }
@@ -102,4 +105,3 @@ index 4b4bf8ebd..3c714effe 100644
      if (model == nullptr) {
 -- 
 2.54.0 (Apple Git-156)
-

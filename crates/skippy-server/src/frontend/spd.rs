@@ -22,6 +22,7 @@ mod cache;
 mod telemetry;
 #[cfg(test)]
 mod tests;
+mod timing;
 
 use self::{
     cache::{
@@ -32,6 +33,7 @@ use self::{
         insert_proposal_stats_attrs, insert_rolling_attrs, insert_rolling_speculation_rows_attrs,
         insert_rolling_verified_delta_attrs,
     },
+    timing::{SpdHeadForwardOutcome, SpdHeadForwardTiming, insert_head_forward_timing_attrs},
 };
 
 pub(super) use self::telemetry::SpdRollingTelemetry;
@@ -95,6 +97,7 @@ pub(super) struct SpdInlineProposal {
     pub(super) tap_collect_ms: f64,
     pub(super) cur_in_ms: f64,
     pub(super) forward_ms: f64,
+    pub(super) head_timing: SpdHeadForwardTiming,
     pub(super) proposal_rows: SpdProposalRows,
 }
 
@@ -217,6 +220,12 @@ pub(super) struct SpdProposalSourceStats {
     tap_collect_ms: f64,
     cur_in_ms: f64,
     forward_ms: f64,
+    cache_prefill_ms: f64,
+    head_fixed_stage_projection_ms: f64,
+    head_decoder_ms: f64,
+    head_final_norm_ms: f64,
+    head_lm_head_topk_ms: f64,
+    head_total_ms: f64,
     last_cache_prefix_len: Option<usize>,
     max_cache_prefix_len: Option<usize>,
 }
@@ -243,6 +252,12 @@ impl SpdProposalSourceStats {
         self.tap_collect_ms += proposal.tap_collect_ms;
         self.cur_in_ms += proposal.cur_in_ms;
         self.forward_ms += proposal.forward_ms;
+        self.cache_prefill_ms += proposal.head_timing.cache_prefill_ms;
+        self.head_fixed_stage_projection_ms += proposal.head_timing.fixed_stage_projection_ms;
+        self.head_decoder_ms += proposal.head_timing.decoder_total_ms();
+        self.head_final_norm_ms += proposal.head_timing.final_norm_ms;
+        self.head_lm_head_topk_ms += proposal.head_timing.lm_head_topk_ms;
+        self.head_total_ms += proposal.head_timing.total_ms;
         if let Some(prefix_len) = proposal.cache_prefix_len {
             self.last_cache_prefix_len = Some(prefix_len);
             self.max_cache_prefix_len =
@@ -261,6 +276,12 @@ impl SpdProposalSourceStats {
         self.tap_collect_ms += window.tap_collect_ms;
         self.cur_in_ms += window.cur_in_ms;
         self.forward_ms += window.forward_ms;
+        self.cache_prefill_ms += window.cache_prefill_ms;
+        self.head_fixed_stage_projection_ms += window.head_fixed_stage_projection_ms;
+        self.head_decoder_ms += window.head_decoder_ms;
+        self.head_final_norm_ms += window.head_final_norm_ms;
+        self.head_lm_head_topk_ms += window.head_lm_head_topk_ms;
+        self.head_total_ms += window.head_total_ms;
         self.last_cache_prefix_len = window.last_cache_prefix_len.or(self.last_cache_prefix_len);
         if let Some(prefix_len) = window.max_cache_prefix_len {
             self.max_cache_prefix_len =
@@ -459,16 +480,17 @@ impl SpdReplayProposalSource {
         })?;
         let cur_in_ms = cur_in_timer.elapsed_ms();
         let forward_timer = PhaseTimer::start();
-        let (topk, cache_used, cache_prefix_len) =
+        let head_forward =
             self.forward_head_for_rows(context_tokens, row_positions, live_rows.cur_in)?;
         let forward_ms = forward_timer.elapsed_ms();
-        let mut proposal = spd_inline_proposal_from_topk(&topk)?;
-        proposal.cache_used = cache_used;
-        proposal.cache_prefix_len = cache_prefix_len;
+        let mut proposal = spd_inline_proposal_from_topk(&head_forward.topk)?;
+        proposal.cache_used = head_forward.cache_used;
+        proposal.cache_prefix_len = head_forward.cache_prefix_len;
         proposal.tap_source = tap_collection.source;
         proposal.tap_collect_ms = tap_collect_ms;
         proposal.cur_in_ms = cur_in_ms;
         proposal.forward_ms = forward_ms;
+        proposal.head_timing = head_forward.timing;
         proposal.proposal_rows = SpdProposalRows::from_probe_rows(
             context_tokens.len(),
             row_positions,
@@ -483,11 +505,7 @@ impl SpdReplayProposalSource {
         context_tokens: &[i32],
         row_positions: &[i64],
         cur_in: Vec<f32>,
-    ) -> Result<(
-        skippy_runtime::spd::SpdQwen3FixtureTopK,
-        bool,
-        Option<usize>,
-    )> {
+    ) -> Result<SpdHeadForwardOutcome> {
         let input = SpdQwen3ForwardInput {
             cur_in,
             seq_len: row_positions.len(),
@@ -499,14 +517,29 @@ impl SpdReplayProposalSource {
             .head_cache
             .lock()
             .map_err(|_| anyhow::anyhow!("SPD Qwen head cache lock poisoned"))?;
-        if self.prefill_head_cache_for_rows(context_tokens, row_positions, &mut cache)? {
+        let prefill_timer = PhaseTimer::start();
+        let cache_ready =
+            self.prefill_head_cache_for_rows(context_tokens, row_positions, &mut cache)?;
+        let cache_prefill_ms = prefill_timer.elapsed_ms();
+        if cache_ready {
             let cache_prefix_len = cache.cached_prefix_len();
-            let topk = self
+            let timed = self
                 .head
-                .forward_with_cache(input, self.top_k, &mut cache)?;
-            return Ok((topk, true, Some(cache_prefix_len)));
+                .forward_with_cache_timed(input, self.top_k, &mut cache)?;
+            return Ok(SpdHeadForwardOutcome::from_timed_forward(
+                timed,
+                true,
+                Some(cache_prefix_len),
+                cache_prefill_ms,
+            ));
         }
-        Ok((self.head.forward(input, self.top_k)?, false, None))
+        let timed = self.head.forward_timed(input, self.top_k)?;
+        Ok(SpdHeadForwardOutcome::from_timed_forward(
+            timed,
+            false,
+            None,
+            cache_prefill_ms,
+        ))
     }
 
     fn prefill_head_cache_for_rows(
@@ -1069,6 +1102,7 @@ fn spd_inline_proposal_from_topk(
         tap_collect_ms: 0.0,
         cur_in_ms: 0.0,
         forward_ms: 0.0,
+        head_timing: SpdHeadForwardTiming::default(),
         proposal_rows: SpdProposalRows::default(),
     })
 }
@@ -1345,6 +1379,11 @@ impl StageOpenAiBackend {
         attrs.insert(
             "llama_stage.spd_inline_probe_forward_ms".to_string(),
             json!(probe.forward_ms),
+        );
+        insert_head_forward_timing_attrs(
+            "llama_stage.spd_inline_probe",
+            &probe.head_timing,
+            &mut attrs,
         );
         attrs.insert(
             "llama_stage.spd_inline_probe_target_token".to_string(),
@@ -1683,6 +1722,7 @@ pub(super) struct SpdInlineProbe {
     pub(super) tap_collect_ms: f64,
     pub(super) cur_in_ms: f64,
     pub(super) forward_ms: f64,
+    pub(super) head_timing: SpdHeadForwardTiming,
     pub(super) elapsed_ms: f64,
     pub(super) target_wait_after_probe_ms: f64,
     pub(super) trigger_hf_index: Option<u32>,
@@ -1713,6 +1753,9 @@ impl SpdInlineProbe {
                 .unwrap_or(0.0),
             cur_in_ms: proposal.map(|proposal| proposal.cur_in_ms).unwrap_or(0.0),
             forward_ms: proposal.map(|proposal| proposal.forward_ms).unwrap_or(0.0),
+            head_timing: proposal
+                .map(|proposal| proposal.head_timing.clone())
+                .unwrap_or_default(),
             elapsed_ms,
             target_wait_after_probe_ms,
             trigger_hf_index,

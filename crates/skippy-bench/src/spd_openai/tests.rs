@@ -93,6 +93,12 @@ fn decode_report_reads_spec_attrs() {
             "llama_stage.spd_proposal.total.tap_collect_ms": 100.0,
             "llama_stage.spd_proposal.total.cur_in_ms": 20.0,
             "llama_stage.spd_proposal.total.forward_ms": 300.0,
+            "llama_stage.spd_proposal.total.cache_prefill_ms": 30.0,
+            "llama_stage.spd_proposal.total.head_fixed_stage_projection_ms": 40.0,
+            "llama_stage.spd_proposal.total.head_decoder_ms": 200.0,
+            "llama_stage.spd_proposal.total.head_final_norm_ms": 5.0,
+            "llama_stage.spd_proposal.total.head_lm_head_topk_ms": 25.0,
+            "llama_stage.spd_proposal.total.head_total_ms": 270.0,
             "llama_stage.spd_proposal.total.last_cache_prefix_len": 31,
             "llama_stage.spd_proposal.total.max_cache_prefix_len": 31,
         }
@@ -115,6 +121,15 @@ fn decode_report_reads_spec_attrs() {
     assert_eq!(report.spd_proposal_total_tap_collect_ms, Some(100.0));
     assert_eq!(report.spd_proposal_total_cur_in_ms, Some(20.0));
     assert_eq!(report.spd_proposal_total_forward_ms, Some(300.0));
+    assert_eq!(report.spd_proposal_total_cache_prefill_ms, Some(30.0));
+    assert_eq!(
+        report.spd_proposal_total_head_fixed_stage_projection_ms,
+        Some(40.0)
+    );
+    assert_eq!(report.spd_proposal_total_head_decoder_ms, Some(200.0));
+    assert_eq!(report.spd_proposal_total_head_final_norm_ms, Some(5.0));
+    assert_eq!(report.spd_proposal_total_head_lm_head_topk_ms, Some(25.0));
+    assert_eq!(report.spd_proposal_total_head_total_ms, Some(270.0));
     assert_eq!(report.spd_proposal_total_last_cache_prefix_len, Some(31));
     assert_eq!(report.spd_proposal_total_max_cache_prefix_len, Some(31));
 }
@@ -181,6 +196,13 @@ fn inline_probe_report_reads_rolling_verified_delta_attrs() {
             "llama_stage.spd_inline_probe_tap_collect_ms": 1.25,
             "llama_stage.spd_inline_probe_cur_in_ms": 2.5,
             "llama_stage.spd_inline_probe_forward_ms": 3.75,
+            "llama_stage.spd_inline_probe_cache_prefill_ms": 0.5,
+            "llama_stage.spd_inline_probe_head_fixed_stage_projection_ms": 0.75,
+            "llama_stage.spd_inline_probe_head_decoder_ms": 1.5,
+            "llama_stage.spd_inline_probe_head_decoder_layer_ms": [0.7, 0.8],
+            "llama_stage.spd_inline_probe_head_final_norm_ms": 0.1,
+            "llama_stage.spd_inline_probe_head_lm_head_topk_ms": 0.2,
+            "llama_stage.spd_inline_probe_head_total_ms": 2.55,
             "llama_stage.spd_inline_probe_proposal_row_positions": [24,25,26,27],
             "llama_stage.spd_inline_probe_proposal_row_i_stages": [4,4,4,0],
             "llama_stage.spd_inline_probe_proposal_row_evicted_prefix_position": null,
@@ -211,6 +233,13 @@ fn inline_probe_report_reads_rolling_verified_delta_attrs() {
     assert_eq!(probe.tap_collect_ms, Some(1.25));
     assert_eq!(probe.cur_in_ms, Some(2.5));
     assert_eq!(probe.forward_ms, Some(3.75));
+    assert_eq!(probe.cache_prefill_ms, Some(0.5));
+    assert_eq!(probe.head_fixed_stage_projection_ms, Some(0.75));
+    assert_eq!(probe.head_decoder_ms, Some(1.5));
+    assert_eq!(probe.head_decoder_layer_ms, vec![0.7, 0.8]);
+    assert_eq!(probe.head_final_norm_ms, Some(0.1));
+    assert_eq!(probe.head_lm_head_topk_ms, Some(0.2));
+    assert_eq!(probe.head_total_ms, Some(2.55));
     assert_eq!(probe.phase.as_deref(), Some("optimistic_commit"));
     assert_eq!(probe.proposal_row_positions, vec![24, 25, 26, 27]);
     assert_eq!(probe.proposal_row_i_stages, vec![4, 4, 4, 0]);
@@ -303,6 +332,45 @@ fn summary_compares_prompt_pairs_and_totals() {
         Some(4.0)
     );
     assert!(summary.prompt_comparisons[0].content_matches);
+}
+
+#[test]
+fn summary_ignores_warmups_and_pairs_measured_repeats() {
+    let mut warmup_baseline = test_case("baseline", 0, "warmup", 1000.0, baseline_decode(500.0));
+    warmup_baseline.warmup = true;
+    let mut warmup_spd = test_case("spd", 0, "warmup", 2000.0, spd_decode(1000.0, 10, 10, 0, 0));
+    warmup_spd.warmup = true;
+
+    let mut baseline_repeat_0 = test_case("baseline", 0, "r0", 100.0, baseline_decode(50.0));
+    baseline_repeat_0.repeat_index = 0;
+    let mut spd_repeat_0 = test_case("spd", 0, "r0", 200.0, spd_decode(100.0, 4, 2, 2, 1));
+    spd_repeat_0.repeat_index = 0;
+
+    let mut baseline_repeat_1 = test_case("baseline", 0, "r1", 120.0, baseline_decode(60.0));
+    baseline_repeat_1.repeat_index = 1;
+    let mut spd_repeat_1 = test_case("spd", 0, "mismatch", 240.0, spd_decode(120.0, 4, 2, 2, 1));
+    spd_repeat_1.repeat_index = 1;
+
+    let cases = vec![
+        warmup_baseline,
+        warmup_spd,
+        baseline_repeat_0,
+        spd_repeat_0,
+        baseline_repeat_1,
+        spd_repeat_1,
+    ];
+
+    let summary = summarize_cases(&cases, 7, 4);
+
+    assert_eq!(summary.prompt_pairs, 2);
+    assert_eq!(summary.matching_content, 1);
+    assert_eq!(summary.baseline_wall_ms.count, 2);
+    assert_eq!(summary.spd_wall_ms.count, 2);
+    assert_eq!(summary.spd_spec_proposed, 8);
+    assert_eq!(summary.prompt_comparisons[0].repeat_index, 0);
+    assert_eq!(summary.prompt_comparisons[1].repeat_index, 1);
+    assert!(summary.prompt_comparisons[0].content_matches);
+    assert!(!summary.prompt_comparisons[1].content_matches);
 }
 
 #[test]
@@ -615,6 +683,8 @@ fn test_case(
         name,
         prompt_index,
         prompt_label: format!("prompt-{prompt_index:03}"),
+        warmup: false,
+        repeat_index: 0,
         prompt: "prompt".to_string(),
         run_id: format!("{name}-{prompt_index}"),
         openai_base_url: "http://127.0.0.1:1".to_string(),
@@ -643,6 +713,7 @@ fn prompt_comparison(
     PromptComparisonReport {
         prompt_index,
         prompt_label: prompt_label.to_string(),
+        repeat_index: 0,
         content_matches,
         baseline_elapsed_ms: 100.0,
         spd_elapsed_ms: 200.0,
@@ -715,6 +786,13 @@ fn inline_probe_at_step_with_phase(
         tap_collect_ms: None,
         cur_in_ms: None,
         forward_ms: None,
+        cache_prefill_ms: None,
+        head_fixed_stage_projection_ms: None,
+        head_decoder_ms: None,
+        head_decoder_layer_ms: Vec::new(),
+        head_final_norm_ms: None,
+        head_lm_head_topk_ms: None,
+        head_total_ms: None,
         target_token: Some(2),
         accepted,
         trigger_hf_index: Some(31),
@@ -840,6 +918,12 @@ fn baseline_decode(elapsed_ms: f64) -> DecodeReport {
         spd_proposal_total_tap_collect_ms: None,
         spd_proposal_total_cur_in_ms: None,
         spd_proposal_total_forward_ms: None,
+        spd_proposal_total_cache_prefill_ms: None,
+        spd_proposal_total_head_fixed_stage_projection_ms: None,
+        spd_proposal_total_head_decoder_ms: None,
+        spd_proposal_total_head_final_norm_ms: None,
+        spd_proposal_total_head_lm_head_topk_ms: None,
+        spd_proposal_total_head_total_ms: None,
         spd_proposal_total_last_cache_prefix_len: None,
         spd_proposal_total_max_cache_prefix_len: None,
         rolling: None,
@@ -886,6 +970,12 @@ fn spd_decode(
         spd_proposal_total_tap_collect_ms: None,
         spd_proposal_total_cur_in_ms: None,
         spd_proposal_total_forward_ms: None,
+        spd_proposal_total_cache_prefill_ms: None,
+        spd_proposal_total_head_fixed_stage_projection_ms: None,
+        spd_proposal_total_head_decoder_ms: None,
+        spd_proposal_total_head_final_norm_ms: None,
+        spd_proposal_total_head_lm_head_topk_ms: None,
+        spd_proposal_total_head_total_ms: None,
         spd_proposal_total_last_cache_prefix_len: None,
         spd_proposal_total_max_cache_prefix_len: None,
         rolling: None,

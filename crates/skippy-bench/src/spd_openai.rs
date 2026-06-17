@@ -16,8 +16,13 @@ use skippy_runtime::spd::{
 
 use crate::cli::SpdOpenAiSmokeArgs;
 
+mod attrs;
 mod remote;
 
+use attrs::{
+    attr_bool, attr_f64, attr_f64_array, attr_i64, attr_i64_array, attr_i64_array_map, attr_string,
+    attr_u64, attr_u64_array, attrs_for, count_events, count_events_by_hf_index, read_events,
+};
 use remote::{collect_remote_case_logs, prepare_case_deployment, start_case_stages};
 
 const OPENAI_PATH_MODELS: &str = "/v1/models";
@@ -37,25 +42,29 @@ pub fn spd_openai_smoke(args: SpdOpenAiSmokeArgs) -> Result<()> {
 
     let mut cases = Vec::new();
     for prompt in &prompts {
-        if args.run_baseline {
-            cases.push(run_case(
-                &args,
-                &work_dir,
-                &stage_ranges,
-                &tap_allowlist,
-                SmokeCase::Baseline,
-                prompt,
-            )?);
-        }
-        if args.run_spd {
-            cases.push(run_case(
-                &args,
-                &work_dir,
-                &stage_ranges,
-                &tap_allowlist,
-                SmokeCase::Spd,
-                prompt,
-            )?);
+        for iteration in case_iterations(args.warmup_count, args.repeat_count) {
+            if args.run_baseline {
+                cases.push(run_case(
+                    &args,
+                    &work_dir,
+                    &stage_ranges,
+                    &tap_allowlist,
+                    SmokeCase::Baseline,
+                    prompt,
+                    iteration,
+                )?);
+            }
+            if args.run_spd {
+                cases.push(run_case(
+                    &args,
+                    &work_dir,
+                    &stage_ranges,
+                    &tap_allowlist,
+                    SmokeCase::Spd,
+                    prompt,
+                    iteration,
+                )?);
+            }
         }
     }
 
@@ -71,6 +80,8 @@ pub fn spd_openai_smoke(args: SpdOpenAiSmokeArgs) -> Result<()> {
         layer_end: args.layer_end,
         ctx_size: args.ctx_size,
         max_tokens: args.max_tokens,
+        repeat_count: args.repeat_count,
+        warmup_count: args.warmup_count,
         temperature: args.temperature,
         enable_thinking: args.enable_thinking,
         activation_wire_dtype: args.activation_wire_dtype.clone(),
@@ -109,6 +120,8 @@ struct SpdOpenAiSmokeReport {
     layer_end: u32,
     ctx_size: u32,
     max_tokens: u32,
+    repeat_count: usize,
+    warmup_count: usize,
     temperature: f32,
     enable_thinking: bool,
     activation_wire_dtype: String,
@@ -120,6 +133,25 @@ struct SpdOpenAiSmokeReport {
     work_dir: String,
     summary: SpdOpenAiSmokeSummary,
     cases: Vec<CaseReport>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CaseIteration {
+    warmup: bool,
+    repeat_index: usize,
+}
+
+fn case_iterations(warmup_count: usize, repeat_count: usize) -> Vec<CaseIteration> {
+    (0..warmup_count)
+        .map(|repeat_index| CaseIteration {
+            warmup: true,
+            repeat_index,
+        })
+        .chain((0..repeat_count).map(|repeat_index| CaseIteration {
+            warmup: false,
+            repeat_index,
+        }))
+        .collect()
 }
 
 #[derive(Debug)]
@@ -401,6 +433,8 @@ struct CaseReport {
     name: &'static str,
     prompt_index: usize,
     prompt_label: String,
+    warmup: bool,
+    repeat_index: usize,
     prompt: String,
     run_id: String,
     openai_base_url: String,
@@ -454,6 +488,12 @@ struct DecodeReport {
     spd_proposal_total_tap_collect_ms: Option<f64>,
     spd_proposal_total_cur_in_ms: Option<f64>,
     spd_proposal_total_forward_ms: Option<f64>,
+    spd_proposal_total_cache_prefill_ms: Option<f64>,
+    spd_proposal_total_head_fixed_stage_projection_ms: Option<f64>,
+    spd_proposal_total_head_decoder_ms: Option<f64>,
+    spd_proposal_total_head_final_norm_ms: Option<f64>,
+    spd_proposal_total_head_lm_head_topk_ms: Option<f64>,
+    spd_proposal_total_head_total_ms: Option<f64>,
     spd_proposal_total_last_cache_prefix_len: Option<u64>,
     spd_proposal_total_max_cache_prefix_len: Option<u64>,
     rolling: Option<SpdLiveRollingReport>,
@@ -475,6 +515,13 @@ struct InlineProbeReport {
     tap_collect_ms: Option<f64>,
     cur_in_ms: Option<f64>,
     forward_ms: Option<f64>,
+    cache_prefill_ms: Option<f64>,
+    head_fixed_stage_projection_ms: Option<f64>,
+    head_decoder_ms: Option<f64>,
+    head_decoder_layer_ms: Vec<f64>,
+    head_final_norm_ms: Option<f64>,
+    head_lm_head_topk_ms: Option<f64>,
+    head_total_ms: Option<f64>,
     target_token: Option<i64>,
     accepted: Option<bool>,
     trigger_hf_index: Option<u64>,
@@ -613,6 +660,12 @@ struct SpdPipelineGapSummary {
     optimistic_decode_wait_ms: MetricSummary,
     optimistic_decode_hidden_wait_ms: MetricSummary,
     chained_optimistic_decode_hidden_wait_ms: MetricSummary,
+    probe_cache_prefill_ms: MetricSummary,
+    probe_head_fixed_stage_projection_ms: MetricSummary,
+    probe_head_decoder_ms: MetricSummary,
+    probe_head_final_norm_ms: MetricSummary,
+    probe_head_lm_head_topk_ms: MetricSummary,
+    probe_head_total_ms: MetricSummary,
     normal_token_downstream_wait_ms: MetricSummary,
     optimistic_token_downstream_wait_ms: MetricSummary,
     pre_target_proposals_without_tap_return: usize,
@@ -658,6 +711,7 @@ struct SpdRollingTraceReplaySummary {
 struct PromptComparisonReport {
     prompt_index: usize,
     prompt_label: String,
+    repeat_index: usize,
     content_matches: bool,
     baseline_elapsed_ms: f64,
     spd_elapsed_ms: f64,
@@ -842,6 +896,42 @@ fn pipeline_gap_summary(spd_cases: &[&CaseReport]) -> SpdPipelineGapSummary {
                 .iter()
                 .filter(|decode| decode.chain_depth.is_some() || decode.chain == Some(true))
                 .filter_map(|decode| decode.hidden_wait_ms),
+        ),
+        probe_cache_prefill_ms: metric_summary(
+            pre_target
+                .iter()
+                .chain(optimistic_commit.iter())
+                .filter_map(|probe| probe.cache_prefill_ms),
+        ),
+        probe_head_fixed_stage_projection_ms: metric_summary(
+            pre_target
+                .iter()
+                .chain(optimistic_commit.iter())
+                .filter_map(|probe| probe.head_fixed_stage_projection_ms),
+        ),
+        probe_head_decoder_ms: metric_summary(
+            pre_target
+                .iter()
+                .chain(optimistic_commit.iter())
+                .filter_map(|probe| probe.head_decoder_ms),
+        ),
+        probe_head_final_norm_ms: metric_summary(
+            pre_target
+                .iter()
+                .chain(optimistic_commit.iter())
+                .filter_map(|probe| probe.head_final_norm_ms),
+        ),
+        probe_head_lm_head_topk_ms: metric_summary(
+            pre_target
+                .iter()
+                .chain(optimistic_commit.iter())
+                .filter_map(|probe| probe.head_lm_head_topk_ms),
+        ),
+        probe_head_total_ms: metric_summary(
+            pre_target
+                .iter()
+                .chain(optimistic_commit.iter())
+                .filter_map(|probe| probe.head_total_ms),
         ),
         normal_token_downstream_wait_ms: token_downstream_wait_summary(spd_cases, "DecodeEmbd"),
         optimistic_token_downstream_wait_ms: token_downstream_wait_summary(
@@ -1182,7 +1272,7 @@ fn optimistic_hidden_wait_ms(
 fn cases_for_name(cases: &[CaseReport], case: SmokeCase) -> Vec<&CaseReport> {
     cases
         .iter()
-        .filter(|report| report.name == case.as_str())
+        .filter(|report| report.name == case.as_str() && !report.warmup)
         .collect()
 }
 
@@ -1193,10 +1283,10 @@ fn compare_prompt_pairs(
     baseline_cases
         .iter()
         .filter_map(|baseline| {
-            let spd = spd_cases
-                .iter()
-                .copied()
-                .find(|case| case.prompt_index == baseline.prompt_index)?;
+            let spd = spd_cases.iter().copied().find(|case| {
+                case.prompt_index == baseline.prompt_index
+                    && case.repeat_index == baseline.repeat_index
+            })?;
             Some(compare_prompt_pair(baseline, spd))
         })
         .collect()
@@ -1210,6 +1300,7 @@ fn compare_prompt_pair(baseline: &CaseReport, spd: &CaseReport) -> PromptCompari
     PromptComparisonReport {
         prompt_index: baseline.prompt_index,
         prompt_label: baseline.prompt_label.clone(),
+        repeat_index: baseline.repeat_index,
         content_matches: baseline.content == spd.content,
         baseline_elapsed_ms: baseline.elapsed_ms,
         spd_elapsed_ms: spd.elapsed_ms,
@@ -1245,7 +1336,12 @@ fn content_mismatch_failure(
     let mismatches = comparisons
         .iter()
         .filter(|comparison| !comparison.content_matches)
-        .map(|comparison| format!("{}#{}", comparison.prompt_label, comparison.prompt_index))
+        .map(|comparison| {
+            format!(
+                "{}#{} repeat {}",
+                comparison.prompt_label, comparison.prompt_index, comparison.repeat_index
+            )
+        })
         .collect::<Vec<_>>();
     if mismatches.is_empty() {
         return None;
@@ -1341,6 +1437,9 @@ fn validate_args(args: &SpdOpenAiSmokeArgs) -> Result<()> {
     if matches!(args.prompt_limit, Some(0)) {
         bail!("--prompt-limit must be greater than zero");
     }
+    if args.repeat_count == 0 {
+        bail!("--repeat-count must be greater than zero");
+    }
     if let Some(path) = args.prompt_file.as_ref()
         && !path.is_file()
     {
@@ -1422,14 +1521,24 @@ fn run_case(
     tap_allowlist: &[u32],
     case: SmokeCase,
     prompt: &PromptInput,
+    iteration: CaseIteration,
 ) -> Result<CaseReport> {
-    let case_dir = work_dir.join(format!("{}-{}", prompt.label, case.as_str()));
+    let iteration_kind = if iteration.warmup { "warmup" } else { "repeat" };
+    let case_dir = work_dir.join(format!(
+        "{}-{}-{}-{:03}",
+        prompt.label,
+        case.as_str(),
+        iteration_kind,
+        iteration.repeat_index
+    ));
     fs::create_dir_all(&case_dir)
         .with_context(|| format!("failed to create {}", case_dir.display()))?;
     let run_id = format!(
-        "spd-openai-{}-{}-{}",
+        "spd-openai-{}-{}-{}-{:03}-{}",
         prompt.label,
         case.as_str(),
+        iteration_kind,
+        iteration.repeat_index,
         timestamp_millis()
     );
     let deployment =
@@ -1488,6 +1597,7 @@ fn run_case(
         openai_base_url: &openai_base_url,
         run_id: &run_id,
         prompt,
+        iteration,
         elapsed_ms,
     };
     summarize_case_logs(&summary, &response_json)
@@ -1516,6 +1626,7 @@ struct CaseSummaryContext<'a> {
     openai_base_url: &'a str,
     run_id: &'a str,
     prompt: &'a PromptInput,
+    iteration: CaseIteration,
     elapsed_ms: f64,
 }
 
@@ -1530,6 +1641,8 @@ fn summarize_case_logs(context: &CaseSummaryContext<'_>, response: &Value) -> Re
         name: context.case.as_str(),
         prompt_index: context.prompt.index,
         prompt_label: context.prompt.label.clone(),
+        warmup: context.iteration.warmup,
+        repeat_index: context.iteration.repeat_index,
         prompt: context.prompt.text.clone(),
         run_id: context.run_id.to_string(),
         openai_base_url: context.openai_base_url.to_string(),
@@ -1650,6 +1763,30 @@ fn decode_report(events: &[Value]) -> Option<DecodeReport> {
         ),
         spd_proposal_total_cur_in_ms: attr_f64(attrs, "llama_stage.spd_proposal.total.cur_in_ms"),
         spd_proposal_total_forward_ms: attr_f64(attrs, "llama_stage.spd_proposal.total.forward_ms"),
+        spd_proposal_total_cache_prefill_ms: attr_f64(
+            attrs,
+            "llama_stage.spd_proposal.total.cache_prefill_ms",
+        ),
+        spd_proposal_total_head_fixed_stage_projection_ms: attr_f64(
+            attrs,
+            "llama_stage.spd_proposal.total.head_fixed_stage_projection_ms",
+        ),
+        spd_proposal_total_head_decoder_ms: attr_f64(
+            attrs,
+            "llama_stage.spd_proposal.total.head_decoder_ms",
+        ),
+        spd_proposal_total_head_final_norm_ms: attr_f64(
+            attrs,
+            "llama_stage.spd_proposal.total.head_final_norm_ms",
+        ),
+        spd_proposal_total_head_lm_head_topk_ms: attr_f64(
+            attrs,
+            "llama_stage.spd_proposal.total.head_lm_head_topk_ms",
+        ),
+        spd_proposal_total_head_total_ms: attr_f64(
+            attrs,
+            "llama_stage.spd_proposal.total.head_total_ms",
+        ),
         spd_proposal_total_last_cache_prefix_len: attr_u64(
             attrs,
             "llama_stage.spd_proposal.total.last_cache_prefix_len",
@@ -1683,6 +1820,22 @@ fn inline_probe_reports(events: &[Value]) -> Vec<InlineProbeReport> {
             tap_collect_ms: attr_f64(attrs, "llama_stage.spd_inline_probe_tap_collect_ms"),
             cur_in_ms: attr_f64(attrs, "llama_stage.spd_inline_probe_cur_in_ms"),
             forward_ms: attr_f64(attrs, "llama_stage.spd_inline_probe_forward_ms"),
+            cache_prefill_ms: attr_f64(attrs, "llama_stage.spd_inline_probe_cache_prefill_ms"),
+            head_fixed_stage_projection_ms: attr_f64(
+                attrs,
+                "llama_stage.spd_inline_probe_head_fixed_stage_projection_ms",
+            ),
+            head_decoder_ms: attr_f64(attrs, "llama_stage.spd_inline_probe_head_decoder_ms"),
+            head_decoder_layer_ms: attr_f64_array(
+                attrs,
+                "llama_stage.spd_inline_probe_head_decoder_layer_ms",
+            ),
+            head_final_norm_ms: attr_f64(attrs, "llama_stage.spd_inline_probe_head_final_norm_ms"),
+            head_lm_head_topk_ms: attr_f64(
+                attrs,
+                "llama_stage.spd_inline_probe_head_lm_head_topk_ms",
+            ),
+            head_total_ms: attr_f64(attrs, "llama_stage.spd_inline_probe_head_total_ms"),
             target_token: attr_i64(attrs, "llama_stage.spd_inline_probe_target_token"),
             accepted: attr_bool(attrs, "llama_stage.spd_inline_probe_accepted"),
             trigger_hf_index: attr_u64(attrs, "llama_stage.spd_inline_probe_trigger_hf_index"),
@@ -1806,121 +1959,6 @@ fn token_event_reports(events: &[Value]) -> Vec<TokenEventReport> {
             chain: attr_bool(attrs, "llama_stage.spd_optimistic_chain"),
             chain_depth: attr_u64(attrs, "llama_stage.spd_optimistic_chain_depth"),
             downstream_wait_ms: attr_f64(attrs, "llama_stage.downstream_wait_ms"),
-        })
-        .collect()
-}
-
-fn attrs_for<'a>(events: &'a [Value], event_name: &str) -> Vec<&'a Value> {
-    events
-        .iter()
-        .filter(|event| event.get("event").and_then(Value::as_str) == Some(event_name))
-        .filter_map(|event| event.get("attributes"))
-        .collect()
-}
-
-fn count_events_by_hf_index(
-    stage_events: &[Vec<Value>],
-    event_name: &str,
-    hf_index_key: &str,
-) -> BTreeMap<String, u64> {
-    let mut counts = BTreeMap::new();
-    for events in stage_events {
-        for attrs in attrs_for(events, event_name) {
-            let key = attr_string(attrs, hf_index_key)
-                .or_else(|| attr_i64(attrs, hf_index_key).map(|value| value.to_string()))
-                .unwrap_or_else(|| "unknown".to_string());
-            *counts.entry(key).or_insert(0) += 1;
-        }
-    }
-    counts
-}
-
-fn count_events(stage_events: &[Vec<Value>], event_name: &str) -> usize {
-    stage_events
-        .iter()
-        .map(|events| attrs_for(events, event_name).len())
-        .sum()
-}
-
-fn read_events(path: &Path) -> Result<Vec<Value>> {
-    let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let mut events = Vec::new();
-    for line in content.lines() {
-        if !line.starts_with('{') {
-            continue;
-        }
-        if let Ok(value) = serde_json::from_str::<Value>(line) {
-            events.push(value);
-        }
-    }
-    Ok(events)
-}
-
-fn attr_string(attrs: &Value, key: &str) -> Option<String> {
-    attrs
-        .get(key)
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
-}
-
-fn attr_bool(attrs: &Value, key: &str) -> Option<bool> {
-    attrs.get(key).and_then(Value::as_bool)
-}
-
-fn attr_f64(attrs: &Value, key: &str) -> Option<f64> {
-    attrs.get(key).and_then(Value::as_f64)
-}
-
-fn attr_u64(attrs: &Value, key: &str) -> Option<u64> {
-    attrs.get(key).and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
-    })
-}
-
-fn attr_i64(attrs: &Value, key: &str) -> Option<i64> {
-    attrs.get(key).and_then(Value::as_i64)
-}
-
-fn attr_i64_array(attrs: &Value, key: &str) -> Vec<i64> {
-    attrs
-        .get(key)
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_i64)
-        .collect()
-}
-
-fn attr_i64_array_map(attrs: &Value, key: &str) -> BTreeMap<String, Vec<i64>> {
-    attrs
-        .get(key)
-        .and_then(Value::as_object)
-        .into_iter()
-        .flat_map(|object| object.iter())
-        .map(|(key, value)| {
-            let values = value
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_i64)
-                .collect();
-            (key.clone(), values)
-        })
-        .collect()
-}
-
-fn attr_u64_array(attrs: &Value, key: &str) -> Vec<u64> {
-    attrs
-        .get(key)
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|value| {
-            value
-                .as_u64()
-                .or_else(|| value.as_i64().and_then(|value| u64::try_from(value).ok()))
         })
         .collect()
 }

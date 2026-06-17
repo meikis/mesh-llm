@@ -164,6 +164,37 @@ impl SpdQwen3Head {
         )
     }
 
+    pub fn forward_with_cache_timed(
+        &self,
+        input: SpdQwen3ForwardInput,
+        top_k: usize,
+        cache: &mut SpdQwen3ForwardCache,
+    ) -> Result<SpdQwen3TimedForward> {
+        let total_timer = Instant::now();
+        let core = run_forward_core_with_cache(
+            &self.weights,
+            input,
+            &self.shape,
+            cache,
+            ForwardMode::Timed,
+        )?;
+        let lm_head_timer = Instant::now();
+        let topk = lm_head_topk(
+            &self.weights,
+            &core.final_hidden,
+            top_k,
+            self.manifest.topology.draft_token_ids.as_deref(),
+        )?;
+        let timing = SpdQwen3ForwardTiming {
+            fixed_stage_projection_ms: core.timing.fixed_stage_projection_ms,
+            decoder_layer_ms: core.timing.decoder_layer_ms,
+            final_norm_ms: core.timing.final_norm_ms,
+            lm_head_topk_ms: elapsed_ms(lm_head_timer),
+            total_ms: elapsed_ms(total_timer),
+        };
+        Ok(SpdQwen3TimedForward { topk, timing })
+    }
+
     pub fn forward_timed(
         &self,
         input: SpdQwen3ForwardInput,
@@ -530,7 +561,7 @@ fn run_forward_trace_with_cache(
     shape: &SpdQwen3Shape,
     cache: &mut SpdQwen3ForwardCache,
 ) -> Result<SpdQwen3ForwardTrace> {
-    let core = run_forward_core_with_cache(weights, input, shape, cache)?;
+    let core = run_forward_core_with_cache(weights, input, shape, cache, ForwardMode::Fast)?;
     let final_hidden = core.final_hidden;
     let logits = lm_head_logits(weights, &final_hidden)?;
     Ok(SpdQwen3ForwardTrace {
@@ -556,7 +587,7 @@ fn run_forward_hidden_with_cache(
     shape: &SpdQwen3Shape,
     cache: &mut SpdQwen3ForwardCache,
 ) -> Result<Vec<f32>> {
-    Ok(run_forward_core_with_cache(weights, input, shape, cache)?.final_hidden)
+    Ok(run_forward_core_with_cache(weights, input, shape, cache, ForwardMode::Fast)?.final_hidden)
 }
 
 fn run_forward_core(
@@ -631,6 +662,7 @@ fn run_forward_core_with_cache(
     input: SpdQwen3ForwardInput,
     shape: &SpdQwen3Shape,
     cache: &mut SpdQwen3ForwardCache,
+    mode: ForwardMode,
 ) -> Result<SpdQwen3ForwardCore> {
     validate_forward_input(&input, shape)?;
     validate_cache_shape(cache, shape)?;
@@ -647,7 +679,7 @@ fn run_forward_core_with_cache(
     let original_hidden = cur_in.clone();
     let mut base_fixed = cur_in.clone();
     let mut query = row(&cur_in, seq_len - 1, shape.hidden_size).to_vec();
-    let timing = SpdQwen3ForwardTiming {
+    let mut timing = SpdQwen3ForwardTiming {
         fixed_stage_projection_ms: 0.0,
         decoder_layer_ms: Vec::with_capacity(shape.num_spec_layers),
         final_norm_ms: 0.0,
@@ -656,11 +688,16 @@ fn run_forward_core_with_cache(
     };
 
     for layer in 0..shape.num_spec_layers {
+        let fixed_timer = (mode == ForwardMode::Timed).then(Instant::now);
         apply_fixed_stage_projections(weights, &mut base_fixed, &stage_ids, layer, shape)?;
+        if let Some(timer) = fixed_timer {
+            timing.fixed_stage_projection_ms += elapsed_ms(timer);
+        }
         let mut full_in = original_hidden.clone();
         copy_fixed_rows(&mut full_in, &base_fixed, &stage_ids, shape);
         full_in[(seq_len - 1) * shape.hidden_size..seq_len * shape.hidden_size]
             .copy_from_slice(&query);
+        let layer_timer = (mode == ForwardMode::Timed).then(Instant::now);
         query = decoder_layer_query_with_cache(
             weights,
             &full_in,
@@ -669,10 +706,17 @@ fn run_forward_core_with_cache(
             shape,
             &mut cache.layers[layer],
         )?;
+        if let Some(timer) = layer_timer {
+            timing.decoder_layer_ms.push(elapsed_ms(timer));
+        }
     }
 
     let spec_query = query.clone();
+    let norm_timer = (mode == ForwardMode::Timed).then(Instant::now);
     qwen35_final_norm_in_place(&mut query, &final_norm_weight, QWEN3_RMS_NORM_EPS);
+    if let Some(timer) = norm_timer {
+        timing.final_norm_ms = elapsed_ms(timer);
+    }
     let final_hidden = query.clone();
     Ok(SpdQwen3ForwardCore {
         layer_inputs: None,

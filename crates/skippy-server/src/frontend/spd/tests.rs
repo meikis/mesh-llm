@@ -2,6 +2,7 @@ use super::cache::{
     SpdInlineTapCache, SpdInlineTapLifecycle, SpdInlineTapRecord, common_token_prefix_len,
     retained_tap_prefix_len_for_context_update,
 };
+use super::timing::SpdHeadForwardTiming;
 use super::*;
 use skippy_protocol::{
     LoadMode, StageTopologyEntry,
@@ -53,6 +54,7 @@ fn inline_proposal_carries_logit_margin_from_topk() {
             tap_collect_ms: 0.0,
             cur_in_ms: 0.0,
             forward_ms: 0.0,
+            head_timing: SpdHeadForwardTiming::default(),
             proposal_rows: SpdProposalRows::default(),
         }
     );
@@ -71,6 +73,7 @@ fn inline_probe_margin_gate_controls_optimistic_decode() {
         tap_collect_ms: 0.2,
         cur_in_ms: 0.3,
         forward_ms: 0.4,
+        head_timing: SpdHeadForwardTiming::default(),
         elapsed_ms: 1.0,
         target_wait_after_probe_ms: 0.0,
         trigger_hf_index: Some(31),

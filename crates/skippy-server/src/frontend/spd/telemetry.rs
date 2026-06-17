@@ -146,6 +146,30 @@ pub(super) fn insert_proposal_stats_attrs(
     attrs.insert(format!("{prefix}.cur_in_ms"), json!(stats.cur_in_ms));
     attrs.insert(format!("{prefix}.forward_ms"), json!(stats.forward_ms));
     attrs.insert(
+        format!("{prefix}.cache_prefill_ms"),
+        json!(stats.cache_prefill_ms),
+    );
+    attrs.insert(
+        format!("{prefix}.head_fixed_stage_projection_ms"),
+        json!(stats.head_fixed_stage_projection_ms),
+    );
+    attrs.insert(
+        format!("{prefix}.head_decoder_ms"),
+        json!(stats.head_decoder_ms),
+    );
+    attrs.insert(
+        format!("{prefix}.head_final_norm_ms"),
+        json!(stats.head_final_norm_ms),
+    );
+    attrs.insert(
+        format!("{prefix}.head_lm_head_topk_ms"),
+        json!(stats.head_lm_head_topk_ms),
+    );
+    attrs.insert(
+        format!("{prefix}.head_total_ms"),
+        json!(stats.head_total_ms),
+    );
+    attrs.insert(
         format!("{prefix}.last_cache_prefix_len"),
         json!(stats.last_cache_prefix_len),
     );

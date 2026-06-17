@@ -221,6 +221,18 @@ pub struct SpdOpenAiSmokeArgs {
     pub prompt_file: Option<PathBuf>,
     #[arg(long)]
     pub prompt_limit: Option<usize>,
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Measured case iterations per prompt. Each iteration launches isolated stage processes."
+    )]
+    pub repeat_count: usize,
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Warmup case iterations per prompt. Warmups are included in cases with warmup=true but excluded from summary."
+    )]
+    pub warmup_count: usize,
     #[arg(long, default_value_t = 1)]
     pub openai_generation_concurrency: usize,
     #[arg(long, default_value_t = 1)]

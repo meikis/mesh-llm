@@ -3154,6 +3154,7 @@ struct BinaryRequestSummary {
     prefill_deferred_replies_drained: usize,
     prefill_pending_replies_max: usize,
     verify_span_count: usize,
+    verify_span_compute_ms: f64,
     verify_span_pre_compute_ms: f64,
     verify_span_post_compute_ms: f64,
     verify_span_pre_reply_ms: f64,
@@ -3336,6 +3337,7 @@ impl BinaryRequestSummary {
             .max(observation.pending_prefill_replies_after);
         if message.kind == WireMessageKind::VerifySpan {
             self.verify_span_count += 1;
+            self.verify_span_compute_ms += observation.compute_ms;
             self.verify_span_pre_compute_ms += observation.verify_span_pre_compute_ms;
             self.verify_span_post_compute_ms += observation.verify_span_post_compute_ms;
             self.verify_span_pre_reply_ms += observation.verify_span_pre_reply_ms;
@@ -3457,6 +3459,10 @@ impl BinaryRequestSummary {
             json!(self.verify_span_pre_compute_ms),
         );
         attrs.insert(
+            "skippy.verify_span_compute_ms".to_string(),
+            json!(self.verify_span_compute_ms),
+        );
+        attrs.insert(
             "skippy.verify_span_post_compute_ms".to_string(),
             json!(self.verify_span_post_compute_ms),
         );
@@ -3477,6 +3483,10 @@ impl BinaryRequestSummary {
             attrs.insert(
                 "skippy.verify_span_pre_compute_ms_avg".to_string(),
                 json!(self.verify_span_pre_compute_ms / verify_span_count),
+            );
+            attrs.insert(
+                "skippy.verify_span_compute_ms_avg".to_string(),
+                json!(self.verify_span_compute_ms / verify_span_count),
             );
             attrs.insert(
                 "skippy.verify_span_post_compute_ms_avg".to_string(),

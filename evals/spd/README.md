@@ -25,6 +25,10 @@ are not the model-selection target for this branch.
 - The training wrapper can now emit a generic contiguous-layer topology plan
   that records randomized logical hidden-state tap layouts without training a
   fixed-stage head.
+- `generic_layer_tap_sidecar.py` can train, evaluate, and export a
+  topology-independent layer-tap sidecar that uses logical hidden-state taps,
+  tap features, randomized contiguous layouts, and tap dropout metadata instead
+  of fixed stage projection tensors.
 - A real SPD head can be trained locally for `Qwen/Qwen3-0.6B` with the paper's
   reference implementation.
 - A real pretrained SPD head for `Qwen/Qwen3.5-4B` reaches high acceptance on
@@ -41,8 +45,8 @@ are not the model-selection target for this branch.
 - We have not trained a topology-independent GLM 4.7 production sidecar for
   this branch yet.
 - The donor SPD architecture still owns fixed `stage_projs.{stage}` projection
-  tensors. A generic sidecar needs layer-indexed evidence and masks instead of
-  stage-specific projection rows.
+  tensors. Use `generic_layer_tap_sidecar.py` for the topology-independent path
+  instead of extending the donor head further.
 - We have not established generic GLM sidecar acceptance/EAL across
   `N=1,2,4,8`.
 - Skippy/Rust does not yet run the SPD head forward pass.
@@ -183,6 +187,79 @@ intentional: the current reference implementation would otherwise produce a
 fixed-stage head. The next model patch should consume these logical tap plans
 with masks or tap dropout so one exported sidecar can be evaluated against many
 candidate Skippy contiguous-layer topologies.
+
+## Generic Layer-Tap Sidecar
+
+`generic_layer_tap_sidecar.py` is the first non-donor sidecar path. It trains a
+small token oracle over a set of logical hidden-state taps:
+
+- `hidden[layer_index = 0]`: token embeddings before target layer 0
+- `hidden[layer_index = k]`: output after target layer `k - 1`
+- tap features: normalized layer depth plus an embedding-row flag
+- tap mask/dropout: randomly withholds intermediate taps during training
+
+The exported manifest uses:
+
+- `source.format = generic-layer-tap-sidecar-v1`
+- `topology.head_kind = generic-layer-tap-v1`
+- serving tensors such as `tap_proj.*`, `depth_proj.*`, `tap_norm.*`,
+  `output_norm.*`, and `draft_heads.{n}.*`
+
+Run a local contract smoke without loading GLM:
+
+```bash
+uv run evals/spd/generic_layer_tap_sidecar.py \
+  --smoke-synthetic \
+  --work-dir /tmp/skippy-spd-generic-layer-tap-smoke \
+  --model-name GLM-4.7-Flash-shape-only \
+  --topology-num-hidden-layers 47 \
+  --topology-plan-samples 8 \
+  --topology-min-stages 2 \
+  --topology-max-stages 4 \
+  --topology-tap-dropout 0.25 \
+  --num-spec-layers 2 \
+  --draft-top-k 1 \
+  --draft-vocab-size 64 \
+  --synthetic-hidden-size 32 \
+  --synthetic-vocab-size 128 \
+  --synthetic-train-examples 48 \
+  --synthetic-eval-examples 24 \
+  --batch-size 8 \
+  --epochs 1 \
+  --device cpu \
+  --export-dtype float32
+```
+
+Validate the exported generic manifest with Rust:
+
+```bash
+SKIPPY_SPD_MANIFEST=/tmp/skippy-spd-generic-layer-tap-smoke/artifacts/<run-id>/train/skippy-spd-head.json \
+  cargo test -p skippy-runtime --lib \
+  validates_external_manifest_when_skippy_spd_manifest_is_set
+```
+
+Run a small real GLM 4.7 quality gate by replacing `--smoke-synthetic` with the
+local checkpoint path and small train/eval row counts first:
+
+```bash
+uv run evals/spd/generic_layer_tap_sidecar.py \
+  --model-name /path/to/GLM-4.7-Flash \
+  --work-dir /tmp/skippy-spd-glm47-generic-layer-tap-n1 \
+  --train-rows 128 \
+  --eval-rows 16 \
+  --positions-per-row 4 \
+  --max-length 512 \
+  --num-spec-layers 1 \
+  --draft-vocab-size 4096 \
+  --topology-plan-samples 32 \
+  --topology-min-stages 2 \
+  --topology-max-stages 6 \
+  --topology-tap-dropout 0.25 \
+  --batch-size 8 \
+  --epochs 1 \
+  --device cuda \
+  --export-dtype float16
+```
 
 ## Reproduce Qwen3-0.6B Training
 

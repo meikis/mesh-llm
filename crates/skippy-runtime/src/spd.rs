@@ -11,7 +11,10 @@ use sha2::{Digest, Sha256};
 
 pub const SPD_HEAD_MANIFEST_SCHEMA: &str = "skippy-spd-head/v1";
 pub const TORCH_SPD_HEAD_FORMAT_V10: &str = "torch-speculation-head-v10";
+pub const GENERIC_LAYER_TAP_HEAD_FORMAT_V1: &str = "generic-layer-tap-sidecar-v1";
 pub const SPD_SERVING_CHECKPOINT_FORMAT_SAFETENSORS_V1: &str = "safetensors-spd-head-v1";
+pub const SPD_HEAD_KIND_FIXED_STAGE_V1: &str = "fixed-stage-v1";
+pub const SPD_HEAD_KIND_GENERIC_LAYER_TAP_V1: &str = "generic-layer-tap-v1";
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SpdHeadManifest {
@@ -54,10 +57,16 @@ pub struct SpdHeadTopology {
     pub hidden_size: u32,
     pub vocab_size: u32,
     pub draft_vocab_size: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_kind: Option<String>,
     pub num_stages: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage_layer_boundaries: Option<Vec<u32>>,
     pub num_spec_layers: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_taps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap_feature_size: Option<u32>,
     pub trained_with_use_deepest: bool,
     pub shallow_hidden_layer_indices: Vec<Vec<u32>>,
     pub spec_init_from_base_layers: Option<Vec<u32>>,
@@ -107,14 +116,7 @@ impl SpdHeadManifest {
                 SPD_HEAD_MANIFEST_SCHEMA
             );
         }
-        if self.source.format != TORCH_SPD_HEAD_FORMAT_V10 || self.source.checkpoint_version != 10 {
-            bail!(
-                "unsupported SPD head format {} version {}; expected {} version 10",
-                self.source.format,
-                self.source.checkpoint_version,
-                TORCH_SPD_HEAD_FORMAT_V10
-            );
-        }
+        validate_source_format(&self.source)?;
         if self.source.base_model_path.trim().is_empty() {
             bail!("SPD head manifest base_model_path must not be empty");
         }
@@ -199,6 +201,13 @@ impl SpdHeadManifest {
     }
 
     fn ensure_serving_tensor_shapes(&self, index: &SpdSafetensorsIndex) -> Result<()> {
+        if self.topology.head_kind() == SPD_HEAD_KIND_GENERIC_LAYER_TAP_V1 {
+            return self.ensure_generic_layer_tap_tensor_shapes(index);
+        }
+        self.ensure_fixed_stage_tensor_shapes(index)
+    }
+
+    fn ensure_fixed_stage_tensor_shapes(&self, index: &SpdSafetensorsIndex) -> Result<()> {
         let hidden_size = self.topology.hidden_size as u64;
         for (stage, indices) in self
             .topology
@@ -232,6 +241,33 @@ impl SpdHeadManifest {
         Ok(())
     }
 
+    fn ensure_generic_layer_tap_tensor_shapes(&self, index: &SpdSafetensorsIndex) -> Result<()> {
+        let hidden_size = self.topology.hidden_size as u64;
+        let tap_feature_size =
+            self.topology
+                .tap_feature_size
+                .context("generic SPD head missing tap_feature_size")? as u64;
+        index.ensure_tensor_shape("tap_proj.weight", &[hidden_size, hidden_size])?;
+        index.ensure_tensor_shape("tap_proj.bias", &[hidden_size])?;
+        index.ensure_tensor_shape("depth_proj.weight", &[hidden_size, tap_feature_size])?;
+        index.ensure_tensor_shape("depth_proj.bias", &[hidden_size])?;
+        index.ensure_tensor_shape("tap_norm.weight", &[hidden_size])?;
+        index.ensure_tensor_shape("tap_norm.bias", &[hidden_size])?;
+        index.ensure_tensor_shape("output_norm.weight", &[hidden_size])?;
+        index.ensure_tensor_shape("output_norm.bias", &[hidden_size])?;
+        for layer in 0..self.topology.num_spec_layers {
+            index.ensure_tensor_shape(
+                &format!("draft_heads.{layer}.weight"),
+                &[self.topology.draft_vocab_size as u64, hidden_size],
+            )?;
+            index.ensure_tensor_shape(
+                &format!("draft_heads.{layer}.bias"),
+                &[self.topology.draft_vocab_size as u64],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn ensure_runtime_compatible(&self, profile: &SpdHeadRuntimeProfile<'_>) -> Result<()> {
         match profile.base_model_path {
             Some(base_model_path) if self.source.base_model_path != base_model_path => {
@@ -257,7 +293,9 @@ impl SpdHeadManifest {
                 profile.vocab_size
             );
         }
-        if self.topology.num_stages != profile.num_stages {
+        if self.topology.head_kind() != SPD_HEAD_KIND_GENERIC_LAYER_TAP_V1
+            && self.topology.num_stages != profile.num_stages
+        {
             bail!(
                 "SPD head num_stages {} does not match runtime num_stages {}",
                 self.topology.num_stages,
@@ -441,6 +479,12 @@ impl SpdSafetensorsTensor {
 
 impl SpdHeadTopology {
     fn validate(&self) -> Result<()> {
+        let head_kind = self.head_kind();
+        if head_kind != SPD_HEAD_KIND_FIXED_STAGE_V1
+            && head_kind != SPD_HEAD_KIND_GENERIC_LAYER_TAP_V1
+        {
+            bail!("unsupported SPD head kind {head_kind}");
+        }
         if self.hidden_size == 0 {
             bail!("SPD head hidden_size must be greater than zero");
         }
@@ -457,31 +501,13 @@ impl SpdHeadTopology {
         if self.num_stages == 0 {
             bail!("SPD head num_stages must be greater than zero");
         }
-        if let Some(boundaries) = &self.stage_layer_boundaries {
-            if boundaries.len() != self.num_stages as usize {
-                bail!(
-                    "SPD head stage_layer_boundaries length {} must match num_stages {}",
-                    boundaries.len(),
-                    self.num_stages
-                );
-            }
-            validate_sorted_unique_indices("stage_layer_boundaries", boundaries)?;
-        }
         if self.num_spec_layers == 0 {
             bail!("SPD head num_spec_layers must be greater than zero");
         }
-        if self.shallow_hidden_layer_indices.len() != self.num_stages as usize {
-            bail!(
-                "SPD head shallow_hidden_layer_indices length {} must match num_stages {}",
-                self.shallow_hidden_layer_indices.len(),
-                self.num_stages
-            );
-        }
-        for (stage, indices) in self.shallow_hidden_layer_indices.iter().enumerate() {
-            validate_sorted_unique_indices(
-                &format!("shallow_hidden_layer_indices[{stage}]"),
-                indices,
-            )?;
+        if head_kind == SPD_HEAD_KIND_FIXED_STAGE_V1 {
+            self.validate_fixed_stage_topology()?;
+        } else {
+            self.validate_generic_layer_tap_topology()?;
         }
         match &self.spec_init_from_base_layers {
             Some(indices) if indices.len() != self.num_spec_layers as usize => {
@@ -510,6 +536,76 @@ impl SpdHeadTopology {
             }
         }
         Ok(())
+    }
+
+    fn head_kind(&self) -> &str {
+        self.head_kind
+            .as_deref()
+            .unwrap_or(SPD_HEAD_KIND_FIXED_STAGE_V1)
+    }
+
+    fn validate_fixed_stage_topology(&self) -> Result<()> {
+        if let Some(boundaries) = &self.stage_layer_boundaries {
+            if boundaries.len() != self.num_stages as usize {
+                bail!(
+                    "SPD head stage_layer_boundaries length {} must match num_stages {}",
+                    boundaries.len(),
+                    self.num_stages
+                );
+            }
+            validate_sorted_unique_indices("stage_layer_boundaries", boundaries)?;
+        }
+        if self.shallow_hidden_layer_indices.len() != self.num_stages as usize {
+            bail!(
+                "SPD head shallow_hidden_layer_indices length {} must match num_stages {}",
+                self.shallow_hidden_layer_indices.len(),
+                self.num_stages
+            );
+        }
+        for (stage, indices) in self.shallow_hidden_layer_indices.iter().enumerate() {
+            validate_sorted_unique_indices(
+                &format!("shallow_hidden_layer_indices[{stage}]"),
+                indices,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate_generic_layer_tap_topology(&self) -> Result<()> {
+        match self.max_taps {
+            Some(max_taps) if max_taps > 0 => {}
+            _ => bail!("generic SPD head max_taps must be greater than zero"),
+        }
+        match self.tap_feature_size {
+            Some(tap_feature_size) if tap_feature_size > 0 => {}
+            _ => bail!("generic SPD head tap_feature_size must be greater than zero"),
+        }
+        if let Some(boundaries) = &self.stage_layer_boundaries {
+            validate_sorted_unique_indices("stage_layer_boundaries", boundaries)?;
+        }
+        if self.shallow_hidden_layer_indices.is_empty() {
+            bail!("generic SPD head shallow_hidden_layer_indices must include representative taps");
+        }
+        for (row, indices) in self.shallow_hidden_layer_indices.iter().enumerate() {
+            validate_sorted_unique_indices(
+                &format!("shallow_hidden_layer_indices[{row}]"),
+                indices,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_source_format(source: &SpdHeadSource) -> Result<()> {
+    match (source.format.as_str(), source.checkpoint_version) {
+        (TORCH_SPD_HEAD_FORMAT_V10, 10) | (GENERIC_LAYER_TAP_HEAD_FORMAT_V1, 1) => Ok(()),
+        _ => bail!(
+            "unsupported SPD head format {} version {}; expected {} version 10 or {} version 1",
+            source.format,
+            source.checkpoint_version,
+            TORCH_SPD_HEAD_FORMAT_V10,
+            GENERIC_LAYER_TAP_HEAD_FORMAT_V1
+        ),
     }
 }
 
@@ -658,9 +754,12 @@ mod tests {
                 hidden_size: 1024,
                 vocab_size: 10,
                 draft_vocab_size: 3,
+                head_kind: None,
                 num_stages: 2,
                 stage_layer_boundaries: Some(vec![7, 14]),
                 num_spec_layers: 1,
+                max_taps: None,
+                tap_feature_size: None,
                 trained_with_use_deepest: true,
                 shallow_hidden_layer_indices: vec![vec![0, 7, 14], vec![0, 14]],
                 spec_init_from_base_layers: Some(vec![20]),
@@ -679,6 +778,24 @@ mod tests {
             tensor_count: 6,
             dtype: "F32".to_string(),
         });
+        manifest
+    }
+
+    fn valid_generic_layer_tap_manifest() -> SpdHeadManifest {
+        let mut manifest = valid_manifest_with_serving_checkpoint();
+        manifest.source.format = GENERIC_LAYER_TAP_HEAD_FORMAT_V1.to_string();
+        manifest.source.checkpoint_version = 1;
+        manifest.topology.head_kind = Some(SPD_HEAD_KIND_GENERIC_LAYER_TAP_V1.to_string());
+        manifest.topology.num_stages = 6;
+        manifest.topology.stage_layer_boundaries = None;
+        manifest.topology.num_spec_layers = 2;
+        manifest.topology.max_taps = Some(8);
+        manifest.topology.tap_feature_size = Some(2);
+        manifest.topology.trained_with_use_deepest = false;
+        manifest.topology.shallow_hidden_layer_indices =
+            vec![vec![0, 7, 14], vec![0, 4, 10, 14], vec![0, 2, 6, 9, 14]];
+        manifest.topology.spec_init_from_base_layers = None;
+        manifest.serving_checkpoint.as_mut().unwrap().tensor_count = 12;
         manifest
     }
 
@@ -797,6 +914,51 @@ mod tests {
     }
 
     #[test]
+    fn verifies_generic_layer_tap_serving_checkpoint_shapes() {
+        let temp = tempfile::tempdir().unwrap();
+        let checkpoint = temp.path().join("spd-head.safetensors");
+        write_test_safetensors(
+            &checkpoint,
+            &[
+                ("tap_proj.weight", "F32", &[1024, 1024]),
+                ("tap_proj.bias", "F32", &[1024]),
+                ("depth_proj.weight", "F32", &[1024, 2]),
+                ("depth_proj.bias", "F32", &[1024]),
+                ("tap_norm.weight", "F32", &[1024]),
+                ("tap_norm.bias", "F32", &[1024]),
+                ("output_norm.weight", "F32", &[1024]),
+                ("output_norm.bias", "F32", &[1024]),
+                ("draft_heads.0.weight", "F32", &[3, 1024]),
+                ("draft_heads.0.bias", "F32", &[3]),
+                ("draft_heads.1.weight", "F32", &[3, 1024]),
+                ("draft_heads.1.bias", "F32", &[3]),
+            ],
+        );
+        let sha256 = file_sha256(&checkpoint).unwrap();
+
+        let mut manifest = valid_generic_layer_tap_manifest();
+        let serving_checkpoint = manifest.serving_checkpoint.as_mut().unwrap();
+        serving_checkpoint.sha256 = sha256;
+        serving_checkpoint.bytes = fs::metadata(&checkpoint).unwrap().len();
+        let manifest_path = temp.path().join("skippy-spd-head.json");
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let parsed = SpdHeadManifest::from_path(&manifest_path).unwrap();
+        let index = parsed
+            .ensure_serving_checkpoint_for_runtime(&manifest_path)
+            .unwrap();
+        assert_eq!(index.tensors.len(), 12);
+        parsed
+            .ensure_runtime_compatible(&SpdHeadRuntimeProfile {
+                base_model_path: Some("Qwen/Qwen3-0.6B"),
+                hidden_size: 1024,
+                vocab_size: 10,
+                num_stages: 3,
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn rejects_serving_checkpoint_shape_mismatch() {
         let temp = tempfile::tempdir().unwrap();
         let checkpoint = temp.path().join("spd-head.safetensors");
@@ -866,7 +1028,11 @@ mod tests {
         let index = manifest
             .ensure_serving_checkpoint_for_runtime(&manifest_path)
             .unwrap();
-        assert!(index.tensors.contains_key("lm_head.weight"));
+        if manifest.topology.head_kind() == SPD_HEAD_KIND_GENERIC_LAYER_TAP_V1 {
+            assert!(index.tensors.contains_key("tap_proj.weight"));
+        } else {
+            assert!(index.tensors.contains_key("lm_head.weight"));
+        }
     }
 
     #[test]

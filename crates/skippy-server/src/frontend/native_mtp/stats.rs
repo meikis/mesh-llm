@@ -73,6 +73,12 @@ pub(in crate::frontend) struct NativeMtpBatchedTimingStats {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(in crate::frontend) struct NativeMtpMarginOutcomeStats {
+    accepted: NativeMtpMarginPathStats,
+    rejected: NativeMtpMarginPathStats,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct NativeMtpBatchedPathTimingStats {
     count: u64,
     verify_elapsed_ms: f64,
@@ -82,6 +88,14 @@ struct NativeMtpBatchedPathTimingStats {
     activation_encode_ms: f64,
     forward_write_ms: f64,
     downstream_wait_ms: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct NativeMtpMarginPathStats {
+    count: u64,
+    sum: f64,
+    min: f32,
+    max: f32,
 }
 
 impl NativeMtpBatchedTimingStats {
@@ -149,6 +163,37 @@ impl NativeMtpBatchedTimingStats {
     }
 }
 
+impl NativeMtpMarginOutcomeStats {
+    pub(in crate::frontend) fn record(
+        &mut self,
+        margin: Option<f32>,
+        verification: NativeMtpVerification,
+    ) {
+        let Some(margin) = margin else {
+            return;
+        };
+        if !margin.is_finite() || verification == NativeMtpVerification::NoPending {
+            return;
+        }
+        if verification.accepted() {
+            self.accepted.record(margin);
+        } else {
+            self.rejected.record(margin);
+        }
+    }
+
+    pub(in crate::frontend) fn insert_attrs(
+        self,
+        attrs: &mut BTreeMap<String, Value>,
+        prefix: &str,
+    ) {
+        self.accepted
+            .insert_attrs(attrs, &format!("{prefix}.accepted"));
+        self.rejected
+            .insert_attrs(attrs, &format!("{prefix}.rejected"));
+    }
+}
+
 impl NativeMtpBatchedPathTimingStats {
     fn record(&mut self, sample: NativeMtpBatchedTimingSample) {
         self.count = self.count.saturating_add(1);
@@ -197,6 +242,30 @@ impl NativeMtpBatchedPathTimingStats {
                 json!(self.verify_elapsed_ms / self.count as f64),
             );
         }
+    }
+}
+
+impl NativeMtpMarginPathStats {
+    fn record(&mut self, margin: f32) {
+        self.count = self.count.saturating_add(1);
+        self.sum += f64::from(margin);
+        if self.count == 1 {
+            self.min = margin;
+            self.max = margin;
+        } else {
+            self.min = self.min.min(margin);
+            self.max = self.max.max(margin);
+        }
+    }
+
+    fn insert_attrs(self, attrs: &mut BTreeMap<String, Value>, prefix: &str) {
+        attrs.insert(format!("{prefix}_count"), json!(self.count));
+        if self.count == 0 {
+            return;
+        }
+        attrs.insert(format!("{prefix}_avg"), json!(self.sum / self.count as f64));
+        attrs.insert(format!("{prefix}_min"), json!(self.min));
+        attrs.insert(format!("{prefix}_max"), json!(self.max));
     }
 }
 
@@ -369,6 +438,68 @@ mod tests {
         assert_eq!(
             attrs.get("llama_stage.native_mtp.batched.committed_positions"),
             Some(&json!(3))
+        );
+    }
+
+    #[test]
+    fn margin_outcome_stats_split_actual_verification_results() {
+        let mut stats = NativeMtpMarginOutcomeStats::default();
+        stats.record(
+            Some(0.25),
+            NativeMtpVerification::Accepted {
+                draft: 1,
+                target: 1,
+            },
+        );
+        stats.record(
+            Some(1.25),
+            NativeMtpVerification::Accepted {
+                draft: 2,
+                target: 2,
+            },
+        );
+        stats.record(
+            Some(0.75),
+            NativeMtpVerification::Rejected {
+                draft: 3,
+                target: 4,
+            },
+        );
+        stats.record(
+            None,
+            NativeMtpVerification::Rejected {
+                draft: 5,
+                target: 6,
+            },
+        );
+        stats.record(Some(9.0), NativeMtpVerification::NoPending);
+
+        let mut attrs = BTreeMap::new();
+        stats.insert_attrs(&mut attrs, "llama_stage.native_mtp.test_margin");
+
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.test_margin.accepted_count"),
+            Some(&json!(2))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.test_margin.accepted_avg"),
+            Some(&json!(0.75))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.test_margin.accepted_min"),
+            Some(&json!(0.25_f32))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.test_margin.accepted_max"),
+            Some(&json!(1.25_f32))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.test_margin.rejected_count"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.test_margin.rejected_avg"),
+            Some(&json!(0.75))
         );
     }
 }

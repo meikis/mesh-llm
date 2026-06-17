@@ -19,7 +19,7 @@ pub(super) use env::{
     native_mtp_verify_next_draft_min_margin, native_mtp_verify_next_reject_recovery_serial_accepts,
 };
 pub(super) use stats::{
-    NativeMtpBatchedTimingSample, NativeMtpBatchedTimingStats, NativeMtpN1Stats,
-    NativeMtpVerification,
+    NativeMtpBatchedTimingSample, NativeMtpBatchedTimingStats, NativeMtpMarginOutcomeStats,
+    NativeMtpN1Stats, NativeMtpVerification,
 };
 pub(super) use verifier::NativeMtpN1Verifier;

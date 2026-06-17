@@ -674,6 +674,8 @@ impl StageOpenAiBackend {
             let mut native_mtp_serial_after_gap_draft_margin_sum = 0.0_f64;
             let mut native_mtp_serial_after_gap_draft_margin_min = f32::INFINITY;
             let mut native_mtp_serial_after_gap_draft_margin_max = f32::NEG_INFINITY;
+            let mut native_mtp_serial_after_gap_verified_margin =
+                NativeMtpMarginOutcomeStats::default();
             let mut native_mtp_serial_after_gap_skipped_probe_count = 0usize;
             let mut native_mtp_serial_after_gap_direct_verify_count = 0usize;
             let mut native_mtp_verify_next_verification_count = 0usize;
@@ -686,6 +688,7 @@ impl StageOpenAiBackend {
             let mut native_mtp_verify_next_draft_margin_sum = 0.0_f64;
             let mut native_mtp_verify_next_draft_margin_min = f32::INFINITY;
             let mut native_mtp_verify_next_draft_margin_max = f32::NEG_INFINITY;
+            let mut native_mtp_verify_next_verified_margin = NativeMtpMarginOutcomeStats::default();
             if let Some(fused) = fused_first_decode.take() {
                 current = fused.predicted;
                 decoded_tokens = fused.predicted_tokens.len();
@@ -952,6 +955,7 @@ impl StageOpenAiBackend {
                         self.telemetry.is_debug_enabled().then(PhaseTimer::start);
                     let native_mtp_draft_token = pending_native_mtp_draft.token;
                     let native_mtp_draft_origin = pending_native_mtp_draft.origin;
+                    let native_mtp_draft_margin = pending_native_mtp_draft.margin();
                     let verify_inputs = [current, native_mtp_draft_token];
                     let message = embedded_verify_message(
                         request.wire_dtype,
@@ -1023,12 +1027,16 @@ impl StageOpenAiBackend {
                         }
                         NativeMtpDraftOrigin::SerialAfterGap => {
                             native_mtp_serial_after_gap_verification_count += 1;
+                            native_mtp_serial_after_gap_verified_margin
+                                .record(native_mtp_draft_margin, native_mtp_decision);
                             if accepted {
                                 native_mtp_serial_after_gap_accepted_count += 1;
                             }
                         }
                         NativeMtpDraftOrigin::VerifyNext => {
                             native_mtp_verify_next_verification_count += 1;
+                            native_mtp_verify_next_verified_margin
+                                .record(native_mtp_draft_margin, native_mtp_decision);
                             if accepted {
                                 native_mtp_verify_next_accepted_count += 1;
                             }
@@ -2232,6 +2240,10 @@ impl StageOpenAiBackend {
                     json!(native_mtp_serial_after_gap_draft_margin_max),
                 );
             }
+            native_mtp_serial_after_gap_verified_margin.insert_attrs(
+                &mut decode_attrs,
+                "llama_stage.native_mtp.serial_after_gap_verified_margin",
+            );
             decode_attrs.insert(
                 "llama_stage.native_mtp.verify_next_verification_count".to_string(),
                 json!(native_mtp_verify_next_verification_count),
@@ -2291,6 +2303,10 @@ impl StageOpenAiBackend {
                     json!(native_mtp_verify_next_draft_margin_max),
                 );
             }
+            native_mtp_verify_next_verified_margin.insert_attrs(
+                &mut decode_attrs,
+                "llama_stage.native_mtp.verify_next_verified_margin",
+            );
             self.emit_openai_summary("stage.openai_decode", decode_timer, decode_attrs);
             Ok(())
         })();

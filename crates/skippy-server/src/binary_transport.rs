@@ -40,7 +40,6 @@ use skippy_runtime::{
 };
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
-const SERIAL_VERIFY_SPAN_ENV: &str = "SKIPPY_NATIVE_MTP_SERIAL_VERIFY_SPAN";
 const AUTO_ALIGN_SESSION_ENV: &str = "SKIPPY_STAGE_AUTO_ALIGN_SESSION";
 
 mod decode_batcher;
@@ -1715,7 +1714,6 @@ fn native_mtp_prediction_tokens(predicted: i32, draft: Option<NativeMtpDraft>) -
         predicted,
         draft.token_id,
         draft.proposal_compute_us.clamp(0, i64::from(i32::MAX)) as i32,
-        draft.margin_milli,
     ]
 }
 
@@ -1723,16 +1721,8 @@ fn native_mtp_enabled() -> bool {
     native_mtp_enabled_from(env::var(NATIVE_MTP_ENABLED_ENV).ok().as_deref())
 }
 
-fn serial_verify_span_enabled() -> bool {
-    serial_verify_span_enabled_from(env::var(SERIAL_VERIFY_SPAN_ENV).ok().as_deref())
-}
-
 fn binary_auto_align_session_enabled() -> bool {
     truthy_env(env::var(AUTO_ALIGN_SESSION_ENV).ok().as_deref())
-}
-
-fn serial_verify_span_enabled_from(value: Option<&str>) -> bool {
-    truthy_env(value)
 }
 
 fn truthy_env(value: Option<&str>) -> bool {
@@ -3778,23 +3768,13 @@ pub(crate) fn run_binary_stage_message(
         }
         WireMessageKind::VerifySpan => {
             let sampling = runtime_sampling_config(message.sampling.as_ref());
-            let (predicted_tokens, output) = if serial_verify_span_enabled() {
-                runtime.verify_frame_sampled_serial(
-                    session_id,
-                    token_ids,
-                    sampling.as_ref(),
-                    input,
-                    output_capacity,
-                )?
-            } else {
-                runtime.verify_frame_sampled(
-                    session_id,
-                    token_ids,
-                    sampling.as_ref(),
-                    input,
-                    output_capacity,
-                )?
-            };
+            let (predicted_tokens, output) = runtime.verify_frame_sampled(
+                session_id,
+                token_ids,
+                sampling.as_ref(),
+                input,
+                output_capacity,
+            )?;
             let predicted = predicted_tokens.first().copied().unwrap_or(0);
             Ok((predicted, predicted_tokens, output))
         }

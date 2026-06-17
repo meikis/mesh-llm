@@ -6,7 +6,6 @@ use super::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PendingDraft {
     token: i32,
-    margin_milli: Option<i32>,
     origin: NativeMtpDraftOrigin,
 }
 
@@ -20,7 +19,6 @@ impl NativeMtpN1Verifier {
     pub(in crate::frontend) fn take_pending_draft(&mut self) -> Option<PendingNativeMtpDraft> {
         self.pending.take().map(|pending| PendingNativeMtpDraft {
             token: pending.token,
-            margin_milli: pending.margin_milli,
             origin: pending.origin,
         })
     }
@@ -109,7 +107,6 @@ impl NativeMtpN1Verifier {
             .saturating_add(next_draft.proposal_compute_us);
         self.pending = Some(PendingDraft {
             token: next_draft.token,
-            margin_milli: next_draft.margin_milli,
             origin,
         });
     }
@@ -123,7 +120,6 @@ mod tests {
         NativeMtpDraft {
             token,
             proposal_compute_us: 7,
-            margin_milli: None,
         }
     }
 

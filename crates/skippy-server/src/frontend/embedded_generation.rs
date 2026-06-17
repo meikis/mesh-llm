@@ -623,62 +623,25 @@ impl StageOpenAiBackend {
             let mut fused_reached_stop = false;
             let mut native_mtp = NativeMtpN1Verifier::default();
             let native_mtp_batched_verify = native_mtp_batched_verify_enabled();
-            let mut native_mtp_adaptive_disable =
-                NativeMtpAdaptiveDisable::new(native_mtp_adaptive_disable_config());
             let native_mtp_reject_cooldown_tokens = native_mtp_reject_cooldown_tokens();
-            let native_mtp_reject_recovery_serial_accepts =
-                native_mtp_reject_recovery_serial_accepts();
-            let native_mtp_serial_after_gap_reject_recovery_serial_accepts =
-                native_mtp_serial_after_gap_reject_recovery_serial_accepts();
-            let native_mtp_verify_next_reject_recovery_serial_accepts =
-                native_mtp_verify_next_reject_recovery_serial_accepts();
-            let native_mtp_serial_after_gap_draft_min_margin =
-                native_mtp_serial_after_gap_draft_min_margin();
-            let native_mtp_verify_next_draft_min_margin = native_mtp_verify_next_draft_min_margin();
             let native_mtp_defer_reject_trim = native_mtp_defer_reject_trim_enabled();
             let native_mtp_suppress_cooldown_drafts = native_mtp_suppress_cooldown_drafts_enabled();
             let native_mtp_suppress_cooldown_draft_limit =
                 native_mtp_suppress_cooldown_draft_limit();
             let mut native_mtp_reject_cooldown_remaining = 0usize;
-            let mut native_mtp_reject_recovery_remaining = 0usize;
-            let mut native_mtp_reject_recovery_active_serial_accepts =
-                native_mtp_reject_recovery_serial_accepts;
             let mut native_mtp_suppress_cooldown_drafts_remaining = 0usize;
-            let mut native_mtp_reject_recovery_blocked_batched_verify_count = 0usize;
-            let mut native_mtp_reject_recovery_scheduled_count = 0usize;
-            let mut native_mtp_reject_recovery_scheduled_from_gap_count = 0usize;
-            let mut native_mtp_reject_recovery_scheduled_from_verify_next_count = 0usize;
-            let mut native_mtp_reject_recovery_serial_accepted_count = 0usize;
-            let mut native_mtp_reject_recovery_serial_rejected_count = 0usize;
-            let mut native_mtp_reject_recovery_max_remaining = 0usize;
             let mut native_mtp_deferred_reject_trim_count = 0usize;
             let mut native_mtp_deferred_reject_trim_local_ms = 0.0_f64;
             let mut native_mtp_suppressed_cooldown_draft_count = 0usize;
             let mut native_mtp_batched_verification_count = 0usize;
-            let mut native_mtp_batched_timing = NativeMtpBatchedTimingStats::default();
             let mut native_mtp_initial_serial_verification_count = 0usize;
             let mut native_mtp_initial_serial_accepted_count = 0usize;
             let mut native_mtp_serial_after_gap_verification_count = 0usize;
             let mut native_mtp_serial_after_gap_accepted_count = 0usize;
-            let mut native_mtp_serial_after_gap_draft_margin_value_count = 0usize;
-            let mut native_mtp_serial_after_gap_draft_margin_accepted_count = 0usize;
-            let mut native_mtp_serial_after_gap_draft_margin_rejected_count = 0usize;
-            let mut native_mtp_serial_after_gap_draft_margin_sum = 0.0_f64;
-            let mut native_mtp_serial_after_gap_draft_margin_min = f32::INFINITY;
-            let mut native_mtp_serial_after_gap_draft_margin_max = f32::NEG_INFINITY;
-            let mut native_mtp_serial_after_gap_verified_margin =
-                NativeMtpMarginOutcomeStats::default();
             let mut native_mtp_verify_next_verification_count = 0usize;
             let mut native_mtp_verify_next_accepted_count = 0usize;
             let mut native_mtp_verify_next_draft_available_count = 0usize;
             let mut native_mtp_verify_next_draft_adopted_count = 0usize;
-            let mut native_mtp_verify_next_draft_margin_value_count = 0usize;
-            let mut native_mtp_verify_next_draft_margin_accepted_count = 0usize;
-            let mut native_mtp_verify_next_draft_margin_rejected_count = 0usize;
-            let mut native_mtp_verify_next_draft_margin_sum = 0.0_f64;
-            let mut native_mtp_verify_next_draft_margin_min = f32::INFINITY;
-            let mut native_mtp_verify_next_draft_margin_max = f32::NEG_INFINITY;
-            let mut native_mtp_verify_next_verified_margin = NativeMtpMarginOutcomeStats::default();
             if let Some(fused) = fused_first_decode.take() {
                 current = fused.predicted;
                 decoded_tokens = fused.predicted_tokens.len();
@@ -876,56 +839,18 @@ impl StageOpenAiBackend {
                 let token_timer = PhaseTimer::start();
                 let native_mtp_remaining =
                     (request.max_tokens as usize).saturating_sub(decoded_tokens);
-                if native_mtp_batched_verify
-                    && !native_mtp_adaptive_disable.disabled()
-                    && native_mtp_reject_cooldown_remaining == 0
-                    && native_mtp_reject_recovery_remaining > 0
-                    && draft_guard.is_none()
-                    && native_mtp_remaining >= 2
-                {
-                    native_mtp_reject_recovery_blocked_batched_verify_count += 1;
-                }
                 let can_run_native_mtp_batched_verify = native_mtp_batched_verify
-                    && !native_mtp_adaptive_disable.disabled()
                     && native_mtp_reject_cooldown_remaining == 0
-                    && native_mtp_reject_recovery_remaining == 0
                     && draft_guard.is_none()
                     && native_mtp_remaining >= 2;
-                let mut pending_native_mtp_draft = can_run_native_mtp_batched_verify
+                let pending_native_mtp_draft = can_run_native_mtp_batched_verify
                     .then(|| native_mtp.take_pending_draft())
                     .flatten();
-                let mut serial_after_gap_draft_margin = None;
-                let mut serial_after_gap_draft_margin_accepted = true;
-                if let Some(pending_draft) = pending_native_mtp_draft.as_ref()
-                    && pending_draft.origin == NativeMtpDraftOrigin::SerialAfterGap
-                    && native_mtp_serial_after_gap_draft_min_margin.is_some()
-                {
-                    serial_after_gap_draft_margin = pending_draft.margin();
-                    serial_after_gap_draft_margin_accepted = margin_passes_min_threshold(
-                        serial_after_gap_draft_margin,
-                        native_mtp_serial_after_gap_draft_min_margin,
-                    );
-                    if let Some(margin) = serial_after_gap_draft_margin {
-                        native_mtp_serial_after_gap_draft_margin_value_count += 1;
-                        native_mtp_serial_after_gap_draft_margin_sum += f64::from(margin);
-                        native_mtp_serial_after_gap_draft_margin_min =
-                            native_mtp_serial_after_gap_draft_margin_min.min(margin);
-                        native_mtp_serial_after_gap_draft_margin_max =
-                            native_mtp_serial_after_gap_draft_margin_max.max(margin);
-                    }
-                    if serial_after_gap_draft_margin_accepted {
-                        native_mtp_serial_after_gap_draft_margin_accepted_count += 1;
-                    } else {
-                        native_mtp_serial_after_gap_draft_margin_rejected_count += 1;
-                        pending_native_mtp_draft = None;
-                    }
-                }
                 if let Some(pending_native_mtp_draft) = pending_native_mtp_draft {
                     let batched_token_timer =
                         self.telemetry.is_debug_enabled().then(PhaseTimer::start);
                     let native_mtp_draft_token = pending_native_mtp_draft.token;
                     let native_mtp_draft_origin = pending_native_mtp_draft.origin;
-                    let native_mtp_draft_margin = pending_native_mtp_draft.margin();
                     let verify_inputs = [current, native_mtp_draft_token];
                     let message = embedded_verify_message(
                         request.wire_dtype,
@@ -966,11 +891,6 @@ impl StageOpenAiBackend {
                         target_token,
                         ms_to_us(verify.elapsed_ms),
                     );
-                    let adaptive_disable_triggered =
-                        native_mtp_adaptive_disable.observe(native_mtp_decision);
-                    if adaptive_disable_triggered {
-                        native_mtp.clear_pending_draft();
-                    }
                     let accepted =
                         matches!(native_mtp_decision, NativeMtpVerification::Accepted { .. });
                     native_mtp_batched_verification_count += 1;
@@ -983,16 +903,12 @@ impl StageOpenAiBackend {
                         }
                         NativeMtpDraftOrigin::SerialAfterGap => {
                             native_mtp_serial_after_gap_verification_count += 1;
-                            native_mtp_serial_after_gap_verified_margin
-                                .record(native_mtp_draft_margin, native_mtp_decision);
                             if accepted {
                                 native_mtp_serial_after_gap_accepted_count += 1;
                             }
                         }
                         NativeMtpDraftOrigin::VerifyNext => {
                             native_mtp_verify_next_verification_count += 1;
-                            native_mtp_verify_next_verified_margin
-                                .record(native_mtp_draft_margin, native_mtp_decision);
                             if accepted {
                                 native_mtp_verify_next_accepted_count += 1;
                             }
@@ -1023,72 +939,17 @@ impl StageOpenAiBackend {
                             native_mtp_suppress_cooldown_draft_limit;
                         native_mtp.clear_pending_draft();
                     }
-                    if !accepted && native_mtp_reject_recovery_serial_accepts > 0 {
-                        let recovery_serial_accepts = match native_mtp_draft_origin {
-                            NativeMtpDraftOrigin::SerialAfterGap
-                                if native_mtp_serial_after_gap_reject_recovery_serial_accepts
-                                    > 0 =>
-                            {
-                                native_mtp_serial_after_gap_reject_recovery_serial_accepts
-                            }
-                            NativeMtpDraftOrigin::VerifyNext
-                                if native_mtp_verify_next_reject_recovery_serial_accepts > 0 =>
-                            {
-                                native_mtp_verify_next_reject_recovery_serial_accepts
-                            }
-                            _ => native_mtp_reject_recovery_serial_accepts,
-                        };
-                        native_mtp_reject_recovery_active_serial_accepts = recovery_serial_accepts;
-                        native_mtp_reject_recovery_remaining = recovery_serial_accepts;
-                        native_mtp_reject_recovery_max_remaining =
-                            native_mtp_reject_recovery_max_remaining
-                                .max(native_mtp_reject_recovery_remaining);
-                        native_mtp_reject_recovery_scheduled_count += 1;
-                        if native_mtp_draft_origin == NativeMtpDraftOrigin::SerialAfterGap {
-                            native_mtp_reject_recovery_scheduled_from_gap_count += 1;
-                        }
-                        if native_mtp_draft_origin == NativeMtpDraftOrigin::VerifyNext {
-                            native_mtp_reject_recovery_scheduled_from_verify_next_count += 1;
-                        }
-                        native_mtp.clear_pending_draft();
-                    }
                     let verify_next_mtp_draft_available = verify_next_mtp_draft.is_some();
-                    let verify_next_mtp_draft_margin = verify_next_mtp_draft
-                        .as_ref()
-                        .and_then(NativeMtpDraft::margin);
-                    let verify_next_mtp_draft_margin_accepted = margin_passes_min_threshold(
-                        verify_next_mtp_draft_margin,
-                        native_mtp_verify_next_draft_min_margin,
-                    );
                     let verify_next_mtp_draft_adopted = accepted
                         && committed_positions == consumed_positions
                         && !reached_stop
                         && decoded_tokens < request.max_tokens as usize
-                        && verify_next_mtp_draft.is_some()
-                        && verify_next_mtp_draft_margin_accepted
-                        && !native_mtp_adaptive_disable.disabled();
+                        && verify_next_mtp_draft.is_some();
                     if verify_next_mtp_draft_available {
                         native_mtp_verify_next_draft_available_count += 1;
                     }
                     if verify_next_mtp_draft_adopted {
                         native_mtp_verify_next_draft_adopted_count += 1;
-                    }
-                    if let Some(margin) = verify_next_mtp_draft_margin {
-                        native_mtp_verify_next_draft_margin_value_count += 1;
-                        native_mtp_verify_next_draft_margin_sum += f64::from(margin);
-                        native_mtp_verify_next_draft_margin_min =
-                            native_mtp_verify_next_draft_margin_min.min(margin);
-                        native_mtp_verify_next_draft_margin_max =
-                            native_mtp_verify_next_draft_margin_max.max(margin);
-                    }
-                    if native_mtp_verify_next_draft_min_margin.is_some()
-                        && verify_next_mtp_draft_available
-                    {
-                        if verify_next_mtp_draft_margin_accepted {
-                            native_mtp_verify_next_draft_margin_accepted_count += 1;
-                        } else {
-                            native_mtp_verify_next_draft_margin_rejected_count += 1;
-                        }
                     }
                     if verify_next_mtp_draft_adopted {
                         native_mtp.observe_next_draft(
@@ -1120,40 +981,6 @@ impl StageOpenAiBackend {
                         };
                         trim_control = Some(trim);
                     }
-                    let trim_elapsed_ms = trim_control
-                        .as_ref()
-                        .map(|trim| trim.elapsed_ms)
-                        .unwrap_or_default();
-                    let trim_local_ms = trim_control
-                        .as_ref()
-                        .map(|trim| trim.local_ms)
-                        .unwrap_or_default();
-                    let trim_downstream_write_ms = trim_control
-                        .as_ref()
-                        .map(|trim| trim.downstream_write_ms)
-                        .unwrap_or_default();
-                    let trim_downstream_wait_ms = trim_control
-                        .as_ref()
-                        .map(|trim| trim.downstream_wait_ms)
-                        .unwrap_or_default();
-                    native_mtp_batched_timing.record(NativeMtpBatchedTimingSample {
-                        verification: native_mtp_decision,
-                        verify_elapsed_ms: verify.elapsed_ms,
-                        stage0_compute_ms: verify.stats.stage0_compute_ms,
-                        runtime_lock_wait_ms: verify.stats.runtime_lock_wait_ms,
-                        runtime_lock_hold_ms: verify.stats.runtime_lock_hold_ms,
-                        activation_encode_ms: verify.stats.activation_encode_ms,
-                        forward_write_ms: verify.stats.forward_write_ms,
-                        downstream_wait_ms: verify.stats.downstream_wait_ms,
-                        trim_elapsed_ms,
-                        trim_local_ms,
-                        trim_downstream_write_ms,
-                        trim_downstream_wait_ms,
-                        consumed_positions,
-                        committed_positions,
-                        verify_next_proposal_compute_us: verify_next_mtp_draft
-                            .map(|draft| draft.proposal_compute_us),
-                    });
                     decode_stage0_compute_ms += verify.stats.stage0_compute_ms;
                     decode_runtime_lock_wait_ms += verify.stats.runtime_lock_wait_ms;
                     decode_runtime_lock_wait_max_ms =
@@ -1195,24 +1022,6 @@ impl StageOpenAiBackend {
                             "llama_stage.native_mtp.pending_origin".to_string(),
                             json!(native_mtp_draft_origin.label()),
                         );
-                        if let Some(min_margin) = native_mtp_serial_after_gap_draft_min_margin {
-                            token_attrs.insert(
-                                "llama_stage.native_mtp.serial_after_gap_draft_min_margin"
-                                    .to_string(),
-                                json!(min_margin),
-                            );
-                            token_attrs.insert(
-                                "llama_stage.native_mtp.serial_after_gap_draft_margin_accepted"
-                                    .to_string(),
-                                json!(serial_after_gap_draft_margin_accepted),
-                            );
-                        }
-                        if let Some(margin) = serial_after_gap_draft_margin {
-                            token_attrs.insert(
-                                "llama_stage.native_mtp.serial_after_gap_draft_margin".to_string(),
-                                json!(margin),
-                            );
-                        }
                         token_attrs.insert(
                             "llama_stage.native_mtp.target_token".to_string(),
                             json!(target_token),
@@ -1229,22 +1038,6 @@ impl StageOpenAiBackend {
                             "llama_stage.native_mtp.verify_next_draft_adopted".to_string(),
                             json!(verify_next_mtp_draft_adopted),
                         );
-                        if let Some(min_margin) = native_mtp_verify_next_draft_min_margin {
-                            token_attrs.insert(
-                                "llama_stage.native_mtp.verify_next_draft_min_margin".to_string(),
-                                json!(min_margin),
-                            );
-                        }
-                        token_attrs.insert(
-                            "llama_stage.native_mtp.verify_next_draft_margin_accepted".to_string(),
-                            json!(verify_next_mtp_draft_margin_accepted),
-                        );
-                        if let Some(margin) = verify_next_mtp_draft_margin {
-                            token_attrs.insert(
-                                "llama_stage.native_mtp.verify_next_draft_margin".to_string(),
-                                json!(margin),
-                            );
-                        }
                         if let Some(next_draft) = verify_next_mtp_draft {
                             token_attrs.insert(
                                 "llama_stage.native_mtp.verify_next_draft_token".to_string(),
@@ -1264,10 +1057,6 @@ impl StageOpenAiBackend {
                             json!(committed_positions),
                         );
                         token_attrs.insert(
-                            "llama_stage.native_mtp.adaptive_disable.triggered".to_string(),
-                            json!(adaptive_disable_triggered),
-                        );
-                        token_attrs.insert(
                             "llama_stage.native_mtp.reject_cooldown_tokens".to_string(),
                             json!(native_mtp_reject_cooldown_tokens),
                         );
@@ -1276,47 +1065,9 @@ impl StageOpenAiBackend {
                             json!(native_mtp_reject_cooldown_remaining),
                         );
                         token_attrs.insert(
-                            "llama_stage.native_mtp.reject_recovery_serial_accepts".to_string(),
-                            json!(native_mtp_reject_recovery_serial_accepts),
-                        );
-                        token_attrs.insert(
-                            "llama_stage.native_mtp.serial_after_gap_reject_recovery_serial_accepts"
-                                .to_string(),
-                            json!(native_mtp_serial_after_gap_reject_recovery_serial_accepts),
-                        );
-                        token_attrs.insert(
-                            "llama_stage.native_mtp.verify_next_reject_recovery_serial_accepts"
-                                .to_string(),
-                            json!(native_mtp_verify_next_reject_recovery_serial_accepts),
-                        );
-                        token_attrs.insert(
-                            "llama_stage.native_mtp.reject_recovery_remaining".to_string(),
-                            json!(native_mtp_reject_recovery_remaining),
-                        );
-                        token_attrs.insert(
-                            "llama_stage.native_mtp.reject_recovery_scheduled_count".to_string(),
-                            json!(native_mtp_reject_recovery_scheduled_count),
-                        );
-                        token_attrs.insert(
-                            "llama_stage.native_mtp.reject_recovery_scheduled_from_gap_count"
-                                .to_string(),
-                            json!(native_mtp_reject_recovery_scheduled_from_gap_count),
-                        );
-                        token_attrs.insert(
-                            "llama_stage.native_mtp.reject_recovery_scheduled_from_verify_next_count"
-                                .to_string(),
-                            json!(native_mtp_reject_recovery_scheduled_from_verify_next_count),
-                        );
-                        token_attrs.insert(
-                            "llama_stage.native_mtp.reject_recovery_blocked_batched_verify_count"
-                                .to_string(),
-                            json!(native_mtp_reject_recovery_blocked_batched_verify_count),
-                        );
-                        token_attrs.insert(
                             "llama_stage.native_mtp.defer_reject_trim".to_string(),
                             json!(native_mtp_defer_reject_trim),
                         );
-                        native_mtp_adaptive_disable.insert_attrs(&mut token_attrs);
                         if let Some(trim) = trim_control.as_ref() {
                             token_attrs.insert(
                                 "llama_stage.native_mtp.trim_ms".to_string(),
@@ -1797,12 +1548,11 @@ impl StageOpenAiBackend {
                     && native_mtp_suppress_cooldown_drafts_remaining > 0;
                 let suppress_cooldown_draft =
                     suppress_cooldown_draft_broad || suppress_cooldown_draft_limited;
-                let native_mtp_draft =
-                    if native_mtp_adaptive_disable.disabled() || suppress_cooldown_draft {
-                        None
-                    } else {
-                        NativeMtpDraft::from_prediction_tokens(&reply.predicted_tokens)
-                    };
+                let native_mtp_draft = if suppress_cooldown_draft {
+                    None
+                } else {
+                    NativeMtpDraft::from_prediction_tokens(&reply.predicted_tokens)
+                };
                 if suppress_cooldown_draft {
                     native_mtp.clear_pending_draft();
                     native_mtp_suppressed_cooldown_draft_count += 1;
@@ -1819,24 +1569,6 @@ impl StageOpenAiBackend {
                         NativeMtpDraftOrigin::SerialAfterGap
                     },
                 );
-                if native_mtp_reject_recovery_remaining > 0 {
-                    match native_mtp_decision {
-                        NativeMtpVerification::Accepted { .. } => {
-                            native_mtp_reject_recovery_serial_accepted_count += 1;
-                            native_mtp_reject_recovery_remaining =
-                                native_mtp_reject_recovery_remaining.saturating_sub(1);
-                        }
-                        NativeMtpVerification::Rejected { .. } => {
-                            native_mtp_reject_recovery_serial_rejected_count += 1;
-                            native_mtp_reject_recovery_remaining =
-                                native_mtp_reject_recovery_active_serial_accepts;
-                            native_mtp_reject_recovery_max_remaining =
-                                native_mtp_reject_recovery_max_remaining
-                                    .max(native_mtp_reject_recovery_remaining);
-                        }
-                        NativeMtpVerification::NoPending => {}
-                    }
-                }
                 native_mtp_reject_cooldown_remaining =
                     native_mtp_reject_cooldown_remaining.saturating_sub(1);
                 decoded_tokens += 1;
@@ -1907,39 +1639,6 @@ impl StageOpenAiBackend {
                         "llama_stage.native_mtp.cooldown_draft_suppressed".to_string(),
                         json!(suppress_cooldown_draft),
                     );
-                    if let Some(min_margin) = native_mtp_serial_after_gap_draft_min_margin {
-                        token_attrs.insert(
-                            "llama_stage.native_mtp.serial_after_gap_draft_min_margin".to_string(),
-                            json!(min_margin),
-                        );
-                        token_attrs.insert(
-                            "llama_stage.native_mtp.serial_after_gap_draft_margin_accepted"
-                                .to_string(),
-                            json!(serial_after_gap_draft_margin_accepted),
-                        );
-                    }
-                    if let Some(margin) = serial_after_gap_draft_margin {
-                        token_attrs.insert(
-                            "llama_stage.native_mtp.serial_after_gap_draft_margin".to_string(),
-                            json!(margin),
-                        );
-                    }
-                    token_attrs.insert(
-                        "llama_stage.native_mtp.reject_recovery_remaining".to_string(),
-                        json!(native_mtp_reject_recovery_remaining),
-                    );
-                    token_attrs.insert(
-                        "llama_stage.native_mtp.reject_recovery_active_serial_accepts".to_string(),
-                        json!(native_mtp_reject_recovery_active_serial_accepts),
-                    );
-                    token_attrs.insert(
-                        "llama_stage.native_mtp.reject_recovery_serial_accepted_count".to_string(),
-                        json!(native_mtp_reject_recovery_serial_accepted_count),
-                    );
-                    token_attrs.insert(
-                        "llama_stage.native_mtp.reject_recovery_serial_rejected_count".to_string(),
-                        json!(native_mtp_reject_recovery_serial_rejected_count),
-                    );
                     self.emit_openai_phase("stage.openai_decode_token", token_timer, token_attrs);
                 }
                 if on_token(current)? == TokenControl::Stop {
@@ -2005,64 +1704,10 @@ impl StageOpenAiBackend {
             );
             speculative_stats.insert_attrs(&mut decode_attrs);
             native_mtp.stats().insert_attrs(&mut decode_attrs);
-            native_mtp_batched_timing.insert_attrs(&mut decode_attrs);
-            native_mtp_adaptive_disable.insert_attrs(&mut decode_attrs);
             decode_attrs.insert(
                 "llama_stage.native_mtp.reject_cooldown_tokens".to_string(),
                 json!(native_mtp_reject_cooldown_tokens),
             );
-            decode_attrs.insert(
-                "llama_stage.native_mtp.reject_recovery_serial_accepts".to_string(),
-                json!(native_mtp_reject_recovery_serial_accepts),
-            );
-            decode_attrs.insert(
-                "llama_stage.native_mtp.serial_after_gap_reject_recovery_serial_accepts"
-                    .to_string(),
-                json!(native_mtp_serial_after_gap_reject_recovery_serial_accepts),
-            );
-            decode_attrs.insert(
-                "llama_stage.native_mtp.verify_next_reject_recovery_serial_accepts".to_string(),
-                json!(native_mtp_verify_next_reject_recovery_serial_accepts),
-            );
-            decode_attrs.insert(
-                "llama_stage.native_mtp.reject_recovery_blocked_batched_verify_count".to_string(),
-                json!(native_mtp_reject_recovery_blocked_batched_verify_count),
-            );
-            decode_attrs.insert(
-                "llama_stage.native_mtp.reject_recovery_scheduled_count".to_string(),
-                json!(native_mtp_reject_recovery_scheduled_count),
-            );
-            decode_attrs.insert(
-                "llama_stage.native_mtp.reject_recovery_scheduled_from_gap_count".to_string(),
-                json!(native_mtp_reject_recovery_scheduled_from_gap_count),
-            );
-            decode_attrs.insert(
-                "llama_stage.native_mtp.reject_recovery_scheduled_from_verify_next_count"
-                    .to_string(),
-                json!(native_mtp_reject_recovery_scheduled_from_verify_next_count),
-            );
-            decode_attrs.insert(
-                "llama_stage.native_mtp.reject_recovery_serial_accepted_count".to_string(),
-                json!(native_mtp_reject_recovery_serial_accepted_count),
-            );
-            decode_attrs.insert(
-                "llama_stage.native_mtp.reject_recovery_serial_rejected_count".to_string(),
-                json!(native_mtp_reject_recovery_serial_rejected_count),
-            );
-            decode_attrs.insert(
-                "llama_stage.native_mtp.reject_recovery_max_remaining".to_string(),
-                json!(native_mtp_reject_recovery_max_remaining),
-            );
-            decode_attrs.insert(
-                "llama_stage.native_mtp.reject_recovery_active_serial_accepts".to_string(),
-                json!(native_mtp_reject_recovery_active_serial_accepts),
-            );
-            if let Some(min_margin) = native_mtp_serial_after_gap_draft_min_margin {
-                decode_attrs.insert(
-                    "llama_stage.native_mtp.serial_after_gap_draft_min_margin".to_string(),
-                    json!(min_margin),
-                );
-            }
             decode_attrs.insert(
                 "llama_stage.native_mtp.defer_reject_trim".to_string(),
                 json!(native_mtp_defer_reject_trim),
@@ -2100,39 +1745,6 @@ impl StageOpenAiBackend {
                 json!(native_mtp_serial_after_gap_accepted_count),
             );
             decode_attrs.insert(
-                "llama_stage.native_mtp.serial_after_gap_draft_margin_value_count".to_string(),
-                json!(native_mtp_serial_after_gap_draft_margin_value_count),
-            );
-            decode_attrs.insert(
-                "llama_stage.native_mtp.serial_after_gap_draft_margin_accepted_count".to_string(),
-                json!(native_mtp_serial_after_gap_draft_margin_accepted_count),
-            );
-            decode_attrs.insert(
-                "llama_stage.native_mtp.serial_after_gap_draft_margin_rejected_count".to_string(),
-                json!(native_mtp_serial_after_gap_draft_margin_rejected_count),
-            );
-            if native_mtp_serial_after_gap_draft_margin_value_count > 0 {
-                decode_attrs.insert(
-                    "llama_stage.native_mtp.serial_after_gap_draft_margin_avg".to_string(),
-                    json!(
-                        native_mtp_serial_after_gap_draft_margin_sum
-                            / native_mtp_serial_after_gap_draft_margin_value_count as f64
-                    ),
-                );
-                decode_attrs.insert(
-                    "llama_stage.native_mtp.serial_after_gap_draft_margin_min".to_string(),
-                    json!(native_mtp_serial_after_gap_draft_margin_min),
-                );
-                decode_attrs.insert(
-                    "llama_stage.native_mtp.serial_after_gap_draft_margin_max".to_string(),
-                    json!(native_mtp_serial_after_gap_draft_margin_max),
-                );
-            }
-            native_mtp_serial_after_gap_verified_margin.insert_attrs(
-                &mut decode_attrs,
-                "llama_stage.native_mtp.serial_after_gap_verified_margin",
-            );
-            decode_attrs.insert(
                 "llama_stage.native_mtp.verify_next_verification_count".to_string(),
                 json!(native_mtp_verify_next_verification_count),
             );
@@ -2148,12 +1760,6 @@ impl StageOpenAiBackend {
                 "llama_stage.native_mtp.deferred_reject_trim_local_ms".to_string(),
                 json!(native_mtp_deferred_reject_trim_local_ms),
             );
-            if let Some(min_margin) = native_mtp_verify_next_draft_min_margin {
-                decode_attrs.insert(
-                    "llama_stage.native_mtp.verify_next_draft_min_margin".to_string(),
-                    json!(min_margin),
-                );
-            }
             decode_attrs.insert(
                 "llama_stage.native_mtp.verify_next_draft_available_count".to_string(),
                 json!(native_mtp_verify_next_draft_available_count),
@@ -2161,39 +1767,6 @@ impl StageOpenAiBackend {
             decode_attrs.insert(
                 "llama_stage.native_mtp.verify_next_draft_adopted_count".to_string(),
                 json!(native_mtp_verify_next_draft_adopted_count),
-            );
-            decode_attrs.insert(
-                "llama_stage.native_mtp.verify_next_draft_margin_value_count".to_string(),
-                json!(native_mtp_verify_next_draft_margin_value_count),
-            );
-            decode_attrs.insert(
-                "llama_stage.native_mtp.verify_next_draft_margin_accepted_count".to_string(),
-                json!(native_mtp_verify_next_draft_margin_accepted_count),
-            );
-            decode_attrs.insert(
-                "llama_stage.native_mtp.verify_next_draft_margin_rejected_count".to_string(),
-                json!(native_mtp_verify_next_draft_margin_rejected_count),
-            );
-            if native_mtp_verify_next_draft_margin_value_count > 0 {
-                decode_attrs.insert(
-                    "llama_stage.native_mtp.verify_next_draft_margin_avg".to_string(),
-                    json!(
-                        native_mtp_verify_next_draft_margin_sum
-                            / native_mtp_verify_next_draft_margin_value_count as f64
-                    ),
-                );
-                decode_attrs.insert(
-                    "llama_stage.native_mtp.verify_next_draft_margin_min".to_string(),
-                    json!(native_mtp_verify_next_draft_margin_min),
-                );
-                decode_attrs.insert(
-                    "llama_stage.native_mtp.verify_next_draft_margin_max".to_string(),
-                    json!(native_mtp_verify_next_draft_margin_max),
-                );
-            }
-            native_mtp_verify_next_verified_margin.insert_attrs(
-                &mut decode_attrs,
-                "llama_stage.native_mtp.verify_next_verified_margin",
             );
             self.emit_openai_summary("stage.openai_decode", decode_timer, decode_attrs);
             Ok(())

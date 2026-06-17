@@ -634,7 +634,6 @@ fn measure_split_serial(
     if let Some(draft) = last_draft {
         prediction.push(draft.token_id);
         prediction.push(i32::try_from(draft.proposal_compute_us.max(0)).unwrap_or(i32::MAX));
-        prediction.push(draft.margin_milli);
     }
 
     Ok(SplitSample {
@@ -661,7 +660,6 @@ fn serial_decode_mtp_n1(session: &mut StageSession, verify_tokens: &[i32]) -> Re
     if let Some(draft) = last_draft {
         predicted_tokens.push(draft.token_id);
         predicted_tokens.push(i32::try_from(draft.proposal_compute_us.max(0)).unwrap_or(i32::MAX));
-        predicted_tokens.push(draft.margin_milli);
     }
     Ok(predicted_tokens)
 }

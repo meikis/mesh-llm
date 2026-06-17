@@ -372,7 +372,6 @@ pub struct NativeMtpDraft {
     pub available: bool,
     pub token_id: i32,
     pub proposal_compute_us: i64,
-    pub margin_milli: i32,
 }
 
 #[repr(C)]

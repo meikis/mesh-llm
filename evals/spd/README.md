@@ -51,23 +51,405 @@ Rust.
   accepted, two rejected, and the same greedy text as the no-SPD baseline.
 - A release `skippy-server` request-path smoke now runs the pretrained head
   from inline returned Skippy taps plus direct GGUF h0 embeddings without
-  `--openai-spd-replay-fallback`; the inline probe was ready, started in the
-  `pre_target_reply` slot after the `hf_index=31` tap, and completed in about
-  `389-393ms` per token on the four-token smoke.
+  `--openai-spd-replay-fallback`. A no-thinking prompt/template smoke first
+  reproduced the exact HF reference target stream
+  `[71093, 12305, 198, 727, 884, 2784, 11, 292]`; the Python reference
+  `generate(..., draft_top_k=1)` accepted `7 / 8` tokens on that same prompt,
+  proving the low-acceptance serving run was not a head-quality issue. The
+  serving bug was token-position alignment: rolling observer positions were
+  using the previous-token predictor position, so post-first proposal rows read
+  the current token from the wrong slot and repeatedly proposed it. After
+  switching live rolling positions to actual token indices, the same bounded
+  OpenAI smoke kept exact output, proposed `8` tokens, accepted `8`, rejected
+  `0`, committed `3 / 3` optimistic target decodes, and recorded `0` tap
+  return failures, `0` tap record failures, and `0` ignored taps. Baseline was
+  `626ms` wall / `198ms` decode; SPD was still slower at `3521ms` wall /
+  `2921ms` decode on the local CPU proof, so this is an acceptance/scheduling
+  fix rather than a speedup claim. The report's paper estimate for the logical
+  `S=4` head showed a `4.0x` paper-like speedup versus serial split from the
+  observed `1.0` accept rate, while the current implementation remained about
+  `59x` slower than that estimate because proposal and stage scheduling are
+  still local proof code.
+- A pre-patch ungated optimistic diagnostic that did not request returned taps
+  was faster (`2591ms` wall / `2004ms` decode with exact output), but it only
+  produced `3` proposals, committed `2` optimistic tokens, and the rolling
+  replay reported `5` missing proposal positions plus `2` out-of-order
+  proposals. Treat that as evidence that tap-return cost is real, not as a
+  correct serving mode.
+- The current request path asks for SPD tap returns whenever optimistic SPD
+  decode starts. The latest ungated no-thinking smoke kept exact output,
+  proposed and accepted `8 / 8`, committed `4 / 4` optimistic decodes, recorded
+  `0` tap failures and `0` ignored taps, and the rolling replay had `7`
+  inserted drafts with `0` missing and `0` out-of-order proposals. Baseline was
+  `629ms` wall / `201ms` decode; SPD was `4154ms` wall / `2919ms` decode. This
+  is the most faithful current serving proof, and it points directly at
+  tap-return transport plus fully overlapped rolling execution as the remaining
+  bottleneck.
+- With `25ms` injected downstream-stage delay, the same current always-tap
+  request path still kept exact output, accepted `8 / 8`, committed `4 / 4`
+  optimistic decodes, and kept rolling replay ordered. The latency gap narrowed
+  but did not cross over: baseline was `2807ms` wall / `1938ms` decode; SPD was
+  `4210ms` wall / `3105ms` decode (`0.667x` wall, `0.624x` decode). The paper
+  estimate for the same trace was `484ms` decode at the baseline stage cost, so
+  current SPD is still about `6.4x` slower than the paper-shaped rolling
+  schedule even when artificial hop latency is present.
+- 2026-06-17 row-specific tap collection removed a serving blocker where
+  proposal assembly treated every required hidden-state tap as required for
+  every row. A `[4, 4, 4, 0]` proposal window no longer waits for downstream
+  taps on the `g_0` row. The fixed no-delay smoke at
+  `/private/tmp/spd-openai-sparse-rows-smoke1/report.json` preserved exact
+  output, accepted `5 / 5`, and moved optimistic probes earlier than `h31`
+  (`trigger_hf_index=20,20,16` after bootstrap). The 8-token rerun at
+  `/private/tmp/spd-openai-sparse-rows-smoke8/report.json` accepted `8 / 8`
+  with exact output, but SPD remained slower (`205ms` baseline decode versus
+  `5631ms` SPD decode). With `25ms` downstream delay, the sparse-row smoke at
+  `/private/tmp/spd-openai-sparse-rows-delay25-smoke1/report.json` kept exact
+  output and `5 / 5` acceptance and narrowed decode speed to `0.353x`
+  SPD-vs-baseline. This proves the missing-tap gate is fixed; the remaining
+  speed gap is rolling executor/direct-return scheduling, not proposal row
+  availability.
+- 2026-06-17 rolling-preferred serving now keeps SPD optimistic decode on the
+  direct-return path instead of letting the older primary `VerifySpan` branch
+  consume the remainder after the first burst. The no-delay smoke at
+  `/private/tmp/spd-openai-rolling-prefer-smoke8/report.json` preserved exact
+  output, accepted `8 / 8`, committed `6 / 6` optimistic verifier results
+  (`4 / 4` chained), emitted two pre-target bursts plus six
+  optimistic-commit probes, and left rolling replay with `0` missing or
+  out-of-order proposals. It is still not a speed result (`207ms` baseline
+  decode versus `15210ms` SPD decode), which isolates the next blocker to
+  verifier overlap/hidden waits rather than sidecar quality or rolling-row
+  availability. The same 8-token smoke with `25ms` downstream delay at
+  `/private/tmp/spd-openai-rolling-prefer-delay25-smoke8/report.json` also
+  preserved exact output, accepted `8 / 8`, committed `6 / 6` optimistic
+  verifier results, and reached only `0.242x` decode speed versus baseline
+  (`1997ms` baseline decode, `8247ms` SPD decode).
+- 2026-06-17 one-token verifier execution now routes single-token
+  `VerifySpan` messages through the normal decode-frame runtime path while
+  preserving the `VerifySpan` wire shape, direct-return reply shape, and
+  rollback checkpoints. The comparable no-delay smoke at
+  `/private/tmp/spd-openai-single-token-decode-smoke8/report.json` preserved
+  exact output, accepted `8 / 8`, and committed `6 / 6` optimistic verifier
+  results (`4 / 4` chained), but only improved SPD decode from `15210ms` to
+  `13516ms` (`224ms` baseline). A temporary unshipped diagnostic that skipped
+  verifier checkpoints
+  (`/private/tmp/spd-openai-skip-verify-checkpoint-smoke8/report.json`) still
+  took `9527ms` SPD decode versus `215ms` baseline. Per-stage logs show the
+  remaining long calls overlap across local stage processes on the same M4
+  Metal device; baseline is serial, while rolling SPD creates true concurrent
+  stage compute. This local single-GPU smoke is therefore a correctness and
+  scheduler-shape test, not a fair speed oracle. The next decisive benchmark
+  needs stage placement across distinct devices/nodes.
+- 2026-06-17 `skippy-bench spd-openai-smoke` can now run the same OpenAI SPD
+  request-path smoke with explicit stage placement. `--stage-hosts` cycles
+  stage placement across `local` plus remote SSH targets, stage 0 remains local
+  so the OpenAI frontend and sidecar stay on the coordinator, and
+  `--endpoint-host-map local=<reachable-stage0-host>` makes the direct-return
+  topology usable from remote stages. `--remote-model-path-map` can point each
+  remote target at an existing GGUF, or `--rsync-model-artifacts` can copy the
+  model into the run directory. The post-refactor local regression smoke at
+  `/private/tmp/spd-openai-remote-refactor-local-smoke2b/report.json`
+  preserved exact output, accepted `2 / 2` SPD proposals, committed one
+  optimistic token, and recorded `0` tap failures. This validates the benchmark
+  path after the placement extraction; the speed question still requires a
+  distinct-device run.
+- `skippy-runtime::spd::SpdRollingScheduler` now codifies the paper/reference
+  rolling scheduler state transitions in Rust: newest-first in-flight entries,
+  evicted-prefix speculation rows on acceptance, oldest-entry verification
+  after fill, and reset-to-corrected-token behavior on rejection.
+  `SpdRollingTraceReplay` replays observed target/proposal traces through that
+  same runtime primitive and reports the final target-verified prefix.
+  `SpdRollingObserver` is the live token/position observer used by
+  `skippy-server` diagnostics. It now exposes `take_verified_delta()` so inline
+  probes can report newly target-verified token spans; the latest fixed smoke
+  emitted deltas `[71093]`, `[12305]`, `[198]`, `[727]`, `[884]`, and
+  `[2784]`.
+  It also exposes `speculation_rows()` with `row_positions` and `row_i_stages`
+  so serving can assemble the reference row roles instead of using only a
+  sliding context window. `SpdRollingObserver::draft_plan()` now clones the
+  verified scheduler for proposal generation. The server advances that draft
+  plan locally while it proposes the next window, so later proposals use the
+  paper-shaped rolling rows without mutating the live observer until the target
+  verifier accepts or rejects them. The runtime scheduler reports nominal paper
+  layout roles; the serving proposal path resolves them through the manifest.
+  For the Qwen3.5-4B artifact, `trained_with_use_deepest=true`, and fixture
+  parity confirms the exported rows use inference roles `[4, 4, 4, 0]` for
+  positions `[9, 10, 11, 12]`. The latest fixed smoke populated rows from the
+  first probe (`[23, 24, 25, 26]` / `[4, 4, 4, 0]`) and kept them moving after
+  accepted evictions (`[30, 30, 31, 32, 33]` / `[4, 3, 3, 3, 0]` at step `7`).
+  A bounded primary-`VerifySpan` smoke with `max_tokens=8`,
+  `--optimistic-decode false`, and replay fallback preserved exact greedy
+  output, ran two SPD windows, accepted `8 / 8` proposals, inserted `7` rolling
+  drafts, verified `5` filled rolling windows, and reported `0` missing or
+  out-of-order proposals. `skippy-bench` now carries primary-verify-only cases
+  into the aggregate rolling summary from `cases[].decode.rolling`: a rerun at
+  `/private/tmp/spd-openai-primary-rolling-report-smoke/report.json` reports
+  `cases_replayed=0`, `live_cases_observed=1`, `inserted_drafts=7`,
+  `verified_windows=5`, and `0` missing/out-of-order proposals. It remained
+  deliberately slow proof code: baseline `636ms` wall / `204ms` decode versus
+  SPD `3817ms` wall / `3228ms` decode, with `2643ms` spent proposing. The
+  paper-style estimate from the same `1.0` accept rate is `4.0x` versus serial
+  split, or about `51ms` decode at that run's baseline stage cost, so current
+  serving is about `63x` slower than the schedule it is trying to realize. A
+  proposal-breakdown rerun at
+  `/private/tmp/spd-openai-proposal-breakdown-smoke/report.json` preserved exact
+  output and accepted `8 / 8`, but all `8` proposals came from replay fallback:
+  `inline_tap_hits=0`, `replay_fallbacks=8`, `tap_collect_ms=2205ms`,
+  `cur_in_ms=51ms`, and `forward_ms=509ms` inside `2766ms` of total proposal
+  time. This confirms the next speed-path requirement is in-flight/direct-return
+  rolling hidden states, not more local replay tuning.
+- A no-replay optimistic inline-probe breakdown rerun at
+  `/private/tmp/spd-openai-overlap-probe-smoke/report.json` preserved exact
+  output, proposed and accepted `8 / 8`, committed `4 / 4` optimistic decodes,
+  and showed every measured `pre_target_reply` and `optimistic_commit` probe
+  using `tap_source=inline`. The accepted optimistic-commit probes now run
+  during the in-flight optimistic `VerifySpan` reply wait, with
+  `trigger_hf_index=31` and about `0.001ms` wait-after-probe. The final decode
+  event carries the same source evidence: `inline_tap_hits=8`,
+  `replay_fallbacks=0`, `tap_collect_ms=2.39ms`, `cur_in_ms=115.2ms`, and
+  `forward_ms=528.5ms`. This proves optimistic probes can consume direct-return
+  taps without replay fallback and can overlap target waits; it is still not a
+  speedup (`202ms` baseline decode versus `2800ms` SPD decode) because the
+  current path remains a bounded one-token proof instead of the full overlapped
+  rolling schedule.
+- A no-thinking chainability rerun at
+  `/private/tmp/spd-openai-chainability-summary-smoke/report.json` preserved
+  exact output, accepted `8 / 8`, committed `4 / 4` optimistic decodes, and
+  split `optimistic_commit` probes out in `summary.pipeline_gap`: `4 / 4`
+  commit probes proposed, `4 / 4` were accepted, and their mean
+  wait-after-probe was about `0.001ms`. That is the clearest current evidence
+  that the next speed-path blocker is safe chained/rolling target execution,
+  not sidecar proposal availability on this prompt. The run was still slower:
+  `201ms` baseline decode versus `2873ms` SPD decode.
+- A follow-up no-thinking chained optimistic execution smoke at
+  `/private/tmp/spd-openai-chained-optimistic-smoke8/report.json` preserved
+  exact output and turned accepted optimistic-commit proposals into real target
+  work. It proposed `6` SPD tokens, accepted `4`, rejected `2`, committed
+  `4 / 4` optimistic target tokens, and committed `2 / 2` through a bounded
+  one-step chained optimistic `VerifySpan` while the previous optimistic
+  verifier was still in flight. Tap return failures, tap record failures, and
+  ignored taps were all `0`, and the report preserves `chain=true` on the two
+  chained `DecodeEmbdOptimistic` token events. Primary `VerifySpan` commits now
+  also emit token events, so replay sees the full target stream
+  `[71093, 12305, 198, 727, 884, 2784, 11, 292]` and verifies it matches.
+  Baseline decode was `203.1ms`; SPD decode was `2820.5ms`, so this is
+  execution-structure evidence, not a speedup. The rolling trace replay is now
+  conservative when target token events are missing: it reports
+  missing/out-of-order proposal positions instead of zero-filling an unobserved
+  verified prefix.
+  A recursive in-flight chain experiment was not retained: without
+  per-message direct-return correlation, launching another `PredictedTokens`
+  verifier from inside a previous chain's return path could consume or wait on
+  the wrong same-kind reply.
+- Direct-return prediction replies now have an opt-in origin header on the
+  direct-return stream, and stage 0 buffers unmatched final replies until the
+  requested origin arrives. A current release smoke at
+  `/private/tmp/spd-openai-origin-aware-smoke2/report.json` preserved exact
+  output, proposed `6` SPD tokens, accepted `4`, rejected `2`, committed
+  `4 / 4` optimistic target tokens, committed `2 / 2` chained optimistic target
+  tokens, and recorded `0` tap return failures, `0` tap record failures, and
+  `0` ignored taps. Baseline decode was `239.1ms`; SPD decode was `2692.0ms`.
+  This removes the reply-ownership blocker for several same-kind in-flight
+  verifiers, but it is still a bounded one-step chain. The next full-rolling
+  step is a scheduler/executor that owns the in-flight entries, launch order,
+  and rollback/restore contract.
+- Checkpoint ownership is now generation-addressed. Speculative `VerifySpan`
+  messages carry a nonzero `checkpoint_generation` derived from target
+  position, direct-return origins include that generation, and embedded plus
+  downstream stages checkpoint/restore by session plus generation. The current
+  release smoke at `/private/tmp/spd-openai-checkpoint-gen-smoke1/report.json`
+  preserved exact output, proposed `6` SPD tokens, accepted `4`, rejected `2`,
+  committed `4 / 4` optimistic target tokens, committed `2 / 2` chained
+  optimistic target tokens, and recorded `0` tap return failures, `0` tap record
+  failures, and `0` ignored taps. Baseline decode was `203.7ms`; SPD decode was
+  `2796.9ms`. This removes the checkpoint-overwrite blocker for multiple
+  in-flight entries, but it is still not the paper's continuously full rolling
+  pipeline.
+- The request path now uses an origin-matched rolling queue rather than one
+  hardcoded chained verifier. Accepted optimistic entries advance the sidecar
+  context, wait for their own direct-return reply by origin, and may launch one
+  deeper verifier from returned taps while capped by the logical SPD stage
+  count. The current release smoke at
+  `/private/tmp/spd-openai-hidden-wait-smoke1/report.json` preserved exact
+  output, reached `max_optimistic_chain_depth=2`, proposed `8` SPD tokens,
+  accepted `6`, rejected `2`, committed `5 / 7` optimistic target tokens,
+  committed `2 / 4` chained optimistic target tokens, and recorded `0` tap
+  return failures, `0` tap record failures, and `0` ignored taps. Baseline
+  decode was `202.3ms`; SPD decode was `9275.4ms`. The depth-2 verifier entries
+  launched and restored correctly, but both rejected on this prompt. Derived
+  hidden-wait from the same run was about `6.72s` total, almost all from chained
+  rows; the two rejected depth-2 rows hid about `1.69s` and `5.03s` behind older
+  verifier work. The report exposes this as `hidden_wait_ms` on
+  `optimistic_decodes[]` and as hidden-wait summaries under
+  `summary.pipeline_gap`. This proves the queue is overlapping latency, but
+  proposal quality and rollback cost still prevent a speedup.
+- A stage-role audit showed that fixture `row_i_stages` are tap/projection
+  roles, not the Qwen spec head's internal fixed-memory roles. Passing
+  `row_i_stages=[4,4,4,0]` as fixed-stage ids made parity much worse
+  (`/private/tmp/spd-fixture-parity-topk4-stageids.json`: forward final-hidden
+  max diff `9.75`, spec-query max diff `28.4375`). The corrected native
+  contract leaves fixed-stage ids unset for live proposal windows so Qwen uses
+  the reference `_infer_stage_ids(q_len)` schedule, while cache prefill can
+  explicitly mark completed prefix rows as deepest-stage rows. The corrected
+  fixture run at
+  `/private/tmp/spd-fixture-parity-topk4-fixedstage-default.json` restored
+  matching top-k and the prior small drift (`0.125` forward final-hidden max
+  diff, `0.0625` cached final-hidden/logit max diff). A fresh OpenAI smoke at
+  `/private/tmp/spd-openai-fixedstage-default-smoke1/report.json` preserved
+  exact output, proposed `8`, accepted `6`, rejected `2`, reached depth `2`,
+  and recorded no tap failures or ignored taps, but remained much slower
+  (`203.8ms` baseline decode versus `13912.7ms` SPD decode).
+- Proposal-row telemetry then found a real serving-context bug behind the
+  repeated depth-2 proposals. The diagnostic run at
+  `/private/tmp/spd-openai-proposal-rows-smoke1/report.json` showed step 2
+  assembled its proposal from stale rows `[23,24,25,26]` with
+  `next_draft_position=27` even though the accepted optimistic token had moved
+  the target position to 28, so the sidecar proposed the previous token again.
+  The server now observes accepted optimistic-commit probes into
+  `SpdRollingObserver` immediately before a deeper chained verifier requests
+  rows. The follow-up release smoke at
+  `/private/tmp/spd-openai-rolling-observe-smoke1/report.json` preserved exact
+  output, proposed `5`, accepted `5`, rejected `0`, committed `3 / 3`
+  optimistic decodes and `2 / 2` chained optimistic decodes, reached depth `2`,
+  and recorded no tap failures. Step 2 now proposes token `198` from rows
+  `[24,25,26,27]` with `next_draft_position=28`. The stale-row repeat is fixed,
+  but SPD is still slower (`222.2ms` baseline decode versus `2667.6ms` SPD
+  decode) and rolling replay still reports `3` missing proposal positions
+  starting at position 30 after the chain boundary. A follow-up
+  miss-diagnostic smoke at
+  `/private/tmp/spd-openai-tap-position-diagnostics-smoke1/report.json`
+  preserved exact output, proposed `5`, accepted all `5`, committed `3 / 3`
+  optimistic decodes and `2 / 2` chained optimistic decodes, and recorded no tap
+  return or record failures. It made the post-target probe empties concrete:
+  probe steps `4`, `5`, and `6` report `missing_inline_taps` for position `28`;
+  h0 is no longer included in those inline requirements, and tap-position
+  telemetry corrected the first diagnosis: the non-h0 rows had already been
+  recorded before the probes, then a shorter accepted-prefix commit pruned them
+  because SPD's sidecar context had advanced ahead of emitted tokens. The prefix-ack
+  fix treats those shorter prefix-compatible accepted-context updates as
+  acknowledgements instead of resets. The follow-up smoke at
+  `/private/tmp/spd-openai-prefix-ack-smoke1/report.json` preserved exact
+  output, proposed and accepted `8 / 8`, committed `6 / 6` optimistic verifier
+  results including `4 / 4` chained results, reported `0` post-target empty
+  probes, and kept rolling replay at `0` missing/out-of-order proposals. It is
+  still slower (`219.7ms` baseline decode versus `2795.3ms` SPD decode), so the
+  remaining task is performance and full rolling execution, not sidecar
+  topology, h0, fixed-stage, or head-quality.
+- A thinking-mode rejection rerun at
+  `/private/tmp/spd-openai-overlap-rejection-clean-smoke/report.json` preserved
+  exact output while accepting only `1 / 8` proposals, rejecting `7 / 8`, and
+  committing `1 / 3` optimistic decodes. Rollback stayed correct with no tap
+  failures or ignored taps, but the final live `decode.rolling` snapshot still
+  reported one out-of-order proposal at the frontier. The live observer now
+  keeps early proposals pending and promotes them after accepted context
+  catches up. The follow-up rejection smoke at
+  `/private/tmp/spd-openai-pending-promote-rejection-smoke/report.json`
+  preserved exact output, proposed `8` tokens, accepted `3`, rejected `5`,
+  committed `2 / 4` optimistic decodes, and ended with
+  `decode.rolling.out_of_order_proposals=0`. It remains slower
+  (`207ms` baseline decode versus `3475ms` SPD decode), so mixed
+  inline/primary reporting is now cleaner but full rolling scheduling remains
+  open.
+  The request path now derives tap returns from the topology
+  (`[8, 10, 16, 20, 24, 31]` for this head after stripping h0) and waits only
+  for row-specific taps while assembling each proposal.
+  `skippy-bench` uses the same observer path through the runtime-owned replay
+  for reports; serving still needs to use it for actual stage execution.
+- `skippy-server --openai-spd-optimistic-decode` can use an accepted inline SPD
+  proposal to start and commit one optimistic target decode in the real
+  seven-stage request path. The current proof is gated to deterministic
+  sampling and uses a checkpointing one-token `VerifySpan` plus restore for
+  rollback.
+- Mesh-native Skippy config now has an experimental default-off
+  `[speculative] mode = "spd"` path that passes manifest, fixture, model,
+  window, top-k, GPU-layer, replay-fallback, and optimistic-decode settings
+  into embedded stage-0 OpenAI serving. The resolver rejects mixed draft/SPD
+  sources and keeps SPD staged-only.
+- `llama-spec-bench` can run a real target/draft speculative-decoding
+  diagnostic after opening the target with enough execution lanes for verifier
+  and projection sessions.
 
 ## What Does Not Work Yet
 
 - The replay fallback collects taps by replaying the current context through
   local `StageModel` slices. It is a correctness bridge into live serving, not
   the optimized inline hidden-tap transport needed for real speed.
-- The no-replay request-path probe currently runs before stage 0 consumes the
-  normal target token reply, but it is still only telemetry. It proves the real
-  head can consume inline taps in the right scheduling slot and records
-  target-verified accept/reject counters, but it is not yet a serving speedup.
+- The no-replay request path can now start and commit optimistic target decodes
+  and can reach high acceptance on the bounded proof prompt, but the current
+  local CPU path is still slower than the normal split baseline. The native
+  sidecar cache is faithful to the Python `spec_past_kv` path on the cached
+  fixture (`cache_prefix_len=20`, exact Rust/Python cached top-k ids, full
+  cached-logit max diff `0.0625`), and the fixed request-path smoke accepted
+  `8 / 8` proposals with exact greedy output. The next bottleneck is therefore
+  concrete: proposal probes still cost tens of milliseconds, normal downstream
+  waits dominate wall time, and the serving path is still a bounded
+  one-token/optimistic proof rather than the paper's fully overlapped rolling
+  schedule.
+- The binary stage transport can already send prediction replies on a direct
+  return stream, so stage 0 does not fundamentally need to wait for each final
+  prediction before writing the next stage message. The missing serving piece is
+  a rolling executor that keeps multiple speculative stage messages in flight,
+  verifies the oldest completed entry, and rolls back to the rejected target
+  position. A trim-to-position rollback shortcut was tested for SPD optimistic
+  rejection and was not retained: an `enable_thinking=true` rejection smoke
+  changed deterministic output casing (`Thinking Process` versus
+  `Thinking process`). Current serving therefore keeps checkpoint/restore for
+  exactness. The restored checkpoint path reran the same thinking-mode smoke
+  with exact output, `1 / 8` accepted proposals, `6` optimistic requests, `5`
+  rejected optimistic decodes, `1` committed optimistic token, `0` tap failures,
+  about `0.038ms` total optimistic checkpoint time, and about `20.8ms` total
+  restore time. Generation-addressed checkpoints now provide the rollback
+  primitive; rolling execution still needs a scheduler that keeps several
+  entries in flight and restores the matching generation only when the oldest
+  completed verifier rejects. The smoke benchmark now fails by default on paired baseline/SPD
+  content mismatch after writing its JSON report, so this kind of rollback
+  regression is not counted as a passing smoke; `--allow-content-mismatch` is
+  reserved for exploratory sweeps.
+- Optimistic target messages now request SPD tap returns whenever optimistic SPD
+  decode starts, including ungated runs. The accepted-context lifecycle filter
+  drops stale future taps, but a production path should still buffer speculative
+  taps and promote them only after acceptance so rejected speculative work
+  cannot pollute the inline tap cache or delay rollback.
+- Primary SPD `VerifySpan` windows now use that same lifecycle: every input
+  position in the span is marked pending before the target stages run, then
+  fully accepted spans promote those rows and rejected spans reset to the
+  verified prefix. This prevents multi-token verified SPD windows from dropping
+  returned taps as stale future rows before the accept/reject decision is known.
+  `skippy-bench spd-openai-smoke` exposes `--spd-replay-fallback`, which passes
+  `--openai-spd-replay-fallback` through to the embedded stage-0 server; pair
+  it with `--optimistic-decode false` to force primary SPD `VerifySpan` windows
+  for correctness evidence. A bounded `max_tokens=4` release smoke
+  (`/private/tmp/spd-openai-primary-rolling-smoke/report.json`) preserved exact
+  output, ran one primary SPD window, accepted `4 / 4` proposals, recorded `0`
+  ignored taps, and had no optimistic commits. The primary verifier now feeds
+  the committed target span into the rolling observer: `inserted_drafts=3`,
+  `verified_windows=1`, `accepted_windows=1`, and no missing or out-of-order
+  proposals. This is deliberately slow replay-fallback evidence: baseline
+  `502ms` wall / `125ms` decode versus SPD `1837ms` wall / `1297ms` decode. A
+  separate bounded `max_tokens=4`
+  release smoke
+  (`/private/tmp/spd-openai-pending-verify-taps-smoke/report.json`) preserved
+  exact output, accepted `4 / 4` SPD proposals, committed `2 / 2` optimistic
+  target decodes, recorded `0` ignored taps, and kept rolling replay ordered.
+  It was still slower: baseline `541ms` wall / `146ms` decode versus SPD
+  `2047ms` wall / `1453ms` decode.
 - The live request-path proof is bounded; it still needs a larger acceptance
   and latency sweep.
 - The `.pt` checkpoint is a proof/training artifact. Export it to
   `spd-head.safetensors` before Rust-side serving work.
+- SPD sidecars are tied to the base model/tokenizer and logical tap topology
+  they were trained/exported for: number of logical SPD stages, selected hidden
+  tap layers, projection layout, hidden size, draft vocab, and spec-layer
+  count. Physical Skippy placement can differ only if it exposes the same
+  logical taps; otherwise a matching hidden-tap ABI or a topology-specific
+  sidecar is required. The Qwen head also has internal fixed-memory stage roles;
+  those are inferred by the spec module for the live proposal window and should
+  not be confused with tap `row_i_stages`.
+- Real distributed speedup is still unproven. The earlier Python/reference eval
+  and Skippy latency model are useful because they use real acceptance traces,
+  but they remain theoretical/simulated speed evidence. Current local
+  request-path smokes are correctness and scheduler-shape evidence; running
+  all stages on one machine/device is not a fair SPD speed oracle because it
+  adds true concurrent stage work on shared resources.
 
 ## Open Training Data
 
@@ -275,8 +657,10 @@ python3 evals/spd/export_parity_fixture.py \
 
 This writes real SPD inference rows, raw hidden-state tap rows, position ids,
 base final-norm weight, Python intermediate states, Python logits, Python top-k
-draft indices, and Python top-k full token ids. Validate the fixture container
-through Rust with:
+draft indices, and Python top-k full token ids. When the prompt leaves prefix
+rows before the rolling SPD window, it also writes `cached_prefill_cur_in`,
+`cached_prefill_position_ids`, and Python cached `spec_past_kv` logits/top-k
+for the same proposal rows. Validate the fixture container through Rust with:
 
 ```bash
 SKIPPY_SPD_PARITY_FIXTURE=/tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/<run-id>/train/spd-parity-fixture.safetensors \
@@ -289,6 +673,10 @@ Validate the real Rust/Python top-k parity path in release mode:
 SKIPPY_SPD_MANIFEST=/tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/<run-id>/train/skippy-spd-head.json \
 SKIPPY_SPD_PARITY_FIXTURE=/tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/<run-id>/train/spd-parity-fixture.safetensors \
   cargo test --release -p skippy-runtime qwen3_fixture_forward_matches_python_topk_when_env_is_set
+
+SKIPPY_SPD_MANIFEST=/tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/<run-id>/train/skippy-spd-head.json \
+SKIPPY_SPD_PARITY_FIXTURE=/tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/<run-id>/train/spd-parity-fixture.safetensors \
+  cargo test --release -p skippy-runtime qwen3_cached_fixture_forward_matches_python_topk_when_env_is_set
 ```
 
 Or run the combined bench report:
@@ -310,6 +698,16 @@ Recorded parity result from the regenerated `Hello` fixture:
 - spec-query max absolute diff: `0.03125`
 - final-hidden max absolute diff: `0.125`
 
+Recorded cached parity result from the Qwen3.5-4B fixture with `20` prefix
+rows:
+
+- Rust/Python cached top-k draft indices matched
+  `[23, 17, 24, 21, 16, 22, 660, 19]`
+- cached full token ids matched `[23, 17, 24, 21, 16, 22, 760, 19]`
+- cached spec-query max absolute diff: `0.03125`
+- cached final-hidden max absolute diff: `0.0625`
+- full cached-logit max absolute diff: `0.0625`
+
 ## Run the Live Skippy Tap Proof
 
 After exporting the parity fixture and building the patched native Skippy ABI,
@@ -326,7 +724,7 @@ cargo run -p skippy-bench -- spd-live-tap-parity \
   --n-gpu-layers 0 \
   --selected-backend-device CPU0 \
   --top-k 8 \
-  --verify-steps 3
+  --verify-steps 8
 ```
 
 Recorded local result:
@@ -348,14 +746,18 @@ Recorded local result:
 - ordinary non-SPD greedy token: `9419`
 - verified committed output matches ordinary non-SPD greedy output: `true`
 
-Recorded repeated verifier run with `--verify-steps 3`:
+Recorded repeated verifier run with `--verify-steps 8`:
 
-- generated committed tokens: `[9419, 0, 2500]`
-- accepted live SPD top-1 proposals: `3 / 3`
-- rejected proposals: `0 / 3`
-- top-1 acceptance rate for this diagnostic prompt: `1.0`
+- generated committed tokens: `[9419, 0, 2500, 628, 353, 1438, 488, 3242]`
+- accepted live SPD top-1 proposals: `7 / 8`
+- rejected proposals: `1 / 8`
+- top-1 acceptance rate for this diagnostic prompt: `0.875`
 - every target verifier window rewound to the pre-verify token count: `true`
 - every committed token matched ordinary non-SPD greedy decoding: `true`
+- total elapsed: about `1697ms`
+- average step timing: about `212ms` total, `128ms` tap replay, `5ms`
+  assembling `cur_in`, `41ms` SPD head, `21ms` target verify, and `17ms`
+  ordinary greedy decode
 
 The live proof uses the Q4_K_M GGUF, while the fixture was exported from the HF
 BF16 model. The deeper-row drift is therefore expected; the current result says
@@ -381,6 +783,86 @@ skippy-server serve-binary \
 
 That path feeds real SPD proposals into the normal Skippy `VerifySpan`
 verify/repair/rollback loop.
+
+For a reproducible local request-path smoke, prefer the benchmark wrapper. It
+launches the local binary stages, runs a baseline request and an SPD request,
+derives the selective tap-return allowlist from the fixture, and writes a JSON
+summary of OpenAI decode telemetry:
+
+```bash
+skippy-bench spd-openai-smoke \
+  --stage-server-bin target/release/skippy-server \
+  --manifest /path/to/skippy-spd-head.json \
+  --fixture /path/to/spd-parity-fixture.safetensors \
+  --model-path /path/to/Qwen3.5-4B-Q4_K_M.gguf \
+  --model-id unsloth/Qwen3.5-4B-GGUF:Q4_K_M \
+  --splits 8,10,16,20,24,31 \
+  --layer-end 32 \
+  --activation-width 2560 \
+  --activation-wire-dtype f16 \
+  --max-tokens 8 \
+  --temperature 0.0 \
+  --output /tmp/spd-openai-smoke-report.json
+```
+
+Add `--downstream-wire-delay-ms <ms>` and optionally
+`--downstream-wire-mbps <mbps>` to run the same smoke with local downstream
+wire conditioning. Add `--prompt-file <jsonl>` and `--prompt-limit <n>` to run
+the same baseline/SPD shape over a prompt set. Prompt files accept non-empty
+plain-text lines, JSON string lines, JSON objects with `prompt`, `text`, or
+`content`, chat-style `messages`, or `turns` arrays. `messages` are sent to the
+OpenAI chat endpoint unchanged; `turns` are joined into one user message. `id`,
+`label`, or `prompt_id` are used as report labels when present. The report's
+aggregate `summary` records paired content matches, baseline/SPD wall and
+decode means, speedup ratios, total accept/reject counts, optimistic commits,
+tap failures, per-prompt comparisons, and `summary.pipeline_gap`. The
+pipeline-gap block rolls up pre-target, optimistic-commit, and post-target
+inline probes, empty post-target probe rate, probe and wait-after-probe timing,
+normal versus optimistic downstream wait time, and whether optimistic verifies
+requested reusable SPD tap returns. Optimistic-commit probe counts show whether
+the sidecar produced an accepted next-token proposal while the already-started
+optimistic verifier was still in flight. It also reports pre-target proposals
+without tap returns, accepted/rejected tap-return requests, and the tap-return
+acceptance rate for margin-gate tuning. `cases[].decode.rolling` and
+`cases[].inline_probes[].rolling` expose the live request-path rolling state.
+When the observer can form paper-style speculation rows, the same rolling block
+includes `row_positions`, resolved inference `row_i_stages`,
+`row_evicted_prefix_position`,
+`row_newest_position`, and `row_next_draft_position`; empty row arrays mean no
+row snapshot was available for that event, not that the whole request lacked
+paper-shaped rows. The scheduler owns nominal paper layout roles; the server
+resolves those roles through the sidecar manifest before reporting the row
+stages used for proposal assembly.
+`cases[].inline_probes[].rolling_verified_delta` is present when the observer
+advanced the target-verified prefix and includes the start position,
+verified-up-to frontier, tokens, and token count for that newly verified span.
+`cases[].inline_probes[].tap_source`, `tap_collect_ms`, `cur_in_ms`, and
+`forward_ms` report whether an optimistic inline probe used direct-return taps
+or replay fallback, plus the time spent collecting taps, assembling `cur_in`,
+and running the sidecar forward. These fields cover `optimistic_commit`
+diagnostics as well as normal pre-target inline probes.
+`summary.paper_pipeline_estimate` projects the
+observed accept rate onto the paper/reference rolling pipeline schedule using
+the manifest's logical SPD stage count, while still reporting the physical
+tap-aligned Skippy stage count. `summary.rolling_trace_replay` replays observed
+pre-target and diagnostic `optimistic_commit` proposals through
+`SpdRollingScheduler` when token/proposal traces exist, and otherwise falls
+back to final live `cases[].decode.rolling` telemetry for primary-verify-only
+smokes. `cases_replayed` counts trace replays; `live_cases_observed` counts
+those live final rolling summaries. Replayed traces also report final
+target-verified prefix tokens and `verified_prefix_matches_target`, which is
+the exactness guard for future scheduler-driven serving changes.
+`cases[].decode.spd_proposal_total_*` reports SPD proposal-source totals from
+the final decode event across primary proposal windows and inline probe
+attempts: requested/attempted/proposed counts, inline-tap hits, replay
+fallbacks, cache hits/misses, and time spent collecting taps, assembling
+`cur_in`, and running the sidecar head. Use those fields to separate head cost
+from replay-fallback hidden-tap cost.
+
+`SpdRollingScheduler` and `SpdRollingTraceReplay` in `skippy-runtime::spd` are
+the Rust contract for the next serving rewrite. They are intentionally
+token/position-only today; hidden states, direct-return taps, and runtime
+checkpoints still live in `skippy-server`.
 
 Recorded bounded local OpenAI request-path proof:
 
@@ -439,12 +921,213 @@ release no-replay smoke for a one-token request:
 That result proves the real pretrained head runs from inline Skippy request
 taps without replay fallback and can start before the final target reply is
 consumed by stage 0. It also proves those proposals are verified against normal
-target decode and ordinary greedy output is preserved. It is still not a live
-speedup because the current CPU Rust head is slower than the remaining
-final-stage work in this local topology and this prompt accepted only one of
-four proposals. The remaining production work is using pre-target accepted
-proposals to drive optimistic next-token stage work and rollback on rejection,
-then measuring ordinary split serving against inline-tap SPD serving.
+target decode and ordinary greedy output is preserved. The first four-token
+run was not a live speedup because it predated the Qwen serving-head fast path
+and accepted only one of four proposals. Later release `spd-live-tap-parity`
+runs matched ordinary greedy output and rewound every verifier window. The
+first release timing sample accepted `3 / 3` live top-1 proposals and averaged
+about `248ms` per step: `42ms` in the SPD head, `58ms` assembling `cur_in`, and
+`107ms` in tap replay. Keeping sidecar projection weights resident cut
+assembly to about `41ms`; parallelizing tap projection cut it to about `5ms`.
+The latest eight-step release live-tap sample accepted `7 / 8` proposals and
+averaged about `212ms` per step.
+
+The real OpenAI request path was then rerun with optimistic decode, selective
+tap returns, resident projection weights, and parallel tap projection. For the
+same eight-token prompt, the latest no-SPD baseline was about `0.65s` wall /
+`209ms` decode. The in-repo `skippy-bench spd-openai-smoke` command now
+reproduces this local seven-stage request-path flow and derives the selective
+tap-return allowlist from the sidecar topology. Earlier filtered SPD returned
+only hidden taps `10`, `20`, and `31`; the current topology-derived default for
+the Qwen3.5-4B S4/L4 head is `[8, 10, 16, 20, 24, 31]` after stripping h0, so
+paper-shaped rolling rows can request their required taps.
+Row-specific collection keeps fixture-shaped probes from waiting on those
+future-row taps. The latest topology-derived run produced the same text,
+proposed `8`, accepted `3`, rejected `5`, committed two optimistic tokens, and
+ran in about `3.52s` wall / `2.96s` decode versus a `547ms` wall / `212ms`
+baseline. It is slower than the narrower fixture-tap run because downstream now
+returns more tap frames, but those frames are required for true paper rows.
+Before the token-position fix, a follow-up run produced exact same text and
+kept live/replay rolling ordered but accepted only `1 / 8` proposals: the live
+rows were shifted by one token after the first accepted proposal, so the sidecar
+kept reading the previous token as the newest row. The Python reference
+generator on the same no-thinking prompt accepted `7 / 8`, which isolated the
+problem to serving row alignment rather than sidecar quality.
+An earlier pre-cache resolved-role diagnostic matched the exported fixture
+roles (`[4, 4, 4, 0]` for full Qwen3.5 snapshots) and preserved exact greedy
+text, but accepted `0 / 8` proposals. That run kept live/replay rolling ordered
+and emitted resolved rows from the first probe, but slowed to about `9.93s`
+wall / `9.23s` decode versus the same-run baseline at about `633ms` wall /
+`201ms` decode. The follow-up native-cache smoke added the first stateful path:
+Rust now lazily prefills complete `g_S` prefix rows from inline prefill taps,
+stores sidecar K/V per spec layer, crops to the minimum rolling row position
+before each proposal, and emits `cache_used` / `cache_prefix_len` on inline
+probe reports.
+The cache was active on every proposal (`cache_prefix_len` moved from `20` to
+`29`) and exact text still matched baseline, but the shifted row positions made
+acceptance collapse. The cached Python fixture closed the cache-fidelity
+question: with `20` prefix rows, Rust and Python cached top-k token ids matched
+exactly (`[23, 17, 24, 21, 16, 22, 760, 19]`), with `0.0625` full-logit max
+diff. After switching live rolling positions to actual token indices, the same
+bounded OpenAI smoke accepted `8 / 8` proposals, committed `3 / 3` optimistic
+target decodes, and kept exact greedy output. Baseline was `626ms` wall /
+`198ms` decode; SPD was still slower at `3521ms` wall / `2921ms` decode.
+Treat the remaining issue as serving latency/scheduling evidence, not
+cache-logit mismatch or low-head-quality evidence.
+
+The next fixed-stage-default smoke preserved exact output but accepted only
+`6 / 8` proposals, and both failures were depth-2 optimistic commits. New
+proposal-row telemetry showed those failures were not model quality: the step-2
+proposal reused stale rows `[23,24,25,26]` after the accepted optimistic token
+should have advanced proposal assembly to target position 28. Observing
+accepted optimistic-commit probes into the live rolling observer immediately
+fixed that stale context. The follow-up smoke at
+`/private/tmp/spd-openai-rolling-observe-smoke1/report.json` preserved exact
+output, proposed `5`, accepted all `5`, committed `3 / 3` optimistic decodes
+and `2 / 2` chained optimistic decodes, and step 2 proposed token `198` from
+rows `[24,25,26,27]`. It still ran slower than baseline (`222ms` baseline
+decode versus `2668ms` SPD decode) and ended with `3` missing rolling proposal
+positions after the chain boundary, so the next work is executor scheduling,
+not the Qwen fixed-stage contract or stale accepted-context rows.
+
+The miss-diagnostic smoke at
+`/private/tmp/spd-openai-tap-position-diagnostics-smoke1/report.json` narrowed
+that executor gap further. It preserved exact output, accepted `5 / 5`
+proposals, and committed all optimistic/chained optimistic verifier results,
+but post-target probe steps `4`, `5`, and `6` were empty with
+`missing_inline_taps` for position `28`. h0 is now synthesized from embeddings
+instead of treated as an inline tap. Tap-position telemetry showed position
+`28` was recorded for all required non-h0 heads before those probes, then lost
+during a shorter accepted-prefix commit from the token-emission path. The
+serving path now treats prefix-compatible accepted-context updates as
+acknowledgements when SPD is already ahead, so it advances lifecycle state
+without pruning future rows. The follow-up smoke at
+`/private/tmp/spd-openai-prefix-ack-smoke1/report.json` preserved exact output,
+accepted `8 / 8`, committed `6 / 6` optimistic verifier results, eliminated
+post-target empty probes, and left rolling replay with `0` missing or
+out-of-order proposals. The native path still needs the paper-shaped rolling
+executor and faster sidecar/head execution to become a speed result.
+
+Earlier filtered SPD
+produced the same text, proposed `4`, accepted `1`, rejected `3`, committed one
+optimistic token, and ran in about `1.92s` wall / `1.38s` decode. Switching
+optimistic target work from `CheckpointSession + DecodeEmbd` to a checkpointing
+one-token `VerifySpan` preserved exact text and the same proposal counts, cut
+optimistic checkpoint telemetry to about `0.017ms`, and measured about `1.95s`
+wall / `1.39s` decode on the same prompt. The previous
+unfiltered SPD run was about `3.19s` wall / `2.60s` decode; filtered SPD before
+the projection fast path was about `2.22s` wall / `1.63s` decode. Proposal time
+is now about `239ms`, down from about `478ms` before the cache/parallel path.
+Local CPU SPD still needs higher accepted proposal coverage and lower target
+wait before it beats the normal split path. Treat this as a
+regression/performance smoke, not native mesh config evidence, because
+`skippy-bench` writes stage JSON itself.
+
+A one-prompt prompt-file smoke against
+`crates/skippy-bench/corpora/speculative_coding_prompts.jsonl` with
+`--prompt-limit 1` validated the aggregate report in the real staged OpenAI
+path. Prompt `spec-code-001` matched baseline text exactly, proposed `2`, accepted
+`1`, rejected `1`, committed `0` optimistic tokens, and had no tap failures.
+The speed result was still negative: baseline was about `805ms` wall / `50.7ms`
+decode, while SPD was about `1338ms` wall / `438ms` decode (`0.602x` wall,
+`0.116x` decode). Use this as report-shape evidence and a starting point for a
+larger prompt sweep, not as proof of SPD acceleration.
+
+A two-prompt smoke against `crates/skippy-bench/corpora/chat_corpus_fixture.jsonl`
+with `--prompt-limit 2` verified that `spd-openai-smoke` preserves true
+chat-style `messages` rows when constructing the OpenAI request. The prompt set
+covered one flat prompt and one `{system,user}` message prompt. Baseline and
+SPD emitted matching two-token text for both prompts. The aggregate summary
+reported `prompt_pairs = 2`, `matching_content = 2`, SPD proposed `4`, accepted
+`1`, rejected `3`, committed `0` optimistic tokens, and had no tap failures.
+The mean baseline timing was about `451ms` wall / `53.3ms` decode; mean SPD
+timing was about `975ms` wall / `447ms` decode (`0.462x` wall speedup and
+`0.119x` decode speedup). Use this as chat-corpus benchmark evidence, not as
+proof of SPD acceleration.
+
+The benchmark can also inject bounded local downstream-stage latency through
+the native `serve-binary` wire conditioner. With `--downstream-wire-delay-ms 10`
+the same eight-token run preserved exact output and narrowed the local gap:
+baseline was about `2.51s` wall / `1.92s` decode, while SPD was about `2.80s`
+wall / `2.14s` decode with `4` proposals, `1` accepted proposal, and one
+committed optimistic token. At `25ms`, the current optimistic path did not cross
+over: baseline was about `2.76s` wall / `1.94s` decode, while SPD was about
+`5.08s` wall / `4.13s` decode. Rejected optimistic target decodes pay delayed
+downstream work too, so the current low-acceptance Qwen proof head is correct
+but not yet a latency speed path. Disabling optimistic decode at `25ms` produced
+`3` accepted probes out of `8` but still took about `3.65s` wall / `2.67s`
+decode because proposals are not committed without the optimistic path.
+
+The serving path now emits inline probe top-1 logits and top-1/top-2 logit
+margins, and `skippy-bench spd-openai-smoke` exposes
+`--optimistic-min-logit-margin` for gated optimistic decode. On the same `25ms`
+run with `--spd-top-k 2`, rejected optimistic proposals had margins `0.125` and
+`1.0`; the accepted proposal had margin `2.5`. With
+`--optimistic-min-logit-margin 1.5`, the paired current-code smoke preserved
+exact output, skipped the two rejected optimistic decodes, committed the accepted
+token, and measured baseline at about `2.76s` wall / `1.91s` decode versus gated
+SPD at about `3.70s` wall / `2.83s` decode. This proves the gate removes bad
+optimistic work, not that the current head is fast enough.
+
+The first tap-return implementation requested taps only after a margin-gated
+optimistic decode, which proved accepted optimistic target decodes could
+preserve their tap rows and improve proposal coverage after a committed
+optimistic token. With `--downstream-wire-delay-ms 25` and
+`--optimistic-min-logit-margin 2.5`, SPD measured `6` proposals, `3` accepted
+probes, `2` committed optimistic tokens, `0` rejected optimistic decodes, and
+exact output. It was still slower than the same-run baseline: about `4.03s`
+wall / `3.02s` decode versus baseline `2.89s` wall / `2.07s` decode. At `10ms`,
+the same gate measured baseline `1.86s` wall / `1.10s` decode and SPD `2.52s`
+wall / `1.81s` decode. Current code applies that tap-return behavior to every
+optimistic SPD verify that is actually started; the margin gate remains only a
+work-start filter. This is a coverage fix and a useful tuning surface; it is
+not yet a speed result for the current CPU proof head.
+
+The request path now keeps inline tap-cache rows for the common token prefix
+when the SPD source resets, dropping only rows at or after the first divergent
+token. A pre-patch ungated no-tap diagnostic was faster, but it starved the
+rolling rows after accepted optimistic tokens. The retained behavior requests
+optimistic taps for every started optimistic SPD verify, drops future rows on
+rejection, preserves accepted-extension rows after verification, and treats
+shorter accepted-prefix commits as acknowledgements when SPD's context is
+already ahead. That keeps the rolling replay ordered in the current smoke, but
+tap-return transport and sidecar/head work still dominate local latency.
+
+Current mesh-native config status: the same experimental SPD knobs are
+available through `[defaults.speculative]` and per-model `speculative`
+configuration (`mode = "spd"`, `spd_manifest_path`, `spd_fixture_path`,
+`spd_model_path`, `spd_max_tokens`, `spd_top_k`, `spd_gpu_layers`,
+`spd_replay_fallback`, `spd_optimistic_decode`,
+`spd_optimistic_min_logit_margin`). These settings now resolve and propagate
+into staged embedded OpenAI args. Native staged config also derives
+the SPD tap-return allowlist from the sidecar topology and carries it through
+stage-control load requests so workers return every logical-row tap except h0;
+the host-runtime split-load test asserts the derived
+`[8, 10, 16, 20, 24, 31]` list reaches the worker `StageLoadRequest`. This is
+config plumbing only; it does not choose a compatible tap topology or train a
+sidecar automatically.
+
+Bounded local `llama-spec-bench` status for ordinary target/draft speculative
+decoding, separate from SPD:
+
+- target: `Qwen3-4B-Q4_K_M.gguf`
+- draft: `Qwen3-0.6B-Q4_K_M.gguf`
+- prompt count: `8`
+- `max_new_tokens=8`, `speculative_window=4`, `ctx_size=512`, `n_gpu_layers=0`
+- tokenizer match: `true` for every prompt
+- speculative output matched baseline for every prompt
+- generated tokens: `64`
+- speculative windows: `39`
+- accept rate: `22.8%` (`29` accepted / `127` draft tokens, `35` rejected)
+- mean accepted tokens per window: `0.74`
+- target baseline: `79.31 tok/s`
+- current serial speculative path: `53.69 tok/s`
+- projected batched rollback path: `50.03 tok/s`
+- projected scratch verification path: `13.00 tok/s`
+
+That run proves the target/draft benchmark harness is usable on real GGUF pairs
+after the target lane-count fix. It is not evidence of SPD speedup, and this
+particular target/draft pair is not a serving-speed candidate as configured.
 
 ## Validate Hidden Tap Compatibility
 
@@ -486,7 +1169,7 @@ The manifest schema is `skippy-spd-head/v1`. It binds a head checkpoint to:
 - hidden size
 - base vocab size
 - draft vocab size and optional draft token ids
-- number of target stages
+- number of target stages and optional logical stage layer boundaries
 - number of spec layers
 - shallow hidden-layer tap indices
 - optional safetensors serving checkpoint path, size, checksum, tensor count,
@@ -502,25 +1185,31 @@ The tap-row-to-`cur_in` projection bridge lives in
 
 ## Next Engineering Steps
 
-1. Capture Skippy hidden-state taps and compare Rust top-k proposals to the
-   Python reference on the same taps.
-2. For the first live proof, prefer the tap-aligned over-split unless the
-   hidden-tap ABI is already available.
-3. Replace `spd-replay` with inline tap capture in `skippy-server`. Stage-0
-   positioned tap caching and downstream direct-return tap transport exist for
-   the tap-aligned local proof, and the no-replay request-path probe can run
-   the real pretrained head from those taps before stage 0 consumes the final
-   target reply. Committed optimistic next-token scheduling remains.
-4. Verify every accepted token through the normal target stages.
-5. Benchmark against ordinary split serving with both injected hop latency and a
-   real multi-node topology.
+1. Keep tightening the native request-path executor toward the paper schedule:
+   multiple in-flight rolling entries, oldest-entry verification, exact
+   generation-addressed rollback, and no reliance on replay fallback for speed.
+2. Run a larger local `spd-openai-smoke --prompt-file ...` sweep to measure
+   acceptance distribution, rollback frequency, rolling gaps, and
+   `summary.paper_pipeline_estimate` across prompt types.
+3. Use injected downstream delay only as a bounded diagnostic while no separate
+   worker is available; do not report it as distributed speedup.
+4. When another worker is available, rerun `spd-openai-smoke` with explicit
+   `--stage-hosts`, staged model artifacts, and ordinary split baseline/SPD
+   pairs to test real wall-clock speed.
+5. Add an SPD sidecar package workflow around the Python reference trainer:
+   plan logical tap topology, train, eval `L'_acc`, export safetensors/manifest,
+   validate Rust parity, then publish sidecar metadata alongside Skippy model
+   artifacts.
 
 ## Next Research Steps
 
 1. Train a head for a larger Qwen-family model to prove scaling beyond the
    pretrained 4B artifact.
 2. Keep the draft vocab capped at 32k or 50k first.
-3. Record acceptance, equivalent accept length, and latency simulation from the
-   same eval prompts.
-4. Only after that, evaluate custom large MoE targets. Very large MoE models
+3. Treat the trained sidecar as a Hugging Face/package artifact with explicit
+   base-model, tokenizer, logical stage, tap-layer, spec-layer, draft-vocab, and
+   checksum metadata.
+4. Record acceptance, equivalent accept length, and latency simulation from the
+   same eval prompts before attempting native speed claims.
+5. Only after that, evaluate custom large MoE targets. Very large MoE models
    need activation-capture support and are not the right first scaling proof.

@@ -55,7 +55,8 @@ skippy-bench local-split-chain-binary --model-path model.gguf --model-id org/rep
 skippy-bench local-split-chain-binary --model-path model.gguf --model-id org/repo:Q4_K_M --splits 8,10,16,20,24,31 --layer-end 32
 skippy-bench spd-fixture-parity --manifest skippy-spd-head.json --fixture spd-parity-fixture.safetensors
 skippy-bench spd-live-tap-parity --manifest skippy-spd-head.json --fixture spd-parity-fixture.safetensors --model-path model.gguf --splits 8,10,16,20,24,31 --layer-end 32
-skippy-bench spd-live-tap-parity --manifest skippy-spd-head.json --fixture spd-parity-fixture.safetensors --model-path model.gguf --splits 8,10,16,20,24,31 --layer-end 32 --verify-steps 3
+skippy-bench spd-live-tap-parity --manifest skippy-spd-head.json --fixture spd-parity-fixture.safetensors --model-path model.gguf --splits 8,10,16,20,24,31 --layer-end 32 --verify-steps 8
+skippy-bench spd-openai-smoke --stage-server-bin target/release/skippy-server --manifest skippy-spd-head.json --fixture spd-parity-fixture.safetensors --model-path model.gguf --model-id org/repo:Q4_K_M --splits 8,10,16,20,24,31 --layer-end 32 --activation-width 2560 --activation-wire-dtype f16 --max-tokens 8
 skippy-bench chat-corpus --base-url http://127.0.0.1:9337/v1 --model org/repo:Q4_K_M --prompt-corpus target/bench-corpora/smoke/corpus.jsonl --max-tokens 64 --stream
 skippy-bench token-lengths --model-path model.gguf --prompt-corpus target/bench-corpora/long/corpus.jsonl --ctx-size 8192 --generation-limit 512 --output-tsv target/bench-corpora/long/prompt-lengths.tsv
 skippy-bench focused-runtime --schema-smoke --hosts host-a,host-b --splits 1 --layer-end 2
@@ -72,8 +73,10 @@ listener ranges.
 `spd-fixture-parity` validates a converted pretrained SPD head against a
 Python-exported fixture. It reconstructs `cur_in` from raw hidden-state tap rows
 using `g0_proj` and `stage_projs.*`, then runs the Rust Qwen SPD forward path
-and reports Python/Rust top-k and max-diff diagnostics. Use it before wiring a
-head into live staged serving.
+and reports Python/Rust top-k and max-diff diagnostics. If the fixture includes
+cached `spec_past_kv` tensors, the report also includes `cached_forward` with
+native `SpdQwen3ForwardCache` top-k parity, cache prefix length, and full-logit
+max diff. Use it before wiring a head into live staged serving.
 
 `spd-live-tap-parity` drives the fixture prompt token ids through live Skippy
 runtime slices, including an embedding-only side tap for hidden-state index
@@ -82,9 +85,139 @@ the Rust Qwen SPD head from those live taps. It also verifies the live top-1
 proposal against a full target Skippy session and compares the committed token
 with ordinary greedy decoding. Pass `--verify-steps` to repeat live
 tap/head/target-verifier windows over generated context; the recorded
-Qwen3.5-4B proof accepted `3 / 3` top-1 proposals and matched ordinary greedy
+Qwen3.5-4B proof accepted `7 / 8` top-1 proposals and matched ordinary greedy
 decoding for every committed token. It is a proof/diagnostic command, not
 request-path serving.
+
+`spd-openai-smoke` launches local binary stage processes, starts embedded
+stage-0 OpenAI serving, runs a no-SPD baseline request and an SPD request, and
+emits one JSON report with response equality, OpenAI decode telemetry, inline
+probe events, optimistic-decode events, token downstream waits, tap-return
+counts, and tap-record counts. By default it derives
+`spd_tap_return_hf_indices` from the SPD manifest topology and strips
+hidden-state index `0`, matching the native resolver's selective tap-return
+behavior for all logical row roles. Use
+this for repeatable request-path smoke evidence before moving to real
+multi-node sweeps. Pass `--downstream-wire-delay-ms` and optionally
+`--downstream-wire-mbps` to reuse `serve-binary`'s native downstream wire
+conditioning for bounded local latency checks before involving lab nodes. Pass
+`--spd-top-k 2 --optimistic-min-logit-margin <margin>` to gate optimistic target
+decode on the inline SPD head's top-1/top-2 logit margin; the report includes
+probe and optimistic-decode margins for calibration. Whenever optimistic SPD
+decode starts, the request asks for SPD tap returns so accepted optimistic work
+can feed later rolling rows; the margin only controls whether that optimistic
+work is started. A pre-patch no-tap diagnostic was faster but starved later
+rolling rows, so it is not the current request-path behavior. Pass
+`--prompt-file` to run the same baseline/SPD shape over a prompt set. Prompt
+files accept non-empty plain-text lines, JSON string lines, JSON objects with
+`prompt`, `text`, or `content`, chat-style `messages`, or `turns` arrays.
+`messages` are sent to `/v1/chat/completions` unchanged; `turns` are joined
+into one user message. `--prompt-limit` bounds quick sweeps. By default
+`spd-openai-smoke` sends `chat_template_kwargs.enable_thinking=false`, matching
+the Qwen parity fixture exporter and reference SPD eval setup. Pass
+`--enable-thinking true` to measure thinking-mode prompts explicitly. The report
+can also exercise the slow correctness-only replay source with
+`--spd-replay-fallback`; combine that with `--optimistic-decode false` when the
+goal is to force primary SPD `VerifySpan` windows instead of inline optimistic
+probes. The report
+includes an aggregate `summary` with paired content matches, mean baseline/SPD
+wall and decode time, speedup ratios, total accept/reject counts, optimistic
+commit counts, chained optimistic commit counts, tap failures, per-prompt
+comparisons, and `summary.pipeline_gap`.
+The pipeline-gap block rolls up pre-target, optimistic-commit, and post-target
+inline probes, empty post-target probe rate, probe and wait-after-probe timing,
+normal versus optimistic downstream wait time, and whether optimistic verifies
+requested reusable SPD tap returns. Optimistic-commit probe counts show whether
+the sidecar produced an accepted next-token proposal while the already-started
+optimistic verifier was still in flight. It also reports pre-target proposals
+without tap returns, accepted/rejected tap-return requests, and the tap-return
+acceptance rate for optimistic scheduling and margin-gate tuning. The summary
+also includes `tap_ignored`, the count of stage-0 inline taps dropped by the
+accepted-context lifecycle filter. If both baseline and SPD are run,
+`spd-openai-smoke` writes and prints the report, then exits nonzero when paired
+baseline/SPD content differs. Pass `--allow-content-mismatch` only for
+exploratory sweeps where mismatched output is expected.
+Inline probe reports include `cache_used` and `cache_prefix_len` when the
+server ran the stateful SPD sidecar cache path for that proposal. They also
+include `tap_source`, `tap_collect_ms`, `cur_in_ms`, and `forward_ms` so
+optimistic probe diagnostics can show whether a proposal came from inline
+direct-return taps or slow replay fallback.
+`cases[].optimistic_decodes[]` carries `chain=true` for bounded chained
+optimistic `VerifySpan` work, and `cases[].token_events[]` preserves the same
+chain flag on emitted `DecodeEmbdOptimistic` token events when stage 0 reports
+it. Primary `VerifySpan` commits also emit `token_events[]` entries with
+`message_kind="VerifySpan"` so rolling replay can reconstruct mixed
+primary/optimistic target streams. Chained counters currently prove bounded
+one-step target execution; they do not imply the full paper rolling executor is
+running. Direct-return prediction replies are origin-tagged on opt-in streams,
+so overlapping same-kind final replies can be buffered and matched to the
+specific `VerifySpan` that launched them. The origin includes
+`checkpoint_generation`, and the serving runtime now keeps checkpoints by
+session plus generation so speculative verifier restores cannot overwrite each
+other when several target positions are in flight. The report also includes
+`summary.max_optimistic_chain_depth` plus per-event `chain_depth` fields on
+`optimistic_decodes[]` and `token_events[]`, so deeper rolling queue entries are
+visible without reading raw stage logs. `cases[].optimistic_decodes[]` also
+reports `hidden_wait_ms`, derived as
+`elapsed_ms - start_elapsed_ms - wait_ms`, and `summary.pipeline_gap` rolls that
+up as `optimistic_decode_hidden_wait_ms` plus
+`chained_optimistic_decode_hidden_wait_ms`. A positive hidden-wait value means a
+speculative verifier spent that time in flight behind earlier target work, which
+is useful evidence that the queue is overlapping latency even when proposal
+quality or restores still prevent an end-to-end speedup.
+`cases[].decode.rolling` and `cases[].inline_probes[].rolling` expose the live
+request-path rolling scheduler state, including inserted drafts, missing
+proposal positions, out-of-order proposals, verified windows, pipeline length,
+and verified frontier.
+When the runtime observer can form paper-shaped speculation input rows, the
+rolling block also includes `row_positions`, resolved inference `row_i_stages`,
+`row_evicted_prefix_position`, `row_newest_position`, and
+`row_next_draft_position`. Empty row arrays mean no row snapshot was available
+for that event, not that the whole request lacked paper-shaped rows. The
+scheduler owns nominal paper layout roles; the server resolves those roles
+through the sidecar manifest before reporting the row stages used for proposal
+assembly.
+`cases[].inline_probes[].rolling_verified_delta` is present when the live
+observer advances the target-verified prefix and carries the newly verified
+start position, verified-up-to frontier, token ids, and token count.
+`cases[].decode.spd_proposal_total_*` reports the final SPD proposal-source
+totals from stage 0 across primary proposal windows and inline probe attempts:
+requested/attempted/proposed counts, inline-tap hits, replay fallbacks, cache
+hits/misses, and milliseconds spent collecting taps, assembling `cur_in`, and
+running the sidecar head. Use these fields to identify whether a smoke is
+exercising direct-return hidden taps or falling back to slow local replay.
+For distinct-device smoke runs, pass `--stage-hosts local,<worker>` to cycle
+physical stage placement while keeping stage 0, the OpenAI frontend, and the
+SPD sidecar on the coordinator. Use `--endpoint-host-map` to put
+remote-reachable endpoint hosts into the generated topology, and use
+`--remote-model-path-map` when the worker already has the GGUF staged. The
+`--rsync-model-artifacts` option is convenient for small artifacts but can be
+too slow for multi-GB GGUFs; stage large model files once and point the smoke at
+that path when possible.
+`logical_spd_stage_count` records the manifest topology used by the sidecar
+head. `summary.paper_pipeline_estimate` projects the observed accept rate onto
+the paper/reference rolling pipeline schedule using that logical SPD stage count
+and baseline decode cost, while also reporting the physical tap-aligned stage
+count. `summary.rolling_trace_replay` replays observed pre-target proposals
+and diagnostic `optimistic_commit` proposals through `SpdRollingObserver` to
+show whether proposal order would keep the paper pipeline filled or stall on
+missing/out-of-order positions. The replay mirrors the server's accepted-context
+catch-up after rejected or missing proposal positions. It reports inserted
+drafts, first missing proposal position, out-of-order proposals,
+verified/rejected windows, final scheduler position, and the final
+target-verified prefix tokens. Reports without per-token events still fall back
+to final `cases[].decode.rolling` telemetry and increment
+`live_cases_observed` instead of `cases_replayed`. Use
+`verified_prefix_matches_target` and
+`first_verified_prefix_mismatch_position` as the exactness guard for future
+scheduler-driven serving changes when a replayed trace is present. The report
+uses `skippy-runtime::spd::SpdRollingTraceReplay`, which uses the same observer
+path as server diagnostics, so benchmark summaries and future server execution
+share the same token/position scheduler contract. Use
+these fields to distinguish "the head can propose" from "the staged request
+path is actually keeping useful speculative work in flight." Replay is
+conservative: if a target token position was not observed, it reports the gap
+instead of fabricating a token for the verified prefix.
 
 The old standalone `kv-stage-integration` and `kv-hit-regression` commands are
 intentionally absent. Mesh does not carry the legacy standalone cache sidecar

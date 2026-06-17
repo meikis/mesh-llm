@@ -3,23 +3,42 @@ use std::{collections::BTreeMap, path::Path};
 use anyhow::{Context, Result, bail};
 
 use super::{
-    SpdHeadManifest, SpdSafetensorsFile, SpdStageLayerRange, SpdTapInputProjector,
-    project_spd_tap_input_row,
+    GgufTokenEmbeddingTable, SpdHeadManifest, SpdSafetensorsFile, SpdStageLayerRange,
+    SpdTapInputProjector, project_spd_tap_input_row,
 };
-use crate::{ActivationFrame, GGML_TYPE_F16, RuntimeConfig, RuntimeLoadMode, StageModel};
+use crate::{
+    ActivationFrame, GGML_TYPE_F16, RuntimeConfig, RuntimeLoadMode, StageModel,
+    package::{PackageStageRequest, select_layer_package_parts},
+};
+
+pub enum SpdLiveTapModelSource<'a> {
+    Gguf(&'a Path),
+    LayerPackage {
+        package_ref: &'a str,
+        model_id: &'a str,
+        topology_id: &'a str,
+    },
+}
 
 pub struct SpdLiveTapRunnerConfig<'a> {
-    pub model_path: &'a Path,
+    pub model_source: SpdLiveTapModelSource<'a>,
     pub stage_ranges: &'a [SpdStageLayerRange],
     pub layer_end: u32,
+    pub hidden_size: usize,
+    pub vocab_size: usize,
     pub ctx_size: u32,
     pub n_gpu_layers: i32,
     pub selected_backend_device: Option<String>,
 }
 
 pub struct SpdLiveTapRunner {
-    h0: StageModel,
+    h0: SpdLiveH0Source,
     stages: Vec<SpdLiveStage>,
+}
+
+enum SpdLiveH0Source {
+    Embeddings(GgufTokenEmbeddingTable),
+    Stage(StageModel),
 }
 
 struct SpdLiveStage {
@@ -47,8 +66,7 @@ pub struct SpdLiveCurInRows {
 
 impl SpdLiveTapRunner {
     pub fn open(config: SpdLiveTapRunnerConfig<'_>) -> Result<Self> {
-        let h0 = open_live_stage_model(&config, 0, 0, 0, false, true)
-            .context("open embedding-only SPD h0 tap stage")?;
+        let h0 = open_h0_source(&config)?;
         let stages = config
             .stage_ranges
             .iter()
@@ -105,8 +123,24 @@ impl SpdLiveTapRunner {
     }
 
     pub fn collect_h0_tap(&self, context_tokens: &[i32]) -> Result<ActivationFrame> {
-        run_live_stage_model(&self.h0, 0, 0, 0, context_tokens, None)
-            .context("run embedding-only SPD h0 tap")
+        let row_positions = all_context_row_positions(context_tokens.len())?;
+        self.collect_h0_tap_for_positions(context_tokens, &row_positions)
+    }
+
+    pub fn collect_h0_tap_for_positions(
+        &self,
+        context_tokens: &[i32],
+        row_positions: &[i64],
+    ) -> Result<ActivationFrame> {
+        match &self.h0 {
+            SpdLiveH0Source::Embeddings(embeddings) => embeddings
+                .frame_for_positions(context_tokens, row_positions)
+                .context("collect token embedding SPD h0 tap"),
+            SpdLiveH0Source::Stage(model) => {
+                run_live_stage_model(model, 0, 0, 0, context_tokens, None)
+                    .context("run embedding-only SPD h0 tap")
+            }
+        }
     }
 }
 
@@ -164,6 +198,10 @@ fn open_live_stage_model(
     include_output: bool,
     embedding_only: bool,
 ) -> Result<StageModel> {
+    let load_mode = match &config.model_source {
+        SpdLiveTapModelSource::Gguf(_) => RuntimeLoadMode::RuntimeSlice,
+        SpdLiveTapModelSource::LayerPackage { .. } => RuntimeLoadMode::LayerPackage,
+    };
     let runtime_config = RuntimeConfig {
         stage_index,
         layer_start,
@@ -179,14 +217,124 @@ fn open_live_stage_model(
         cache_type_k: GGML_TYPE_F16,
         cache_type_v: GGML_TYPE_F16,
         flash_attn_type: crate::FlashAttentionType::Auto,
-        load_mode: RuntimeLoadMode::RuntimeSlice,
+        load_mode,
         projector_path: None,
         include_embeddings: layer_start == 0 || embedding_only,
         include_output,
         filter_tensors_on_load: true,
     };
-    StageModel::open(config.model_path, &runtime_config).with_context(|| {
-        format!("open SPD live tap stage {stage_index} {layer_start}..{layer_end}")
+    match &config.model_source {
+        SpdLiveTapModelSource::Gguf(model_path) => StageModel::open(model_path, &runtime_config)
+            .with_context(|| {
+                format!("open SPD live tap stage {stage_index} {layer_start}..{layer_end}")
+            }),
+        SpdLiveTapModelSource::LayerPackage {
+            package_ref,
+            model_id,
+            topology_id,
+        } => open_live_stage_package_parts(LiveStagePackageOpen {
+            package_ref,
+            model_id,
+            topology_id,
+            stage_index,
+            layer_start,
+            layer_end,
+            include_output,
+            embedding_only,
+            runtime_config: &runtime_config,
+        }),
+    }
+}
+
+fn open_h0_source(config: &SpdLiveTapRunnerConfig<'_>) -> Result<SpdLiveH0Source> {
+    match &config.model_source {
+        SpdLiveTapModelSource::Gguf(model_path) => {
+            match GgufTokenEmbeddingTable::open(model_path, config.hidden_size, config.vocab_size) {
+                Ok(table) => Ok(SpdLiveH0Source::Embeddings(table)),
+                Err(table_error) => open_live_stage_model(config, 0, 0, 0, false, true)
+                    .with_context(|| {
+                        format!(
+                            "open embedding-only SPD h0 tap stage after GGUF token embedding table failed: {table_error:#}"
+                        )
+                    })
+                    .map(SpdLiveH0Source::Stage),
+            }
+        }
+        SpdLiveTapModelSource::LayerPackage { .. } => {
+            open_package_h0_embeddings(config).map(SpdLiveH0Source::Embeddings)
+        }
+    }
+}
+
+fn open_package_h0_embeddings(
+    config: &SpdLiveTapRunnerConfig<'_>,
+) -> Result<GgufTokenEmbeddingTable> {
+    let SpdLiveTapModelSource::LayerPackage {
+        package_ref,
+        model_id,
+        topology_id,
+    } = &config.model_source
+    else {
+        bail!("package h0 embeddings require a layer package model source");
+    };
+    let parts = select_layer_package_parts(&PackageStageRequest {
+        model_id: (*model_id).to_string(),
+        topology_id: (*topology_id).to_string(),
+        package_ref: (*package_ref).to_string(),
+        stage_id: "spd-live-tap-h0".to_string(),
+        layer_start: 0,
+        layer_end: 0,
+        include_embeddings: true,
+        include_output: false,
+    })
+    .context("select layer package token embedding parts for SPD h0")?;
+    let mut failures = Vec::new();
+    for path in &parts.absolute_paths {
+        match GgufTokenEmbeddingTable::open(path, config.hidden_size, config.vocab_size) {
+            Ok(table) => return Ok(table),
+            Err(error) => failures.push(format!("{}: {error:#}", path.display())),
+        }
+    }
+    bail!(
+        "selected layer package parts did not contain a usable token_embd.weight for SPD h0: {}",
+        failures.join("; ")
+    )
+}
+
+struct LiveStagePackageOpen<'a> {
+    package_ref: &'a str,
+    model_id: &'a str,
+    topology_id: &'a str,
+    stage_index: u32,
+    layer_start: u32,
+    layer_end: u32,
+    include_output: bool,
+    embedding_only: bool,
+    runtime_config: &'a RuntimeConfig,
+}
+
+fn open_live_stage_package_parts(args: LiveStagePackageOpen<'_>) -> Result<StageModel> {
+    let parts = select_layer_package_parts(&PackageStageRequest {
+        model_id: args.model_id.to_string(),
+        topology_id: args.topology_id.to_string(),
+        package_ref: args.package_ref.to_string(),
+        stage_id: format!("spd-live-tap-{}", args.stage_index),
+        layer_start: args.layer_start,
+        layer_end: args.layer_end,
+        include_embeddings: args.layer_start == 0 || args.embedding_only,
+        include_output: args.include_output,
+    })
+    .with_context(|| {
+        format!(
+            "select SPD live tap package parts for stage {}",
+            args.stage_index
+        )
+    })?;
+    StageModel::open_from_parts(&parts.absolute_paths, args.runtime_config).with_context(|| {
+        format!(
+            "open SPD live tap package stage {} {}..{}",
+            args.stage_index, args.layer_start, args.layer_end
+        )
     })
 }
 
@@ -208,6 +356,12 @@ fn run_live_stage_model(
 fn sequential_positions(token_count: usize) -> Result<Vec<i32>> {
     (0..token_count)
         .map(|position| i32::try_from(position).context("SPD tap position exceeds i32"))
+        .collect()
+}
+
+fn all_context_row_positions(token_count: usize) -> Result<Vec<i64>> {
+    (0..token_count)
+        .map(|position| i64::try_from(position).context("SPD h0 row position exceeds i64"))
         .collect()
 }
 

@@ -213,7 +213,7 @@ pub struct SpdOpenAiSmokeArgs {
     pub endpoint_host_map: Option<String>,
     #[arg(
         long,
-        help = "Comma-separated HOST=PATH overrides for the GGUF model path on remote hosts."
+        help = "Comma-separated HOST=PATH overrides for the GGUF file or layer-package directory on remote hosts."
     )]
     pub remote_model_path_map: Option<String>,
     #[arg(

@@ -1507,8 +1507,16 @@ fn validate_args(args: &SpdOpenAiSmokeArgs) -> Result<()> {
             args.stage_server_bin.display()
         );
     }
-    if !args.model_path.is_file() {
-        bail!("model path does not exist: {}", args.model_path.display());
+    if !args.model_path.is_file() && !args.model_path.is_dir() {
+        bail!(
+            "model path must be a GGUF file or layer package directory: {}",
+            args.model_path.display()
+        );
+    }
+    if args.rsync_model_artifacts && args.model_path.is_dir() {
+        bail!(
+            "--rsync-model-artifacts does not support layer package directories; pre-stage packages and use --remote-model-path-map"
+        );
     }
     if !args.manifest.is_file() {
         bail!("SPD manifest does not exist: {}", args.manifest.display());
@@ -1566,6 +1574,22 @@ fn validate_args(args: &SpdOpenAiSmokeArgs) -> Result<()> {
     }
     stage_ranges(&args.splits, args.layer_end)?;
     Ok(())
+}
+
+pub(super) fn model_path_is_layer_package(path: &Path) -> bool {
+    path.is_dir()
+}
+
+pub(super) fn stage_load_mode_for_model_path(path: &Path) -> &'static str {
+    if model_path_is_layer_package(path) {
+        "layer-package"
+    } else {
+        "runtime-slice"
+    }
+}
+
+pub(super) fn explicit_spd_model_path(path: &Path) -> Option<&Path> {
+    (!model_path_is_layer_package(path)).then_some(path)
 }
 
 fn stage_ranges(splits: &[u32], layer_end: u32) -> Result<Vec<(u32, u32)>> {

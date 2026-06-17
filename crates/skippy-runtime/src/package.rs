@@ -588,7 +588,11 @@ fn load_manifest(path: &Path, contents: &[u8]) -> Result<PackageManifest> {
 fn validate_manifest(manifest: &PackageManifest, request: &PackageStageRequest) -> Result<()> {
     validate_manifest_identity(manifest)?;
     let layer_counts = validate_layer_manifest(manifest)?;
-    if request.layer_start >= request.layer_end {
+    let embedding_only = request.layer_start == 0
+        && request.layer_end == 0
+        && request.include_embeddings
+        && !request.include_output;
+    if request.layer_start >= request.layer_end && !embedding_only {
         bail!("stage layer_start must be less than layer_end");
     }
     if request.layer_end > manifest.layer_count {
@@ -1218,6 +1222,14 @@ mod tests {
         }
     }
 
+    fn embedding_only_package_stage_request(package_ref: &Path) -> PackageStageRequest {
+        PackageStageRequest {
+            layer_end: 0,
+            include_output: false,
+            ..package_stage_request(package_ref)
+        }
+    }
+
     fn materialized_cache_parts() -> Vec<PackagePart> {
         vec![
             PackagePart {
@@ -1301,6 +1313,29 @@ mod tests {
         assert!(
             second.starts_with(dir.path().join(".staging")),
             "temporary materialization must stay in the cache-owned staging directory"
+        );
+    }
+
+    #[test]
+    fn select_layer_package_parts_allows_embedding_only_slice() {
+        let dir = tempfile::tempdir().unwrap();
+        write_package_fixture(dir.path());
+        let request = embedding_only_package_stage_request(dir.path());
+
+        let selected = select_layer_package_parts(&request).unwrap();
+
+        let roles = selected
+            .selected_parts
+            .iter()
+            .map(|part| part.role.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(roles, ["metadata", "embeddings"]);
+        assert_eq!(
+            selected.absolute_paths,
+            [
+                dir.path().join("metadata.gguf"),
+                dir.path().join("embeddings.gguf")
+            ]
         );
     }
 

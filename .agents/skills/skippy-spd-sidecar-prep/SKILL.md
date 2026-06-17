@@ -70,10 +70,13 @@ The bundle must contain:
 
 The base model should remain a normal Mesh/Skippy model reference or layer
 package so each node materializes its assigned stage through the existing
-resolver. The current SPD proposal source still needs a full GGUF on the
-coordinator via `spd_model_path` unless stage `source_model_path` is already a
-real local file. Do not use `spd-openai-smoke --rsync-model-artifacts` as
-product proof; that is a harness-only shortcut.
+resolver. When stage 0 is configured with a resolved local Skippy layer package,
+the SPD proposal source can replay boundary taps from package parts and read h0
+from the package embedding part, so a coordinator-side full GGUF override is no
+longer required for that shape. `spd_model_path` remains useful as an explicit
+full-GGUF override for lower-level smokes. Do not use
+`spd-openai-smoke --rsync-model-artifacts` as product proof; that is a
+harness-only shortcut.
 
 ## Topology Checklist
 
@@ -215,6 +218,15 @@ artifact, use a larger local run or a confirmed Hugging Face job, export
 tap parity on `--splits 16 --layer-end 32`, and only then run
 `spd-openai-smoke --run-baseline true --run-spd true --spd-rolling-executor`
 on the same two-node topology.
+
+Current package-backed checkpoint: local release `spd-openai-smoke` passed with
+`--model-path` set to a Skippy layer package directory, generated both stages as
+`load_mode=layer-package`, and logged `spd_model_source=layer_package` with no
+full-GGUF `spd_model_path`. The report
+`/private/tmp/spd-qwen35-s2-openai-package-local-4-rerun.json` matched
+baseline/SPD content and recorded `0` tap failures, but accepted `0 / 3`
+proposals from the tiny S2 debug sidecar. Treat this as request-path/package
+source correctness evidence, not speed or sidecar-quality evidence.
 
 ## First Larger Training Target
 

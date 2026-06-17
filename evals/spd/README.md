@@ -29,6 +29,9 @@ Rust.
 - `skippy-runtime` can read GGUF `token_embd.weight` rows directly for the
   SPD hidden-state-index `0` embedding tap on the current Qwen3.5-4B proof
   model.
+- `skippy-runtime` can also read the SPD h0 embedding tap from selected Skippy
+  layer-package parts, so package-backed stage-0 SPD replay no longer has to
+  open an invalid `0..0` layer stage or carry a coordinator-side full GGUF.
 - `skippy-runtime` can reconstruct the SPD `cur_in` rows from raw recorded
   hidden-state tap inputs using `g0_proj` and `stage_projs.*`.
 - `skippy-model-package` can plan, write, and preflight explicit tap-aligned
@@ -1350,11 +1353,23 @@ local sidecar directory/manifest or `hf://namespace/repo[@revision]` containing
 `skippy-spd-head.json`, the manifest-declared serving checkpoint
 (`spd-head.safetensors` in current exports), and
 `spd-parity-fixture.safetensors`. Worker stages still receive only the derived
-tap-return allowlist. The remaining product gap is the SPD replay model source:
-today the sidecar proposal source still needs a full GGUF through
-`spd_model_path` unless `source_model_path` already resolves to a real local
-file; teaching live taps to open from Skippy layer-package parts is the clean
-way to remove that extra coordinator-side full-GGUF requirement.
+tap-return allowlist. The SPD replay model source can now be either an explicit
+full GGUF through `spd_model_path` or the resolved local Skippy layer package
+used by stage 0. In the package-backed shape, live taps open selected package
+parts and h0 comes from the package embedding part, so the coordinator does not
+need an extra full GGUF only for SPD replay.
+
+2026-06-18 package-backed SPD request-path checkpoint: release
+`spd-openai-smoke` passed with `--model-path /private/tmp/skippy-qwen35-4b-package-s2`,
+`--splits 16 --layer-end 32`, and the two-stage S2 sidecar bundle. Generated
+stage configs used
+`load_mode=layer-package` for `0..16` and `16..32`; stage-0 logs reported
+`llama_stage.spd_model_source="layer_package"` and `spd_model_path=null`.
+Report `/private/tmp/spd-qwen35-s2-openai-package-local-4-rerun.json` matched
+baseline/SPD content, proposed `3`, accepted `0`, rejected `3`, and recorded
+`0` tap return/record failures. This proves package-backed request-path
+correctness for the two-stage shape; it is not speed evidence and not a quality
+claim for the tiny debug sidecar.
 
 Bounded local `llama-spec-bench` status for ordinary target/draft speculative
 decoding, separate from SPD:
@@ -1439,22 +1454,24 @@ The tap-row-to-`cur_in` projection bridge lives in
    `num_stages=2`, `stage_layer_boundaries=16,32`, and tap rows
    `0,16,32;0,16`; the current pretrained S4/L4 sidecar is intentionally
    excluded from this test.
-2. Move from the completed one-worker CPU LAN correctness proofs and the
-   completed two-stage Metal baseline to a real speed gate: stage 0 plus sidecar
-   on the coordinator, stage 1 on the worker, paired baseline/SPD content and
-   timing, and no one-worker all-Metal oversubscription. Do not call it a speed
-   proof until rolling replay is back to `0` missing / `0` out-of-order
-   proposals on the measured prompt set, oldest rejection drains are explained
-   as sidecar-quality misses, and the report shows useful overlap rather than
-   same-worker stage contention.
+2. Move from the completed one-worker CPU LAN correctness proofs, the completed
+   two-stage Metal baseline, and the completed local package-backed SPD smoke to
+   a real speed gate: Mesh-resolved package materialization on both nodes, stage
+   0 plus sidecar on the coordinator, stage 1 on the worker, paired
+   baseline/SPD content and timing, and no one-worker all-Metal
+   oversubscription. Do not call it a speed proof until rolling replay is back
+   to `0` missing / `0` out-of-order proposals on the measured prompt set,
+   oldest rejection drains are explained as sidecar-quality misses, and the
+   report shows useful overlap rather than same-worker stage contention.
 3. Run a larger local `spd-openai-smoke --prompt-file ...` sweep to measure
    acceptance distribution, rollback frequency, rolling gaps, and
    `summary.paper_pipeline_estimate` across prompt types.
 4. Use injected downstream delay only as a bounded diagnostic while no separate
    worker is available; do not report it as distributed speedup.
 5. When another worker is available, rerun `spd-openai-smoke` with explicit
-   `--stage-hosts`, staged model artifacts, and ordinary split baseline/SPD
-   pairs to test real wall-clock speed.
+   `--stage-hosts`, pre-materialized package directories or Mesh-resolved
+   package artifacts, and ordinary split baseline/SPD pairs to test real
+   wall-clock speed.
 6. Add an SPD sidecar package workflow around the Python reference trainer:
    plan logical tap topology, train, eval `L'_acc`, export safetensors/manifest,
    validate Rust parity, then publish sidecar metadata alongside Skippy model

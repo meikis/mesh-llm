@@ -14,7 +14,7 @@ use serde_json::json;
 
 use crate::{cli::SpdOpenAiSmokeArgs, support::ChildGuard};
 
-use super::SmokeCase;
+use super::{SmokeCase, explicit_spd_model_path, stage_load_mode_for_model_path};
 
 const LOCAL_STAGE_HOST: &str = "local";
 
@@ -257,6 +257,7 @@ fn write_topology(
     ports: &[u16],
     endpoint_hosts: &BTreeMap<String, String>,
 ) -> Result<()> {
+    let load_mode = stage_load_mode_for_model_path(&args.model_path);
     let topology_stages = stage_ranges
         .iter()
         .enumerate()
@@ -269,7 +270,7 @@ fn write_topology(
                 "endpoint": stage_endpoint(stage, ports[index], endpoint_hosts),
                 "layer_start": layer_start,
                 "layer_end": layer_end,
-                "load_mode": "runtime-slice",
+                "load_mode": load_mode,
             })
         })
         .collect::<Vec<_>>();
@@ -332,6 +333,8 @@ fn write_stage_configs(plan: StageConfigPlan<'_>) -> Result<()> {
             || args.model_path.display().to_string(),
             ToString::to_string,
         );
+        let load_mode = stage_load_mode_for_model_path(&args.model_path);
+        let package_ref = (load_mode == "layer-package").then_some(model_path.clone());
         let lane_count = stage_lane_count(args, plan.case)?;
         fs::write(
             &stage.config_path,
@@ -339,6 +342,7 @@ fn write_stage_configs(plan: StageConfigPlan<'_>) -> Result<()> {
                 "run_id": plan.run_id,
                 "topology_id": "spd-openai-smoke",
                 "model_id": args.model_id,
+                "package_ref": package_ref,
                 "source_model_path": model_path,
                 "model_path": model_path,
                 "stage_id": stage_id(index),
@@ -351,7 +355,7 @@ fn write_stage_configs(plan: StageConfigPlan<'_>) -> Result<()> {
                 "n_gpu_layers": args.n_gpu_layers,
                 "selected_device": selected_device,
                 "filter_tensors_on_load": true,
-                "load_mode": "runtime-slice",
+                "load_mode": load_mode,
                 "bind_addr": stage_bind_addr(
                     stage,
                     plan.explicit_stage_hosts,
@@ -676,8 +680,6 @@ pub(super) fn start_case_stages(
                     .arg(&args.manifest)
                     .arg("--openai-spd-fixture")
                     .arg(&args.fixture)
-                    .arg("--openai-spd-model-path")
-                    .arg(&args.model_path)
                     .arg("--openai-spd-top-k")
                     .arg(args.spd_top_k.to_string())
                     .arg(format!(
@@ -694,6 +696,9 @@ pub(super) fn start_case_stages(
                 }
                 if args.spd_replay_fallback {
                     command.arg("--openai-spd-replay-fallback");
+                }
+                if let Some(model_path) = explicit_spd_model_path(&args.model_path) {
+                    command.arg("--openai-spd-model-path").arg(model_path);
                 }
                 if let Some(min_margin) = args.optimistic_min_logit_margin {
                     command

@@ -1406,7 +1406,15 @@ impl StageOpenAiBackend {
                     );
                     attrs.insert(
                         "llama_stage.spd_model_path".to_string(),
-                        json!(spd.model_path.display().to_string()),
+                        json!(
+                            spd.model_path
+                                .as_ref()
+                                .map(|path| path.display().to_string())
+                        ),
+                    );
+                    attrs.insert(
+                        "llama_stage.spd_model_source".to_string(),
+                        json!(spd.model_source.clone()),
                     );
                     attrs.insert(
                         "llama_stage.speculative_window".to_string(),

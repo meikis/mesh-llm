@@ -5,14 +5,15 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use skippy_protocol::LoadMode;
 use skippy_runtime::spd::{
-    GgufTokenEmbeddingTable, SpdHeadManifest, SpdLiveCurInRequest, SpdLiveTapRunner,
-    SpdLiveTapRunnerConfig, SpdQwen3ForwardCache, SpdQwen3ForwardInput, SpdQwen3Head,
-    SpdRollingDraftPlan, SpdRollingObserver, SpdRollingSnapshot, SpdRollingSpeculationRows,
-    SpdRollingVerifiedDelta, SpdSafetensorsFile, SpdStageLayerRange, SpdTapInputProjector,
-    assemble_spd_live_cur_in_for_positions, plan_hidden_state_taps, required_spd_hf_indices,
-    required_spd_hf_indices_for_topology, sliding_spd_row_positions, spd_fixture_cur_in_row_count,
-    spd_fixture_row_hf_indices, spd_hf_indices_for_stage_id,
+    GgufTokenEmbeddingTable, SpdHeadManifest, SpdLiveCurInRequest, SpdLiveTapModelSource,
+    SpdLiveTapRunner, SpdLiveTapRunnerConfig, SpdQwen3ForwardCache, SpdQwen3ForwardInput,
+    SpdQwen3Head, SpdRollingDraftPlan, SpdRollingObserver, SpdRollingSnapshot,
+    SpdRollingSpeculationRows, SpdRollingVerifiedDelta, SpdSafetensorsFile, SpdStageLayerRange,
+    SpdTapInputProjector, assemble_spd_live_cur_in_for_positions, plan_hidden_state_taps,
+    required_spd_hf_indices, required_spd_hf_indices_for_topology, sliding_spd_row_positions,
+    spd_fixture_cur_in_row_count, spd_fixture_row_hf_indices, spd_hf_indices_for_stage_id,
 };
 use skippy_runtime::{ActivationFrame, RuntimeActivationDType, RuntimeActivationLayout};
 
@@ -66,7 +67,8 @@ pub(super) struct SpdReplayProposalState {
 
 pub(super) struct SpdReplayProposalSource {
     pub(super) manifest_path: PathBuf,
-    pub(super) model_path: PathBuf,
+    pub(super) model_path: Option<PathBuf>,
+    pub(super) model_source: String,
     pub(super) window: usize,
     top_k: usize,
     row_count: usize,
@@ -309,7 +311,7 @@ impl SpdReplayProposalSource {
         let topology = args
             .topology
             .context("--openai-spd-manifest requires --topology for stage layer ranges")?;
-        let model_path = resolve_spd_model_path(args.model_path, args.config)?;
+        let model_source = resolve_spd_model_source(args.model_path, args.config)?;
         let head = SpdQwen3Head::open(manifest_path).context("open SPD Qwen head")?;
         let manifest = head.manifest().clone();
         let serving_file =
@@ -342,12 +344,14 @@ impl SpdReplayProposalSource {
             );
         }
         let live_taps = SpdLiveTapRunner::open(SpdLiveTapRunnerConfig {
-            model_path: &model_path,
+            model_source: model_source.as_live_tap_source(args.config),
             stage_ranges: &stage_ranges,
             layer_end: stage_ranges
                 .last()
                 .map(|range| range.layer_end)
                 .context("SPD topology has no stages")?,
+            hidden_size,
+            vocab_size,
             ctx_size: args.config.ctx_size,
             n_gpu_layers: args.n_gpu_layers.unwrap_or(args.config.n_gpu_layers),
             selected_backend_device: args
@@ -357,8 +361,9 @@ impl SpdReplayProposalSource {
                 .map(|device| device.backend_device.clone()),
         })
         .context("open live SPD tap replay stages")?;
-        let h0_embeddings =
-            GgufTokenEmbeddingTable::open(&model_path, hidden_size, vocab_size).ok();
+        let h0_embeddings = model_source.gguf_path().and_then(|model_path| {
+            GgufTokenEmbeddingTable::open(model_path, hidden_size, vocab_size).ok()
+        });
         let inline_taps = Arc::new(Mutex::new(SpdInlineTapCache::new(
             hidden_size,
             required_hf_indices.clone(),
@@ -370,7 +375,8 @@ impl SpdReplayProposalSource {
         let tap_lifecycle = Arc::new(Mutex::new(SpdInlineTapLifecycle::default()));
         Ok(Self {
             manifest_path: manifest_path.to_path_buf(),
-            model_path,
+            model_path: model_source.gguf_path().map(Path::to_path_buf),
+            model_source: model_source.as_str().to_string(),
             window: args.window,
             top_k: args.top_k,
             row_count,
@@ -677,7 +683,8 @@ impl SpdReplayProposalSource {
                 .frame_for_positions(context_tokens, row_positions)
                 .context("collect GGUF token embedding h0 tap");
         }
-        self.live_taps.collect_h0_tap(context_tokens)
+        self.live_taps
+            .collect_h0_tap_for_positions(context_tokens, row_positions)
     }
 
     pub(super) fn propose_inline_for_current_context(
@@ -2008,10 +2015,56 @@ impl SpdInlineProbePhase {
     }
 }
 
-fn resolve_spd_model_path(override_path: Option<&Path>, config: &StageConfig) -> Result<PathBuf> {
+enum SpdReplayModelSource {
+    Gguf(PathBuf),
+    LayerPackage(String),
+}
+
+impl SpdReplayModelSource {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Gguf(_) => "gguf",
+            Self::LayerPackage(_) => "layer_package",
+        }
+    }
+
+    fn gguf_path(&self) -> Option<&Path> {
+        match self {
+            Self::Gguf(path) => Some(path),
+            Self::LayerPackage(_) => None,
+        }
+    }
+
+    fn as_live_tap_source<'a>(&'a self, config: &'a StageConfig) -> SpdLiveTapModelSource<'a> {
+        match self {
+            Self::Gguf(path) => SpdLiveTapModelSource::Gguf(path),
+            Self::LayerPackage(package_ref) => SpdLiveTapModelSource::LayerPackage {
+                package_ref,
+                model_id: &config.model_id,
+                topology_id: &config.topology_id,
+            },
+        }
+    }
+}
+
+fn resolve_spd_model_source(
+    override_path: Option<&Path>,
+    config: &StageConfig,
+) -> Result<SpdReplayModelSource> {
     if let Some(path) = override_path {
         ensure_model_file(path)?;
-        return Ok(path.to_path_buf());
+        return Ok(SpdReplayModelSource::Gguf(path.to_path_buf()));
+    }
+    if config.load_mode == LoadMode::LayerPackage {
+        let package_ref = config
+            .model_path
+            .as_deref()
+            .or(config.package_ref.as_deref())
+            .context("SPD replay source requires a layer-package model_path or package_ref")?;
+        let path = Path::new(package_ref);
+        if path.is_dir() {
+            return Ok(SpdReplayModelSource::LayerPackage(package_ref.to_string()));
+        }
     }
     for value in [&config.source_model_path, &config.model_path]
         .into_iter()
@@ -2019,11 +2072,11 @@ fn resolve_spd_model_path(override_path: Option<&Path>, config: &StageConfig) ->
     {
         let path = PathBuf::from(value);
         if path.is_file() {
-            return Ok(path);
+            return Ok(SpdReplayModelSource::Gguf(path));
         }
     }
     bail!(
-        "SPD replay source requires a full GGUF via --openai-spd-model-path, source_model_path, or model_path"
+        "SPD replay source requires a full GGUF via --openai-spd-model-path, source_model_path, or model_path, or a resolved local layer package when load_mode=layer-package"
     )
 }
 

@@ -18,6 +18,15 @@ fn merge_spd_rolling_executor_stats(
     let stats = executor.stats();
     speculative_stats.spd_rolling_executor_launches = stats.launches;
     speculative_stats.spd_rolling_executor_launch_misses = stats.launch_misses;
+    speculative_stats.spd_rolling_executor_launch_miss_in_flight_full =
+        stats.launch_miss_in_flight_full;
+    speculative_stats.spd_rolling_executor_launch_miss_no_rows = stats.launch_miss_no_rows;
+    speculative_stats.spd_rolling_executor_launch_miss_no_proposal = stats.launch_miss_no_proposal;
+    speculative_stats.spd_rolling_executor_launch_miss_shadow_not_seedable =
+        stats.launch_miss_shadow_not_seedable;
+    speculative_stats.spd_rolling_executor_launch_miss_shadow_missing_view =
+        stats.launch_miss_shadow_missing_view;
+    speculative_stats.spd_rolling_executor_shadow_source_reseeds = stats.shadow_source_reseeds;
     speculative_stats.spd_rolling_executor_margin_rejects = stats.launch_margin_rejects;
     speculative_stats.spd_rolling_executor_max_in_flight = stats.max_in_flight;
     speculative_stats.spd_rolling_executor_accepted_oldest = stats.accepted_oldest;
@@ -441,9 +450,10 @@ fn start_spd_rolling_executor_decode(
         .shadow_session
         .as_ref()
         .is_some_and(|shadow| shadow.work.is_none())
-        && launch.position != args.source_materialized_token_count
+        && launch.position > args.source_materialized_token_count
     {
-        args.executor.record_launch_miss();
+        args.executor
+            .record_launch_miss(SpdRollingExecutorLaunchMissReason::ShadowNotSeedable);
         return Ok(None);
     }
     if launch.position < args.source_materialized_token_count
@@ -452,9 +462,15 @@ fn start_spd_rolling_executor_decode(
             .as_ref()
             .is_some_and(|shadow| !shadow.has_view_at(launch.position))
     {
-        args.executor.record_launch_miss();
+        args.executor
+            .record_launch_miss(SpdRollingExecutorLaunchMissReason::ShadowMissingView);
         return Ok(None);
     }
+    let source_prefix_reseed = launch.position == args.source_materialized_token_count
+        && args
+            .shadow_session
+            .as_ref()
+            .is_some_and(|shadow| !shadow.has_view_at(launch.position));
     let decode = {
         let shadow = args
             .shadow_session
@@ -468,6 +484,9 @@ fn start_spd_rolling_executor_decode(
             args.source_materialized_token_count,
             launch.position,
         )?;
+        if source_prefix_reseed {
+            args.executor.record_shadow_source_reseed();
+        }
         let execution_session = Some(shadow.work_execution_session()?);
         backend.start_spd_optimistic_decode_for_probe(
             args.request,
@@ -1944,7 +1963,7 @@ impl StageOpenAiBackend {
                         decode_runtime_lock_hold_max_ms.max(token_runtime_lock_hold_ms);
                     output
                 };
-                let canonical_materialized_token_count = context_tokens.len();
+                let mut canonical_materialized_token_count = context_tokens.len();
                 let stage0_compute_ms = stage0_timer.elapsed_ms();
                 decode_stage0_compute_ms += stage0_compute_ms;
                 self.record_spd_stage0_boundary_tap(&request, message, &output);
@@ -2368,6 +2387,7 @@ impl StageOpenAiBackend {
                                     context_with_reply.len(),
                                 )?
                             {
+                                canonical_materialized_token_count = context_with_reply.len();
                                 speculative_stats.recovery_ms += promote.elapsed_ms;
                             }
                             speculative_stats.optimistic_decode_accepted += 1;
@@ -2759,6 +2779,8 @@ impl StageOpenAiBackend {
                                             context_with_expected.len(),
                                         )?
                                     {
+                                        canonical_materialized_token_count =
+                                            context_with_expected.len();
                                         speculative_stats.recovery_ms += promote.elapsed_ms;
                                     }
                                     speculative_stats.optimistic_decode_accepted += 1;

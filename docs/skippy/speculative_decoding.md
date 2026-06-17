@@ -172,6 +172,18 @@ tap callback and maintain a filled logical rolling queue. It is still a local
 same-machine proof. It does not show the paper's distributed overlap regime and
 should not be used as speedup evidence.
 
+Latest KV/rolling diagnostic on 2026-06-17:
+
+| Check | Result |
+| --- | --- |
+| Report | `/private/tmp/spd-local-rolling-kv-counters-smoke24.json` |
+| Content match | 1 / 1 baseline/SPD pair matched |
+| SPD proposals | 19 accepted / 23 proposed |
+| Rolling executor | 15 launches, max in flight 4, 12 oldest accepts, 1 oldest rejection, 3 younger replies drained |
+| Launch-miss breakdown | 49 no proposal, 40 missing shadow view, 14 in-flight full, 2 shadow not seedable, 0 no rows |
+| Shadow KV finding | exact canonical-prefix reseed succeeded twice; older-prefix canonical copy failed with the native recurrent/hybrid guard, so missing shadow views need retained snapshots rather than older-prefix copy |
+| Speed signal | still negative locally; this is correctness/scheduler evidence, not a speedup claim |
+
 Paper fidelity:
 
 - The mechanism is paper-shaped: hidden states from target stages are converted

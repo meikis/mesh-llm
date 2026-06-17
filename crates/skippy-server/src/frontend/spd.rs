@@ -37,7 +37,9 @@ use self::{
     timing::{SpdHeadForwardOutcome, SpdHeadForwardTiming, insert_head_forward_timing_attrs},
 };
 
-pub(super) use self::executor::{SpdRollingExecutor, SpdRollingExecutorCommit};
+pub(super) use self::executor::{
+    SpdRollingExecutor, SpdRollingExecutorCommit, SpdRollingExecutorLaunchMissReason,
+};
 pub(super) use self::telemetry::SpdRollingTelemetry;
 
 pub(super) const SPD_REPLAY_PROPOSAL_SOURCE: &str = "spd-replay";

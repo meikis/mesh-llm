@@ -495,6 +495,19 @@ Rust.
   This is a correctness/recovery checkpoint, not a speed claim: same-machine
   CPU debug SPD decode was `53405.2ms` versus `452.7ms` baseline, and the next
   performance proof still needs real stage placement across distinct hardware.
+- 2026-06-17 KV/rolling follow-up: release `spd-openai-smoke` at
+  `/private/tmp/spd-local-rolling-kv-counters-smoke24.json` preserved exact
+  baseline/SPD content and passed `spd-openai-check` with `19 / 23` accepted SPD
+  proposals, `max_in_flight=4`, one oldest rejection, and three drained younger
+  verifier replies. The new rolling launch-miss breakdown is actionable:
+  `no_proposal=49`, `shadow_missing_view=40`, `in_flight_full=14`,
+  `shadow_not_seedable=2`, `no_rows=0`, with `2` successful exact canonical
+  shadow reseeds. A trial that copied an older canonical prefix into a shadow
+  lane failed on this Qwen path with
+  `recurrent session copy requires source at the copied prefix`, so older-prefix
+  copy is not a portable fix. The next executor change should retain or seed
+  shadow snapshots at the paper scheduler positions around rejection/recovery,
+  then verify/evict only the oldest completed entry.
 
 ## What Does Not Work Yet
 

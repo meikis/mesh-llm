@@ -39,12 +39,27 @@ pub(in crate::frontend) struct SpdRollingExecutorPreparedLaunch {
 pub(in crate::frontend) struct SpdRollingExecutorStats {
     pub(in crate::frontend) launches: usize,
     pub(in crate::frontend) launch_misses: usize,
+    pub(in crate::frontend) launch_miss_in_flight_full: usize,
+    pub(in crate::frontend) launch_miss_no_rows: usize,
+    pub(in crate::frontend) launch_miss_no_proposal: usize,
+    pub(in crate::frontend) launch_miss_shadow_not_seedable: usize,
+    pub(in crate::frontend) launch_miss_shadow_missing_view: usize,
+    pub(in crate::frontend) shadow_source_reseeds: usize,
     pub(in crate::frontend) launch_margin_rejects: usize,
     pub(in crate::frontend) max_in_flight: usize,
     pub(in crate::frontend) accepted_oldest: usize,
     pub(in crate::frontend) rejected_oldest: usize,
     pub(in crate::frontend) drained_younger: usize,
     pub(in crate::frontend) target_tokens: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::frontend) enum SpdRollingExecutorLaunchMissReason {
+    InFlightFull,
+    NoSpeculationRows,
+    NoProposal,
+    ShadowNotSeedable,
+    ShadowMissingView,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,7 +115,7 @@ impl SpdRollingExecutor {
         trigger_hf_index: Option<u32>,
     ) -> Result<Option<SpdRollingExecutorPreparedLaunch>> {
         if self.in_flight.len() >= self.logical_stage_count {
-            self.stats.launch_misses += 1;
+            self.record_launch_miss(SpdRollingExecutorLaunchMissReason::InFlightFull);
             return Ok(None);
         }
         self.drop_stale_pending_pre_step_scheduler();
@@ -109,7 +124,7 @@ impl SpdRollingExecutor {
             .as_ref()
             .unwrap_or(&self.scheduler);
         let Some(rows) = launch_scheduler.speculation_rows() else {
-            self.stats.launch_misses += 1;
+            self.record_launch_miss(SpdRollingExecutorLaunchMissReason::NoSpeculationRows);
             return Ok(None);
         };
         let timer = PhaseTimer::start();
@@ -117,7 +132,7 @@ impl SpdRollingExecutor {
             source.propose_inline_for_rolling_context(&self.speculative_context, &rows)?;
         let elapsed_ms = timer.elapsed_ms();
         let Some(proposal) = proposal else {
-            self.stats.launch_misses += 1;
+            self.record_launch_miss(SpdRollingExecutorLaunchMissReason::NoProposal);
             return Ok(None);
         };
         let probe = SpdInlineProbe::from_proposal(
@@ -173,8 +188,32 @@ impl SpdRollingExecutor {
         Ok(())
     }
 
-    pub(in crate::frontend) fn record_launch_miss(&mut self) {
+    pub(in crate::frontend) fn record_launch_miss(
+        &mut self,
+        reason: SpdRollingExecutorLaunchMissReason,
+    ) {
         self.stats.launch_misses += 1;
+        match reason {
+            SpdRollingExecutorLaunchMissReason::InFlightFull => {
+                self.stats.launch_miss_in_flight_full += 1;
+            }
+            SpdRollingExecutorLaunchMissReason::NoSpeculationRows => {
+                self.stats.launch_miss_no_rows += 1;
+            }
+            SpdRollingExecutorLaunchMissReason::NoProposal => {
+                self.stats.launch_miss_no_proposal += 1;
+            }
+            SpdRollingExecutorLaunchMissReason::ShadowNotSeedable => {
+                self.stats.launch_miss_shadow_not_seedable += 1;
+            }
+            SpdRollingExecutorLaunchMissReason::ShadowMissingView => {
+                self.stats.launch_miss_shadow_missing_view += 1;
+            }
+        }
+    }
+
+    pub(in crate::frontend) fn record_shadow_source_reseed(&mut self) {
+        self.stats.shadow_source_reseeds += 1;
     }
 
     pub(in crate::frontend) fn record_target_token(&mut self, position: usize, token: i32) {

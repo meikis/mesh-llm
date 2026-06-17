@@ -493,6 +493,12 @@ struct DecodeReport {
     chained_optimistic_committed: Option<u64>,
     spd_rolling_executor_launches: Option<u64>,
     spd_rolling_executor_launch_misses: Option<u64>,
+    spd_rolling_executor_launch_miss_in_flight_full: Option<u64>,
+    spd_rolling_executor_launch_miss_no_rows: Option<u64>,
+    spd_rolling_executor_launch_miss_no_proposal: Option<u64>,
+    spd_rolling_executor_launch_miss_shadow_not_seedable: Option<u64>,
+    spd_rolling_executor_launch_miss_shadow_missing_view: Option<u64>,
+    spd_rolling_executor_shadow_source_reseeds: Option<u64>,
     spd_rolling_executor_margin_rejects: Option<u64>,
     spd_rolling_executor_max_in_flight: Option<u64>,
     spd_rolling_executor_accepted_oldest: Option<u64>,
@@ -645,6 +651,12 @@ struct SpdOpenAiSmokeSummary {
     max_optimistic_chain_depth: u64,
     spd_rolling_executor_launches: u64,
     spd_rolling_executor_launch_misses: u64,
+    spd_rolling_executor_launch_miss_in_flight_full: u64,
+    spd_rolling_executor_launch_miss_no_rows: u64,
+    spd_rolling_executor_launch_miss_no_proposal: u64,
+    spd_rolling_executor_launch_miss_shadow_not_seedable: u64,
+    spd_rolling_executor_launch_miss_shadow_missing_view: u64,
+    spd_rolling_executor_shadow_source_reseeds: u64,
     spd_rolling_executor_margin_rejects: u64,
     spd_rolling_executor_max_in_flight: u64,
     spd_rolling_executor_accepted_oldest: u64,
@@ -818,6 +830,26 @@ fn summarize_cases(
         }),
         spd_rolling_executor_launch_misses: sum_decode_u64(&spd_cases, |decode| {
             decode.spd_rolling_executor_launch_misses
+        }),
+        spd_rolling_executor_launch_miss_in_flight_full: sum_decode_u64(&spd_cases, |decode| {
+            decode.spd_rolling_executor_launch_miss_in_flight_full
+        }),
+        spd_rolling_executor_launch_miss_no_rows: sum_decode_u64(&spd_cases, |decode| {
+            decode.spd_rolling_executor_launch_miss_no_rows
+        }),
+        spd_rolling_executor_launch_miss_no_proposal: sum_decode_u64(&spd_cases, |decode| {
+            decode.spd_rolling_executor_launch_miss_no_proposal
+        }),
+        spd_rolling_executor_launch_miss_shadow_not_seedable: sum_decode_u64(
+            &spd_cases,
+            |decode| decode.spd_rolling_executor_launch_miss_shadow_not_seedable,
+        ),
+        spd_rolling_executor_launch_miss_shadow_missing_view: sum_decode_u64(
+            &spd_cases,
+            |decode| decode.spd_rolling_executor_launch_miss_shadow_missing_view,
+        ),
+        spd_rolling_executor_shadow_source_reseeds: sum_decode_u64(&spd_cases, |decode| {
+            decode.spd_rolling_executor_shadow_source_reseeds
         }),
         spd_rolling_executor_margin_rejects: sum_decode_u64(&spd_cases, |decode| {
             decode.spd_rolling_executor_margin_rejects
@@ -1810,6 +1842,30 @@ fn decode_report(events: &[Value]) -> Option<DecodeReport> {
         spd_rolling_executor_launch_misses: attr_u64(
             attrs,
             "llama_stage.spec.spd_rolling_executor_launch_misses",
+        ),
+        spd_rolling_executor_launch_miss_in_flight_full: attr_u64(
+            attrs,
+            "llama_stage.spec.spd_rolling_executor_launch_miss_in_flight_full",
+        ),
+        spd_rolling_executor_launch_miss_no_rows: attr_u64(
+            attrs,
+            "llama_stage.spec.spd_rolling_executor_launch_miss_no_rows",
+        ),
+        spd_rolling_executor_launch_miss_no_proposal: attr_u64(
+            attrs,
+            "llama_stage.spec.spd_rolling_executor_launch_miss_no_proposal",
+        ),
+        spd_rolling_executor_launch_miss_shadow_not_seedable: attr_u64(
+            attrs,
+            "llama_stage.spec.spd_rolling_executor_launch_miss_shadow_not_seedable",
+        ),
+        spd_rolling_executor_launch_miss_shadow_missing_view: attr_u64(
+            attrs,
+            "llama_stage.spec.spd_rolling_executor_launch_miss_shadow_missing_view",
+        ),
+        spd_rolling_executor_shadow_source_reseeds: attr_u64(
+            attrs,
+            "llama_stage.spec.spd_rolling_executor_shadow_source_reseeds",
         ),
         spd_rolling_executor_margin_rejects: attr_u64(
             attrs,

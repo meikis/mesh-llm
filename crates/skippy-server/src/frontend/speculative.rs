@@ -107,6 +107,12 @@ pub(super) struct OpenAiSpeculativeStats {
     pub(super) chained_optimistic_decode_committed_tokens: usize,
     pub(super) spd_rolling_executor_launches: usize,
     pub(super) spd_rolling_executor_launch_misses: usize,
+    pub(super) spd_rolling_executor_launch_miss_in_flight_full: usize,
+    pub(super) spd_rolling_executor_launch_miss_no_rows: usize,
+    pub(super) spd_rolling_executor_launch_miss_no_proposal: usize,
+    pub(super) spd_rolling_executor_launch_miss_shadow_not_seedable: usize,
+    pub(super) spd_rolling_executor_launch_miss_shadow_missing_view: usize,
+    pub(super) spd_rolling_executor_shadow_source_reseeds: usize,
     pub(super) spd_rolling_executor_margin_rejects: usize,
     pub(super) spd_rolling_executor_max_in_flight: usize,
     pub(super) spd_rolling_executor_accepted_oldest: usize,
@@ -402,6 +408,30 @@ impl OpenAiSpeculativeStats {
         attrs.insert(
             "llama_stage.spec.spd_rolling_executor_launch_misses".to_string(),
             json!(self.spd_rolling_executor_launch_misses),
+        );
+        attrs.insert(
+            "llama_stage.spec.spd_rolling_executor_launch_miss_in_flight_full".to_string(),
+            json!(self.spd_rolling_executor_launch_miss_in_flight_full),
+        );
+        attrs.insert(
+            "llama_stage.spec.spd_rolling_executor_launch_miss_no_rows".to_string(),
+            json!(self.spd_rolling_executor_launch_miss_no_rows),
+        );
+        attrs.insert(
+            "llama_stage.spec.spd_rolling_executor_launch_miss_no_proposal".to_string(),
+            json!(self.spd_rolling_executor_launch_miss_no_proposal),
+        );
+        attrs.insert(
+            "llama_stage.spec.spd_rolling_executor_launch_miss_shadow_not_seedable".to_string(),
+            json!(self.spd_rolling_executor_launch_miss_shadow_not_seedable),
+        );
+        attrs.insert(
+            "llama_stage.spec.spd_rolling_executor_launch_miss_shadow_missing_view".to_string(),
+            json!(self.spd_rolling_executor_launch_miss_shadow_missing_view),
+        );
+        attrs.insert(
+            "llama_stage.spec.spd_rolling_executor_shadow_source_reseeds".to_string(),
+            json!(self.spd_rolling_executor_shadow_source_reseeds),
         );
         attrs.insert(
             "llama_stage.spec.spd_rolling_executor_margin_rejects".to_string(),

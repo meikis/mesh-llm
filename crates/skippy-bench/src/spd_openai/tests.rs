@@ -85,6 +85,12 @@ fn decode_report_reads_spec_attrs() {
             "llama_stage.spec.rejected": 1,
             "llama_stage.spec.spd_rolling_executor_launches": 6,
             "llama_stage.spec.spd_rolling_executor_launch_misses": 2,
+            "llama_stage.spec.spd_rolling_executor_launch_miss_in_flight_full": 1,
+            "llama_stage.spec.spd_rolling_executor_launch_miss_no_rows": 0,
+            "llama_stage.spec.spd_rolling_executor_launch_miss_no_proposal": 1,
+            "llama_stage.spec.spd_rolling_executor_launch_miss_shadow_not_seedable": 0,
+            "llama_stage.spec.spd_rolling_executor_launch_miss_shadow_missing_view": 2,
+            "llama_stage.spec.spd_rolling_executor_shadow_source_reseeds": 3,
             "llama_stage.spec.spd_rolling_executor_margin_rejects": 1,
             "llama_stage.spec.spd_rolling_executor_max_in_flight": 4,
             "llama_stage.spec.spd_rolling_executor_accepted_oldest": 3,
@@ -120,6 +126,21 @@ fn decode_report_reads_spec_attrs() {
     assert_eq!(report.spec_rejected, Some(1));
     assert_eq!(report.spd_rolling_executor_launches, Some(6));
     assert_eq!(report.spd_rolling_executor_launch_misses, Some(2));
+    assert_eq!(
+        report.spd_rolling_executor_launch_miss_in_flight_full,
+        Some(1)
+    );
+    assert_eq!(report.spd_rolling_executor_launch_miss_no_rows, Some(0));
+    assert_eq!(report.spd_rolling_executor_launch_miss_no_proposal, Some(1));
+    assert_eq!(
+        report.spd_rolling_executor_launch_miss_shadow_not_seedable,
+        Some(0)
+    );
+    assert_eq!(
+        report.spd_rolling_executor_launch_miss_shadow_missing_view,
+        Some(2)
+    );
+    assert_eq!(report.spd_rolling_executor_shadow_source_reseeds, Some(3));
     assert_eq!(report.spd_rolling_executor_margin_rejects, Some(1));
     assert_eq!(report.spd_rolling_executor_max_in_flight, Some(4));
     assert_eq!(report.spd_rolling_executor_accepted_oldest, Some(3));
@@ -922,6 +943,12 @@ fn baseline_decode(elapsed_ms: f64) -> DecodeReport {
         chained_optimistic_committed: None,
         spd_rolling_executor_launches: None,
         spd_rolling_executor_launch_misses: None,
+        spd_rolling_executor_launch_miss_in_flight_full: None,
+        spd_rolling_executor_launch_miss_no_rows: None,
+        spd_rolling_executor_launch_miss_no_proposal: None,
+        spd_rolling_executor_launch_miss_shadow_not_seedable: None,
+        spd_rolling_executor_launch_miss_shadow_missing_view: None,
+        spd_rolling_executor_shadow_source_reseeds: None,
         spd_rolling_executor_margin_rejects: None,
         spd_rolling_executor_max_in_flight: None,
         spd_rolling_executor_accepted_oldest: None,
@@ -981,6 +1008,12 @@ fn spd_decode(
         chained_optimistic_committed: None,
         spd_rolling_executor_launches: None,
         spd_rolling_executor_launch_misses: None,
+        spd_rolling_executor_launch_miss_in_flight_full: None,
+        spd_rolling_executor_launch_miss_no_rows: None,
+        spd_rolling_executor_launch_miss_no_proposal: None,
+        spd_rolling_executor_launch_miss_shadow_not_seedable: None,
+        spd_rolling_executor_launch_miss_shadow_missing_view: None,
+        spd_rolling_executor_shadow_source_reseeds: None,
         spd_rolling_executor_margin_rejects: None,
         spd_rolling_executor_max_in_flight: None,
         spd_rolling_executor_accepted_oldest: None,

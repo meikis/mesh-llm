@@ -9,6 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use serde::Serialize;
 use serde_json::json;
 
 use crate::{cli::SpdOpenAiSmokeArgs, support::ChildGuard};
@@ -16,6 +17,33 @@ use crate::{cli::SpdOpenAiSmokeArgs, support::ChildGuard};
 use super::SmokeCase;
 
 const LOCAL_STAGE_HOST: &str = "local";
+
+#[derive(Debug, Serialize)]
+pub(super) struct RemotePreflightPlan {
+    explicit_stage_hosts: bool,
+    stage_hosts: Vec<String>,
+    remote_hosts: Vec<String>,
+    stage_port_base: Option<u16>,
+    checked_local_stage_ports: Vec<u16>,
+    stages: Vec<RemotePreflightStage>,
+    endpoint_host_map: BTreeMap<String, String>,
+    remote_model_path_map: BTreeMap<String, String>,
+    rsync_model_artifacts: bool,
+    remote_root: String,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RemotePreflightStage {
+    index: usize,
+    stage_id: String,
+    host: String,
+    local: bool,
+    port: Option<u16>,
+    endpoint: Option<String>,
+    bind_addr: Option<String>,
+    remote_model_path: Option<String>,
+}
 
 pub(super) struct CaseDeployment {
     pub(super) stages: Vec<StageDeployment>,
@@ -133,6 +161,89 @@ pub(super) fn prepare_case_deployment(
         stages,
         openai_addr,
         topology_path,
+    })
+}
+
+pub(super) fn preflight_stage_placement(
+    args: &SpdOpenAiSmokeArgs,
+    stage_count: usize,
+) -> Result<RemotePreflightPlan> {
+    if stage_count == 0 {
+        bail!("SPD OpenAI preflight requires at least one stage");
+    }
+
+    let explicit_stage_hosts = !args.stage_hosts.is_empty();
+    let endpoint_hosts = parse_string_map(args.endpoint_host_map.as_deref())?;
+    let remote_model_paths = parse_string_map(args.remote_model_path_map.as_deref())?;
+    let stage_hosts = if explicit_stage_hosts {
+        normalized_stage_hosts(&args.stage_hosts)?
+    } else {
+        vec![LOCAL_STAGE_HOST.to_string()]
+    };
+    if explicit_stage_hosts
+        && stage_hosts
+            .first()
+            .is_none_or(|host| !is_local_stage_host(host))
+    {
+        bail!("--stage-hosts must place stage 0 on 'local' for SPD OpenAI smoke");
+    }
+    if args.remote_root.trim().is_empty() {
+        bail!("--remote-root must not be empty");
+    }
+    if args.remote_bind_host.trim().is_empty() {
+        bail!("--remote-bind-host must not be empty");
+    }
+
+    let ports = explicit_stage_hosts
+        .then(|| explicit_stage_ports(args.stage_port_base, stage_count))
+        .transpose()?;
+    let remote_hosts = remote_hosts_for_plan(&stage_hosts, stage_count);
+    validate_remote_preflight_maps(args, &remote_hosts, &endpoint_hosts, &remote_model_paths)?;
+    let checked_local_stage_ports =
+        validate_local_preflight_ports(stage_count, &stage_hosts, ports.as_deref())?;
+    let warnings = remote_preflight_warnings(args, stage_count, &stage_hosts, &remote_hosts);
+    let stages = (0..stage_count)
+        .map(|index| {
+            let host = stage_hosts[index % stage_hosts.len()].clone();
+            let local = is_local_stage_host(&host);
+            let port = ports.as_ref().map(|ports| ports[index]);
+            RemotePreflightStage {
+                index,
+                stage_id: stage_id(index),
+                endpoint: port
+                    .map(|port| endpoint_for_preflight(&host, local, port, &endpoint_hosts)),
+                bind_addr: port.map(|port| {
+                    if local {
+                        format!("0.0.0.0:{port}")
+                    } else {
+                        format!("{}:{port}", args.remote_bind_host)
+                    }
+                }),
+                remote_model_path: remote_model_path_for_preflight(
+                    args,
+                    &host,
+                    local,
+                    &remote_model_paths,
+                ),
+                host,
+                local,
+                port,
+            }
+        })
+        .collect();
+
+    Ok(RemotePreflightPlan {
+        explicit_stage_hosts,
+        stage_hosts,
+        remote_hosts,
+        stage_port_base: ports.as_ref().map(|_| args.stage_port_base),
+        checked_local_stage_ports,
+        stages,
+        endpoint_host_map: endpoint_hosts,
+        remote_model_path_map: remote_model_paths,
+        rsync_model_artifacts: args.rsync_model_artifacts,
+        remote_root: args.remote_root.clone(),
+        warnings,
     })
 }
 
@@ -356,6 +467,153 @@ fn validate_remote_stage0_endpoint(
         );
     }
     Ok(())
+}
+
+fn remote_hosts_for_plan(stage_hosts: &[String], stage_count: usize) -> Vec<String> {
+    let mut hosts = Vec::new();
+    for index in 0..stage_count {
+        let host = &stage_hosts[index % stage_hosts.len()];
+        if !is_local_stage_host(host) && !hosts.contains(host) {
+            hosts.push(host.clone());
+        }
+    }
+    hosts
+}
+
+fn validate_remote_preflight_maps(
+    args: &SpdOpenAiSmokeArgs,
+    remote_hosts: &[String],
+    endpoint_hosts: &BTreeMap<String, String>,
+    remote_model_paths: &BTreeMap<String, String>,
+) -> Result<()> {
+    if remote_hosts.is_empty() {
+        return Ok(());
+    }
+    validate_remote_stage0_endpoint_value(endpoint_hosts)?;
+    let missing_endpoint_hosts = remote_hosts
+        .iter()
+        .filter(|host| !endpoint_hosts.contains_key(*host))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing_endpoint_hosts.is_empty() {
+        bail!(
+            "--endpoint-host-map must include every remote stage host; missing {:?}",
+            missing_endpoint_hosts
+        );
+    }
+    if args.rsync_model_artifacts {
+        return Ok(());
+    }
+    let missing_model_hosts = remote_hosts
+        .iter()
+        .filter(|host| !remote_model_paths.contains_key(*host))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing_model_hosts.is_empty() {
+        bail!(
+            "--remote-model-path-map must include every remote stage host when --rsync-model-artifacts is not set; missing {:?}",
+            missing_model_hosts
+        );
+    }
+    Ok(())
+}
+
+fn validate_local_preflight_ports(
+    stage_count: usize,
+    stage_hosts: &[String],
+    ports: Option<&[u16]>,
+) -> Result<Vec<u16>> {
+    let Some(ports) = ports else {
+        return Ok(Vec::new());
+    };
+    let mut checked = Vec::new();
+    for index in 0..stage_count {
+        if is_local_stage_host(&stage_hosts[index % stage_hosts.len()]) {
+            let port = ports[index];
+            TcpListener::bind(("0.0.0.0", port))
+                .with_context(|| format!("local stage port {port} is not available"))?;
+            checked.push(port);
+        }
+    }
+    Ok(checked)
+}
+
+fn validate_remote_stage0_endpoint_value(endpoint_hosts: &BTreeMap<String, String>) -> Result<()> {
+    let stage0_endpoint = endpoint_hosts
+        .get(LOCAL_STAGE_HOST)
+        .or_else(|| endpoint_hosts.get("localhost"))
+        .map(String::as_str)
+        .unwrap_or("127.0.0.1");
+    if matches!(stage0_endpoint, "127.0.0.1" | "localhost" | "::1") {
+        bail!(
+            "--stage-hosts with remote stages requires --endpoint-host-map local=<reachable-stage0-host>"
+        );
+    }
+    Ok(())
+}
+
+fn remote_preflight_warnings(
+    args: &SpdOpenAiSmokeArgs,
+    stage_count: usize,
+    stage_hosts: &[String],
+    remote_hosts: &[String],
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if remote_hosts.is_empty() {
+        warnings.push("all stages are local; this is not a real remote-node smoke".to_string());
+    }
+    if stage_hosts.len() < stage_count {
+        warnings.push(format!(
+            "--stage-hosts has {} entries for {stage_count} stages; hosts will repeat cyclically",
+            stage_hosts.len()
+        ));
+    }
+    if (1..stage_count).any(|index| is_local_stage_host(&stage_hosts[index % stage_hosts.len()])) {
+        warnings.push(
+            "one or more downstream stages resolve to local; use explicit repeated worker entries if only stage 0 should stay local"
+                .to_string(),
+        );
+    }
+    if args.rsync_model_artifacts && !remote_hosts.is_empty() {
+        warnings.push(
+            "--rsync-model-artifacts will copy the GGUF for each run; pre-stage large models and use --remote-model-path-map for faster smokes"
+                .to_string(),
+        );
+    }
+    warnings
+}
+
+fn endpoint_for_preflight(
+    host: &str,
+    local: bool,
+    port: u16,
+    endpoint_hosts: &BTreeMap<String, String>,
+) -> String {
+    let endpoint_host = if local {
+        endpoint_hosts
+            .get(LOCAL_STAGE_HOST)
+            .or_else(|| endpoint_hosts.get("localhost"))
+            .map(String::as_str)
+            .unwrap_or("127.0.0.1")
+    } else {
+        endpoint_hosts.get(host).map(String::as_str).unwrap_or(host)
+    };
+    format!("{endpoint_host}:{port}")
+}
+
+fn remote_model_path_for_preflight(
+    args: &SpdOpenAiSmokeArgs,
+    host: &str,
+    local: bool,
+    remote_model_paths: &BTreeMap<String, String>,
+) -> Option<String> {
+    if local {
+        return None;
+    }
+    if args.rsync_model_artifacts {
+        return Some(format!("{}/<run-id>/model.gguf", args.remote_root));
+    }
+    remote_model_paths.get(host).cloned()
 }
 
 pub(super) fn start_case_stages(

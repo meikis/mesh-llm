@@ -89,7 +89,7 @@ Expected local artifact paths in the current proof workspace:
 
 Keep stage 0, the OpenAI frontend, and the SPD sidecar on the coordinator. Put
 downstream physical stages on worker nodes or devices. With one worker node,
-start with:
+start with a no-launch preflight:
 
 ```bash
 target/release/skippy-bench spd-openai-smoke \
@@ -101,9 +101,32 @@ target/release/skippy-bench spd-openai-smoke \
   --splits 8,10,16,20,24,31 \
   --layer-end 32 \
   --ctx-size 128 \
-  --n-gpu-layers -1 \
+  --n-gpu-layers=-1 \
   --stage-hosts local,<worker>,<worker>,<worker>,<worker>,<worker>,<worker> \
-  --endpoint-host-map <worker>=<worker-lan-ip-or-name> \
+  --endpoint-host-map local=<coordinator-lan-ip-or-name>,<worker>=<worker-lan-ip-or-name> \
+  --remote-model-path-map <worker>=/path/on/worker/Qwen3.5-4B-Q4_K_M.gguf \
+  --max-tokens 1 \
+  --repeat-count 1 \
+  --preflight-only \
+  --output /tmp/spd-qwen35-first-remote-preflight.json
+```
+
+Only after the preflight validates artifacts, tap coverage, endpoint maps, and
+remote model paths, remove `--preflight-only` and run the smoke:
+
+```bash
+target/release/skippy-bench spd-openai-smoke \
+  --stage-server-bin target/release/skippy-server \
+  --manifest /private/tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/20260616-152346/train/skippy-spd-head.json \
+  --fixture /private/tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/20260616-152346/train/spd-parity-fixture.safetensors \
+  --model-path .artifacts/spd/qwen35-4b-gguf/Qwen3.5-4B-Q4_K_M.gguf \
+  --model-id unsloth/Qwen3.5-4B-GGUF:Q4_K_M \
+  --splits 8,10,16,20,24,31 \
+  --layer-end 32 \
+  --ctx-size 128 \
+  --n-gpu-layers=-1 \
+  --stage-hosts local,<worker>,<worker>,<worker>,<worker>,<worker>,<worker> \
+  --endpoint-host-map local=<coordinator-lan-ip-or-name>,<worker>=<worker-lan-ip-or-name> \
   --remote-model-path-map <worker>=/path/on/worker/Qwen3.5-4B-Q4_K_M.gguf \
   --max-tokens 1 \
   --repeat-count 1 \

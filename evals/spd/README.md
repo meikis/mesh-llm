@@ -152,6 +152,25 @@ Rust.
   optimistic token, and recorded `0` tap failures. This validates the benchmark
   path after the placement extraction; the speed question still requires a
   distinct-device run.
+- 2026-06-17 `spd-openai-smoke --preflight-only` now validates first-node SPD
+  run inputs without launching stages. The Qwen3.5-4B preflight at
+  `/private/tmp/spd-qwen35-first-remote-preflight.json` checked the release
+  `skippy-server` binary, the 2.74 GB GGUF, the sidecar manifest, `66` serving
+  checkpoint tensors, `28` parity fixture tensors, logical `S=4`, physical
+  split `8,10,16,20,24,31`, tap returns `8,10,16,20,24,31`, local stage port
+  `20031`, and a complete stage-0-local plus worker endpoint plan with no
+  warnings.
+- 2026-06-17 the local CPU multi-token repeat at
+  `/private/tmp/spd-local-multitoken-repeat-cpu.json` preserved exact output for
+  `3 / 3` measured baseline/SPD pairs, accepted `24 / 24` SPD proposals,
+  committed `18` optimistic tokens with `12` chained commits, and kept rolling
+  replay ordered (`21` inserted drafts, `15` accepted windows, `0` missing,
+  `0` out-of-order). It is still a negative speed result: baseline decode mean
+  was `219.3ms`, SPD decode mean was `13964.2ms`, while the paper estimate from
+  the observed trace was `54.8ms`. The timing splits point away from a missing
+  sidecar cache port: proposal cache prefill averaged `16.8ms` over `24`
+  probes, sidecar head total averaged `45.9ms`, normal downstream wait averaged
+  `2681.2ms`, and optimistic hidden wait averaged `2169.6ms`.
 - `skippy-runtime::spd::SpdRollingScheduler` now codifies the paper/reference
   rolling scheduler state transitions in Rust: newest-first in-flight entries,
   evicted-prefix speculation rows on acceptance, oldest-entry verification
@@ -450,6 +469,12 @@ Rust.
   request-path smokes are correctness and scheduler-shape evidence; running
   all stages on one machine/device is not a fair SPD speed oracle because it
   adds true concurrent stage work on shared resources.
+- The latest repeated CPU run shows the overhead is not primarily a missing
+  reference sidecar cache path. Cache reuse and cached logits have parity
+  evidence, and the live request path reported cache hits rather than misses.
+  The remaining gap is native serving scheduling: direct-return tap plumbing,
+  downstream wait, hidden verifier wait, and the missing continuously full
+  rolling executor.
 
 ## Open Training Data
 

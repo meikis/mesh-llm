@@ -17,6 +17,7 @@ use skippy_runtime::spd::{
 use crate::cli::SpdOpenAiSmokeArgs;
 
 mod attrs;
+mod preflight;
 mod remote;
 
 use attrs::{
@@ -36,6 +37,16 @@ pub fn spd_openai_smoke(args: SpdOpenAiSmokeArgs) -> Result<()> {
     let logical_spd_stage_count = usize::try_from(manifest.topology.num_stages)
         .context("SPD manifest num_stages exceeds usize")?;
     let tap_allowlist = spd_tap_allowlist(&args, &manifest)?;
+    preflight::validate_tap_coverage(&stage_ranges, &tap_allowlist)?;
+    if args.preflight_only {
+        return preflight::write_spd_openai_preflight(
+            &args,
+            &manifest,
+            &stage_ranges,
+            &tap_allowlist,
+            prompts.len(),
+        );
+    }
     let work_dir = args.work_dir.clone().unwrap_or_else(default_work_dir);
     fs::create_dir_all(&work_dir)
         .with_context(|| format!("failed to create {}", work_dir.display()))?;

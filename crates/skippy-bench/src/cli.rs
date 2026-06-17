@@ -283,6 +283,12 @@ pub struct SpdOpenAiSmokeArgs {
     #[arg(
         long,
         default_value_t = false,
+        help = "Validate artifacts, topology, tap coverage, and remote placement without starting stages."
+    )]
+    pub preflight_only: bool,
+    #[arg(
+        long,
+        default_value_t = false,
         help = "Write the report but do not fail when paired baseline/SPD content differs."
     )]
     pub allow_content_mismatch: bool,
@@ -954,5 +960,29 @@ mod tests {
             Some("worker=/models/model.gguf")
         );
         assert!(args.rsync_model_artifacts);
+    }
+
+    #[test]
+    fn parses_spd_openai_smoke_preflight_only() {
+        let cli = Cli::try_parse_from([
+            "skippy-bench",
+            "spd-openai-smoke",
+            "--manifest",
+            "skippy-spd-head.json",
+            "--fixture",
+            "spd-parity-fixture.safetensors",
+            "--model-path",
+            "model.gguf",
+            "--splits",
+            "8,10,16,20,24,31",
+            "--preflight-only",
+        ])
+        .unwrap();
+
+        let CommandKind::SpdOpenAiSmoke(args) = cli.command else {
+            panic!("expected spd-openai-smoke subcommand");
+        };
+
+        assert!(args.preflight_only);
     }
 }

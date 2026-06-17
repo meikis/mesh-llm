@@ -99,6 +99,46 @@ Readiness check on 2026-06-17:
 | OpenAI downstream wait | 261.7 ms |
 | OpenAI sidecar cache/head | 123.2 ms cache prefill, 52.1 ms head total |
 
+Latest multi-token overhead sweep on 2026-06-17:
+
+| Field | Value |
+| --- | --- |
+| Report | `/private/tmp/spd-local-multitoken-repeat-cpu.json` |
+| Command shape | `spd-openai-smoke --max-tokens 8 --warmup-count 1 --repeat-count 3 --run-baseline true --run-spd true` |
+| Host/device | local M4 node, `CPU0`, local binary stage processes |
+| Content match | 3 / 3 baseline/SPD pairs |
+| SPD accepted/proposed | 24 / 24 |
+| Optimistic commits | 18 total, 12 chained |
+| Max optimistic chain depth | 2 |
+| Rolling replay | 21 inserted drafts, 15 accepted windows, 0 missing, 0 out-of-order, verified prefix matched target |
+| Tap failures | 0 return, 0 record, 0 ignored |
+| Mean decode | baseline 219.3 ms, SPD 13964.2 ms |
+| Mean sidecar cache prefill | 16.8 ms across 24 probes; first prefill max 120.3 ms |
+| Mean sidecar head total | 45.9 ms |
+| Mean downstream/hidden wait | normal downstream 2681.2 ms, optimistic hidden wait 2169.6 ms |
+| Paper estimate from observed trace | 4.0x versus serial split, 54.8 ms estimated decode at baseline stage cost |
+
+This run answers the current overhead question: the trained head, cache reuse,
+tap rows, and verification mechanics are native enough to preserve output and
+reach 100% acceptance on the bounded prompt. The large local slowdown is not a
+missing sidecar-cache port from the paper/reference implementation. It is the
+gap between the paper/reference rolling pipeline schedule and the current
+Skippy serving shape: local stage processes contend for the same machine, and
+bounded optimistic verifier work still spends seconds in downstream and hidden
+waits instead of keeping a full rolling queue continuously useful.
+
+First remote preflight on 2026-06-17:
+
+| Check | Result |
+| --- | --- |
+| Report | `/private/tmp/spd-qwen35-first-remote-preflight.json` |
+| Mode | `spd-openai-preflight`; no stages launched |
+| Artifact checks | `skippy-server` stat succeeded; GGUF stat succeeded; serving checkpoint has 66 tensors; parity fixture has 28 tensors |
+| Logical/physical topology | logical SPD stages 4; physical stages 7 |
+| Split/tap check | `8,10,16,20,24,31` exposes tap returns `8,10,16,20,24,31` |
+| Remote plan | stage 0 local with checked port 20031, stages 1-6 assigned to one worker endpoint plan |
+| Warnings | none for the complete fake endpoint/model-path map |
+
 Paper fidelity:
 
 - The mechanism is paper-shaped: hidden states from target stages are converted
@@ -113,6 +153,13 @@ Paper fidelity:
   process-heavy, mostly CPU-bound, and one-token. It does not yet reproduce the
   paper's useful overlap regime where target pipeline work and sidecar work hide
   each other on genuinely parallel hardware.
+- The overhead delta is a serving/scheduler gap, not evidence that the paper or
+  reference sidecar mechanics are absent. The reference loop keeps an `n`-slot
+  rolling pipeline, runs target stage work and speculation in parallel, reuses
+  `spec_past_kv`, and verifies/evicts the oldest completed entry. Skippy has
+  the Rust scheduler primitive, inline taps, cache parity, and bounded chained
+  verification evidence, but still needs that rolling executor as the native
+  serving path.
 
 ## Outstanding Work
 
@@ -123,8 +170,8 @@ run with enough instrumentation to explain the result.
 
 Open items:
 
-- Run baseline-vs-SPD with `--repeat-count` over multi-token prompts, not only a
-  one-token smoke.
+- Repeat the multi-token baseline-vs-SPD sweep on Metal and then on distinct
+  devices/nodes; the CPU repeat passed correctness but is not a speed oracle.
 - Use a topology-compatible artifact and record both logical SPD stage count and
   physical tap-aligned stage count.
 - Use distinct devices or nodes so target stage work and sidecar work can
@@ -142,10 +189,16 @@ one-token local run.
 
 Open items:
 
-- Reduce or hide sidecar cache prefill; the measured CPU proof spent about
-  120 ms there for a one-token proposal.
-- Reduce downstream wait and stage handoff overhead; the measured CPU proof
-  spent about 270 ms waiting downstream.
+- Keep the stateful sidecar cache path, but do not treat cache prefill as the
+  primary blocker: the 8-token CPU repeat had 24 proposal cache hits, no cache
+  misses, and only 16.8 ms mean prefill after the first warm row.
+- Reduce or hide downstream wait and verifier hidden wait; the 8-token CPU
+  repeat spent 2681.2 ms mean normal downstream wait and 2169.6 ms mean
+  optimistic hidden wait.
+- Turn the paper/reference rolling scheduler from diagnostics into the serving
+  executor: keep multiple speculative entries in flight, route returned taps by
+  scheduler position, verify the oldest completed entry, and reset only on the
+  oldest rejection.
 - Add a server-side reuse path for warmup/measured requests only after request
   attribution is robust; the current benchmark intentionally isolates stage
   processes per iteration so logs are unambiguous.
@@ -159,6 +212,13 @@ Run these before making any speedup claim:
 
 1. Local all-tap baseline comparison:
 
+   CPU status: completed on 2026-06-17 at
+   `/private/tmp/spd-local-multitoken-repeat-cpu.json`. It preserved exact
+   output for all measured pairs and accepted `24 / 24` proposals, but SPD was
+   still much slower than baseline because local downstream/hidden waits
+   dominated. A Metal run is still useful as a contention diagnostic, not as a
+   final speed claim.
+
    ```bash
    target/release/skippy-bench spd-openai-smoke \
      --stage-server-bin target/release/skippy-server \
@@ -169,7 +229,7 @@ Run these before making any speedup claim:
      --splits 8,10,16,20,24,31 \
      --layer-end 32 \
      --ctx-size 128 \
-     --n-gpu-layers -1 \
+     --n-gpu-layers=-1 \
      --selected-backend-device MTL0 \
      --max-tokens 8 \
      --warmup-count 1 \
@@ -190,7 +250,9 @@ Run these before making any speedup claim:
      sidecar head total, accept rate, rolling gaps, and content equality.
 
    First remote command shape when one worker is available and already has the
-   same GGUF path:
+   same GGUF path. Run it once with `--preflight-only` first; that report should
+   validate artifacts, splits, tap coverage, endpoint mapping, and remote model
+   paths before any SSH process launch.
 
    ```bash
    target/release/skippy-bench spd-openai-smoke \
@@ -202,9 +264,31 @@ Run these before making any speedup claim:
      --splits 8,10,16,20,24,31 \
      --layer-end 32 \
      --ctx-size 128 \
-     --n-gpu-layers -1 \
+     --n-gpu-layers=-1 \
      --stage-hosts local,<worker>,<worker>,<worker>,<worker>,<worker>,<worker> \
-     --endpoint-host-map <worker>=<worker-lan-ip-or-name> \
+     --endpoint-host-map local=<coordinator-lan-ip-or-name>,<worker>=<worker-lan-ip-or-name> \
+     --remote-model-path-map <worker>=/path/on/worker/Qwen3.5-4B-Q4_K_M.gguf \
+     --max-tokens 1 \
+     --repeat-count 1 \
+     --preflight-only \
+     --output /tmp/spd-qwen35-first-remote-preflight.json
+   ```
+
+   Then remove `--preflight-only` and write the real smoke report:
+
+   ```bash
+   target/release/skippy-bench spd-openai-smoke \
+     --stage-server-bin target/release/skippy-server \
+     --manifest /private/tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/20260616-152346/train/skippy-spd-head.json \
+     --fixture /private/tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/20260616-152346/train/spd-parity-fixture.safetensors \
+     --model-path .artifacts/spd/qwen35-4b-gguf/Qwen3.5-4B-Q4_K_M.gguf \
+     --model-id unsloth/Qwen3.5-4B-GGUF:Q4_K_M \
+     --splits 8,10,16,20,24,31 \
+     --layer-end 32 \
+     --ctx-size 128 \
+     --n-gpu-layers=-1 \
+     --stage-hosts local,<worker>,<worker>,<worker>,<worker>,<worker>,<worker> \
+     --endpoint-host-map local=<coordinator-lan-ip-or-name>,<worker>=<worker-lan-ip-or-name> \
      --remote-model-path-map <worker>=/path/on/worker/Qwen3.5-4B-Q4_K_M.gguf \
      --max-tokens 1 \
      --repeat-count 1 \
@@ -217,13 +301,21 @@ Run these before making any speedup claim:
 
 3. Sidecar/topology training check:
 
-   - inspect whether the reference training/export path can train heads for
-     cleaner physical split plans, not only the current all-tap artifact;
-   - record the sidecar manifest's required hidden-state indices alongside every
-     benchmark topology;
-   - prefer a sidecar whose required taps match the intended mesh stage layout,
-     otherwise the runtime must either create extra tap stages or fuse tap
-     collection into neighboring stages.
+   - Use `evals/spd/hf_train_eval_qwen06.py` for the first topology-specific
+     proof. It already clones/patches the reference repo, trains/evaluates,
+     exports the Skippy manifest, and supports `--stage-layer-boundaries` plus
+     explicit `--shallow-hidden-layer-indices`.
+   - Do not blindly reuse the pretrained Qwen3.5 S4/L4 tap layout for a cleaner
+     physical split. For any intended Skippy split, write the exact tap rows
+     first, then train/evaluate the sidecar against those rows.
+   - For a clean four-boundary topology, start on `Qwen/Qwen3-0.6B` locally or
+     in a dry-run HF job with explicit tap rows that match the planned
+     boundaries. Promote to Qwen3.5-4B only after export, parity fixture, and
+     live tap proof pass.
+   - Record the sidecar manifest's required hidden-state indices alongside every
+     benchmark topology. Prefer a sidecar whose required taps match the intended
+     mesh stage layout; otherwise the runtime must either create extra tap
+     stages or fuse tap collection into neighboring stages.
 
 ### Batched Target Verification
 

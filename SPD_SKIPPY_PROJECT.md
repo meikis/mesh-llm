@@ -1141,6 +1141,31 @@ accepted context is already a prefix of the sidecar's longer verified context,
 the tap lifecycle advances the accepted length without pruning rows that later
 rolling proposals still need.
 
+2026-06-17 checkpoint: the first local multi-token/repeat CPU run and the
+first remote-run preflight are now recorded. The CPU repeat at
+`/private/tmp/spd-local-multitoken-repeat-cpu.json` used the pretrained
+Qwen3.5-4B S4/L4 sidecar, `--max-tokens 8`, `--warmup-count 1`, and
+`--repeat-count 3`. It preserved exact output for `3 / 3` measured pairs,
+accepted `24 / 24` proposals, committed `18` optimistic target tokens with
+`12` chained commits, and kept rolling replay ordered (`21` inserted drafts,
+`15` accepted windows, `0` missing, `0` out-of-order). It is still not a speed
+result: baseline decode averaged `219.3ms`, SPD decode averaged `13964.2ms`,
+and the paper-shaped estimate from the accepted trace was `54.8ms`. The timing
+split is important: sidecar cache prefill averaged `16.8ms` over `24` probes
+and sidecar head total averaged `45.9ms`, while normal downstream wait averaged
+`2681.2ms` and optimistic hidden wait averaged `2169.6ms`. That makes the
+remaining overhead a native serving/scheduler gap, not evidence that the paper
+or reference sidecar cache mechanics failed to port.
+
+The first no-launch remote preflight at
+`/private/tmp/spd-qwen35-first-remote-preflight.json` validated the release
+`skippy-server` binary, GGUF, manifest, `66` serving checkpoint tensors, `28`
+parity fixture tensors, logical `S=4`, physical split `8,10,16,20,24,31`, tap
+returns `8,10,16,20,24,31`, local stage port `20031`, and a complete
+stage-0-local plus worker endpoint plan. Use
+`spd-openai-smoke --preflight-only` before a real node launch, then remove the
+flag for the smoke once model paths and reachable endpoint maps are real.
+
 ## What Does Not Work Yet
 
 - The `spd-replay` request path has a correctness fallback, not a final speed

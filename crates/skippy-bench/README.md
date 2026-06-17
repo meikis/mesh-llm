@@ -205,6 +205,13 @@ remote-reachable endpoint hosts into the generated topology, and use
 `--rsync-model-artifacts` option is convenient for small artifacts but can be
 too slow for multi-GB GGUFs; stage large model files once and point the smoke at
 that path when possible.
+Pass `--preflight-only` before a first real-node run to validate the local
+model, sidecar manifest, serving checkpoint, parity fixture, tap coverage,
+physical stage ranges, remote endpoint map, and remote model path map without
+launching stages. The preflight report exits before process startup, rejects
+splits that do not expose every requested SPD tap, requires a remote-reachable
+stage-0 endpoint when any downstream stage is remote, and emits the exact stage
+endpoint/model-path plan that the smoke would use.
 `logical_spd_stage_count` records the manifest topology used by the sidecar
 head. `summary.paper_pipeline_estimate` projects the observed accept rate onto
 the paper/reference rolling pipeline schedule using that logical SPD stage count
@@ -388,7 +395,7 @@ one layer. For Qwen3.6's 40-layer package on three hosts, use
 `--splits 14,27`; uneven splits are only for local investigation and should
 not be reported as lab benchmark results.
 
-Performance runs default to `--n-gpu-layers -1`, and lab commands should pass
+Performance runs default to `--n-gpu-layers=-1`, and lab commands should pass
 that flag explicitly so each stage asks llama.cpp to offload all available
 layers for its slice. CPU-only runs should be named and treated as diagnostic
 baselines, not production performance numbers.

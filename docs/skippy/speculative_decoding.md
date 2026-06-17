@@ -65,6 +65,40 @@ Latest native evidence:
 | Measured sidecar decoder layers | 34.1 ms |
 | Tap failures | 0 |
 
+First real-node split target:
+
+- Use the pretrained `Qwen/Qwen3.5-4B` S4/L4 SPD sidecar first. It is the only
+  current artifact with strong reference acceptance evidence, Rust/Python
+  parity, live Skippy tap parity, and a known tap-aligned physical split.
+- Target GGUF: `.artifacts/spd/qwen35-4b-gguf/Qwen3.5-4B-Q4_K_M.gguf`
+  (`unsloth/Qwen3.5-4B-GGUF:Q4_K_M`).
+- Sidecar bundle:
+  `/private/tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/20260616-152346/train/`
+  with `skippy-spd-head.json`, `spd-head.safetensors`, and
+  `spd-parity-fixture.safetensors`.
+- Required physical split for this artifact: `8,10,16,20,24,31`, exposing taps
+  `0,8,10,16,20,24,31`. Do not try a clean four-stage split with this sidecar;
+  it will miss required hidden-state rows.
+- Keep stage 0, the OpenAI frontend, and the SPD sidecar on the coordinator.
+  Place downstream physical stages on the worker node or worker devices.
+
+Readiness check on 2026-06-17:
+
+| Check | Result |
+| --- | --- |
+| Live tap parity report | `/private/tmp/spd-real-node-ready-live-tap.json` |
+| Live taps | `0,8,10,16,20,24,31` |
+| Live tap verification | 2 / 2 proposals accepted, 0 rejected |
+| Live tap output | matched ordinary non-SPD greedy output |
+| OpenAI smoke report | `/private/tmp/spd-real-node-ready-openai.json` |
+| OpenAI topology | seven local CPU stages, same tap-aligned split |
+| OpenAI content match | 1 / 1 baseline/SPD pair matched |
+| OpenAI accepted/proposed | 1 / 1 |
+| OpenAI tap failures | 0 return, 0 record, 0 ignored |
+| OpenAI measured decode | baseline 26.2 ms, SPD 268.1 ms |
+| OpenAI downstream wait | 261.7 ms |
+| OpenAI sidecar cache/head | 123.2 ms cache prefill, 52.1 ms head total |
+
 Paper fidelity:
 
 - The mechanism is paper-shaped: hidden states from target stages are converted
@@ -154,6 +188,32 @@ Run these before making any speedup claim:
      artifact unless a cleaner topology-specific sidecar is trained;
    - compare baseline/SPD decode time, downstream wait, sidecar cache prefill,
      sidecar head total, accept rate, rolling gaps, and content equality.
+
+   First remote command shape when one worker is available and already has the
+   same GGUF path:
+
+   ```bash
+   target/release/skippy-bench spd-openai-smoke \
+     --stage-server-bin target/release/skippy-server \
+     --manifest /private/tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/20260616-152346/train/skippy-spd-head.json \
+     --fixture /private/tmp/skippy-spd-qwen35-4b-pretrained-s4l4/artifacts/20260616-152346/train/spd-parity-fixture.safetensors \
+     --model-path .artifacts/spd/qwen35-4b-gguf/Qwen3.5-4B-Q4_K_M.gguf \
+     --model-id unsloth/Qwen3.5-4B-GGUF:Q4_K_M \
+     --splits 8,10,16,20,24,31 \
+     --layer-end 32 \
+     --ctx-size 128 \
+     --n-gpu-layers -1 \
+     --stage-hosts local,<worker>,<worker>,<worker>,<worker>,<worker>,<worker> \
+     --endpoint-host-map <worker>=<worker-lan-ip-or-name> \
+     --remote-model-path-map <worker>=/path/on/worker/Qwen3.5-4B-Q4_K_M.gguf \
+     --max-tokens 1 \
+     --repeat-count 1 \
+     --output /tmp/spd-qwen35-first-remote-openai.json
+   ```
+
+   Use `--rsync-model-artifacts` only if copying the 2.6 GB GGUF for the run is
+   acceptable; otherwise stage the GGUF once on the worker and use
+   `--remote-model-path-map`.
 
 3. Sidecar/topology training check:
 

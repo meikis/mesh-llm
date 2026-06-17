@@ -25,6 +25,16 @@ struct TimingStats {
 }
 
 #[derive(Debug, Serialize)]
+struct TimingShape {
+    first_half: TimingStats,
+    second_half: TimingStats,
+    second_half_avg_vs_first_half_avg: f64,
+    first_sample_us: u128,
+    last_sample_us: u128,
+    samples_us: Vec<u128>,
+}
+
+#[derive(Debug, Serialize)]
 struct VerifySpanLocalReport {
     mode: &'static str,
     model_path: PathBuf,
@@ -65,8 +75,19 @@ struct SplitInprocessReport {
     serial_total_token_per_sec: f64,
     total_avg_vs_full_batched_avg: f64,
     total_avg_vs_serial_total_avg: f64,
+    diagnostics: SplitTimingDiagnostics,
     first_prediction: Vec<i32>,
     first_serial_prediction: Vec<i32>,
+}
+
+#[derive(Debug, Serialize)]
+struct SplitTimingDiagnostics {
+    batched_total: TimingShape,
+    batched_stage0: TimingShape,
+    batched_stage1: TimingShape,
+    serial_total: TimingShape,
+    serial_stage0: TimingShape,
+    serial_stage1: TimingShape,
 }
 
 pub fn verify_span_local(args: VerifySpanLocalArgs) -> Result<()> {
@@ -691,8 +712,20 @@ fn split_report(
         serial_total_token_per_sec: verified_tokens_per_sec(serial_total_avg, 2),
         total_avg_vs_full_batched_avg: total_avg / full_batched_avg_us,
         total_avg_vs_serial_total_avg: total_avg / serial_total_avg,
+        diagnostics: split_timing_diagnostics(&samples)?,
         first_prediction: samples.first_prediction,
         first_serial_prediction: samples.first_serial_prediction,
+    })
+}
+
+fn split_timing_diagnostics(samples: &SplitSampleSet) -> Result<SplitTimingDiagnostics> {
+    Ok(SplitTimingDiagnostics {
+        batched_total: timing_shape(&samples.total)?,
+        batched_stage0: timing_shape(&samples.stage0)?,
+        batched_stage1: timing_shape(&samples.stage1)?,
+        serial_total: timing_shape(&samples.serial_total)?,
+        serial_stage0: timing_shape(&samples.serial_stage0)?,
+        serial_stage1: timing_shape(&samples.serial_stage1)?,
     })
 }
 
@@ -764,6 +797,30 @@ fn timing_stats(samples: &[Duration]) -> Result<TimingStats> {
     })
 }
 
+fn timing_shape(samples: &[Duration]) -> Result<TimingShape> {
+    if samples.is_empty() {
+        bail!("cannot summarize empty timing shape");
+    }
+    let split_at = (samples.len() / 2).max(1);
+    let (first_half, second_half) = samples.split_at(split_at);
+    let second_half = if second_half.is_empty() {
+        first_half
+    } else {
+        second_half
+    };
+    let first_half_stats = timing_stats(first_half)?;
+    let second_half_stats = timing_stats(second_half)?;
+    let samples_us = samples.iter().map(Duration::as_micros).collect::<Vec<_>>();
+    Ok(TimingShape {
+        second_half_avg_vs_first_half_avg: second_half_stats.avg_us / first_half_stats.avg_us,
+        first_half: first_half_stats,
+        second_half: second_half_stats,
+        first_sample_us: samples_us[0],
+        last_sample_us: *samples_us.last().context("missing timing shape sample")?,
+        samples_us,
+    })
+}
+
 fn percentile(sorted_micros: &[u128], percentile: f64) -> u128 {
     let last_index = sorted_micros.len().saturating_sub(1);
     let index = (last_index as f64 * percentile).round() as usize;
@@ -785,7 +842,7 @@ fn model_description(config: &RuntimeConfig) -> String {
 mod tests {
     use std::time::Duration;
 
-    use super::{percentile, timing_stats, verified_tokens_per_sec};
+    use super::{percentile, timing_shape, timing_stats, verified_tokens_per_sec};
 
     #[test]
     fn timing_stats_sorts_and_summarizes_microseconds() {
@@ -811,5 +868,23 @@ mod tests {
     #[test]
     fn token_rate_uses_verified_token_count() {
         assert_eq!(verified_tokens_per_sec(20_000.0, 2), 100.0);
+    }
+
+    #[test]
+    fn timing_shape_reports_half_drift_in_sample_order() {
+        let shape = timing_shape(&[
+            Duration::from_micros(10),
+            Duration::from_micros(20),
+            Duration::from_micros(30),
+            Duration::from_micros(50),
+        ])
+        .unwrap();
+
+        assert_eq!(shape.first_sample_us, 10);
+        assert_eq!(shape.last_sample_us, 50);
+        assert_eq!(shape.samples_us, vec![10, 20, 30, 50]);
+        assert_eq!(shape.first_half.avg_us, 15.0);
+        assert_eq!(shape.second_half.avg_us, 40.0);
+        assert_eq!(shape.second_half_avg_vs_first_half_avg, 40.0 / 15.0);
     }
 }

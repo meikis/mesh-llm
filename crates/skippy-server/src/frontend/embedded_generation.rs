@@ -30,30 +30,78 @@ fn observe_spd_rolling_executor_target(
     executor: Option<&mut SpdRollingExecutor>,
     position: usize,
     token: i32,
-) -> OpenAiResult<Option<SpdRollingExecutorCommit>> {
+) -> OpenAiResult<Vec<SpdRollingExecutorCommit>> {
     let Some(executor) = executor else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     executor.record_target_token(position, token);
-    let mut commit = None;
+    let mut commits = Vec::new();
     while let Some(ready) = executor
         .commit_ready_oldest()
         .map_err(openai_backend_error)?
     {
         let rejected = matches!(ready, SpdRollingExecutorCommit::Rejected { .. });
-        commit = Some(ready);
+        commits.push(ready);
         if rejected {
             break;
         }
     }
     merge_spd_rolling_executor_stats(speculative_stats, Some(executor));
-    Ok(commit)
+    Ok(commits)
+}
+
+fn spd_rolling_executor_acceptance(
+    commits: &[SpdRollingExecutorCommit],
+    target_position: usize,
+    target_token: i32,
+    legacy_acceptance: bool,
+) -> OpenAiResult<bool> {
+    let Some(commit) = commits
+        .iter()
+        .copied()
+        .find(|commit| spd_rolling_executor_commit_position(*commit) == target_position)
+    else {
+        return Ok(legacy_acceptance);
+    };
+    match commit {
+        SpdRollingExecutorCommit::Accepted {
+            position, token, ..
+        } => {
+            if token != target_token {
+                return Err(OpenAiError::backend(format!(
+                    "SPD rolling executor accepted token {token} at position {position}, expected target token {target_token}"
+                )));
+            }
+            Ok(true)
+        }
+        SpdRollingExecutorCommit::Rejected {
+            position,
+            corrected,
+            ..
+        } => {
+            if corrected != target_token {
+                return Err(OpenAiError::backend(format!(
+                    "SPD rolling executor rejected with corrected token {corrected} at position {position}, expected target token {target_token}"
+                )));
+            }
+            Ok(false)
+        }
+    }
+}
+
+fn spd_rolling_executor_commit_position(commit: SpdRollingExecutorCommit) -> usize {
+    match commit {
+        SpdRollingExecutorCommit::Accepted { position, .. }
+        | SpdRollingExecutorCommit::Rejected { position, .. } => position,
+    }
 }
 
 struct SpdRollingStartArgs<'a> {
     request: &'a EmbeddedStageZeroGeneration<'a>,
     downstream: &'a mut TcpStream,
     session_key: &'a str,
+    shadow_session: Option<&'a mut SpdRollingShadowSession>,
+    source_materialized_token_count: usize,
     spd: &'a mut SpdReplayProposalSource,
     executor: &'a mut SpdRollingExecutor,
     decode_step: usize,
@@ -61,9 +109,178 @@ struct SpdRollingStartArgs<'a> {
     trigger_hf_index: Option<u32>,
 }
 
+#[derive(Debug)]
+struct SpdRollingShadowLane {
+    session_id: u64,
+    session_key: String,
+    token_count: usize,
+}
+
+impl SpdRollingShadowLane {
+    fn new(token_count: usize) -> OpenAiResult<Self> {
+        let session_id =
+            OPENAI_GENERATION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if session_id > i32::MAX as u64 {
+            return Err(OpenAiError::backend(
+                "SPD rolling shadow session id exceeds i32",
+            ));
+        }
+        Ok(Self {
+            session_id,
+            session_key: session_id.to_string(),
+            token_count,
+        })
+    }
+
+    fn execution_session(&self) -> SpdExecutionSession<'_> {
+        SpdExecutionSession {
+            session_id: self.session_id,
+            session_key: &self.session_key,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct SpdRollingShadowSession {
+    work: Option<SpdRollingShadowLane>,
+    snapshots: std::collections::BTreeMap<usize, SpdRollingShadowLane>,
+}
+
+impl SpdRollingShadowSession {
+    fn ensure_work_at(
+        &mut self,
+        backend: &StageOpenAiBackend,
+        request: &EmbeddedStageZeroGeneration<'_>,
+        downstream: &mut TcpStream,
+        source_session_id: u64,
+        token_count: usize,
+    ) -> OpenAiResult<()> {
+        if self.work.is_none() {
+            let lane = SpdRollingShadowLane::new(token_count)?;
+            backend.copy_embedded_stage_session(
+                request,
+                downstream,
+                source_session_id,
+                lane.session_id,
+                token_count as u64,
+            )
+            .map_err(|error| {
+                OpenAiError::backend(format!(
+                    "failed to seed SPD rolling work shadow {} from source {} at token_count {}: {}",
+                    lane.session_id, source_session_id, token_count, error
+                ))
+            })?;
+            self.work = Some(lane);
+            return Ok(());
+        }
+
+        let work = self
+            .work
+            .as_ref()
+            .ok_or_else(|| OpenAiError::backend("missing SPD rolling work shadow"))?;
+        if work.token_count != token_count {
+            return Err(OpenAiError::backend(format!(
+                "SPD rolling work shadow is at token_count {}, cannot launch at {}",
+                work.token_count, token_count
+            )));
+        }
+        self.snapshot_work_at(backend, request, downstream, token_count)?;
+        Ok(())
+    }
+
+    fn work_execution_session(&self) -> OpenAiResult<SpdExecutionSession<'_>> {
+        self.work
+            .as_ref()
+            .map(SpdRollingShadowLane::execution_session)
+            .ok_or_else(|| OpenAiError::backend("missing SPD rolling work shadow"))
+    }
+
+    fn advance_work_to(&mut self, token_count: usize) -> OpenAiResult<()> {
+        let work = self
+            .work
+            .as_mut()
+            .ok_or_else(|| OpenAiError::backend("missing SPD rolling work shadow"))?;
+        work.token_count = token_count;
+        Ok(())
+    }
+
+    fn snapshot_work_at(
+        &mut self,
+        backend: &StageOpenAiBackend,
+        request: &EmbeddedStageZeroGeneration<'_>,
+        downstream: &mut TcpStream,
+        token_count: usize,
+    ) -> OpenAiResult<Option<EmbeddedSessionControl>> {
+        if self.snapshots.contains_key(&token_count) {
+            return Ok(None);
+        }
+        let work_session_id = self
+            .work
+            .as_ref()
+            .ok_or_else(|| OpenAiError::backend("missing SPD rolling work shadow"))?
+            .session_id;
+        let lane = SpdRollingShadowLane::new(token_count)?;
+        let control = backend.copy_embedded_stage_session(
+            request,
+            downstream,
+            work_session_id,
+            lane.session_id,
+            token_count as u64,
+        )
+        .map_err(|error| {
+            OpenAiError::backend(format!(
+                "failed to snapshot SPD rolling work shadow {} into snapshot {} at token_count {}: {}",
+                work_session_id, lane.session_id, token_count, error
+            ))
+        })?;
+        self.snapshots.insert(token_count, lane);
+        Ok(Some(control))
+    }
+
+    fn remove_snapshot(&mut self, token_count: usize) -> Option<SpdRollingShadowLane> {
+        self.snapshots.remove(&token_count)
+    }
+
+    fn work_at(&self, token_count: usize) -> Option<&SpdRollingShadowLane> {
+        self.work
+            .as_ref()
+            .filter(|work| work.token_count == token_count)
+    }
+
+    fn stale_snapshot_token_counts(&self, token_count: usize) -> Vec<usize> {
+        self.snapshots
+            .keys()
+            .copied()
+            .filter(|snapshot_token_count| *snapshot_token_count <= token_count)
+            .collect()
+    }
+
+    fn drain_lanes(self) -> Vec<SpdRollingShadowLane> {
+        self.work
+            .into_iter()
+            .chain(self.snapshots.into_values())
+            .collect()
+    }
+}
+
+fn merge_session_control(
+    total: &mut Option<EmbeddedSessionControl>,
+    control: EmbeddedSessionControl,
+) {
+    match total {
+        Some(total) => {
+            total.elapsed_ms += control.elapsed_ms;
+            total.local_ms += control.local_ms;
+            total.downstream_write_ms += control.downstream_write_ms;
+            total.downstream_wait_ms += control.downstream_wait_ms;
+        }
+        None => *total = Some(control),
+    }
+}
+
 fn start_spd_rolling_executor_decode(
     backend: &StageOpenAiBackend,
-    args: SpdRollingStartArgs<'_>,
+    mut args: SpdRollingStartArgs<'_>,
 ) -> OpenAiResult<Option<(SpdOptimisticDecode, super::spd::SpdInlineProbe)>> {
     let Some(launch) = args
         .executor
@@ -84,23 +301,51 @@ fn start_spd_rolling_executor_decode(
         .ok_or_else(|| {
             OpenAiError::backend("SPD rolling executor launch position is inside prompt")
         })?;
-    let decode = backend.start_spd_optimistic_decode_for_probe(
-        args.request,
-        SpdOptimisticDecodeStart {
-            downstream: args.downstream,
-            session_key: args.session_key,
-            pos_start: launch.position,
-            decode_step,
-            chain_depth: launch.chain_depth,
-            chain_depth_limit: args.executor.logical_stage_count(),
-            probe: &launch.probe,
-        },
-    )?;
+    if args
+        .shadow_session
+        .as_ref()
+        .is_some_and(|shadow| shadow.work.is_none())
+        && launch.position != args.source_materialized_token_count
+    {
+        args.executor.record_launch_miss();
+        return Ok(None);
+    }
+    let decode = {
+        let shadow = args
+            .shadow_session
+            .as_deref_mut()
+            .ok_or_else(|| OpenAiError::backend("SPD rolling executor requires shadow KV"))?;
+        shadow.ensure_work_at(
+            backend,
+            args.request,
+            args.downstream,
+            args.request.ids.session_id,
+            launch.position,
+        )?;
+        let execution_session = Some(shadow.work_execution_session()?);
+        backend.start_spd_optimistic_decode_for_probe(
+            args.request,
+            SpdOptimisticDecodeStart {
+                downstream: args.downstream,
+                session_key: args.session_key,
+                execution_session,
+                pos_start: launch.position,
+                decode_step,
+                chain_depth: launch.chain_depth,
+                chain_depth_limit: args.executor.logical_stage_count(),
+                probe: &launch.probe,
+                checkpoint: false,
+            },
+        )?
+    };
     let Some(decode) = decode else {
         return Ok(None);
     };
+    if let Some(shadow) = args.shadow_session.as_deref_mut() {
+        shadow.advance_work_to(launch.position.saturating_add(1))?;
+    }
     args.executor
-        .record_launch(&launch)
+        .record_launch(&launch, decode.origin)
         .map_err(openai_backend_error)?;
     Ok(Some((decode, launch.probe)))
 }
@@ -122,6 +367,105 @@ fn drain_spd_rolling_executor_replies(
         drained += 1;
     }
     Ok(drained)
+}
+
+fn promote_spd_rolling_shadow_session(
+    backend: &StageOpenAiBackend,
+    request: &EmbeddedStageZeroGeneration<'_>,
+    downstream: &mut TcpStream,
+    shadow_session: &mut Option<SpdRollingShadowSession>,
+    token_count: usize,
+) -> OpenAiResult<Option<EmbeddedSessionControl>> {
+    let Some(shadow) = shadow_session.as_mut() else {
+        return Ok(None);
+    };
+    let mut promoted_snapshot = shadow.remove_snapshot(token_count);
+    let source_session_id = if let Some(snapshot) = promoted_snapshot.as_ref() {
+        snapshot.session_id
+    } else if let Some(work) = shadow.work_at(token_count) {
+        work.session_id
+    } else {
+        return Err(OpenAiError::backend(format!(
+            "missing exact SPD rolling shadow snapshot for token_count {token_count}"
+        )));
+    };
+    let mut total = None;
+    merge_session_control(
+        &mut total,
+        backend.copy_embedded_stage_session(
+            request,
+            downstream,
+            source_session_id,
+            request.ids.session_id,
+            token_count as u64,
+        )
+        .map_err(|error| {
+            OpenAiError::backend(format!(
+                "failed to promote SPD rolling shadow {} into canonical {} at token_count {}: {}",
+                source_session_id, request.ids.session_id, token_count, error
+            ))
+        })?,
+    );
+    if let Some(snapshot) = promoted_snapshot.take() {
+        merge_session_control(
+            &mut total,
+            backend.drop_embedded_stage_session(
+                request,
+                downstream,
+                request.ids.request_id,
+                snapshot.session_id,
+            )?,
+        );
+    }
+    for stale in shadow.stale_snapshot_token_counts(token_count) {
+        if let Some(snapshot) = shadow.remove_snapshot(stale) {
+            merge_session_control(
+                &mut total,
+                backend.drop_embedded_stage_session(
+                    request,
+                    downstream,
+                    request.ids.request_id,
+                    snapshot.session_id,
+                )?,
+            );
+        }
+    }
+    Ok(total)
+}
+
+fn drop_spd_rolling_shadow_session(
+    backend: &StageOpenAiBackend,
+    request: &EmbeddedStageZeroGeneration<'_>,
+    downstream: &mut TcpStream,
+    shadow_session: &mut Option<SpdRollingShadowSession>,
+) -> OpenAiResult<Option<EmbeddedSessionControl>> {
+    let Some(shadow) = shadow_session.take() else {
+        return Ok(None);
+    };
+    let mut total = None;
+    for lane in shadow.drain_lanes() {
+        merge_session_control(
+            &mut total,
+            backend.drop_embedded_stage_session(
+                request,
+                downstream,
+                request.ids.request_id,
+                lane.session_id,
+            )?,
+        );
+    }
+    Ok(total)
+}
+
+fn reset_spd_rolling_shadow_session(
+    backend: &StageOpenAiBackend,
+    request: &EmbeddedStageZeroGeneration<'_>,
+    downstream: &mut TcpStream,
+    shadow_session: &mut Option<SpdRollingShadowSession>,
+) -> OpenAiResult<Option<EmbeddedSessionControl>> {
+    let drop = drop_spd_rolling_shadow_session(backend, request, downstream, shadow_session)?;
+    *shadow_session = Some(SpdRollingShadowSession::default());
+    Ok(drop)
 }
 
 impl StageOpenAiBackend {
@@ -952,6 +1296,7 @@ impl StageOpenAiBackend {
                 .unwrap_or(0)
                 .saturating_sub(1);
             let mut spd_rolling_executor = None::<SpdRollingExecutor>;
+            let mut spd_rolling_shadow_session = None::<SpdRollingShadowSession>;
             while decoded_tokens < request.max_tokens as usize {
                 let decode_step = u32::try_from(decoded_tokens)
                     .map_err(|_| OpenAiError::backend("decode step exceeds u32"))?;
@@ -980,6 +1325,7 @@ impl StageOpenAiBackend {
                         SpdRollingExecutor::new(logical_stage_count, &context_tokens)
                             .map_err(openai_backend_error)?,
                     );
+                    spd_rolling_shadow_session = Some(SpdRollingShadowSession::default());
                 }
                 if !prefer_rolling_spd_optimistic_decode
                     && (spd_guard.is_some() || draft_guard.is_some())
@@ -1469,6 +1815,7 @@ impl StageOpenAiBackend {
                         decode_runtime_lock_hold_max_ms.max(token_runtime_lock_hold_ms);
                     output
                 };
+                let canonical_materialized_token_count = context_tokens.len();
                 let stage0_compute_ms = stage0_timer.elapsed_ms();
                 decode_stage0_compute_ms += stage0_compute_ms;
                 self.record_spd_stage0_boundary_tap(&request, message, &output);
@@ -1509,7 +1856,9 @@ impl StageOpenAiBackend {
                                 .len()
                                 .saturating_add(request.max_tokens as usize)
                     });
-                let prediction_return = if can_start_optimistic_spd && use_spd_rolling_executor {
+                let rolling_executor_can_launch =
+                    can_start_optimistic_spd && use_spd_rolling_executor;
+                let prediction_return = if rolling_executor_can_launch {
                     let mut pre_target_probe = None;
                     let immediate_probe_position = context_tokens.len();
                     let rolling_reply = self
@@ -1534,6 +1883,9 @@ impl StageOpenAiBackend {
                                         request: &request,
                                         downstream,
                                         session_key: &session_key,
+                                        shadow_session: spd_rolling_shadow_session.as_mut(),
+                                        source_materialized_token_count:
+                                            canonical_materialized_token_count,
                                         spd,
                                         executor,
                                         decode_step,
@@ -1564,7 +1916,7 @@ impl StageOpenAiBackend {
                         reply: rolling_reply,
                         pre_target_probe,
                     })
-                } else if can_start_optimistic_spd {
+                } else if can_start_optimistic_spd && !use_spd_rolling_executor {
                     self.recv_spd_aware_prediction_return_with_probe_action(
                         &request,
                         WireReplyKind::PredictedToken,
@@ -1580,11 +1932,13 @@ impl StageOpenAiBackend {
                                         SpdOptimisticDecodeStart {
                                             downstream,
                                             session_key: &session_key,
+                                            execution_session: None,
                                             pos_start: optimistic_pos_start,
                                             decode_step: decoded_tokens + 1,
                                             chain_depth: 0,
                                             chain_depth_limit: spd_optimistic_chain_depth_limit,
                                             probe,
+                                            checkpoint: true,
                                         },
                                     )
                                     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -1611,7 +1965,7 @@ impl StageOpenAiBackend {
                 // Rolling SPD row positions are token indices. Before pushing
                 // reply.predicted, the target token will occupy context_tokens.len().
                 let rolling_target_position = context_tokens.len();
-                observe_spd_rolling_executor_target(
+                let mut rolling_executor_commits = observe_spd_rolling_executor_target(
                     &mut speculative_stats,
                     spd_rolling_executor.as_mut(),
                     rolling_target_position,
@@ -1636,7 +1990,16 @@ impl StageOpenAiBackend {
                     }
                     if let Some(mut optimistic) = optimistic_decode.take() {
                         let optimistic_wait_timer = PhaseTimer::start();
-                        let accepted = optimistic.proposed == reply.predicted;
+                        let accepted = if use_spd_rolling_executor {
+                            spd_rolling_executor_acceptance(
+                                &rolling_executor_commits,
+                                rolling_target_position,
+                                reply.predicted,
+                                optimistic.proposed == reply.predicted,
+                            )?
+                        } else {
+                            optimistic.proposed == reply.predicted
+                        };
                         let mut context_with_reply = context_tokens.clone();
                         context_with_reply.push(reply.predicted);
                         if use_spd_rolling_executor
@@ -1706,6 +2069,10 @@ impl StageOpenAiBackend {
                                                             request: &request,
                                                             downstream,
                                                             session_key: &session_key,
+                                                            shadow_session:
+                                                                spd_rolling_shadow_session.as_mut(),
+                                                            source_materialized_token_count:
+                                                                canonical_materialized_token_count,
                                                             spd,
                                                             executor,
                                                             decode_step,
@@ -1756,12 +2123,14 @@ impl StageOpenAiBackend {
                                                         SpdOptimisticDecodeStart {
                                                             downstream,
                                                             session_key: &session_key,
+                                                            execution_session: None,
                                                             pos_start: chain_pos_start,
                                                             decode_step: decoded_tokens + 2,
                                                             chain_depth: 1,
                                                             chain_depth_limit:
                                                                 spd_optimistic_chain_depth_limit,
                                                             probe,
+                                                            checkpoint: true,
                                                         },
                                                     )
                                                     .map_err(|error| {
@@ -1803,12 +2172,13 @@ impl StageOpenAiBackend {
                                     "optimistic SPD verify returned no predicted token",
                                 )
                             })?;
-                        observe_spd_rolling_executor_target(
+                        let optimistic_target_commits = observe_spd_rolling_executor_target(
                             &mut speculative_stats,
                             spd_rolling_executor.as_mut(),
                             context_with_reply.len(),
                             optimistic_next,
                         )?;
+                        rolling_executor_commits.extend(optimistic_target_commits);
                         if let Some(probe) = optimistic_return.pre_target_probe {
                             let rolling_target_position = context_with_reply.len();
                             let rolling = if let Some(spd) = spd_guard.as_deref_mut() {
@@ -1860,35 +2230,21 @@ impl StageOpenAiBackend {
                         decode_forward_write_ms += optimistic_stats.forward_write_ms;
                         decode_downstream_wait_ms += optimistic_wait_ms;
                         if accepted {
+                            if use_spd_rolling_executor
+                                && let Some(promote) = promote_spd_rolling_shadow_session(
+                                    self,
+                                    &request,
+                                    downstream,
+                                    &mut spd_rolling_shadow_session,
+                                    context_with_reply.len(),
+                                )?
+                            {
+                                speculative_stats.recovery_ms += promote.elapsed_ms;
+                            }
                             speculative_stats.optimistic_decode_accepted += 1;
                             optimistic_commit = Some((optimistic_next, optimistic_stats));
                         } else {
                             speculative_stats.optimistic_decode_rejected += 1;
-                            let restore = self.restore_embedded_stage_session(
-                                &request,
-                                downstream,
-                                &session_key,
-                                request_id,
-                                session_id,
-                                optimistic.origin.checkpoint_generation,
-                            )?;
-                            speculative_stats.recovery_restores += 1;
-                            speculative_stats.recovery_ms += restore.elapsed_ms;
-                            speculative_stats.recovery_restore_ms += restore.elapsed_ms;
-                            speculative_stats.recovery_restore_local_ms += restore.local_ms;
-                            speculative_stats.recovery_restore_downstream_write_ms +=
-                                restore.downstream_write_ms;
-                            speculative_stats.recovery_restore_downstream_wait_ms +=
-                                restore.downstream_wait_ms;
-                            speculative_stats.optimistic_restore_ms += restore.elapsed_ms;
-                            if optimistic.requested_spd_taps
-                                && let Some(spd) = spd_guard.as_deref_mut()
-                            {
-                                let reset_timer = PhaseTimer::start();
-                                spd.reset_to_verified_context(&context_with_reply)
-                                    .map_err(openai_backend_error)?;
-                                speculative_stats.draft_reset_ms += reset_timer.elapsed_ms();
-                            }
                             if use_spd_rolling_executor {
                                 drain_spd_rolling_executor_replies(
                                     self,
@@ -1899,6 +2255,40 @@ impl StageOpenAiBackend {
                                     &mut speculative_stats,
                                     spd_rolling_executor.as_ref(),
                                 );
+                                if let Some(drop) = reset_spd_rolling_shadow_session(
+                                    self,
+                                    &request,
+                                    downstream,
+                                    &mut spd_rolling_shadow_session,
+                                )? {
+                                    speculative_stats.recovery_ms += drop.elapsed_ms;
+                                }
+                            } else {
+                                let restore = self.restore_embedded_stage_session(
+                                    &request,
+                                    downstream,
+                                    &session_key,
+                                    request_id,
+                                    session_id,
+                                    optimistic.origin.checkpoint_generation,
+                                )?;
+                                speculative_stats.recovery_restores += 1;
+                                speculative_stats.recovery_ms += restore.elapsed_ms;
+                                speculative_stats.recovery_restore_ms += restore.elapsed_ms;
+                                speculative_stats.recovery_restore_local_ms += restore.local_ms;
+                                speculative_stats.recovery_restore_downstream_write_ms +=
+                                    restore.downstream_write_ms;
+                                speculative_stats.recovery_restore_downstream_wait_ms +=
+                                    restore.downstream_wait_ms;
+                                speculative_stats.optimistic_restore_ms += restore.elapsed_ms;
+                            }
+                            if optimistic.requested_spd_taps
+                                && let Some(spd) = spd_guard.as_deref_mut()
+                            {
+                                let reset_timer = PhaseTimer::start();
+                                spd.reset_to_verified_context(&context_with_reply)
+                                    .map_err(openai_backend_error)?;
+                                speculative_stats.draft_reset_ms += reset_timer.elapsed_ms();
                             }
                         }
                         let mut attrs = self.openai_attrs(request.ids);
@@ -1973,7 +2363,16 @@ impl StageOpenAiBackend {
                                         OpenAiError::backend("optimistic decode step exceeds u32")
                                     })?;
                                 let chain_target = expected_target;
-                                let chain_accepted = chained.proposed == chain_target;
+                                let chain_accepted = if use_spd_rolling_executor {
+                                    spd_rolling_executor_acceptance(
+                                        &rolling_executor_commits,
+                                        chained.position,
+                                        chain_target,
+                                        chained.proposed == chain_target,
+                                    )?
+                                } else {
+                                    chained.proposed == chain_target
+                                };
                                 let mut context_with_expected = rolling_context.clone();
                                 context_with_expected.push(chain_target);
                                 if use_spd_rolling_executor
@@ -2053,6 +2452,11 @@ impl StageOpenAiBackend {
                                                                     request: &request,
                                                                     downstream,
                                                                     session_key: &session_key,
+                                                                    shadow_session:
+                                                                        spd_rolling_shadow_session
+                                                                            .as_mut(),
+                                                                    source_materialized_token_count:
+                                                                        canonical_materialized_token_count,
                                                                     spd,
                                                                     executor,
                                                                     decode_step,
@@ -2106,6 +2510,7 @@ impl StageOpenAiBackend {
                                                                 SpdOptimisticDecodeStart {
                                                                     downstream,
                                                                     session_key: &session_key,
+                                                                    execution_session: None,
                                                                     pos_start: next_pos_start,
                                                                     decode_step: decoded_tokens
                                                                         + 2
@@ -2114,6 +2519,7 @@ impl StageOpenAiBackend {
                                                                     chain_depth_limit:
                                                                         spd_optimistic_chain_depth_limit,
                                                                     probe,
+                                                                    checkpoint: true,
                                                                 },
                                                             )
                                                             .map_err(|error| {
@@ -2156,12 +2562,13 @@ impl StageOpenAiBackend {
                                             "chained optimistic SPD verify returned no predicted token",
                                         )
                                     })?;
-                                observe_spd_rolling_executor_target(
+                                let chain_target_commits = observe_spd_rolling_executor_target(
                                     &mut speculative_stats,
                                     spd_rolling_executor.as_mut(),
                                     context_with_expected.len(),
                                     chain_next,
                                 )?;
+                                rolling_executor_commits.extend(chain_target_commits);
                                 if let Some(probe) = chain_return.pre_target_probe {
                                     let rolling_target_position = context_with_expected.len();
                                     let rolling = if let Some(spd) = spd_guard.as_deref_mut() {
@@ -2214,6 +2621,17 @@ impl StageOpenAiBackend {
                                 decode_forward_write_ms += chain_stats.forward_write_ms;
                                 decode_downstream_wait_ms += chain_wait_ms;
                                 if chain_accepted {
+                                    if use_spd_rolling_executor
+                                        && let Some(promote) = promote_spd_rolling_shadow_session(
+                                            self,
+                                            &request,
+                                            downstream,
+                                            &mut spd_rolling_shadow_session,
+                                            context_with_expected.len(),
+                                        )?
+                                    {
+                                        speculative_stats.recovery_ms += promote.elapsed_ms;
+                                    }
                                     speculative_stats.optimistic_decode_accepted += 1;
                                     speculative_stats.chained_optimistic_decode_accepted += 1;
                                     chained_optimistic_commits.push((
@@ -2226,32 +2644,6 @@ impl StageOpenAiBackend {
                                 } else {
                                     speculative_stats.optimistic_decode_rejected += 1;
                                     speculative_stats.chained_optimistic_decode_rejected += 1;
-                                    let restore = self.restore_embedded_stage_session(
-                                        &request,
-                                        downstream,
-                                        &session_key,
-                                        request_id,
-                                        session_id,
-                                        chained.origin.checkpoint_generation,
-                                    )?;
-                                    speculative_stats.recovery_restores += 1;
-                                    speculative_stats.recovery_ms += restore.elapsed_ms;
-                                    speculative_stats.recovery_restore_ms += restore.elapsed_ms;
-                                    speculative_stats.recovery_restore_local_ms += restore.local_ms;
-                                    speculative_stats.recovery_restore_downstream_write_ms +=
-                                        restore.downstream_write_ms;
-                                    speculative_stats.recovery_restore_downstream_wait_ms +=
-                                        restore.downstream_wait_ms;
-                                    speculative_stats.optimistic_restore_ms += restore.elapsed_ms;
-                                    if chained.requested_spd_taps
-                                        && let Some(spd) = spd_guard.as_deref_mut()
-                                    {
-                                        let reset_timer = PhaseTimer::start();
-                                        spd.reset_to_verified_context(&rolling_context)
-                                            .map_err(openai_backend_error)?;
-                                        speculative_stats.draft_reset_ms +=
-                                            reset_timer.elapsed_ms();
-                                    }
                                     if use_spd_rolling_executor {
                                         drain_spd_rolling_executor_replies(
                                             self,
@@ -2262,6 +2654,43 @@ impl StageOpenAiBackend {
                                             &mut speculative_stats,
                                             spd_rolling_executor.as_ref(),
                                         );
+                                        if let Some(drop) = reset_spd_rolling_shadow_session(
+                                            self,
+                                            &request,
+                                            downstream,
+                                            &mut spd_rolling_shadow_session,
+                                        )? {
+                                            speculative_stats.recovery_ms += drop.elapsed_ms;
+                                        }
+                                    } else {
+                                        let restore = self.restore_embedded_stage_session(
+                                            &request,
+                                            downstream,
+                                            &session_key,
+                                            request_id,
+                                            session_id,
+                                            chained.origin.checkpoint_generation,
+                                        )?;
+                                        speculative_stats.recovery_restores += 1;
+                                        speculative_stats.recovery_ms += restore.elapsed_ms;
+                                        speculative_stats.recovery_restore_ms += restore.elapsed_ms;
+                                        speculative_stats.recovery_restore_local_ms +=
+                                            restore.local_ms;
+                                        speculative_stats.recovery_restore_downstream_write_ms +=
+                                            restore.downstream_write_ms;
+                                        speculative_stats.recovery_restore_downstream_wait_ms +=
+                                            restore.downstream_wait_ms;
+                                        speculative_stats.optimistic_restore_ms +=
+                                            restore.elapsed_ms;
+                                    }
+                                    if chained.requested_spd_taps
+                                        && let Some(spd) = spd_guard.as_deref_mut()
+                                    {
+                                        let reset_timer = PhaseTimer::start();
+                                        spd.reset_to_verified_context(&context_with_expected)
+                                            .map_err(openai_backend_error)?;
+                                        speculative_stats.draft_reset_ms +=
+                                            reset_timer.elapsed_ms();
                                     }
                                 }
                                 let mut attrs = self.openai_attrs(request.ids);
@@ -2699,6 +3128,14 @@ impl StageOpenAiBackend {
                 if reached_stop {
                     break;
                 }
+            }
+            if let Some(drop) = drop_spd_rolling_shadow_session(
+                self,
+                &request,
+                downstream,
+                &mut spd_rolling_shadow_session,
+            )? {
+                speculative_stats.recovery_ms += drop.elapsed_ms;
             }
             let mut decode_attrs = self.openai_attrs(request.ids);
             decode_attrs.insert(

@@ -175,6 +175,21 @@ pub(super) fn embedded_verify_message(
     })
 }
 
+pub(super) fn with_execution_session(
+    mut message: StageWireMessage,
+    execution_session_id: u64,
+) -> OpenAiResult<StageWireMessage> {
+    if execution_session_id == 0 {
+        return Err(OpenAiError::backend(
+            "execution session id must be non-zero",
+        ));
+    }
+    message.state.seq_id = i32::try_from(execution_session_id)
+        .map_err(|_| OpenAiError::backend("execution session id exceeds i32"))?;
+    message.state.flags |= state_flags::EXECUTION_SESSION;
+    Ok(message)
+}
+
 pub(super) fn checkpoint_generation_from_position(position: usize) -> OpenAiResult<i32> {
     let generation = position
         .checked_add(1)
@@ -205,6 +220,45 @@ pub(super) fn embedded_session_control_message(
         activation: Vec::new(),
         raw_bytes: Vec::new(),
     }
+}
+
+pub(super) fn embedded_copy_session_message(
+    wire_dtype: WireActivationDType,
+    source_session_id: u64,
+    target_session_id: u64,
+    token_count: u64,
+) -> OpenAiResult<StageWireMessage> {
+    let mut state = StageStateHeader::new(WireMessageKind::CopySession, wire_dtype);
+    state.source_stage_index = -1;
+    Ok(StageWireMessage {
+        kind: WireMessageKind::CopySession,
+        pos_start: 0,
+        token_count: i32::try_from(token_count)
+            .map_err(|_| OpenAiError::backend("session copy token count exceeds i32"))?,
+        state,
+        request_id: source_session_id,
+        session_id: target_session_id,
+        sampling: None,
+        chat_sampling_metadata: None,
+        tokens: Vec::new(),
+        positions: Vec::new(),
+        activation: Vec::new(),
+        raw_bytes: Vec::new(),
+    })
+}
+
+pub(super) fn embedded_drop_session_message(
+    wire_dtype: WireActivationDType,
+    request_id: u64,
+    session_id: u64,
+) -> StageWireMessage {
+    embedded_session_control_message(
+        wire_dtype,
+        WireMessageKind::DropSession,
+        request_id,
+        session_id,
+        0,
+    )
 }
 
 pub(super) fn generation_config_message(
@@ -429,5 +483,43 @@ mod tests {
     fn checkpoint_generation_from_position_reserves_zero_for_legacy() {
         assert_eq!(checkpoint_generation_from_position(0).unwrap(), 1);
         assert_eq!(checkpoint_generation_from_position(31).unwrap(), 32);
+    }
+
+    #[test]
+    fn execution_session_keeps_message_identity_canonical() {
+        let message = embedded_verify_message(
+            WireActivationDType::F16,
+            VerifySpanMessageArgs {
+                request_id: 7,
+                session_id: 11,
+                prompt_token_count: 5,
+                pos_start: 8,
+                decode_step: 3,
+                checkpoint_generation: 9,
+                tokens: &[101],
+                checkpoint: false,
+            },
+        )
+        .expect("verify message");
+        let shadow = with_execution_session(message, 19).expect("execution session");
+
+        assert_eq!(shadow.request_id, 7);
+        assert_eq!(shadow.session_id, 11);
+        assert_eq!(shadow.state.seq_id, 19);
+        assert_ne!(shadow.state.flags & state_flags::EXECUTION_SESSION, 0);
+        assert_ne!(shadow.state.flags & state_flags::SKIP_VERIFY_CHECKPOINT, 0);
+    }
+
+    #[test]
+    fn copy_session_message_names_source_and_destination() {
+        let copy =
+            embedded_copy_session_message(WireActivationDType::F16, 11, 19, 32).expect("copy");
+
+        assert_eq!(copy.kind, WireMessageKind::CopySession);
+        assert_eq!(copy.request_id, 11);
+        assert_eq!(copy.session_id, 19);
+        assert_eq!(copy.token_count, 32);
+        assert!(copy.tokens.is_empty());
+        assert!(copy.activation.is_empty());
     }
 }

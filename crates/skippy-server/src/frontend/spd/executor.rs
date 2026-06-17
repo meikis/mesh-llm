@@ -3,12 +3,16 @@ use std::collections::{BTreeMap, VecDeque};
 use anyhow::{Context, Result, bail};
 use skippy_runtime::spd::{SpdRollingScheduler, SpdRollingVerifyOutcome};
 
+use crate::binary_transport::PredictionReturnOrigin;
+
 use super::{PhaseTimer, SpdInlineProbe, SpdInlineProbePhase, SpdReplayProposalSource};
 
 #[derive(Debug)]
 pub(in crate::frontend) struct SpdRollingExecutor {
     logical_stage_count: usize,
+    first_position: usize,
     scheduler: SpdRollingScheduler,
+    pending_pre_step_scheduler: Option<SpdRollingScheduler>,
     speculative_context: Vec<i32>,
     in_flight: VecDeque<SpdRollingExecutorInFlight>,
     target_tokens: BTreeMap<usize, i32>,
@@ -19,6 +23,7 @@ pub(in crate::frontend) struct SpdRollingExecutor {
 struct SpdRollingExecutorInFlight {
     position: usize,
     proposed: i32,
+    origin: PredictionReturnOrigin,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,14 +50,18 @@ pub(in crate::frontend) struct SpdRollingExecutorStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::frontend) enum SpdRollingExecutorCommit {
     Accepted {
+        completed_position: usize,
         position: usize,
         token: i32,
+        origin: Option<PredictionReturnOrigin>,
         in_flight_after: usize,
     },
     Rejected {
+        completed_position: usize,
         position: usize,
         speculated: i32,
         corrected: i32,
+        origin: Option<PredictionReturnOrigin>,
         drained_younger: usize,
     },
 }
@@ -72,7 +81,9 @@ impl SpdRollingExecutor {
             .context("SPD rolling executor requires current token")?;
         Ok(Self {
             logical_stage_count,
+            first_position,
             scheduler: SpdRollingScheduler::new(logical_stage_count, first_position, first_token)?,
+            pending_pre_step_scheduler: None,
             speculative_context: context_tokens.to_vec(),
             in_flight: VecDeque::new(),
             target_tokens: BTreeMap::new(),
@@ -92,7 +103,11 @@ impl SpdRollingExecutor {
             self.stats.launch_misses += 1;
             return Ok(None);
         }
-        let Some(rows) = self.scheduler.speculation_rows() else {
+        let launch_scheduler = self
+            .pending_pre_step_scheduler
+            .as_ref()
+            .unwrap_or(&self.scheduler);
+        let Some(rows) = launch_scheduler.speculation_rows() else {
             self.stats.launch_misses += 1;
             return Ok(None);
         };
@@ -115,7 +130,7 @@ impl SpdRollingExecutor {
             self.stats.launch_margin_rejects += 1;
             return Ok(None);
         }
-        let position = self.scheduler.next_position();
+        let position = launch_scheduler.next_position();
         Ok(Some(SpdRollingExecutorPreparedLaunch {
             position,
             proposed: proposal.token,
@@ -128,6 +143,7 @@ impl SpdRollingExecutor {
     pub(in crate::frontend) fn record_launch(
         &mut self,
         launch: &SpdRollingExecutorPreparedLaunch,
+        origin: PredictionReturnOrigin,
     ) -> Result<()> {
         if self.speculative_context.len() != launch.position {
             bail!(
@@ -138,14 +154,26 @@ impl SpdRollingExecutor {
         }
         self.scheduler
             .insert_draft_at(launch.position, launch.proposed)?;
+        if self
+            .pending_pre_step_scheduler
+            .as_ref()
+            .is_some_and(|scheduler| scheduler.next_position() == launch.position)
+        {
+            self.pending_pre_step_scheduler = None;
+        }
         self.speculative_context.push(launch.proposed);
         self.in_flight.push_back(SpdRollingExecutorInFlight {
             position: launch.position,
             proposed: launch.proposed,
+            origin,
         });
         self.stats.launches += 1;
         self.stats.max_in_flight = self.stats.max_in_flight.max(self.in_flight.len());
         Ok(())
+    }
+
+    pub(in crate::frontend) fn record_launch_miss(&mut self) {
+        self.stats.launch_misses += 1;
     }
 
     pub(in crate::frontend) fn record_target_token(&mut self, position: usize, token: i32) {
@@ -162,39 +190,49 @@ impl SpdRollingExecutor {
         let Some(target_token) = self.target_tokens.get(&target_position).copied() else {
             return Ok(None);
         };
+        let pre_step_scheduler = self.scheduler.clone();
         match self.scheduler.verify_oldest(target_token) {
             SpdRollingVerifyOutcome::NotReady => Ok(None),
             SpdRollingVerifyOutcome::Accepted {
+                completed_position,
                 target_position,
                 token,
                 ..
             } => {
-                self.pop_matching_in_flight(target_position)?;
+                self.pending_pre_step_scheduler
+                    .get_or_insert(pre_step_scheduler);
+                let accepted = self.pop_completed_in_flight(completed_position)?;
                 self.stats.accepted_oldest += 1;
                 Ok(Some(SpdRollingExecutorCommit::Accepted {
+                    completed_position,
                     position: target_position,
                     token,
+                    origin: accepted.map(|in_flight| in_flight.origin),
                     in_flight_after: self.in_flight.len(),
                 }))
             }
             SpdRollingVerifyOutcome::Rejected {
+                completed_position,
                 target_position,
                 speculated,
                 corrected,
                 ..
             } => {
-                self.pop_matching_in_flight(target_position)?;
+                let rejected = self.pop_completed_in_flight(completed_position)?;
                 let drained_younger = self.in_flight.len();
                 self.in_flight.clear();
+                self.pending_pre_step_scheduler = None;
                 self.reset_speculative_context(target_position, corrected)?;
                 self.target_tokens
                     .retain(|position, _| *position <= target_position);
                 self.stats.rejected_oldest += 1;
                 self.stats.drained_younger += drained_younger;
                 Ok(Some(SpdRollingExecutorCommit::Rejected {
+                    completed_position,
                     position: target_position,
                     speculated,
                     corrected,
+                    origin: rejected.map(|in_flight| in_flight.origin),
                     drained_younger,
                 }))
             }
@@ -213,19 +251,25 @@ impl SpdRollingExecutor {
         self.stats
     }
 
-    fn pop_matching_in_flight(&mut self, target_position: usize) -> Result<()> {
+    fn pop_completed_in_flight(
+        &mut self,
+        completed_position: usize,
+    ) -> Result<Option<SpdRollingExecutorInFlight>> {
+        if completed_position <= self.first_position {
+            return Ok(None);
+        }
         let in_flight = self
             .in_flight
             .pop_front()
             .context("SPD rolling executor has no in-flight verifier for oldest target")?;
-        if in_flight.position != target_position {
+        if in_flight.position != completed_position {
             bail!(
-                "SPD rolling executor oldest in-flight position {} does not match target {}",
+                "SPD rolling executor oldest in-flight position {} does not match completed position {}",
                 in_flight.position,
-                target_position
+                completed_position
             );
         }
-        Ok(())
+        Ok(Some(in_flight))
     }
 
     fn reset_speculative_context(&mut self, target_position: usize, corrected: i32) -> Result<()> {
@@ -261,13 +305,56 @@ mod tests {
         assert_eq!(
             executor.commit_ready_oldest().unwrap(),
             Some(SpdRollingExecutorCommit::Accepted {
+                completed_position: 1,
                 position: 2,
                 token: 21,
-                in_flight_after: 2,
+                origin: None,
+                in_flight_after: 3,
             })
         );
         assert_eq!(executor.stats().accepted_oldest, 1);
         assert_eq!(executor.stats().max_in_flight, 3);
+    }
+
+    #[test]
+    fn accepted_commit_reports_completed_verifier_origin_after_initial_window() {
+        let mut executor = SpdRollingExecutor::new(3, &[10, 20]).unwrap();
+        record_launch(&mut executor, 2, 21);
+        record_launch(&mut executor, 3, 22);
+        executor.record_target_token(2, 21);
+        assert_eq!(
+            executor.commit_ready_oldest().unwrap(),
+            Some(SpdRollingExecutorCommit::Accepted {
+                completed_position: 1,
+                position: 2,
+                token: 21,
+                origin: None,
+                in_flight_after: 2,
+            })
+        );
+        assert_eq!(
+            executor
+                .pending_pre_step_scheduler
+                .as_ref()
+                .and_then(SpdRollingScheduler::speculation_rows)
+                .map(|rows| rows.row_positions),
+            Some(vec![1, 2, 3])
+        );
+
+        record_launch(&mut executor, 4, 23);
+        assert!(executor.pending_pre_step_scheduler.is_none());
+        executor.record_target_token(3, 22);
+
+        assert_eq!(
+            executor.commit_ready_oldest().unwrap(),
+            Some(SpdRollingExecutorCommit::Accepted {
+                completed_position: 2,
+                position: 3,
+                token: 22,
+                origin: Some(origin(2)),
+                in_flight_after: 2,
+            })
+        );
     }
 
     #[test]
@@ -280,16 +367,36 @@ mod tests {
         assert_eq!(
             executor.commit_ready_oldest().unwrap(),
             Some(SpdRollingExecutorCommit::Rejected {
+                completed_position: 1,
                 position: 2,
                 speculated: 21,
                 corrected: 99,
-                drained_younger: 1,
+                origin: None,
+                drained_younger: 2,
             })
         );
         assert_eq!(executor.in_flight_len(), 0);
         assert_eq!(executor.speculative_context.as_slice(), &[10, 20, 99]);
         assert_eq!(executor.stats().rejected_oldest, 1);
-        assert_eq!(executor.stats().drained_younger, 1);
+        assert_eq!(executor.stats().drained_younger, 2);
+    }
+
+    #[test]
+    fn rejection_reset_accepts_fresh_launches() {
+        let mut executor = SpdRollingExecutor::new(3, &[10, 20]).unwrap();
+        record_launch(&mut executor, 2, 21);
+        record_launch(&mut executor, 3, 22);
+        executor.record_target_token(2, 99);
+        assert!(matches!(
+            executor.commit_ready_oldest().unwrap(),
+            Some(SpdRollingExecutorCommit::Rejected { .. })
+        ));
+
+        record_launch(&mut executor, 3, 100);
+        assert_eq!(executor.in_flight_len(), 1);
+        assert_eq!(executor.speculative_context.as_slice(), &[10, 20, 99, 100]);
+        assert_eq!(executor.stats().launches, 3);
+        assert_eq!(executor.stats().max_in_flight, 2);
     }
 
     fn record_launch(executor: &mut SpdRollingExecutor, position: usize, proposed: i32) {
@@ -306,6 +413,17 @@ mod tests {
                 None,
             ),
         };
-        executor.record_launch(&launch).unwrap();
+        executor.record_launch(&launch, origin(position)).unwrap();
+    }
+
+    fn origin(pos_start: usize) -> PredictionReturnOrigin {
+        PredictionReturnOrigin {
+            kind: skippy_protocol::binary::WireMessageKind::VerifySpan,
+            pos_start: i32::try_from(pos_start).unwrap(),
+            token_count: 1,
+            prompt_token_count: 1,
+            decode_step: i32::try_from(pos_start).unwrap(),
+            checkpoint_generation: i32::try_from(pos_start).unwrap(),
+        }
     }
 }

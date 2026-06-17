@@ -435,8 +435,17 @@ fn handle_binary_connection(
         let message_started = Instant::now();
         let session_id = binary_message_session_id(connection_session_id, &message);
         let session_key = session_id.to_string();
+        let execution_session_id =
+            binary_message_execution_session_id(connection_session_id, &message)?;
+        let execution_session_key = execution_session_id.to_string();
         if telemetry.is_debug_enabled() {
             let mut recv_attrs = binary_message_attrs(config, session_id, &message);
+            if execution_session_id != session_id {
+                recv_attrs.insert(
+                    "llama_stage.execution_session_id".to_string(),
+                    json!(execution_session_id),
+                );
+            }
             recv_attrs.insert(
                 "llama_stage.recv_start_unix_nanos".to_string(),
                 json!(recv_start_unix_nanos),
@@ -601,6 +610,18 @@ fn handle_binary_connection(
                     WireMessageKind::TrimSession => runtime
                         .trim_session(&session_key, message.token_count.max(0) as u64)
                         .context("trim binary stage session")?,
+                    WireMessageKind::CopySession => runtime
+                        .copy_session_prefix(
+                            &message.request_id.to_string(),
+                            &session_key,
+                            message.token_count.max(0) as u64,
+                        )
+                        .context("copy binary stage session")?,
+                    WireMessageKind::DropSession => {
+                        runtime
+                            .drop_session_timed(&session_key)
+                            .context("drop binary stage session")?;
+                    }
                     _ => unreachable!("session control checked above"),
                 }
             }
@@ -880,7 +901,7 @@ fn handle_binary_connection(
                     let mut runtime = runtime.lock().expect("runtime lock poisoned");
                     runtime
                         .checkpoint_session_generation(
-                            &session_key,
+                            &execution_session_key,
                             message.state.checkpoint_generation,
                         )
                         .context("checkpoint binary stage session before verify span")?;
@@ -918,13 +939,13 @@ fn handle_binary_connection(
                     proactive_eviction = Some(evict_binary_resident_prefix_for_decode(
                         &mut runtime,
                         kv,
-                        &session_key,
+                        &execution_session_key,
                         eviction_plan,
                     )?);
                 }
                 let result = run_binary_stage_message(
                     &mut runtime,
-                    &session_key,
+                    &execution_session_key,
                     &message,
                     executable_token_ids,
                     input.as_ref(),
@@ -1867,6 +1888,19 @@ fn binary_message_session_id(fallback: u64, message: &StageWireMessage) -> u64 {
         fallback
     } else {
         message.session_id
+    }
+}
+
+fn binary_message_execution_session_id(fallback: u64, message: &StageWireMessage) -> Result<u64> {
+    if message.kind == WireMessageKind::VerifySpan
+        && (message.state.flags & state_flags::EXECUTION_SESSION) != 0
+    {
+        if message.state.seq_id <= 0 {
+            bail!("verify span execution session id is invalid");
+        }
+        Ok(message.state.seq_id as u64)
+    } else {
+        Ok(binary_message_session_id(fallback, message))
     }
 }
 
@@ -3488,6 +3522,8 @@ pub(crate) fn run_binary_stage_message(
         | WireMessageKind::CheckpointSession
         | WireMessageKind::RestoreSession
         | WireMessageKind::TrimSession
+        | WireMessageKind::CopySession
+        | WireMessageKind::DropSession
         | WireMessageKind::ProbePrefill
         | WireMessageKind::RestorePrefill
         | WireMessageKind::TryRestorePrefill

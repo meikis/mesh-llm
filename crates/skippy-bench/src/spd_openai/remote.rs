@@ -329,6 +329,7 @@ fn write_stage_configs(plan: StageConfigPlan<'_>) -> Result<()> {
             || args.model_path.display().to_string(),
             ToString::to_string,
         );
+        let lane_count = stage_lane_count(args)?;
         fs::write(
             &stage.config_path,
             serde_json::to_vec_pretty(&json!({
@@ -343,6 +344,7 @@ fn write_stage_configs(plan: StageConfigPlan<'_>) -> Result<()> {
                 "layer_end": layer_end,
                 "spd_tap_return_hf_indices": plan.tap_allowlist,
                 "ctx_size": args.ctx_size,
+                "lane_count": lane_count,
                 "n_gpu_layers": args.n_gpu_layers,
                 "selected_device": selected_device,
                 "filter_tensors_on_load": true,
@@ -360,6 +362,18 @@ fn write_stage_configs(plan: StageConfigPlan<'_>) -> Result<()> {
         .with_context(|| format!("failed to write {}", stage.config_path.display()))?;
     }
     Ok(())
+}
+
+fn stage_lane_count(args: &SpdOpenAiSmokeArgs) -> Result<u32> {
+    let per_generation = if args.spd_rolling_executor {
+        args.speculative_window.saturating_add(2).max(4)
+    } else {
+        4
+    };
+    let lane_count = per_generation
+        .checked_mul(args.openai_generation_concurrency.max(1))
+        .context("SPD OpenAI smoke lane count overflow")?;
+    u32::try_from(lane_count).context("SPD OpenAI smoke lane count exceeds u32")
 }
 
 fn normalized_stage_hosts(hosts: &[String]) -> Result<Vec<String>> {

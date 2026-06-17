@@ -1,6 +1,6 @@
 pub const ABI_VERSION_MAJOR: u32 = 0;
 pub const ABI_VERSION_MINOR: u32 = 1;
-pub const ABI_VERSION_PATCH: u32 = 26;
+pub const ABI_VERSION_PATCH: u32 = 27;
 pub const FEATURE_BACKEND_DEVICES: u64 = 1 << 23;
 pub const FEATURE_RUNTIME_EVENTS: u64 = 1 << 24;
 
@@ -587,6 +587,7 @@ mod dynamic {
         skippy_session_reset(session: *mut Session, out_error: *mut *mut Error) -> Status;
         skippy_checkpoint_session(session: *mut Session, out_token_count: *mut u64, out_error: *mut *mut Error) -> Status;
         skippy_restore_session_checkpoint(session: *mut Session, token_count: u64, out_error: *mut *mut Error) -> Status;
+        skippy_session_copy_prefix(destination: *mut Session, source: *mut Session, token_count: u64, out_error: *mut *mut Error) -> Status;
         skippy_session_free(session: *mut Session, out_error: *mut *mut Error) -> Status;
         skippy_prefill_chunk(session: *mut Session, token_ids: *const i32, token_count: usize, input_activations: *const c_void, input_activation_bytes: usize, output_activations: *mut c_void, output_activation_capacity: usize, out_output_activation_bytes: *mut usize, out_error: *mut *mut Error) -> Status;
         skippy_decode_step(session: *mut Session, token_id: i32, input_activation: *const c_void, input_activation_bytes: usize, output_activation: *mut c_void, output_activation_capacity: usize, out_output_activation_bytes: *mut usize, out_predicted_token: *mut i32, out_error: *mut *mut Error) -> Status;
@@ -829,6 +830,13 @@ unsafe extern "C" {
 
     pub fn skippy_restore_session_checkpoint(
         session: *mut Session,
+        token_count: u64,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_session_copy_prefix(
+        destination: *mut Session,
+        source: *mut Session,
         token_count: u64,
         out_error: *mut *mut Error,
     ) -> Status;

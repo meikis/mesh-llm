@@ -64,6 +64,8 @@ pub enum WireMessageKind {
     TryRestorePrefillDecode = 18,
     TrimSession = 19,
     PredictionReturnOpen = 20,
+    CopySession = 21,
+    DropSession = 22,
 }
 
 impl WireMessageKind {
@@ -94,7 +96,11 @@ impl WireMessageKind {
     pub fn is_session_control(self) -> bool {
         matches!(
             self,
-            Self::CheckpointSession | Self::RestoreSession | Self::TrimSession
+            Self::CheckpointSession
+                | Self::RestoreSession
+                | Self::TrimSession
+                | Self::CopySession
+                | Self::DropSession
         )
     }
 
@@ -145,6 +151,8 @@ impl TryFrom<i32> for WireMessageKind {
             18 => Ok(Self::TryRestorePrefillDecode),
             19 => Ok(Self::TrimSession),
             20 => Ok(Self::PredictionReturnOpen),
+            21 => Ok(Self::CopySession),
+            22 => Ok(Self::DropSession),
             _ => Err(invalid_data("unknown stage message kind")),
         }
     }
@@ -193,6 +201,7 @@ pub mod state_flags {
     pub const GEMMA3N_ALTUP_SIDEBAND: i32 = 1 << 7;
     pub const SPD_TAP_RETURN: i32 = 1 << 8;
     pub const PREDICTION_RETURN_ORIGIN: i32 = 1 << 9;
+    pub const EXECUTION_SESSION: i32 = 1 << 10;
 }
 
 pub const ACTIVATION_FLAG_RWKV7_V_FIRST: u64 = 1 << 0;

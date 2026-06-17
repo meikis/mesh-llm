@@ -142,6 +142,28 @@ fn rolling_row_roles_cap_fused_rows_when_evicted_prefix_is_present() {
 }
 
 #[test]
+fn rolling_executor_launch_waits_for_deepest_cycle_rows() {
+    let topology = test_spd_topology(true);
+    let shallow_rows = SpdRollingSpeculationRows {
+        evicted_prefix_position: Some(28),
+        row_positions: vec![28, 28, 29, 30, 31],
+        row_i_stages: vec![4, 3, 1, 1, 0],
+        newest_position: 31,
+        next_draft_position: 32,
+    };
+    let ready_rows = SpdRollingSpeculationRows {
+        row_i_stages: vec![4, 3, 3, 3, 0],
+        ..shallow_rows.clone()
+    };
+
+    assert!(!rolling_rows_ready_for_executor_launch(&topology, &shallow_rows).unwrap());
+    assert!(rolling_rows_ready_for_executor_launch(&topology, &ready_rows).unwrap());
+    assert!(
+        rolling_rows_ready_for_executor_launch(&test_spd_topology(false), &shallow_rows).unwrap()
+    );
+}
+
+#[test]
 fn rolling_state_verifies_contiguous_live_proposals() {
     let mut state = SpdRollingObserver::new(3);
 

@@ -513,6 +513,8 @@ mod tests {
             WireMessageKind::CheckpointSession,
             WireMessageKind::RestoreSession,
             WireMessageKind::TrimSession,
+            WireMessageKind::CopySession,
+            WireMessageKind::DropSession,
         ] {
             let message = StageWireMessage {
                 kind,

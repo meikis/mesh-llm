@@ -30,6 +30,8 @@ pub enum CommandKind {
     SpdLiveTapParity(SpdLiveTapParityArgs),
     #[command(name = "spd-openai-smoke")]
     SpdOpenAiSmoke(SpdOpenAiSmokeArgs),
+    #[command(name = "spd-openai-check")]
+    SpdOpenAiCheck(SpdOpenAiCheckArgs),
     #[command(name = "focused-runtime")]
     FocusedRuntime(FocusedRuntimeArgs),
     Run(RunArgs),
@@ -128,6 +130,32 @@ pub struct SpdLiveTapParityArgs {
     pub top_k: usize,
     #[arg(long, default_value_t = 1)]
     pub verify_steps: usize,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+pub struct SpdOpenAiCheckArgs {
+    #[arg(long)]
+    pub report: PathBuf,
+    #[arg(long, default_value_t = 24)]
+    pub min_accepted: u64,
+    #[arg(long, default_value_t = 4)]
+    pub expected_logical_stage_count: u64,
+    #[arg(long, default_value_t = 4)]
+    pub min_max_inflight: u64,
+    #[arg(long, default_value_t = 0)]
+    pub max_rejected_oldest: u64,
+    #[arg(long, default_value_t = 0)]
+    pub max_drained_younger: u64,
+    #[arg(long, default_value_t = 0)]
+    pub max_rolling_trace_missing_proposals: u64,
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub require_content_match: bool,
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub require_rolling_executor: bool,
+    #[arg(long)]
+    pub max_spd_decode_ms: Option<f64>,
     #[arg(long)]
     pub output: Option<PathBuf>,
 }
@@ -990,5 +1018,45 @@ mod tests {
         };
 
         assert!(args.preflight_only);
+    }
+
+    #[test]
+    fn parses_spd_openai_check() {
+        let cli = Cli::try_parse_from([
+            "skippy-bench",
+            "spd-openai-check",
+            "--report",
+            "report.json",
+            "--min-accepted",
+            "24",
+            "--expected-logical-stage-count",
+            "4",
+            "--min-max-inflight",
+            "4",
+            "--max-rejected-oldest",
+            "1",
+            "--max-drained-younger",
+            "3",
+            "--max-rolling-trace-missing-proposals",
+            "9",
+            "--max-spd-decode-ms",
+            "1500",
+        ])
+        .unwrap();
+
+        let CommandKind::SpdOpenAiCheck(args) = cli.command else {
+            panic!("expected spd-openai-check subcommand");
+        };
+
+        assert_eq!(args.report, PathBuf::from("report.json"));
+        assert_eq!(args.min_accepted, 24);
+        assert_eq!(args.expected_logical_stage_count, 4);
+        assert_eq!(args.min_max_inflight, 4);
+        assert_eq!(args.max_rejected_oldest, 1);
+        assert_eq!(args.max_drained_younger, 3);
+        assert_eq!(args.max_rolling_trace_missing_proposals, 9);
+        assert_eq!(args.max_spd_decode_ms, Some(1500.0));
+        assert!(args.require_content_match);
+        assert!(args.require_rolling_executor);
     }
 }

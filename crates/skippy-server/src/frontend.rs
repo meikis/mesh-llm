@@ -1848,11 +1848,19 @@ struct SpdOptimisticDecode {
 struct SpdOptimisticDecodeStart<'a> {
     downstream: &'a mut TcpStream,
     session_key: &'a str,
+    execution_session: Option<SpdExecutionSession<'a>>,
     pos_start: usize,
     decode_step: usize,
     chain_depth: usize,
     chain_depth_limit: usize,
     probe: &'a SpdInlineProbe,
+    checkpoint: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SpdExecutionSession<'a> {
+    session_id: u64,
+    session_key: &'a str,
 }
 
 struct EmbeddedFusedFirstDecode {
@@ -1865,6 +1873,7 @@ struct EmbeddedFusedFirstDecode {
     message_kind: &'static str,
 }
 
+#[derive(Clone, Copy, Default)]
 struct EmbeddedSessionControl {
     elapsed_ms: f64,
     local_ms: f64,

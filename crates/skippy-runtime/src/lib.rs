@@ -2556,6 +2556,16 @@ impl StageSession {
         Ok(())
     }
 
+    pub fn copy_prefix_from(&mut self, source: &mut StageSession, token_count: u64) -> Result<()> {
+        let mut error = ptr::null_mut();
+        let status = unsafe {
+            skippy_ffi::skippy_session_copy_prefix(self.raw, source.raw, token_count, &mut error)
+        };
+        ensure_ok(status, error)?;
+        self.token_count = token_count;
+        Ok(())
+    }
+
     pub fn reset(&mut self) -> Result<()> {
         let mut error = ptr::null_mut();
         let status = unsafe { skippy_ffi::skippy_session_reset(self.raw, &mut error) };

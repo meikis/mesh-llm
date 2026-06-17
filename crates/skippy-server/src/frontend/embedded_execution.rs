@@ -235,7 +235,7 @@ impl StageOpenAiBackend {
         }
         let timer = PhaseTimer::start();
         let tokens = [proposed];
-        let message = embedded_verify_message(
+        let mut message = embedded_verify_message(
             request.wire_dtype,
             VerifySpanMessageArgs {
                 request_id: request.ids.request_id,
@@ -245,14 +245,20 @@ impl StageOpenAiBackend {
                 decode_step: args.decode_step,
                 checkpoint_generation: checkpoint_generation_from_position(args.pos_start)?,
                 tokens: &tokens,
-                checkpoint: true,
+                checkpoint: args.checkpoint,
             },
         )?;
+        let execution_session_key = if let Some(execution_session) = args.execution_session {
+            message = with_execution_session(message, execution_session.session_id)?;
+            execution_session.session_key
+        } else {
+            args.session_key
+        };
         let origin = PredictionReturnOrigin::from_message(&message);
         let execution = self.start_embedded_stage_message(
             request,
             args.downstream,
-            args.session_key,
+            execution_session_key,
             &message,
             &tokens,
             request_spd_taps,
@@ -270,6 +276,107 @@ impl StageOpenAiBackend {
             timer,
             execution,
         }))
+    }
+
+    pub(super) fn copy_embedded_stage_session(
+        &self,
+        request: &EmbeddedStageZeroGeneration<'_>,
+        downstream: &mut TcpStream,
+        source_session_id: u64,
+        target_session_id: u64,
+        token_count: u64,
+    ) -> OpenAiResult<EmbeddedSessionControl> {
+        let timer = PhaseTimer::start();
+        let source_key = source_session_id.to_string();
+        let target_key = target_session_id.to_string();
+        let local_timer = PhaseTimer::start();
+        {
+            let mut runtime = self
+                .runtime
+                .lock()
+                .map_err(|_| OpenAiError::backend("runtime lock poisoned"))?;
+            runtime
+                .copy_session_prefix(&source_key, &target_key, token_count)
+                .map_err(openai_backend_error)?;
+        }
+        let local_ms = local_timer.elapsed_ms();
+        let message = embedded_copy_session_message(
+            request.wire_dtype,
+            source_session_id,
+            target_session_id,
+            token_count,
+        )?;
+        let write_timer = PhaseTimer::start();
+        write_stage_message_conditioned(
+            &mut *downstream,
+            &message,
+            request.wire_dtype,
+            request.downstream_wire_condition,
+        )
+        .map_err(openai_io_error)?;
+        let downstream_write_ms = write_timer.elapsed_ms();
+        let wait_timer = PhaseTimer::start();
+        let reply = recv_reply(&mut *downstream).map_err(openai_io_error)?;
+        let downstream_wait_ms = wait_timer.elapsed_ms();
+        if reply.kind != WireReplyKind::Ack {
+            return Err(OpenAiError::backend(format!(
+                "session copy expected ACK from downstream, got {:?}",
+                reply.kind
+            )));
+        }
+        Ok(EmbeddedSessionControl {
+            elapsed_ms: timer.elapsed_ms(),
+            local_ms,
+            downstream_write_ms,
+            downstream_wait_ms,
+        })
+    }
+
+    pub(super) fn drop_embedded_stage_session(
+        &self,
+        request: &EmbeddedStageZeroGeneration<'_>,
+        downstream: &mut TcpStream,
+        request_id: u64,
+        session_id: u64,
+    ) -> OpenAiResult<EmbeddedSessionControl> {
+        let timer = PhaseTimer::start();
+        let session_key = session_id.to_string();
+        let local_timer = PhaseTimer::start();
+        {
+            let mut runtime = self
+                .runtime
+                .lock()
+                .map_err(|_| OpenAiError::backend("runtime lock poisoned"))?;
+            runtime
+                .drop_session_timed(&session_key)
+                .map_err(openai_backend_error)?;
+        }
+        let local_ms = local_timer.elapsed_ms();
+        let message = embedded_drop_session_message(request.wire_dtype, request_id, session_id);
+        let write_timer = PhaseTimer::start();
+        write_stage_message_conditioned(
+            &mut *downstream,
+            &message,
+            request.wire_dtype,
+            request.downstream_wire_condition,
+        )
+        .map_err(openai_io_error)?;
+        let downstream_write_ms = write_timer.elapsed_ms();
+        let wait_timer = PhaseTimer::start();
+        let reply = recv_reply(&mut *downstream).map_err(openai_io_error)?;
+        let downstream_wait_ms = wait_timer.elapsed_ms();
+        if reply.kind != WireReplyKind::Ack {
+            return Err(OpenAiError::backend(format!(
+                "session drop expected ACK from downstream, got {:?}",
+                reply.kind
+            )));
+        }
+        Ok(EmbeddedSessionControl {
+            elapsed_ms: timer.elapsed_ms(),
+            local_ms,
+            downstream_write_ms,
+            downstream_wait_ms,
+        })
     }
 
     pub(super) fn restore_embedded_stage_session(

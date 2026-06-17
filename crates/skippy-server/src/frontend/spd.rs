@@ -412,6 +412,14 @@ impl SpdReplayProposalSource {
         rows: &SpdRollingSpeculationRows,
     ) -> Result<Option<SpdInlineProposal>> {
         let rows = self.resolve_rolling_rows(rows)?;
+        self.propose_one_from_resolved_rolling_rows(context_tokens, &rows)
+    }
+
+    fn propose_one_from_resolved_rolling_rows(
+        &self,
+        context_tokens: &[i32],
+        rows: &SpdRollingSpeculationRows,
+    ) -> Result<Option<SpdInlineProposal>> {
         if rows.row_positions.is_empty()
             || rows.row_positions.len() != rows.row_i_stages.len()
             || rows
@@ -452,7 +460,7 @@ impl SpdReplayProposalSource {
             &row_positions,
             &row_stage_ids,
             &row_hf_indices,
-            Some(&rows),
+            Some(rows),
         )
     }
 
@@ -701,7 +709,12 @@ impl SpdReplayProposalSource {
         rows: &SpdRollingSpeculationRows,
     ) -> Result<Option<SpdInlineProposal>> {
         let resolved_rows = self.resolve_rolling_rows(rows)?;
-        let proposal = self.propose_one_from_rolling_rows(context_tokens, &resolved_rows)?;
+        if !rolling_rows_ready_for_executor_launch(&self.manifest.topology, &resolved_rows)? {
+            self.record_inline_probe_attempt(None);
+            return Ok(None);
+        }
+        let proposal =
+            self.propose_one_from_resolved_rolling_rows(context_tokens, &resolved_rows)?;
         self.record_inline_probe_attempt(proposal.as_ref());
         Ok(proposal)
     }
@@ -1232,6 +1245,16 @@ fn tap_positions_before(tap: &StageReplySpdTap, accepted_context_len: usize) -> 
         })
 }
 
+fn should_discard_stale_spd_verifier_return(
+    expected_origin: Option<PredictionReturnOrigin>,
+    expected: WireReplyKind,
+    actual: WireReplyKind,
+) -> bool {
+    expected_origin.is_none()
+        && expected == WireReplyKind::PredictedToken
+        && actual == WireReplyKind::PredictedTokens
+}
+
 impl StageOpenAiBackend {
     pub(super) fn mark_spd_tap_return(
         &self,
@@ -1317,6 +1340,9 @@ impl StageOpenAiBackend {
                 let trigger_hf_index = reply.spd_tap.as_ref().map(|tap| tap.hf_index);
                 self.record_spd_direct_return_tap(request, &reply, item.origin);
                 on_spd_tap(self, trigger_hf_index)?;
+                continue;
+            }
+            if should_discard_stale_spd_verifier_return(expected_origin, expected, reply.kind) {
                 continue;
             }
             if reply.kind != expected {
@@ -1416,6 +1442,13 @@ impl StageOpenAiBackend {
                         );
                     }
                 }
+                continue;
+            }
+            if should_discard_stale_spd_verifier_return(
+                wait.expected_origin,
+                wait.expected,
+                reply.kind,
+            ) {
                 continue;
             }
             if reply.kind != wait.expected {
@@ -2128,6 +2161,43 @@ fn resolve_rolling_row_stage_roles(
             )
         })
         .collect()
+}
+
+fn rolling_rows_ready_for_executor_launch(
+    topology: &skippy_runtime::spd::SpdHeadTopology,
+    rows: &SpdRollingSpeculationRows,
+) -> Result<bool> {
+    if !topology.trained_with_use_deepest {
+        return Ok(true);
+    }
+    let stage_count =
+        usize::try_from(topology.num_stages).context("SPD num_stages exceeds usize")?;
+    if rows.row_positions.len() != rows.row_i_stages.len() {
+        return Ok(false);
+    }
+    let deepest_fused = if rows.evicted_prefix_position.is_some() {
+        stage_count.saturating_sub(1).max(1)
+    } else {
+        stage_count
+    };
+    for (index, (position, stage_id)) in rows
+        .row_positions
+        .iter()
+        .copied()
+        .zip(rows.row_i_stages.iter().copied())
+        .enumerate()
+    {
+        if position == rows.newest_position && stage_id == 0 {
+            continue;
+        }
+        if index == 0 && rows.evicted_prefix_position == Some(position) && stage_id == stage_count {
+            continue;
+        }
+        if stage_id < deepest_fused {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn resolve_rolling_row_stage_role(

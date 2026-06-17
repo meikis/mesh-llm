@@ -343,6 +343,39 @@ impl RuntimeState {
         Ok(())
     }
 
+    pub fn copy_session_prefix(
+        &mut self,
+        source_session_id: &str,
+        target_session_id: &str,
+        token_count: u64,
+    ) -> Result<()> {
+        if source_session_id == target_session_id {
+            return self.trim_session(target_session_id, token_count);
+        }
+
+        self.session(target_session_id)?;
+        let mut target_lane = self
+            .sessions
+            .remove(target_session_id)
+            .expect("target session allocated above");
+        let copy_result = match self.sessions.get_mut(source_session_id) {
+            Some(source_lane) => target_lane
+                .session
+                .copy_prefix_from(&mut source_lane.session, token_count),
+            None => Err(anyhow::anyhow!("session {source_session_id} is not active")),
+        };
+        target_lane.resident_prefix = None;
+        self.sessions
+            .insert(target_session_id.to_string(), target_lane);
+        copy_result?;
+        self.session_token_counts
+            .insert(target_session_id.to_string(), token_count);
+        self.session_checkpoints
+            .retain(|key, _| key.session_id != target_session_id);
+        self.session_resident_prefixes.remove(target_session_id);
+        Ok(())
+    }
+
     fn session(&mut self, session_id: &str) -> Result<&mut StageSession> {
         if !self.sessions.contains_key(session_id) {
             let lane_session = self.take_idle_session().map(Ok).unwrap_or_else(|| {

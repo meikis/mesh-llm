@@ -58,6 +58,7 @@ pub(super) struct SpdReplayOpenArgs<'a> {
 pub(super) struct SpdReplayProposalState {
     pub(super) source: Arc<Mutex<SpdReplayProposalSource>>,
     taps: Arc<Mutex<SpdInlineTapCache>>,
+    pending_taps: Arc<Mutex<SpdInlineTapCache>>,
     tap_lifecycle: Arc<Mutex<SpdInlineTapLifecycle>>,
 }
 
@@ -80,6 +81,7 @@ pub(super) struct SpdReplayProposalSource {
     live_taps: SpdLiveTapRunner,
     h0_embeddings: Option<GgufTokenEmbeddingTable>,
     inline_taps: Arc<Mutex<SpdInlineTapCache>>,
+    pending_taps: Arc<Mutex<SpdInlineTapCache>>,
     tap_lifecycle: Arc<Mutex<SpdInlineTapLifecycle>>,
     logical_stage_count: usize,
     rolling: SpdRollingObserver,
@@ -359,6 +361,10 @@ impl SpdReplayProposalSource {
             hidden_size,
             required_hf_indices.clone(),
         )));
+        let pending_taps = Arc::new(Mutex::new(SpdInlineTapCache::new(
+            hidden_size,
+            required_hf_indices.clone(),
+        )));
         let tap_lifecycle = Arc::new(Mutex::new(SpdInlineTapLifecycle::default()));
         Ok(Self {
             manifest_path: manifest_path.to_path_buf(),
@@ -379,6 +385,7 @@ impl SpdReplayProposalSource {
             live_taps,
             h0_embeddings,
             inline_taps,
+            pending_taps,
             tap_lifecycle,
             logical_stage_count,
             rolling: SpdRollingObserver::new(logical_stage_count),
@@ -754,9 +761,7 @@ impl SpdReplayProposalSource {
         let required_hf_indices = required_spd_hf_indices(&row_hf_indices);
         let required_inline_hf_indices = inline_required_hf_indices(&required_hf_indices);
         let missing_taps = self
-            .inline_taps
-            .lock()
-            .map_err(|_| anyhow::anyhow!("SPD inline tap cache lock poisoned"))?
+            .inline_taps_for_proposal()?
             .missing_required_rows_for_row_hf_indices(
                 &row_positions,
                 &row_hf_indices,
@@ -788,6 +793,7 @@ impl SpdReplayProposalSource {
 
     pub(super) fn advance_to_accepted_context(&mut self, context_tokens: &[i32]) -> Result<()> {
         if self.context_tokens.starts_with(context_tokens) {
+            self.promote_pending_taps_before(context_tokens.len())?;
             self.tap_lifecycle
                 .lock()
                 .map_err(|_| anyhow::anyhow!("SPD tap lifecycle lock poisoned"))?
@@ -800,10 +806,13 @@ impl SpdReplayProposalSource {
         self.context_tokens = context_tokens.to_vec();
         self.rolling.advance_to_accepted_context(context_tokens);
         if !accepted_extension {
+            self.clear_pending_taps()?;
             self.inline_taps
                 .lock()
                 .map_err(|_| anyhow::anyhow!("SPD inline tap cache lock poisoned"))?
                 .retain_positions_before(retained_prefix_len);
+        } else {
+            self.promote_pending_taps_before(context_tokens.len())?;
         }
         self.head_cache
             .lock()
@@ -823,6 +832,7 @@ impl SpdReplayProposalSource {
             retained_tap_prefix_len_for_context_update(&self.context_tokens, context_tokens, false);
         self.context_tokens = context_tokens.to_vec();
         self.rolling.advance_to_accepted_context(context_tokens);
+        self.clear_pending_taps()?;
         self.inline_taps
             .lock()
             .map_err(|_| anyhow::anyhow!("SPD inline tap cache lock poisoned"))?
@@ -946,10 +956,7 @@ impl SpdReplayProposalSource {
     ) -> Result<SpdRollingSpeculationRows> {
         let mut resolved = rows.clone();
         resolved.row_i_stages = {
-            let inline_taps = self
-                .inline_taps
-                .lock()
-                .map_err(|_| anyhow::anyhow!("SPD inline tap cache lock poisoned"))?;
+            let inline_taps = self.inline_taps_for_proposal()?;
             resolve_rolling_row_stage_roles(&self.manifest.topology, rows, &inline_taps)?
         };
         Ok(resolved)
@@ -960,10 +967,7 @@ impl SpdReplayProposalSource {
         row_positions: &[i64],
         required_hf_indices: &[u32],
     ) -> Result<Option<BTreeMap<u32, ActivationFrame>>> {
-        let inline_taps = self
-            .inline_taps
-            .lock()
-            .map_err(|_| anyhow::anyhow!("SPD inline tap cache lock poisoned"))?;
+        let inline_taps = self.inline_taps_for_proposal()?;
         inline_taps.complete_frames(
             row_positions,
             &non_h0_required_hf_indices(required_hf_indices),
@@ -977,10 +981,7 @@ impl SpdReplayProposalSource {
         row_hf_indices: &[Vec<u32>],
         required_hf_indices: &[u32],
     ) -> Result<Option<BTreeMap<u32, ActivationFrame>>> {
-        let inline_taps = self
-            .inline_taps
-            .lock()
-            .map_err(|_| anyhow::anyhow!("SPD inline tap cache lock poisoned"))?;
+        let inline_taps = self.inline_taps_for_proposal()?;
         inline_taps.complete_frames_for_row_hf_indices(
             row_positions,
             row_hf_indices,
@@ -996,10 +997,7 @@ impl SpdReplayProposalSource {
         row_hf_indices: &[Vec<u32>],
         required_hf_indices: &[u32],
     ) -> Result<()> {
-        let mut inline_taps = self
-            .inline_taps
-            .lock()
-            .map_err(|_| anyhow::anyhow!("SPD inline tap cache lock poisoned"))?;
+        let mut inline_taps = self.inline_taps_for_proposal()?;
         inline_taps.overlay_complete_frames_for_row_hf_indices(
             taps,
             row_positions,
@@ -1007,6 +1005,40 @@ impl SpdReplayProposalSource {
             required_hf_indices,
             self.hidden_size,
         )
+    }
+
+    fn inline_taps_for_proposal(&self) -> Result<SpdInlineTapCache> {
+        let mut inline_taps = self
+            .inline_taps
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SPD inline tap cache lock poisoned"))?
+            .clone();
+        let pending_taps = self
+            .pending_taps
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SPD pending tap cache lock poisoned"))?;
+        inline_taps.overlay_from(&pending_taps);
+        Ok(inline_taps)
+    }
+
+    fn promote_pending_taps_before(&self, context_len: usize) -> Result<usize> {
+        let mut inline_taps = self
+            .inline_taps
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SPD inline tap cache lock poisoned"))?;
+        let mut pending_taps = self
+            .pending_taps
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SPD pending tap cache lock poisoned"))?;
+        Ok(pending_taps.drain_positions_before_into(context_len, &mut inline_taps))
+    }
+
+    fn clear_pending_taps(&self) -> Result<()> {
+        self.pending_taps
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SPD pending tap cache lock poisoned"))?
+            .retain_positions_before(0);
+        Ok(())
     }
 }
 
@@ -1030,6 +1062,7 @@ impl SpeculativeProposalSource for SpdReplayProposalSource {
             .lock()
             .map_err(|_| anyhow::anyhow!("SPD inline tap cache lock poisoned"))?
             .retain_positions_before(retained_prefix_len);
+        self.clear_pending_taps()?;
         self.head_cache
             .lock()
             .map_err(|_| anyhow::anyhow!("SPD Qwen head cache lock poisoned"))?
@@ -1128,10 +1161,12 @@ pub(super) fn open_spd_replay_source(
         (Some(_), Some(_)) => {
             let source = SpdReplayProposalSource::open(args)?;
             let taps = source.inline_taps.clone();
+            let pending_taps = source.pending_taps.clone();
             let tap_lifecycle = source.tap_lifecycle.clone();
             Ok(Some(SpdReplayProposalState {
                 source: Arc::new(Mutex::new(source)),
                 taps,
+                pending_taps,
                 tap_lifecycle,
             }))
         }
@@ -1148,14 +1183,31 @@ impl SpdReplayProposalState {
         Ok(())
     }
 
-    fn record_returned_tap(&self, tap: &StageReplySpdTap) -> Result<SpdTapRecordOutcome> {
-        let decision = self
+    fn record_returned_tap(
+        &self,
+        tap: &StageReplySpdTap,
+        origin: Option<PredictionReturnOrigin>,
+    ) -> Result<SpdTapRecordOutcome> {
+        let lifecycle = self
             .tap_lifecycle
             .lock()
-            .map_err(|_| anyhow::anyhow!("SPD tap lifecycle lock poisoned"))?
-            .record_decision(tap)?;
+            .map_err(|_| anyhow::anyhow!("SPD tap lifecycle lock poisoned"))?;
+        let decision = lifecycle.record_decision(tap)?;
+        let accepted_context_len = lifecycle.accepted_context_len();
+        drop(lifecycle);
         if let Some(ignored) = decision.ignored {
             return Ok(SpdTapRecordOutcome::Ignored(ignored));
+        }
+        if !tap_positions_before(tap, accepted_context_len)? {
+            let record = self
+                .pending_taps
+                .lock()
+                .map_err(|_| anyhow::anyhow!("SPD pending tap cache lock poisoned"))?
+                .record_returned_tap(tap)?;
+            return Ok(SpdTapRecordOutcome::Pending(cache::SpdPendingTapRecord {
+                record,
+                origin,
+            }));
         }
         let record = self
             .taps
@@ -1164,6 +1216,20 @@ impl SpdReplayProposalState {
             .record_returned_tap(tap)?;
         Ok(SpdTapRecordOutcome::Recorded(record))
     }
+}
+
+fn tap_positions_before(tap: &StageReplySpdTap, accepted_context_len: usize) -> Result<bool> {
+    tap.positions
+        .iter()
+        .copied()
+        .map(|position| {
+            let position = usize::try_from(position)
+                .with_context(|| format!("negative SPD returned tap position {position}"))?;
+            Ok(position < accepted_context_len)
+        })
+        .try_fold(true, |all_before, before| {
+            before.map(|before| all_before && before)
+        })
 }
 
 impl StageOpenAiBackend {
@@ -1249,7 +1315,7 @@ impl StageOpenAiBackend {
             let reply = item.reply;
             if reply.kind == WireReplyKind::SpdTap {
                 let trigger_hf_index = reply.spd_tap.as_ref().map(|tap| tap.hf_index);
-                self.record_spd_direct_return_tap(request, &reply);
+                self.record_spd_direct_return_tap(request, &reply, item.origin);
                 on_spd_tap(self, trigger_hf_index)?;
                 continue;
             }
@@ -1316,7 +1382,7 @@ impl StageOpenAiBackend {
             let reply = item.reply;
             if reply.kind == WireReplyKind::SpdTap {
                 let trigger_hf_index = reply.spd_tap.as_ref().map(|tap| tap.hf_index);
-                self.record_spd_direct_return_tap(request, &reply);
+                self.record_spd_direct_return_tap(request, &reply, item.origin);
                 if pre_target_probe.is_none()
                     && let Some(spd) = wait.spd_source.as_mut()
                 {
@@ -1643,12 +1709,13 @@ impl StageOpenAiBackend {
         &self,
         request: &EmbeddedStageZeroGeneration<'_>,
         reply: &StageReply,
+        origin: Option<PredictionReturnOrigin>,
     ) {
         let Some(tap) = reply.spd_tap.as_ref() else {
             self.emit_missing_spd_tap_payload(request);
             return;
         };
-        self.record_spd_direct_tap_payload(request, tap);
+        self.record_spd_direct_tap_payload(request, tap, origin);
     }
 
     fn emit_missing_spd_tap_payload(&self, request: &EmbeddedStageZeroGeneration<'_>) {
@@ -1665,11 +1732,12 @@ impl StageOpenAiBackend {
         &self,
         request: &EmbeddedStageZeroGeneration<'_>,
         tap: &StageReplySpdTap,
+        origin: Option<PredictionReturnOrigin>,
     ) {
         let Some(spd) = request.spd.as_ref() else {
             return;
         };
-        let outcome = spd.record_returned_tap(tap);
+        let outcome = spd.record_returned_tap(tap, origin);
         match outcome {
             Ok(SpdTapRecordOutcome::Recorded(record)) => {
                 let mut attrs = self.openai_attrs(request.ids);
@@ -1703,6 +1771,57 @@ impl StageOpenAiBackend {
                 );
                 self.telemetry
                     .emit_debug("stage.openai_spd_tap_record", attrs);
+            }
+            Ok(SpdTapRecordOutcome::Pending(pending)) => {
+                let mut attrs = self.openai_attrs(request.ids);
+                attrs.insert(
+                    "llama_stage.spd_inline_tap_hf_index".to_string(),
+                    json!(pending.record.hf_index),
+                );
+                attrs.insert(
+                    "llama_stage.spd_inline_tap_rows_recorded".to_string(),
+                    json!(pending.record.rows_recorded),
+                );
+                attrs.insert(
+                    "llama_stage.spd_inline_tap_positions".to_string(),
+                    json!(&pending.record.positions),
+                );
+                attrs.insert(
+                    "llama_stage.spd_inline_tap_cached_rows".to_string(),
+                    json!(pending.record.cached_rows),
+                );
+                attrs.insert(
+                    "llama_stage.spd_inline_tap_payload_bytes".to_string(),
+                    json!(pending.record.payload_bytes),
+                );
+                attrs.insert(
+                    "llama_stage.spd_inline_tap_required".to_string(),
+                    json!(pending.record.required),
+                );
+                attrs.insert(
+                    "llama_stage.spd_inline_tap_producer_stage_index".to_string(),
+                    json!(tap.producer_stage_index),
+                );
+                if let Some(origin) = pending.origin {
+                    attrs.insert(
+                        "llama_stage.spd_inline_tap_origin_kind".to_string(),
+                        json!(format!("{:?}", origin.kind)),
+                    );
+                    attrs.insert(
+                        "llama_stage.spd_inline_tap_origin_pos_start".to_string(),
+                        json!(origin.pos_start),
+                    );
+                    attrs.insert(
+                        "llama_stage.spd_inline_tap_origin_decode_step".to_string(),
+                        json!(origin.decode_step),
+                    );
+                    attrs.insert(
+                        "llama_stage.spd_inline_tap_origin_checkpoint_generation".to_string(),
+                        json!(origin.checkpoint_generation),
+                    );
+                }
+                self.telemetry
+                    .emit_debug("stage.openai_spd_tap_pending", attrs);
             }
             Ok(SpdTapRecordOutcome::Ignored(ignored)) => {
                 let mut attrs = self.openai_attrs(request.ids);

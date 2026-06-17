@@ -258,9 +258,12 @@ impl StageOpenAiBackend {
             request_spd_taps,
         )?;
         Ok(Some(SpdOptimisticDecode {
+            position: args.pos_start,
             proposed,
             proposed_logit: args.probe.proposed_logit,
             proposed_logit_margin: args.probe.proposed_logit_margin,
+            inline_probe: args.probe.clone(),
+            inline_probe_emitted: false,
             requested_spd_taps: request_spd_taps,
             chain_depth: args.chain_depth,
             origin,

@@ -10,6 +10,7 @@ pub(super) struct SpdInlineTapRecord {
     pub(super) required: bool,
 }
 
+#[derive(Clone)]
 pub(super) struct SpdInlineTapCache {
     hidden_size: usize,
     required_hf_indices: BTreeSet<u32>,
@@ -19,7 +20,14 @@ pub(super) struct SpdInlineTapCache {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum SpdTapRecordOutcome {
     Recorded(SpdInlineTapRecord),
+    Pending(SpdPendingTapRecord),
     Ignored(SpdIgnoredTap),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SpdPendingTapRecord {
+    pub(super) record: SpdInlineTapRecord,
+    pub(super) origin: Option<PredictionReturnOrigin>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +88,10 @@ impl SpdInlineTapLifecycle {
         }
         Ok(SpdTapRecordDecision { ignored: None })
     }
+
+    pub(super) fn accepted_context_len(&self) -> usize {
+        self.accepted_context_len
+    }
 }
 
 pub(super) struct SpdTapRecordDecision {
@@ -112,6 +124,48 @@ impl SpdInlineTapCache {
             });
         }
         self.frames.retain(|_, frame| !frame.rows.is_empty());
+    }
+
+    pub(super) fn overlay_from(&mut self, other: &Self) {
+        for (hf_index, frame) in &other.frames {
+            let target = self
+                .frames
+                .entry(*hf_index)
+                .or_insert_with(|| SpdCachedTapFrame::new(frame.desc));
+            for (position, row) in &frame.rows {
+                target.rows.insert(*position, row.clone());
+            }
+        }
+    }
+
+    pub(super) fn drain_positions_before_into(
+        &mut self,
+        position_limit: usize,
+        target: &mut Self,
+    ) -> usize {
+        let mut promoted = 0;
+        for (hf_index, frame) in &mut self.frames {
+            let target_frame = target
+                .frames
+                .entry(*hf_index)
+                .or_insert_with(|| SpdCachedTapFrame::new(frame.desc));
+            let promoted_positions = frame
+                .rows
+                .keys()
+                .copied()
+                .filter(|position| {
+                    usize::try_from(*position).is_ok_and(|position| position < position_limit)
+                })
+                .collect::<Vec<_>>();
+            for position in promoted_positions {
+                if let Some(row) = frame.rows.remove(&position) {
+                    target_frame.rows.insert(position, row);
+                    promoted += 1;
+                }
+            }
+        }
+        self.frames.retain(|_, frame| !frame.rows.is_empty());
+        promoted
     }
 
     pub(super) fn record_stage_output(

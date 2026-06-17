@@ -1832,9 +1832,12 @@ struct EmbeddedStageStart {
 }
 
 struct SpdOptimisticDecode {
+    position: usize,
     proposed: i32,
     proposed_logit: Option<f32>,
     proposed_logit_margin: Option<f32>,
+    inline_probe: SpdInlineProbe,
+    inline_probe_emitted: bool,
     requested_spd_taps: bool,
     chain_depth: usize,
     origin: PredictionReturnOrigin,

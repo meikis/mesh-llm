@@ -35,9 +35,17 @@ fn observe_spd_rolling_executor_target(
         return Ok(None);
     };
     executor.record_target_token(position, token);
-    let commit = executor
+    let mut commit = None;
+    while let Some(ready) = executor
         .commit_ready_oldest()
-        .map_err(openai_backend_error)?;
+        .map_err(openai_backend_error)?
+    {
+        let rejected = matches!(ready, SpdRollingExecutorCommit::Rejected { .. });
+        commit = Some(ready);
+        if rejected {
+            break;
+        }
+    }
     merge_spd_rolling_executor_stats(speculative_stats, Some(executor));
     Ok(commit)
 }
@@ -70,13 +78,19 @@ fn start_spd_rolling_executor_decode(
     else {
         return Ok(None);
     };
+    let decode_step = launch
+        .position
+        .checked_sub(args.request.prompt_token_ids.len())
+        .ok_or_else(|| {
+            OpenAiError::backend("SPD rolling executor launch position is inside prompt")
+        })?;
     let decode = backend.start_spd_optimistic_decode_for_probe(
         args.request,
         SpdOptimisticDecodeStart {
             downstream: args.downstream,
             session_key: args.session_key,
             pos_start: launch.position,
-            decode_step: launch.decode_step,
+            decode_step,
             chain_depth: launch.chain_depth,
             chain_depth_limit: args.executor.logical_stage_count(),
             probe: &launch.probe,
@@ -1497,6 +1511,7 @@ impl StageOpenAiBackend {
                     });
                 let prediction_return = if can_start_optimistic_spd && use_spd_rolling_executor {
                     let mut pre_target_probe = None;
+                    let immediate_probe_position = context_tokens.len();
                     let rolling_reply = self
                         .recv_spd_aware_prediction_return_with_tap_action(
                             &request,
@@ -1513,7 +1528,7 @@ impl StageOpenAiBackend {
                                     .checked_add(1)
                                     .and_then(|step| step.checked_add(executor.in_flight_len()))
                                     .context("SPD rolling executor decode step overflow")?;
-                                let Some((decode, probe)) = start_spd_rolling_executor_decode(
+                                let Some((mut decode, probe)) = start_spd_rolling_executor_decode(
                                     backend,
                                     SpdRollingStartArgs {
                                         request: &request,
@@ -1530,7 +1545,12 @@ impl StageOpenAiBackend {
                                 else {
                                     return Ok(());
                                 };
-                                pre_target_probe.get_or_insert_with(|| probe.clone());
+                                let emit_probe = pre_target_probe.is_none()
+                                    && decode.position == immediate_probe_position;
+                                if emit_probe {
+                                    pre_target_probe = Some(probe.clone());
+                                    decode.inline_probe_emitted = true;
+                                }
                                 if optimistic_decode.is_none() {
                                     optimistic_decode = Some(decode);
                                 } else {
@@ -1614,11 +1634,42 @@ impl StageOpenAiBackend {
                         speculative_stats
                             .observe_inline_verified_probe(proposed == reply.predicted);
                     }
-                    if let Some(optimistic) = optimistic_decode.take() {
+                    if let Some(mut optimistic) = optimistic_decode.take() {
                         let optimistic_wait_timer = PhaseTimer::start();
                         let accepted = optimistic.proposed == reply.predicted;
                         let mut context_with_reply = context_tokens.clone();
                         context_with_reply.push(reply.predicted);
+                        if use_spd_rolling_executor
+                            && !optimistic.inline_probe_emitted
+                            && optimistic.position == rolling_target_position
+                        {
+                            let rolling = if let Some(spd) = spd_guard.as_deref_mut() {
+                                Some(
+                                    spd.observe_rolling_probe(
+                                        rolling_target_position,
+                                        reply.predicted,
+                                        optimistic.inline_probe.proposed,
+                                    )
+                                    .map_err(openai_backend_error)?,
+                                )
+                            } else {
+                                None
+                            };
+                            if let Some(proposed) = optimistic.inline_probe.proposed {
+                                speculative_stats
+                                    .observe_inline_verified_probe(proposed == reply.predicted);
+                            }
+                            let probe = optimistic.inline_probe.clone();
+                            speculative_stats.draft_propose_ms += self.emit_spd_inline_probe(
+                                &request,
+                                decode_step,
+                                current,
+                                reply.predicted,
+                                probe,
+                                rolling.as_ref(),
+                            );
+                            optimistic.inline_probe_emitted = true;
+                        }
                         let optimistic_return = if accepted && optimistic.requested_spd_taps {
                             if let Some(spd) = spd_guard.as_deref_mut() {
                                 let reset_timer = PhaseTimer::start();
@@ -1628,6 +1679,7 @@ impl StageOpenAiBackend {
                                 spd_advanced_for_current = true;
                                 if use_spd_rolling_executor {
                                     let mut optimistic_commit_probe = None;
+                                    let immediate_probe_position = context_with_reply.len();
                                     let rolling_reply = self
                                         .recv_spd_aware_prediction_return_with_tap_action(
                                             &request,
@@ -1647,7 +1699,7 @@ impl StageOpenAiBackend {
                                                     .context(
                                                         "SPD rolling executor decode step overflow",
                                                     )?;
-                                                let Some((decode, probe)) =
+                                                let Some((mut decode, probe)) =
                                                     start_spd_rolling_executor_decode(
                                                         backend,
                                                         SpdRollingStartArgs {
@@ -1667,8 +1719,14 @@ impl StageOpenAiBackend {
                                                 else {
                                                     return Ok(());
                                                 };
-                                                optimistic_commit_probe
-                                                    .get_or_insert_with(|| probe.clone());
+                                                let emit_probe =
+                                                    optimistic_commit_probe.is_none()
+                                                        && decode.position
+                                                            == immediate_probe_position;
+                                                if emit_probe {
+                                                    optimistic_commit_probe = Some(probe.clone());
+                                                    decode.inline_probe_emitted = true;
+                                                }
                                                 rolling_optimistic_decodes.push_back(decode);
                                                 Ok(())
                                             },
@@ -1906,18 +1964,54 @@ impl StageOpenAiBackend {
                         if accepted {
                             let mut rolling_context = context_with_reply;
                             let mut expected_target = optimistic_next;
-                            while let Some(chained) = rolling_optimistic_decodes.pop_front() {
-                                let chain_decode_step =
-                                    u32::try_from(decoded_tokens + 1 + chained.chain_depth)
-                                        .map_err(|_| {
-                                            OpenAiError::backend(
-                                                "optimistic decode step exceeds u32",
-                                            )
-                                        })?;
+                            while let Some(mut chained) = rolling_optimistic_decodes.pop_front() {
+                                let chain_decode_step = chained
+                                    .position
+                                    .checked_sub(request.prompt_token_ids.len())
+                                    .and_then(|step| u32::try_from(step).ok())
+                                    .ok_or_else(|| {
+                                        OpenAiError::backend("optimistic decode step exceeds u32")
+                                    })?;
                                 let chain_target = expected_target;
                                 let chain_accepted = chained.proposed == chain_target;
                                 let mut context_with_expected = rolling_context.clone();
                                 context_with_expected.push(chain_target);
+                                if use_spd_rolling_executor
+                                    && !chained.inline_probe_emitted
+                                    && chained.position == rolling_context.len()
+                                {
+                                    let rolling_target_position = rolling_context.len();
+                                    let rolling = if let Some(spd) = spd_guard.as_deref_mut() {
+                                        Some(
+                                            spd.observe_rolling_probe(
+                                                rolling_target_position,
+                                                chain_target,
+                                                chained.inline_probe.proposed,
+                                            )
+                                            .map_err(openai_backend_error)?,
+                                        )
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(proposed) = chained.inline_probe.proposed {
+                                        speculative_stats.observe_inline_verified_probe(
+                                            proposed == chain_target,
+                                        );
+                                    }
+                                    let probe_current =
+                                        rolling_context.last().copied().unwrap_or(chain_target);
+                                    let probe = chained.inline_probe.clone();
+                                    speculative_stats.draft_propose_ms += self
+                                        .emit_spd_inline_probe(
+                                            &request,
+                                            chain_decode_step,
+                                            probe_current,
+                                            chain_target,
+                                            probe,
+                                            rolling.as_ref(),
+                                        );
+                                    chained.inline_probe_emitted = true;
+                                }
                                 let chain_wait_timer = PhaseTimer::start();
                                 let chain_return = if chain_accepted && chained.requested_spd_taps {
                                     if let Some(spd) = spd_guard.as_deref_mut() {
@@ -1929,6 +2023,8 @@ impl StageOpenAiBackend {
                                         let next_chain_depth = chained.chain_depth + 1;
                                         if use_spd_rolling_executor {
                                             let mut optimistic_commit_probe = None;
+                                            let immediate_probe_position =
+                                                context_with_expected.len();
                                             let rolling_reply = self
                                                 .recv_spd_aware_prediction_return_with_tap_action(
                                                     &request,
@@ -1950,7 +2046,7 @@ impl StageOpenAiBackend {
                                                             .context(
                                                                 "SPD rolling executor decode step overflow",
                                                             )?;
-                                                        let Some((decode, probe)) =
+                                                        let Some((mut decode, probe)) =
                                                             start_spd_rolling_executor_decode(
                                                                 backend,
                                                                 SpdRollingStartArgs {
@@ -1970,8 +2066,15 @@ impl StageOpenAiBackend {
                                                         else {
                                                             return Ok(());
                                                         };
-                                                        optimistic_commit_probe
-                                                            .get_or_insert_with(|| probe.clone());
+                                                        let emit_probe =
+                                                            optimistic_commit_probe.is_none()
+                                                                && decode.position
+                                                                    == immediate_probe_position;
+                                                        if emit_probe {
+                                                            optimistic_commit_probe =
+                                                                Some(probe.clone());
+                                                            decode.inline_probe_emitted = true;
+                                                        }
                                                         rolling_optimistic_decodes
                                                             .push_back(decode);
                                                         Ok(())
@@ -2331,6 +2434,7 @@ impl StageOpenAiBackend {
                 }
                 if let Some((optimistic_token, _)) = optimistic_commit.as_ref()
                     && optimistic_commit_probes.is_empty()
+                    && !use_spd_rolling_executor
                     && let Some(spd) = spd_guard.as_deref_mut()
                 {
                     let optimistic_probe_step = u32::try_from(decoded_tokens)

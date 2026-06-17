@@ -197,6 +197,23 @@ Rust.
   machine (`170.5ms` baseline decode versus `25149.1ms` SPD decode), so the
   next proof needs real split placement on distinct hardware rather than more
   same-machine timing.
+- 2026-06-17 follow-up rolling-executor work moved speculative direct-return
+  taps into a pending cache that is overlaid for rolling proposals, promoted
+  only when the accepted context reaches those positions, and cleared on
+  verified-context reset. The executor target observer now drains every ready
+  oldest scheduler commit after a target token arrives instead of checking only
+  once. Focused SPD tests, `cargo clippy -p skippy-server --all-targets -- -D
+  warnings`, and `cargo test -p skippy-server --lib` pass. The current debug
+  Metal smoke at
+  `/private/tmp/spd-rolling-executor-metal-smoke8-commit-drain.json` preserves
+  exact output, reaches `max_in_flight=4`, and keeps rolling replay clean
+  (`0` missing / `0` out-of-order), but it still proposes `8`, accepts `7`,
+  rejects `1`, and is far slower than baseline (`229.1ms` baseline decode
+  versus `23301.0ms` SPD decode). This is not the final paper-shaped executor
+  yet: the request path still processes younger chained verifier replies before
+  the rolling executor owns commit/restore. A deeper-row launch gate experiment
+  was not retained because it starved the executor (`max_in_flight=3`), reduced
+  acceptance to `5 / 7`, and reintroduced missing replay proposals.
 - `skippy-runtime::spd::SpdRollingScheduler` now codifies the paper/reference
   rolling scheduler state transitions in Rust: newest-first in-flight entries,
   evicted-prefix speculation rows on acceptance, oldest-entry verification

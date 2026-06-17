@@ -185,6 +185,30 @@ Latest KV/rolling diagnostic on 2026-06-17:
 | Shadow KV finding | idle executor catch-up to the accepted canonical context reduced stale shadow-view launches from 40 to 5; older-prefix canonical copy remains invalid on this recurrent/hybrid Qwen path |
 | Speed signal | still negative locally; this is correctness/scheduler evidence, not a speedup claim |
 
+First real LAN split checkpoint on 2026-06-17:
+
+| Check | Result |
+| --- | --- |
+| Baseline-only report | `/private/tmp/spd-lan-cpu-baseline1.json` |
+| Paired SPD report | `/private/tmp/spd-lan-cpu-spd8.json` |
+| Placement | stage 0, OpenAI frontend, and SPD sidecar on the coordinator; physical stages 1-6 on one LAN worker |
+| Runtime device choice | `--n-gpu-layers 0 --spd-n-gpu-layers 0` for the transport proof |
+| Content match | 1 / 1 baseline/SPD pair matched |
+| SPD proposals | 7 accepted / 7 proposed, 0 rejected |
+| Rolling executor | 7 launches, max in flight 4, 5 oldest accepts, 0 oldest rejections, 0 younger drains |
+| Rolling replay | 6 inserted drafts, 1 tail missing proposal, 0 out-of-order proposals, verified 8-token prefix matched target |
+| Stage logs | no stage connection errors, no Metal OOM lines, no `llama_decode failed` lines |
+| Checker | `spd-openai-check --min-accepted 7 --min-max-inflight 4 --max-rejected-oldest 0 --max-drained-younger 0 --max-rolling-trace-missing-proposals 1` passed |
+| Speed signal | negative by design: baseline decode 1501.4 ms, SPD decode 4991.3 ms on CPU stages |
+
+The first attempted LAN smoke with all remote stages using Metal
+(`--n-gpu-layers -1`) failed before a full token because one worker was running
+six Metal-backed stage processes. Stage 3 hit Metal out-of-memory on the first
+`DecodeEmbd`. That failure is a placement/resource issue, not a Skippy KV or
+binary-transport correctness failure. For one-worker correctness gates, use CPU
+stages. For speed gates, spread stages across distinct devices/workers or reduce
+the number of Metal-backed processes per worker.
+
 Paper fidelity:
 
 - The mechanism is paper-shaped: hidden states from target stages are converted
@@ -293,12 +317,22 @@ Run these before making any speedup claim:
 
 2. Distinct-device or multi-node all-tap run:
 
+   Status: a one-worker CPU-backed LAN transport proof completed on
+   2026-06-17 at `/private/tmp/spd-lan-cpu-spd8.json`. It matched
+   baseline, accepted `7 / 7` SPD proposals, reached `max_in_flight=4`, and
+   passed `spd-openai-check` with a single tail missing proposal allowed for the
+   short run. This is a correctness and placement proof only.
+
    - keep stage 0 and the SPD sidecar on the coordinator;
    - place physical stages on distinct devices/nodes where available;
    - keep `--splits 8,10,16,20,24,31` for the current Qwen3.5-4B sidecar
      artifact unless a cleaner topology-specific sidecar is trained;
    - compare baseline/SPD decode time, downstream wait, sidecar cache prefill,
      sidecar head total, accept rate, rolling gaps, and content equality.
+   - do not launch all six downstream physical stages on one worker with
+     `--n-gpu-layers -1`; that oversubscribed Metal and failed with
+     out-of-memory on the first decode step. Use CPU for one-worker correctness,
+     or use multiple devices/workers for a real speed gate.
 
    First remote command shape when one worker is available and already has the
    same GGUF path. Run it once with `--preflight-only` first; that report should
@@ -315,7 +349,8 @@ Run these before making any speedup claim:
      --splits 8,10,16,20,24,31 \
      --layer-end 32 \
      --ctx-size 128 \
-     --n-gpu-layers=-1 \
+     --n-gpu-layers=0 \
+     --spd-n-gpu-layers=0 \
      --stage-hosts local,<worker>,<worker>,<worker>,<worker>,<worker>,<worker> \
      --endpoint-host-map local=<coordinator-lan-ip-or-name>,<worker>=<worker-lan-ip-or-name> \
      --remote-model-path-map <worker>=/path/on/worker/Qwen3.5-4B-Q4_K_M.gguf \
@@ -337,12 +372,15 @@ Run these before making any speedup claim:
      --splits 8,10,16,20,24,31 \
      --layer-end 32 \
      --ctx-size 128 \
-     --n-gpu-layers=-1 \
+     --n-gpu-layers=0 \
+     --spd-n-gpu-layers=0 \
      --stage-hosts local,<worker>,<worker>,<worker>,<worker>,<worker>,<worker> \
      --endpoint-host-map local=<coordinator-lan-ip-or-name>,<worker>=<worker-lan-ip-or-name> \
      --remote-model-path-map <worker>=/path/on/worker/Qwen3.5-4B-Q4_K_M.gguf \
-     --max-tokens 1 \
+     --max-tokens 8 \
      --repeat-count 1 \
+     --optimistic-decode true \
+     --spd-rolling-executor \
      --output /tmp/spd-qwen35-first-remote-openai.json
    ```
 

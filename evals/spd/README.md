@@ -246,6 +246,22 @@ Rust.
   prefix that matches the target. The required follow-up is still a
   model-backed `spd-openai-smoke --spd-rolling-executor` run with real stage
   ports; this checkpoint is not yet a content-match or speed claim.
+- 2026-06-17 the first real LAN split checkpoint is now model-backed and
+  content-matched. A one-worker CPU correctness run at
+  `/private/tmp/spd-lan-cpu-spd8.json` kept stage 0, the OpenAI frontend,
+  and the SPD sidecar on the coordinator, placed physical stages 1-6 on one LAN
+  worker, used `--n-gpu-layers 0 --spd-n-gpu-layers 0`, matched baseline
+  output, accepted `7 / 7` SPD proposals, reached `max_in_flight=4`, rejected
+  `0` oldest entries, drained `0` younger replies, and passed
+  `spd-openai-check` with one allowed tail missing proposal. The stage logs had
+  no connection errors, no Metal OOM lines, and no `llama_decode failed` lines.
+  This proves the explicit stage placement, direct-return tap transport,
+  rolling executor, and Skippy KV/session path can complete across the LAN.
+  It is not a speed claim: CPU baseline decode was `1501.4ms` and CPU SPD
+  decode was `4991.3ms`. The first all-Metal one-worker attempt failed because
+  six remote Metal-backed stage processes oversubscribed the worker and stage 3
+  hit out-of-memory on the first `DecodeEmbd`; future speed gates need distinct
+  devices/workers or fewer Metal-backed stage processes per worker.
 - 2026-06-17 the first model-backed 24-token rolling-executor smoke after the
   replay reset cleanup is
   `/private/tmp/spd-rolling-executor-real-local-smoke24-4.json`. It restores
@@ -1350,12 +1366,12 @@ The tap-row-to-`cur_in` projection bridge lives in
 
 ## Next Engineering Steps
 
-1. Move the opt-in native request-path rolling executor from local smoke to a
-   real split run as a transport and placement proof: distinct hardware for
-   downstream stages, stage 0 plus sidecar on the coordinator, and paired
-   baseline/SPD content and timing. Do not call it a speed proof until rolling
-   replay is back to `0` missing / `0` out-of-order proposals and oldest
-   rejection drains are understood.
+1. Move from the completed one-worker CPU LAN correctness proof to a real speed
+   gate: distinct hardware for downstream stages, stage 0 plus sidecar on the
+   coordinator, paired baseline/SPD content and timing, and no one-worker
+   all-Metal oversubscription. Do not call it a speed proof until rolling replay
+   is back to `0` missing / `0` out-of-order proposals and oldest rejection
+   drains are understood.
 2. Run a larger local `spd-openai-smoke --prompt-file ...` sweep to measure
    acceptance distribution, rollback frequency, rolling gaps, and
    `summary.paper_pipeline_estimate` across prompt types.

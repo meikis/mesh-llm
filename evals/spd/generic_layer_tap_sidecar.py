@@ -72,8 +72,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--examples-cache-in", default="")
     parser.add_argument("--examples-cache-out", default="")
-    parser.add_argument("--encoder", choices=("mean", "attention"), default="mean")
+    parser.add_argument("--encoder", choices=("mean", "mean_mlp", "attention"), default="mean")
     parser.add_argument("--attention-heads", type=int, default=4)
+    parser.add_argument("--mlp-ratio", type=float, default=2.0)
+    parser.add_argument("--eval-top-k", default="1,2,4,8,16,32")
     parser.add_argument("--device", choices=("auto", "cuda", "mps", "cpu"), default="auto")
     parser.add_argument("--dtype", choices=("float32", "float16", "bfloat16"), default="float32")
     parser.add_argument("--attn-implementation", default="sdpa")
@@ -103,6 +105,7 @@ class GenericLayerTapSidecar(nn.Module):
         *,
         encoder_kind: str = "mean",
         attention_heads: int = 4,
+        mlp_ratio: float = 2.0,
     ) -> None:
         super().__init__()
         self.encoder_kind = encoder_kind
@@ -117,6 +120,13 @@ class GenericLayerTapSidecar(nn.Module):
                 batch_first=True,
             )
             self.attn_norm = nn.LayerNorm(hidden_size)
+        elif encoder_kind == "mean_mlp":
+            mlp_hidden_size = max(1, int(hidden_size * mlp_ratio))
+            self.pool_mlp = nn.Sequential(
+                nn.Linear(hidden_size, mlp_hidden_size),
+                nn.GELU(),
+                nn.Linear(mlp_hidden_size, hidden_size),
+            )
         elif encoder_kind != "mean":
             raise ValueError(f"unsupported encoder_kind: {encoder_kind}")
         self.output_norm = nn.LayerNorm(hidden_size)
@@ -144,7 +154,10 @@ class GenericLayerTapSidecar(nn.Module):
         else:
             masked = encoded * mask.unsqueeze(-1).to(encoded.dtype)
             denom = mask.sum(dim=1, keepdim=True).clamp_min(1).to(encoded.dtype)
-            pooled = self.output_norm(masked.sum(dim=1) / denom)
+            pooled = masked.sum(dim=1) / denom
+            if self.encoder_kind == "mean_mlp":
+                pooled = pooled + self.pool_mlp(pooled)
+            pooled = self.output_norm(pooled)
         return [head(pooled) for head in self.draft_heads]
 
 
@@ -185,6 +198,7 @@ def main() -> None:
         num_spec_layers=int(args.num_spec_layers),
         encoder_kind=args.encoder,
         attention_heads=int(args.attention_heads),
+        mlp_ratio=float(args.mlp_ratio),
     ).to(device)
     optimizer = torch.optim.AdamW(sidecar.parameters(), lr=float(args.learning_rate))
     label_map = {token_id: index for index, token_id in enumerate(draft_token_ids)}
@@ -207,6 +221,7 @@ def main() -> None:
         label_map,
         batch_size=int(args.batch_size),
         device=device,
+        top_k_values=parse_top_k_values(args.eval_top_k),
     )
     eval_summary["train_loss"] = train_loss
     eval_summary["train_wall_seconds"] = train_elapsed
@@ -214,6 +229,7 @@ def main() -> None:
     eval_summary["encoder"] = {
         "kind": args.encoder,
         "attention_heads": int(args.attention_heads) if args.encoder == "attention" else None,
+        "mlp_ratio": float(args.mlp_ratio) if args.encoder == "mean_mlp" else None,
     }
     eval_summary["topology_policy"] = plan["policy"]
     eval_summary["topology_eval"] = summarize_examples_by_topology(eval_examples)
@@ -231,6 +247,7 @@ def main() -> None:
             "num_spec_layers": int(args.num_spec_layers),
             "encoder_kind": args.encoder,
             "attention_heads": int(args.attention_heads),
+            "mlp_ratio": float(args.mlp_ratio) if args.encoder == "mean_mlp" else None,
             "max_taps": max_taps(plan),
             "tap_feature_size": 2,
             "draft_token_ids": draft_token_ids,
@@ -267,6 +284,7 @@ def main() -> None:
                 "equivalent_accept_length": eval_summary["equivalent_accept_length"],
                 "proposal_latency_ms": eval_summary["proposal_latency_ms"],
                 "eval_wall_seconds": eval_summary["eval_wall_seconds"],
+                "top_k": eval_summary["top_k_diagnostics"]["overall"],
             },
             indent=2,
             sort_keys=True,
@@ -581,6 +599,7 @@ def evaluate_sidecar(
     *,
     batch_size: int,
     device: torch.device,
+    top_k_values: list[int],
 ) -> dict[str, Any]:
     sidecar.eval()
     accepted = 0
@@ -588,6 +607,7 @@ def evaluate_sidecar(
     covered_labels = 0
     total_labels = 0
     proposal_time = 0.0
+    top_k_stats = new_top_k_stats(top_k_values, len(examples[0].labels))
     by_topology = {
         example.topology_key: {"examples": 0, "accepted": 0, "slots": 0}
         for example in examples
@@ -604,6 +624,7 @@ def evaluate_sidecar(
             elif device.type == "cuda":
                 torch.cuda.synchronize()
             proposal_time += time.perf_counter() - proposal_started
+            update_top_k_stats(logits, labels, top_k_stats)
             predictions = torch.stack([head.argmax(dim=-1) for head in logits], dim=1)
             for row_idx in range(predictions.shape[0]):
                 topology = batch[row_idx].topology_key
@@ -646,8 +667,86 @@ def evaluate_sidecar(
         "proposal_latency_ms": (proposal_time / max(1, len(examples))) * 1000.0,
         "proposal_wall_seconds": proposal_time,
         "eval_wall_seconds": eval_wall,
+        "top_k_diagnostics": summarize_top_k_stats(top_k_stats),
         "by_topology": topology_rows,
     }
+
+
+def parse_top_k_values(raw: str) -> list[int]:
+    values = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        value = int(part)
+        if value <= 0:
+            raise ValueError("--eval-top-k values must be positive")
+        values.append(value)
+    return sorted(set(values)) or [1]
+
+
+def new_top_k_stats(top_k_values: list[int], num_spec_layers: int) -> dict[str, Any]:
+    return {
+        "k_values": list(top_k_values),
+        "overall": {k: {"hits": 0, "labels": 0} for k in top_k_values},
+        "by_spec_layer": [
+            {k: {"hits": 0, "labels": 0} for k in top_k_values}
+            for _ in range(num_spec_layers)
+        ],
+    }
+
+
+def update_top_k_stats(
+    logits: list[torch.Tensor],
+    labels: torch.Tensor,
+    stats: dict[str, Any],
+) -> None:
+    for spec_idx, head_logits in enumerate(logits):
+        target = labels[:, spec_idx]
+        valid = target.ge(0)
+        if not valid.any():
+            continue
+        valid_targets = target[valid].detach().cpu()
+        valid_logits = head_logits[valid].detach()
+        max_k = min(max(stats["k_values"]), valid_logits.shape[-1])
+        top_indices = valid_logits.topk(k=max_k, dim=-1).indices.detach().cpu()
+        for k in stats["k_values"]:
+            clipped_k = min(k, top_indices.shape[-1])
+            hits = int(top_indices[:, :clipped_k].eq(valid_targets.unsqueeze(1)).any(dim=1).sum())
+            labels_count = int(valid_targets.numel())
+            stats["overall"][k]["hits"] += hits
+            stats["overall"][k]["labels"] += labels_count
+            stats["by_spec_layer"][spec_idx][k]["hits"] += hits
+            stats["by_spec_layer"][spec_idx][k]["labels"] += labels_count
+
+
+def summarize_top_k_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "overall": top_k_rows(stats["overall"], stats["k_values"]),
+        "by_spec_layer": [
+            {
+                "spec_layer": spec_idx,
+                "rows": top_k_rows(layer_stats, stats["k_values"]),
+            }
+            for spec_idx, layer_stats in enumerate(stats["by_spec_layer"])
+        ],
+    }
+
+
+def top_k_rows(rows: dict[int, dict[str, int]], k_values: list[int]) -> list[dict[str, Any]]:
+    result = []
+    for k in k_values:
+        labels = rows[k]["labels"]
+        hits = rows[k]["hits"]
+        result.append(
+            {
+                "k": k,
+                "hits": hits,
+                "labels": labels,
+                "hit_rate": hits / max(1, labels),
+            }
+        )
+    return result
 
 
 def summarize_examples_by_topology(examples: list[TapExample]) -> list[dict[str, Any]]:
@@ -758,6 +857,7 @@ def write_manifest(
             "head_kind": HEAD_KIND,
             "encoder_kind": args.encoder,
             "attention_heads": int(args.attention_heads) if args.encoder == "attention" else None,
+            "mlp_ratio": float(args.mlp_ratio) if args.encoder == "mean_mlp" else None,
             "num_stages": max_stages,
             "stage_layer_boundaries": None,
             "num_spec_layers": int(args.num_spec_layers),

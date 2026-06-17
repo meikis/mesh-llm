@@ -312,9 +312,10 @@ Then train another sidecar on the exact same examples without reloading GLM:
 ```bash
 uv run evals/spd/generic_layer_tap_sidecar.py \
   --examples-cache-in /tmp/glm47-layer-tap-examples.pt \
-  --encoder attention \
-  --attention-heads 4 \
+  --encoder mean_mlp \
+  --mlp-ratio 2.0 \
   --num-spec-layers 2 \
+  --eval-top-k 1,2,4,8,16,32 \
   --batch-size 16 \
   --epochs 3 \
   --device mps \
@@ -324,11 +325,18 @@ uv run evals/spd/generic_layer_tap_sidecar.py \
 Supported encoders:
 
 - `--encoder mean`: masked mean pooling over encoded taps
+- `--encoder mean_mlp`: masked mean pooling plus a residual MLP over the pooled
+  representation
 - `--encoder attention`: learned query plus multi-head attention over encoded
-  taps
+  taps; this has not beaten mean pooling in the current GLM 4.7 gate
 
-Both encoder variants export `generic-layer-tap-v1` safetensors manifests that
-validate through `skippy-runtime`.
+Use `--eval-top-k` to report all-label diagnostic hit rates. These diagnostics
+are separate from sequential acceptance/EAL and are intended to show whether
+the correct target token is close to the top of the sidecar distribution.
+
+All encoder variants export `generic-layer-tap-v1` safetensors manifests that
+validate through `skippy-runtime`; the manifest records the exact safetensors
+tensor count for encoder-specific tensors.
 
 ## Reproduce Qwen3-0.6B Training
 

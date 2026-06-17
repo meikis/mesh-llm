@@ -293,6 +293,39 @@ This is a tokenizer/model/export/manifest mechanics pass, not a quality result.
 The next quality gate needs more rows, more positions, and then the `N=1,2,4`
 sweep.
 
+To avoid paying full GLM target-forward cost for every sidecar architecture
+iteration, write a reusable hidden-state example cache:
+
+```bash
+uv run evals/spd/generic_layer_tap_sidecar.py \
+  --model-name /path/to/GLM-4.7-Flash \
+  --examples-cache-out /tmp/glm47-layer-tap-examples.pt \
+  ...same extraction/training flags...
+```
+
+Then train another sidecar on the exact same examples without reloading GLM:
+
+```bash
+uv run evals/spd/generic_layer_tap_sidecar.py \
+  --examples-cache-in /tmp/glm47-layer-tap-examples.pt \
+  --encoder attention \
+  --attention-heads 4 \
+  --num-spec-layers 1 \
+  --batch-size 16 \
+  --epochs 3 \
+  --device mps \
+  --export-dtype float16
+```
+
+Supported encoders:
+
+- `--encoder mean`: masked mean pooling over encoded taps
+- `--encoder attention`: learned query plus multi-head attention over encoded
+  taps
+
+Both encoder variants export `generic-layer-tap-v1` safetensors manifests that
+validate through `skippy-runtime`.
+
 ## Reproduce Qwen3-0.6B Training
 
 This is the smallest useful proof that the training path and artifact shape

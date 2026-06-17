@@ -70,6 +70,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--examples-cache-in", default="")
+    parser.add_argument("--examples-cache-out", default="")
+    parser.add_argument("--encoder", choices=("mean", "attention"), default="mean")
+    parser.add_argument("--attention-heads", type=int, default=4)
     parser.add_argument("--device", choices=("auto", "cuda", "mps", "cpu"), default="auto")
     parser.add_argument("--dtype", choices=("float32", "float16", "bfloat16"), default="float32")
     parser.add_argument("--attn-implementation", default="sdpa")
@@ -91,11 +95,30 @@ def parse_args() -> argparse.Namespace:
 
 
 class GenericLayerTapSidecar(nn.Module):
-    def __init__(self, hidden_size: int, draft_vocab_size: int, num_spec_layers: int) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        draft_vocab_size: int,
+        num_spec_layers: int,
+        *,
+        encoder_kind: str = "mean",
+        attention_heads: int = 4,
+    ) -> None:
         super().__init__()
+        self.encoder_kind = encoder_kind
         self.tap_proj = nn.Linear(hidden_size, hidden_size)
         self.depth_proj = nn.Linear(2, hidden_size)
         self.tap_norm = nn.LayerNorm(hidden_size)
+        if encoder_kind == "attention":
+            self.attn_query = nn.Parameter(torch.zeros(1, 1, hidden_size))
+            self.tap_attention = nn.MultiheadAttention(
+                embed_dim=hidden_size,
+                num_heads=attention_heads,
+                batch_first=True,
+            )
+            self.attn_norm = nn.LayerNorm(hidden_size)
+        elif encoder_kind != "mean":
+            raise ValueError(f"unsupported encoder_kind: {encoder_kind}")
         self.output_norm = nn.LayerNorm(hidden_size)
         self.draft_heads = nn.ModuleList(
             [nn.Linear(hidden_size, draft_vocab_size) for _ in range(num_spec_layers)]
@@ -108,9 +131,20 @@ class GenericLayerTapSidecar(nn.Module):
         mask: torch.Tensor,
     ) -> list[torch.Tensor]:
         encoded = torch.tanh(self.tap_norm(self.tap_proj(hidden) + self.depth_proj(features)))
-        masked = encoded * mask.unsqueeze(-1).to(encoded.dtype)
-        denom = mask.sum(dim=1, keepdim=True).clamp_min(1).to(encoded.dtype)
-        pooled = self.output_norm(masked.sum(dim=1) / denom)
+        if self.encoder_kind == "attention":
+            query = self.attn_query.expand(encoded.shape[0], -1, -1)
+            attended, _ = self.tap_attention(
+                query,
+                encoded,
+                encoded,
+                key_padding_mask=~mask,
+                need_weights=False,
+            )
+            pooled = self.output_norm(self.attn_norm(attended[:, 0, :]))
+        else:
+            masked = encoded * mask.unsqueeze(-1).to(encoded.dtype)
+            denom = mask.sum(dim=1, keepdim=True).clamp_min(1).to(encoded.dtype)
+            pooled = self.output_norm(masked.sum(dim=1) / denom)
         return [head(pooled) for head in self.draft_heads]
 
 
@@ -124,16 +158,33 @@ def main() -> None:
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     plan = load_or_build_topology_plan(args)
-    if args.smoke_synthetic:
+    cache_in = Path(args.examples_cache_in).expanduser() if args.examples_cache_in else None
+    if cache_in is not None:
+        model_meta, draft_token_ids, train_examples, eval_examples, plan = load_examples_cache(cache_in)
+    elif args.smoke_synthetic:
         model_meta, draft_token_ids, train_examples, eval_examples = synthetic_examples(args, plan)
     else:
         model_meta, draft_token_ids, train_examples, eval_examples = real_glm_examples(args, plan)
+    if args.examples_cache_out and cache_in is None:
+        write_examples_cache(
+            Path(args.examples_cache_out).expanduser(),
+            model_meta,
+            draft_token_ids,
+            train_examples,
+            eval_examples,
+            plan,
+            args,
+        )
+    validate_example_width(train_examples, int(args.num_spec_layers), "train")
+    validate_example_width(eval_examples, int(args.num_spec_layers), "eval")
 
     device = resolve_device(args.device)
     sidecar = GenericLayerTapSidecar(
         hidden_size=int(model_meta["hidden_size"]),
         draft_vocab_size=len(draft_token_ids),
         num_spec_layers=int(args.num_spec_layers),
+        encoder_kind=args.encoder,
+        attention_heads=int(args.attention_heads),
     ).to(device)
     optimizer = torch.optim.AdamW(sidecar.parameters(), lr=float(args.learning_rate))
     label_map = {token_id: index for index, token_id in enumerate(draft_token_ids)}
@@ -160,6 +211,10 @@ def main() -> None:
     eval_summary["train_loss"] = train_loss
     eval_summary["train_wall_seconds"] = train_elapsed
     eval_summary["total_wall_seconds"] = time.perf_counter() - started
+    eval_summary["encoder"] = {
+        "kind": args.encoder,
+        "attention_heads": int(args.attention_heads) if args.encoder == "attention" else None,
+    }
     eval_summary["topology_policy"] = plan["policy"]
     eval_summary["topology_eval"] = summarize_examples_by_topology(eval_examples)
     eval_summary["model"] = model_meta
@@ -174,6 +229,8 @@ def main() -> None:
             "vocab_size": int(model_meta["vocab_size"]),
             "draft_vocab_size": len(draft_token_ids),
             "num_spec_layers": int(args.num_spec_layers),
+            "encoder_kind": args.encoder,
+            "attention_heads": int(args.attention_heads),
             "max_taps": max_taps(plan),
             "tap_feature_size": 2,
             "draft_token_ids": draft_token_ids,
@@ -221,6 +278,88 @@ def load_or_build_topology_plan(args: argparse.Namespace) -> dict[str, Any]:
     if args.topology_plan:
         return json.loads(Path(args.topology_plan).expanduser().read_text(encoding="utf-8"))
     return build_topology_plan(args)
+
+
+def write_examples_cache(
+    path: Path,
+    model_meta: dict[str, Any],
+    draft_token_ids: list[int],
+    train_examples: list[TapExample],
+    eval_examples: list[TapExample],
+    plan: dict[str, Any],
+    args: argparse.Namespace,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema": "skippy-spd-layer-tap-examples/v1",
+        "created_at": timestamp(),
+        "model": model_meta,
+        "draft_token_ids": draft_token_ids,
+        "topology_plan": plan,
+        "metadata": {
+            "num_spec_layers": int(args.num_spec_layers),
+            "train_rows": int(args.train_rows),
+            "eval_rows": int(args.eval_rows),
+            "positions_per_row": int(args.positions_per_row),
+            "max_length": int(args.max_length),
+        },
+        "train_examples": [example_to_record(example) for example in train_examples],
+        "eval_examples": [example_to_record(example) for example in eval_examples],
+    }
+    torch.save(payload, path)
+    print(f"wrote layer-tap examples cache -> {path}", flush=True)
+
+
+def load_examples_cache(
+    path: Path,
+) -> tuple[dict[str, Any], list[int], list[TapExample], list[TapExample], dict[str, Any]]:
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        payload = torch.load(path, map_location="cpu")
+    if payload.get("schema") != "skippy-spd-layer-tap-examples/v1":
+        raise RuntimeError(f"unsupported examples cache schema in {path}")
+    train_examples = [record_to_example(record) for record in payload["train_examples"]]
+    eval_examples = [record_to_example(record) for record in payload["eval_examples"]]
+    print(
+        f"loaded layer-tap examples cache -> {path} "
+        f"(train={len(train_examples)}, eval={len(eval_examples)})",
+        flush=True,
+    )
+    return (
+        dict(payload["model"]),
+        [int(token_id) for token_id in payload["draft_token_ids"]],
+        train_examples,
+        eval_examples,
+        dict(payload["topology_plan"]),
+    )
+
+
+def example_to_record(example: TapExample) -> dict[str, Any]:
+    return {
+        "hidden": example.hidden.detach().cpu().to(torch.float16),
+        "features": example.features.detach().cpu().to(torch.float16),
+        "labels": [int(label) for label in example.labels],
+        "topology_key": example.topology_key,
+    }
+
+
+def record_to_example(record: dict[str, Any]) -> TapExample:
+    return TapExample(
+        hidden=record["hidden"].float(),
+        features=record["features"].float(),
+        labels=[int(label) for label in record["labels"]],
+        topology_key=str(record["topology_key"]),
+    )
+
+
+def validate_example_width(examples: list[TapExample], num_spec_layers: int, label: str) -> None:
+    bad = [len(example.labels) for example in examples if len(example.labels) != num_spec_layers]
+    if bad:
+        raise RuntimeError(
+            f"{label} examples do not match --num-spec-layers={num_spec_layers}; "
+            f"found label widths including {bad[:5]}"
+        )
 
 
 def synthetic_examples(
@@ -597,6 +736,8 @@ def write_manifest(
             "vocab_size": int(model_meta["vocab_size"]),
             "draft_vocab_size": len(draft_token_ids),
             "head_kind": HEAD_KIND,
+            "encoder_kind": args.encoder,
+            "attention_heads": int(args.attention_heads) if args.encoder == "attention" else None,
             "num_stages": max_stages,
             "stage_layer_boundaries": None,
             "num_spec_layers": int(args.num_spec_layers),

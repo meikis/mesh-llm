@@ -539,6 +539,31 @@ Rust.
   younger replies, three replay-missing proposals, and local SPD decode is
   still slower than the baseline because the request path waits on chained
   verifier replies instead of running the full zero-bubble rolling executor.
+- 2026-06-17 hybrid checkpoint restore now has a native Skippy/llama.cpp
+  patch-queue fix. A pre-patch non-rolling CPU smoke failed with
+  `failed to trim hybrid memory suffix`: `skippy_restore_session_checkpoint`
+  was trimming the hybrid memory wrapper before restoring the saved recurrent
+  checkpoint lane, which asked Qwen's recurrent state to roll back a speculative
+  suffix outside its rollback window. Patch `0094` keeps explicit
+  `skippy_trim_session` semantics unchanged, but checkpoint restore now trims
+  only the attention KV suffix for hybrid/hybrid-ISWA memory and then restores
+  recurrent state from the checkpoint. The post-patch non-rolling CPU smoke at
+  `/private/tmp/spd-local-nonrolling-cpu-smoke24-v2.json` completes and accepts
+  `20 / 24` proposals; the comparable local rolling smoke at
+  `/private/tmp/spd-local-rolling-cpu-smoke24-v2.json` preserves exact content,
+  reaches `max_in_flight=4`, records `0` tap failures, and accepts `21 / 22`;
+  the one-worker LAN split rerun at `/private/tmp/spd-lan-cpu-spd24-v2.json`
+  has the same content-correct `21 / 22` acceptance shape with `0` tap failures.
+  The surviving oldest rejection is the same target-position `38` mismatch seen
+  in non-rolling verification, so it is sidecar/top-1 quality for this prompt,
+  not rolling executor, LAN transport, or Skippy KV corruption. This is still
+  below the paper gate: one oldest rejection drains three younger replies, replay
+  still misses three proposals, and LAN CPU SPD decode is `14392.6ms` versus
+  `4502.5ms` baseline (`0.313x`). The strict `spd-openai-check` failure is
+  exactly those four gates (`21 < 24` accepted, one oldest rejection, three
+  drained younger replies, three missing replay proposals); the relaxed
+  correctness gate passed at
+  `/private/tmp/spd-lan-cpu-spd24-v2-check-relaxed.json`.
 
 ## What Does Not Work Yet
 

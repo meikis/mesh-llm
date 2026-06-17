@@ -54,21 +54,18 @@ Latest native evidence:
 
 | Field | Value |
 | --- | --- |
-| Commit | `c0298e54` |
-| Report | `/private/tmp/spd-openai-smoke-repeat-telemetry-cpu-1tok.json` |
+| Report set | `/private/tmp/spd-local-nonrolling-cpu-smoke24-v2.json`, `/private/tmp/spd-local-rolling-cpu-smoke24-v2.json`, `/private/tmp/spd-lan-cpu-spd24-v2.json` |
 | Model | Qwen3.5-4B Q4_K_M GGUF |
 | Sidecar | pretrained Qwen3.5-4B SPD manifest + serving checkpoint |
-| Host/device | local M4 node, `CPU0`, local binary stage processes |
-| Command shape | `spd-openai-smoke --splits 8,10,16,20,24,31 --max-tokens 1 --warmup-count 1 --repeat-count 1 --run-baseline false` |
+| Host/device | local M4 CPU stages plus one-worker LAN CPU split for transport/KV proof |
+| Command shape | `spd-openai-smoke --splits 8,10,16,20,24,31 --max-tokens 24 --spd-rolling-executor --n-gpu-layers 0 --spd-n-gpu-layers 0` |
 | Logical SPD stages | 4 |
 | Physical stages needed by this artifact | 7 (`0..8 | 8..10 | 10..16 | 16..20 | 20..24 | 24..31 | 31..32`) |
-| Measured accepted/proposed | 1 / 1 |
-| Measured wall/decode | 914.2 ms / 276.8 ms |
-| Measured downstream wait | 269.9 ms |
-| Measured sidecar cache prefill | 119.8 ms |
-| Measured sidecar head total | 47.6 ms |
-| Measured sidecar decoder layers | 34.1 ms |
-| Tap failures | 0 |
+| Native KV finding | llama.cpp patch `0094` fixes hybrid checkpoint restore by trimming attention KV only before restoring recurrent checkpoint state |
+| Non-rolling control | completed after the patch; accepted 20 / 24 proposals, proving the target-position 38 mismatch is sidecar/top-1 behavior rather than rolling KV corruption |
+| Local rolling | exact content, 21 / 22 accepted, max in flight 4, one oldest rejection, three younger drains, 0 tap failures |
+| LAN rolling | exact content, 21 / 22 accepted, max in flight 4, one oldest rejection, three younger drains, 0 tap failures |
+| LAN speed signal | negative correctness result: baseline decode 4502.5 ms, SPD decode 14392.6 ms (`0.313x`) |
 
 First real-node split target:
 
@@ -176,30 +173,32 @@ Latest KV/rolling diagnostic on 2026-06-17:
 
 | Check | Result |
 | --- | --- |
-| Report | `/private/tmp/spd-local-idle-catchup-smoke24.json` |
+| Reports | `/private/tmp/spd-local-nonrolling-cpu-smoke24-v2.json`, `/private/tmp/spd-local-rolling-cpu-smoke24-v2.json` |
 | Content match | 1 / 1 baseline/SPD pair matched |
 | SPD proposals | 21 accepted / 22 proposed |
 | Rolling executor | 22 launches, max in flight 4, 17 oldest accepts, 1 oldest rejection, 3 younger replies drained |
 | Launch-miss breakdown | 72 no proposal, 5 missing shadow view, 17 in-flight full, 2 shadow not seedable, 0 no rows |
 | Rolling replay | 20 inserted drafts, 3 missing proposals, 0 out-of-order proposals, verified 24-token prefix matched target |
-| Shadow KV finding | idle executor catch-up to the accepted canonical context reduced stale shadow-view launches from 40 to 5; older-prefix canonical copy remains invalid on this recurrent/hybrid Qwen path |
-| Speed signal | still negative locally; this is correctness/scheduler evidence, not a speedup claim |
+| Native KV finding | patch `0094` prevents checkpoint restore from trimming recurrent/hybrid memory before restoring the saved checkpoint lane; explicit trim still uses the recurrent owner |
+| Sidecar-quality control | non-rolling CPU verification accepted 20 / 24 and hit the same target-position 38 mismatch as rolling, so the remaining rejection is not a rolling/LAN KV artifact |
+| Speed signal | still negative locally: baseline decode 620.5 ms, SPD decode 8839.2 ms (`0.070x`); this is correctness/scheduler evidence, not a speedup claim |
 
 First real LAN split checkpoint on 2026-06-17:
 
 | Check | Result |
 | --- | --- |
 | Baseline-only report | `/private/tmp/spd-lan-cpu-baseline1.json` |
-| Paired SPD report | `/private/tmp/spd-lan-cpu-spd8.json` |
+| First paired SPD report | `/private/tmp/spd-lan-cpu-spd8.json` |
+| Latest 24-token paired report | `/private/tmp/spd-lan-cpu-spd24-v2.json` |
 | Placement | stage 0, OpenAI frontend, and SPD sidecar on the coordinator; physical stages 1-6 on one LAN worker |
 | Runtime device choice | `--n-gpu-layers 0 --spd-n-gpu-layers 0` for the transport proof |
 | Content match | 1 / 1 baseline/SPD pair matched |
-| SPD proposals | 7 accepted / 7 proposed, 0 rejected |
-| Rolling executor | 7 launches, max in flight 4, 5 oldest accepts, 0 oldest rejections, 0 younger drains |
-| Rolling replay | 6 inserted drafts, 1 tail missing proposal, 0 out-of-order proposals, verified 8-token prefix matched target |
-| Stage logs | no stage connection errors, no Metal OOM lines, no `llama_decode failed` lines |
-| Checker | `spd-openai-check --min-accepted 7 --min-max-inflight 4 --max-rejected-oldest 0 --max-drained-younger 0 --max-rolling-trace-missing-proposals 1` passed |
-| Speed signal | negative by design: baseline decode 1501.4 ms, SPD decode 4991.3 ms on CPU stages |
+| SPD proposals | first run: 7 / 7 accepted; latest 24-token run: 21 / 22 accepted with one oldest rejection |
+| Rolling executor | latest run: 22 launches, max in flight 4, 17 oldest accepts, 1 oldest rejection, 3 younger drains |
+| Rolling replay | latest run: 20 inserted drafts, 3 missing proposals, 0 out-of-order proposals, verified 24-token prefix matched target |
+| Stage logs | no post-ready KV, decode, tap-return, or Metal OOM errors; only transient startup readiness retries on the latest run |
+| Checker | the 8-token checkpoint passed; the 24-token run fails the strict paper gate for `21 < 24` accepted proposals, one oldest rejection, three drained younger replies, and three missing replay proposals; the relaxed correctness gate passed at `/private/tmp/spd-lan-cpu-spd24-v2-check-relaxed.json` |
+| Speed signal | negative by design: latest CPU baseline decode 4502.5 ms, SPD decode 14392.6 ms (`0.313x`) |
 
 The first attempted LAN smoke with all remote stages using Metal
 (`--n-gpu-layers -1`) failed before a full token because one worker was running
@@ -219,10 +218,10 @@ Paper fidelity:
   The current Qwen3.5-4B proof required all tap boundaries
   `8,10,16,20,24,31`, even though the sidecar's logical topology has four SPD
   stages.
-- The performance claim is not proven. The local proof is single-machine,
-  process-heavy, mostly CPU-bound, and one-token. It does not yet reproduce the
-  paper's useful overlap regime where target pipeline work and sidecar work hide
-  each other on genuinely parallel hardware.
+- The performance claim is not proven. The current proof is CPU-heavy and either
+  local or one-worker LAN placement; it does not yet reproduce the paper's useful
+  overlap regime where target pipeline work and sidecar work hide each other on
+  genuinely parallel hardware.
 - The overhead delta is now a distributed-execution and scheduling-quality gap,
   not evidence that the paper or reference sidecar mechanics are absent. The
   reference loop keeps an `n`-slot rolling pipeline, runs target stage work and
@@ -318,10 +317,11 @@ Run these before making any speedup claim:
 2. Distinct-device or multi-node all-tap run:
 
    Status: a one-worker CPU-backed LAN transport proof completed on
-   2026-06-17 at `/private/tmp/spd-lan-cpu-spd8.json`. It matched
-   baseline, accepted `7 / 7` SPD proposals, reached `max_in_flight=4`, and
-   passed `spd-openai-check` with a single tail missing proposal allowed for the
-   short run. This is a correctness and placement proof only.
+   2026-06-17 at `/private/tmp/spd-lan-cpu-spd24-v2.json`. It matched
+   baseline, accepted `21 / 22` SPD proposals, reached `max_in_flight=4`, had
+   one oldest rejection plus three younger drains, and kept tap failures at zero.
+   This is a correctness and placement proof only; it is not a speedup claim and
+   not a strict paper-gate pass.
 
    - keep stage 0 and the SPD sidecar on the coordinator;
    - place physical stages on distinct devices/nodes where available;

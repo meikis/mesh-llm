@@ -26,7 +26,7 @@ Current policy:
 
 ### SPD Sidecar
 
-Status as of 2026-06-17: SPD is a real native request-path proof, but not a
+Status as of 2026-06-18: SPD is a real native request-path proof, but not a
 speedup proof yet.
 
 What is working:
@@ -65,6 +65,8 @@ Latest native evidence:
 | Non-rolling control | completed after the patch; accepted 20 / 24 proposals, proving the target-position 38 mismatch is sidecar/top-1 behavior rather than rolling KV corruption |
 | Local rolling | exact content, 21 / 22 accepted, max in flight 4, one oldest rejection, three younger drains, 0 tap failures |
 | LAN rolling | exact content, 21 / 22 accepted, max in flight 4, one oldest rejection, three younger drains, 0 tap failures |
+| Clean LAN rolling case | `/private/tmp/spd-lan-count-paired.json`: exact content, 23 / 23 accepted, max in flight 4, 21 oldest accepts, 0 oldest rejections, 0 younger drains, 0 tap failures |
+| LAN reset sweep | `/private/tmp/spd-lan-mini-sweep.json`: three SPD-only prompts, 57 / 59 accepted, one oldest rejection, three younger drains, 0 tap failures, 0 out-of-order replay proposals |
 | LAN speed signal | negative correctness result: baseline decode 4502.5 ms, SPD decode 14392.6 ms (`0.313x`) |
 
 First real-node split target:
@@ -200,6 +202,27 @@ First real LAN split checkpoint on 2026-06-17:
 | Checker | the 8-token checkpoint passed; the 24-token run fails the strict paper gate for `21 < 24` accepted proposals, one oldest rejection, three drained younger replies, and three missing replay proposals; the relaxed correctness gate passed at `/private/tmp/spd-lan-cpu-spd24-v2-check-relaxed.json` |
 | Speed signal | negative by design: latest CPU baseline decode 4502.5 ms, SPD decode 14392.6 ms (`0.313x`) |
 
+Follow-up LAN split evidence on 2026-06-18:
+
+| Check | Result |
+| --- | --- |
+| Clean paired report | `/private/tmp/spd-lan-count-paired.json` |
+| Clean paired checker | `/private/tmp/spd-lan-count-paired-check.json` |
+| Placement | same one-worker LAN CPU split: stage 0, OpenAI frontend, and SPD sidecar on the coordinator; physical stages 1-6 on one worker |
+| Content match | 1 / 1 baseline/SPD pair matched |
+| SPD proposals | 23 / 23 accepted, 0 rejected |
+| Rolling executor | 23 launches, max in flight 4, 21 oldest accepts, 0 oldest rejections, 0 younger drains |
+| Rolling replay | one terminal missing proposal at the max-token boundary, 0 out-of-order proposals, verified 24-token prefix matched target |
+| Tap/KV evidence | 0 tap return failures, 0 tap record failures, 0 ignored taps |
+| Speed signal | still negative: baseline decode 4426.1 ms, SPD decode 13458.4 ms (`0.329x`) |
+| SPD-only reset sweep | `/private/tmp/spd-lan-mini-sweep.json` plus `/private/tmp/spd-lan-mini-sweep-check.json` |
+| Sweep result | three prompts, 57 / 59 accepted, two rejected proposals, one oldest rejection, three younger drains, max in flight 4, 0 tap failures, 0 out-of-order replay proposals |
+
+The clean paired case proves the happy-path shadow-KV promotion behavior over
+real stage transport. The SPD-only sweep proves rejection/drain recovery over
+the same split path. The checker for SPD-only reports must pass
+`--require-content-match false` because no baseline half exists in that report.
+
 The first attempted LAN smoke with all remote stages using Metal
 (`--n-gpu-layers -1`) failed before a full token because one worker was running
 six Metal-backed stage processes. Stage 3 hit Metal out-of-memory on the first
@@ -316,12 +339,15 @@ Run these before making any speedup claim:
 
 2. Distinct-device or multi-node all-tap run:
 
-   Status: a one-worker CPU-backed LAN transport proof completed on
-   2026-06-17 at `/private/tmp/spd-lan-cpu-spd24-v2.json`. It matched
-   baseline, accepted `21 / 22` SPD proposals, reached `max_in_flight=4`, had
-   one oldest rejection plus three younger drains, and kept tap failures at zero.
-   This is a correctness and placement proof only; it is not a speedup claim and
-   not a strict paper-gate pass.
+   Status: one-worker CPU-backed LAN transport proofs completed on 2026-06-17
+   and 2026-06-18. The latest clean paired report
+   `/private/tmp/spd-lan-count-paired.json` matched baseline, accepted
+   `23 / 23` SPD proposals, reached `max_in_flight=4`, had no oldest rejection
+   or younger drain, and kept tap failures at zero. The follow-up SPD-only sweep
+   `/private/tmp/spd-lan-mini-sweep.json` accepted `57 / 59` proposals and
+   exercised one oldest rejection plus three younger drains with zero tap
+   failures. This is correctness and placement evidence only; it is not a
+   speedup claim.
 
    - keep stage 0 and the SPD sidecar on the coordinator;
    - place physical stages on distinct devices/nodes where available;
@@ -397,10 +423,16 @@ Run these before making any speedup claim:
    - Do not blindly reuse the pretrained Qwen3.5 S4/L4 tap layout for a cleaner
      physical split. For any intended Skippy split, write the exact tap rows
      first, then train/evaluate the sidecar against those rows.
-   - For a clean four-boundary topology, start on `Qwen/Qwen3-0.6B` locally or
-     in a dry-run HF job with explicit tap rows that match the planned
-     boundaries. Promote to Qwen3.5-4B only after export, parity fixture, and
-     live tap proof pass.
+   - For the next larger dense proof, use `Qwen/Qwen3-8B` with
+     `num_stages=4`, `num_spec_layers=4`, greedy/no-thinking eval, and a `32k`
+     draft vocab cap. Inspect the HF config/GGUF metadata first, derive logical
+     boundaries from the actual target layer count, and then let the Skippy tap
+     planner produce the physical tap-aligned split. Do not reuse the
+     pretrained Qwen3.5-4B `8,10,16,20,24,31` physical split as a training
+     topology.
+   - Run a local or dry-run HF job on `Qwen/Qwen3-0.6B` only when debugging the
+     trainer/export path itself. It is no longer the next scaling target now
+     that the Qwen3.5-4B request path has real LAN KV evidence.
    - Record the sidecar manifest's required hidden-state indices alongside every
      benchmark topology. Prefer a sidecar whose required taps match the intended
      mesh stage layout; otherwise the runtime must either create extra tap

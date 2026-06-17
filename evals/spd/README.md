@@ -564,6 +564,27 @@ Rust.
   drained younger replies, three missing replay proposals); the relaxed
   correctness gate passed at
   `/private/tmp/spd-lan-cpu-spd24-v2-check-relaxed.json`.
+- 2026-06-18 the same request-path rolling executor has a clean 24-token LAN
+  split case and a rejection/reset sweep on one worker. The paired clean-count
+  report at `/private/tmp/spd-lan-count-paired.json` matches baseline/SPD
+  content, accepts `23 / 23` SPD proposals, reaches `max_in_flight=4`, records
+  `21` oldest accepts, `0` oldest rejections, `0` drained younger replies, `0`
+  tap return failures, `0` tap record failures, and `0` ignored taps. Its
+  focused gate passes at `/private/tmp/spd-lan-count-paired-check.json`, with
+  one allowed terminal replay miss at the `max_tokens` boundary and a verified
+  24-token prefix matching target. The three-prompt SPD-only LAN sweep at
+  `/private/tmp/spd-lan-mini-sweep.json` exercises both clean acceptance and
+  rejection recovery over the real split path: aggregate `57 / 59` accepted,
+  `2` rejected, `max_in_flight=4`, one oldest rejection, three younger drains,
+  `0` tap failures, `0` ignored taps, `0` out-of-order replay proposals, and a
+  verified prefix matching target. The SPD-only checker must run with
+  `--require-content-match false` because there is no baseline half; the
+  bounded gate passed at `/private/tmp/spd-lan-mini-sweep-check.json`. These
+  runs strengthen the KV/shadow-session claim: accepted speculative taps are
+  promoted correctly, rejection drains reset without corrupting Skippy state,
+  and the surviving negative speed result is still scheduling/resource
+  placement, not evidence of KV corruption. The paired LAN speed signal remains
+  negative: baseline decode `4426.1ms`, SPD decode `13458.4ms` (`0.329x`).
 
 ## What Does Not Work Yet
 
@@ -1391,12 +1412,13 @@ The tap-row-to-`cur_in` projection bridge lives in
 
 ## Next Engineering Steps
 
-1. Move from the completed one-worker CPU LAN correctness proof to a real speed
+1. Move from the completed one-worker CPU LAN correctness proofs to a real speed
    gate: distinct hardware for downstream stages, stage 0 plus sidecar on the
    coordinator, paired baseline/SPD content and timing, and no one-worker
    all-Metal oversubscription. Do not call it a speed proof until rolling replay
-   is back to `0` missing / `0` out-of-order proposals and oldest rejection
-   drains are understood.
+   is back to `0` missing / `0` out-of-order proposals on the measured prompt
+   set, oldest rejection drains are explained as sidecar-quality misses, and the
+   report shows useful overlap rather than same-worker stage contention.
 2. Run a larger local `spd-openai-smoke --prompt-file ...` sweep to measure
    acceptance distribution, rollback frequency, rolling gaps, and
    `summary.paper_pipeline_estimate` across prompt types.
@@ -1412,13 +1434,21 @@ The tap-row-to-`cur_in` projection bridge lives in
 
 ## Next Research Steps
 
-1. Train a head for a larger Qwen-family model to prove scaling beyond the
-   pretrained 4B artifact.
-2. Keep the draft vocab capped at 32k or 50k first.
-3. Treat the trained sidecar as a Hugging Face/package artifact with explicit
+1. Train a head for `Qwen/Qwen3-8B` as the first larger dense Qwen-family
+   scaling proof. Use the matching GGUF quant intended for Skippy split serving
+   after the HF config/GGUF metadata has been inspected.
+2. Start with `num_stages=4`, `num_spec_layers=4`, greedy/no-thinking eval, and
+   a draft vocab capped at `32k`. Derive the logical stage boundaries from the
+   inspected target layer count; do not copy the Qwen3.5-4B
+   `8,10,16,20,24,31` physical tap split into a new sidecar.
+3. For the first spend-bearing HF job, dry-run the exact model, dataset, row
+   count, hardware flavor, timeout, output repo, and max cost first. A useful
+   first real training scale is `8k` to `16k` UltraChat rows before spending on
+   a larger corpus.
+4. Treat the trained sidecar as a Hugging Face/package artifact with explicit
    base-model, tokenizer, logical stage, tap-layer, spec-layer, draft-vocab, and
    checksum metadata.
-4. Record acceptance, equivalent accept length, and latency simulation from the
+5. Record acceptance, equivalent accept length, and latency simulation from the
    same eval prompts before attempting native speed claims.
-5. Only after that, evaluate custom large MoE targets. Very large MoE models
+6. Only after that, evaluate custom large MoE targets. Very large MoE models
    need activation-capture support and are not the right first scaling proof.

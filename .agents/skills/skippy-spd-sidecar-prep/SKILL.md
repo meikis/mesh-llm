@@ -138,6 +138,33 @@ tokens/repeats and the hardware placement actually lets stages overlap. The
 first purpose is to prove stage launch, hidden-tap return, sidecar proposal,
 target verification, and cleanup across a real node boundary.
 
+Current checkpoint: the first real-node proof has completed for the pretrained
+Qwen3.5-4B sidecar. The clean paired LAN report
+`/private/tmp/spd-lan-count-paired.json` matched baseline/SPD content, accepted
+`23 / 23` proposals, reached `max_in_flight=4`, had `0` oldest rejections,
+`0` younger drains, and `0` tap failures. The SPD-only LAN sweep
+`/private/tmp/spd-lan-mini-sweep.json` exercised reset behavior with
+`57 / 59` accepted, one oldest rejection, three younger drains, `0` tap
+failures, and `0` out-of-order replay proposals. Treat these as KV/transport
+correctness evidence, not speed evidence.
+
+## First Larger Training Target
+
+Use `Qwen/Qwen3-8B` for the first larger dense sidecar training proof. Keep the
+initial training topology conservative:
+
+- `num_stages=4`
+- `num_spec_layers=4`
+- greedy/no-thinking eval
+- draft vocab capped at `32k`
+- UltraChat rows first, then broaden the corpus after export/parity works
+
+Inspect the target HF config/GGUF metadata before selecting
+`stage_layer_boundaries`. Derive logical boundaries from the actual target layer
+count, then use the Skippy tap planner to determine physical tap-aligned split
+boundaries. Do not reuse the pretrained Qwen3.5-4B `8,10,16,20,24,31` physical
+split as the training topology for Qwen3-8B.
+
 ## Local Proof Flow
 
 Use the M4/MPS local path for a small proof or overfit/debug run. Do not treat

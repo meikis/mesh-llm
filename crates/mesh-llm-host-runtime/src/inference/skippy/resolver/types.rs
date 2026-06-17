@@ -101,6 +101,7 @@ pub(crate) struct ResolvedSpeculativeConfig {
     pub(crate) spd_top_k: usize,
     pub(crate) spd_replay_fallback: bool,
     pub(crate) spd_optimistic_decode: bool,
+    pub(crate) spd_rolling_executor: bool,
     pub(crate) spd_optimistic_min_logit_margin: Option<f32>,
 }
 

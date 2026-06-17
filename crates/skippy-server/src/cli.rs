@@ -141,6 +141,7 @@ pub struct ServeBinaryArgs {
     pub openai_spd_top_k: usize,
     #[arg(
         long,
+        allow_hyphen_values = true,
         help = "Override n_gpu_layers for experimental SPD replay tap models. Defaults to the stage config n_gpu_layers."
     )]
     pub openai_spd_n_gpu_layers: Option<i32>,
@@ -170,6 +171,7 @@ pub struct ServeBinaryArgs {
     pub openai_adaptive_speculative_window: bool,
     #[arg(
         long,
+        allow_hyphen_values = true,
         help = "Override n_gpu_layers for the embedded OpenAI draft model. Defaults to the stage config n_gpu_layers."
     )]
     pub openai_draft_n_gpu_layers: Option<i32>,
@@ -290,7 +292,7 @@ mod tests {
             "--openai-spd-top-k",
             "4",
             "--openai-spd-n-gpu-layers",
-            "99",
+            "-1",
             "--openai-spd-replay-fallback",
             "--openai-spd-optimistic-decode",
             "--openai-spd-rolling-executor",
@@ -318,7 +320,7 @@ mod tests {
             Some(PathBuf::from("model.gguf"))
         );
         assert_eq!(args.openai_spd_top_k, 4);
-        assert_eq!(args.openai_spd_n_gpu_layers, Some(99));
+        assert_eq!(args.openai_spd_n_gpu_layers, Some(-1));
         assert!(args.openai_spd_replay_fallback);
         assert!(args.openai_spd_optimistic_decode);
         assert!(args.openai_spd_rolling_executor);

@@ -832,6 +832,7 @@ spd_top_k = 8
 spd_gpu_layers = 0
 spd_replay_fallback = true
 spd_optimistic_decode = true
+spd_rolling_executor = true
 spd_optimistic_min_logit_margin = 5.5
 "#,
     );
@@ -884,7 +885,36 @@ spd_optimistic_min_logit_margin = 5.5
     assert_eq!(openai.spd_n_gpu_layers, Some(0));
     assert!(openai.spd_replay_fallback);
     assert!(openai.spd_optimistic_decode);
+    assert!(openai.spd_rolling_executor);
     assert_eq!(openai.spd_optimistic_min_logit_margin, Some(5.5));
+}
+
+#[test]
+fn spd_rolling_executor_requires_optimistic_decode() {
+    let mesh_config = parse_config(
+        r#"
+[defaults.speculative]
+mode = "spd"
+spd_manifest_path = "/models/spd/skippy-spd-head.json"
+spd_fixture_path = "/models/spd/spd-parity-fixture.safetensors"
+spd_max_tokens = 2
+spd_rolling_executor = true
+"#,
+    );
+    let model_file = temp_model_file();
+
+    let err = resolve_skippy_config(SkippyConfigResolveRequest {
+        mesh_config: &mesh_config,
+        model_id: "Qwen/Qwen3-0.6B:Q4_K_M",
+        model_path: model_file.path(),
+        model_bytes: 4 * 1024 * 1024 * 1024,
+        allocatable_memory_bytes: None,
+        request_defaults: None,
+    })
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("rolling executor requires spd_optimistic_decode"));
 }
 
 #[test]

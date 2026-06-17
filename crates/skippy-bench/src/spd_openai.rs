@@ -1599,7 +1599,7 @@ fn run_case(
         timestamp_millis()
     );
     let deployment =
-        prepare_case_deployment(args, &case_dir, &run_id, stage_ranges, tap_allowlist)?;
+        prepare_case_deployment(args, &case_dir, &run_id, stage_ranges, tap_allowlist, case)?;
     let mut stage_processes = start_case_stages(args, &deployment, case)?;
 
     let openai_base_url = format!("http://{}", deployment.openai_addr);

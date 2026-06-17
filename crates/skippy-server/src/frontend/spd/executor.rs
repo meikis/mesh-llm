@@ -10,7 +10,7 @@ use super::{PhaseTimer, SpdInlineProbe, SpdInlineProbePhase, SpdReplayProposalSo
 #[derive(Debug)]
 pub(in crate::frontend) struct SpdRollingExecutor {
     logical_stage_count: usize,
-    first_position: usize,
+    base_position: usize,
     scheduler: SpdRollingScheduler,
     pending_pre_step_scheduler: Option<SpdRollingScheduler>,
     speculative_context: Vec<i32>,
@@ -81,7 +81,7 @@ impl SpdRollingExecutor {
             .context("SPD rolling executor requires current token")?;
         Ok(Self {
             logical_stage_count,
-            first_position,
+            base_position: first_position,
             scheduler: SpdRollingScheduler::new(logical_stage_count, first_position, first_token)?,
             pending_pre_step_scheduler: None,
             speculative_context: context_tokens.to_vec(),
@@ -103,6 +103,7 @@ impl SpdRollingExecutor {
             self.stats.launch_misses += 1;
             return Ok(None);
         }
+        self.drop_stale_pending_pre_step_scheduler();
         let launch_scheduler = self
             .pending_pre_step_scheduler
             .as_ref()
@@ -202,6 +203,7 @@ impl SpdRollingExecutor {
                 self.pending_pre_step_scheduler
                     .get_or_insert(pre_step_scheduler);
                 let accepted = self.pop_completed_in_flight(completed_position)?;
+                self.base_position = completed_position;
                 self.stats.accepted_oldest += 1;
                 Ok(Some(SpdRollingExecutorCommit::Accepted {
                     completed_position,
@@ -223,6 +225,7 @@ impl SpdRollingExecutor {
                 self.in_flight.clear();
                 self.pending_pre_step_scheduler = None;
                 self.reset_speculative_context(target_position, corrected)?;
+                self.base_position = target_position;
                 self.target_tokens
                     .retain(|position, _| *position <= target_position);
                 self.stats.rejected_oldest += 1;
@@ -255,7 +258,7 @@ impl SpdRollingExecutor {
         &mut self,
         completed_position: usize,
     ) -> Result<Option<SpdRollingExecutorInFlight>> {
-        if completed_position <= self.first_position {
+        if completed_position <= self.base_position {
             return Ok(None);
         }
         let in_flight = self
@@ -270,6 +273,17 @@ impl SpdRollingExecutor {
             );
         }
         Ok(Some(in_flight))
+    }
+
+    fn drop_stale_pending_pre_step_scheduler(&mut self) {
+        let context_len = self.speculative_context.len();
+        if self
+            .pending_pre_step_scheduler
+            .as_ref()
+            .is_some_and(|scheduler| scheduler.next_position() != context_len)
+        {
+            self.pending_pre_step_scheduler = None;
+        }
     }
 
     fn reset_speculative_context(&mut self, target_position: usize, corrected: i32) -> Result<()> {
@@ -397,6 +411,51 @@ mod tests {
         assert_eq!(executor.speculative_context.as_slice(), &[10, 20, 99, 100]);
         assert_eq!(executor.stats().launches, 3);
         assert_eq!(executor.stats().max_in_flight, 2);
+    }
+
+    #[test]
+    fn rejection_reset_treats_corrected_target_as_new_base() {
+        let mut executor = SpdRollingExecutor::new(3, &[10, 20]).unwrap();
+        record_launch(&mut executor, 2, 21);
+        record_launch(&mut executor, 3, 22);
+        executor.record_target_token(2, 99);
+        assert!(matches!(
+            executor.commit_ready_oldest().unwrap(),
+            Some(SpdRollingExecutorCommit::Rejected { .. })
+        ));
+
+        record_launch(&mut executor, 3, 100);
+        record_launch(&mut executor, 4, 101);
+        executor.record_target_token(3, 100);
+
+        assert_eq!(
+            executor.commit_ready_oldest().unwrap(),
+            Some(SpdRollingExecutorCommit::Accepted {
+                completed_position: 2,
+                position: 3,
+                token: 100,
+                origin: None,
+                in_flight_after: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn stale_pre_step_scheduler_is_dropped_after_context_advances() {
+        let mut executor = SpdRollingExecutor::new(4, &[10, 20]).unwrap();
+        record_launch(&mut executor, 2, 21);
+        record_launch(&mut executor, 3, 22);
+
+        executor.pending_pre_step_scheduler =
+            Some(SpdRollingScheduler::new(4, executor.base_position, 20).unwrap());
+
+        let stale_next = executor
+            .pending_pre_step_scheduler
+            .as_ref()
+            .map(SpdRollingScheduler::next_position);
+        assert_ne!(stale_next, Some(executor.speculative_context.len()));
+        executor.drop_stale_pending_pre_step_scheduler();
+        assert!(executor.pending_pre_step_scheduler.is_none());
     }
 
     fn record_launch(executor: &mut SpdRollingExecutor, position: usize, proposed: i32) {

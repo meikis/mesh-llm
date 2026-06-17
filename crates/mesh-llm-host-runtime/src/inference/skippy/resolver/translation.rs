@@ -260,7 +260,7 @@ impl ResolvedSkippyConfig {
             },
             spd_replay_fallback: spd_enabled && self.speculative.spd_replay_fallback,
             spd_optimistic_decode: spd_enabled && self.speculative.spd_optimistic_decode,
-            spd_rolling_executor: false,
+            spd_rolling_executor: spd_enabled && self.speculative.spd_rolling_executor,
             spd_optimistic_min_logit_margin: if spd_enabled {
                 self.speculative.spd_optimistic_min_logit_margin
             } else {

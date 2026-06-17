@@ -454,6 +454,8 @@ pub struct SpeculativeConfig {
     #[serde(default)]
     pub spd_optimistic_decode: Option<bool>,
     #[serde(default)]
+    pub spd_rolling_executor: Option<bool>,
+    #[serde(default)]
     pub spd_optimistic_min_logit_margin: Option<f64>,
 }
 

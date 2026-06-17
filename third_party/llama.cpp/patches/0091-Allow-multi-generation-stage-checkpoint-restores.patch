@@ -48,7 +48,7 @@ index d3aea60b..a8be71bc 100644
  struct skippy_tensor_meta {
      std::string name;
      int32_t layer_index = -1;
-@@ -2301,7 +2317,9 @@ static enum skippy_status skippy_finish_model_open(
+@@ -2301,7 +2317,10 @@ static enum skippy_status skippy_finish_model_open(
      params.flash_attn_type = config != nullptr ? static_cast<llama_flash_attn_type>(config->flash_attn_type) : LLAMA_FLASH_ATTN_TYPE_AUTO;
      params.embeddings = config != nullptr && config->filter_tensors_on_load && !config->include_output;
      if (llm_arch_is_recurrent(model->arch) || llm_arch_is_hybrid(model->arch)) {
@@ -56,6 +56,7 @@ index d3aea60b..a8be71bc 100644
 +        params.n_seq_max = std::max<uint32_t>(
 +                2,
 +                static_cast<uint32_t>(skippy_reserved_sequence_count(stage_model->lane_count)));
++        params.n_outputs_max = std::max<uint32_t>(params.n_outputs_max, params.n_seq_max);
          params.kv_unified = true;
      }
  
@@ -329,4 +330,3 @@ index d3aea60b..a8be71bc 100644
  
 -- 
 2.54.0
-

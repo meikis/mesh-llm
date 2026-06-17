@@ -1296,7 +1296,7 @@ async fn load_split_runtime_generation_inner(
     runtime_options.config.layer_start = settings.stage0.layer_start;
     runtime_options.config.layer_end = settings.stage0.layer_end;
     runtime_options.config.ctx_size = spec.ctx_size;
-    runtime_options.config.lane_count = spec.slots as u32;
+    runtime_options.config.lane_count = settings.runtime_options.config.lane_count;
     runtime_options.config.filter_tensors_on_load = true;
     if let Some(gpu) = spec.pinned_gpu {
         runtime_options.config.selected_device = Some(pinned_stage_device(gpu));
@@ -1492,7 +1492,7 @@ fn split_runtime_stage_load_request(
         activation_width: settings.activation_width,
         wire_dtype: settings.activation_wire_dtype,
         ctx_size: spec.ctx_size,
-        lane_count: spec.slots as u32,
+        lane_count: settings.runtime_options.config.lane_count,
         n_batch: resolved_config.n_batch,
         n_ubatch: resolved_config.n_ubatch,
         n_gpu_layers: resolved_config.n_gpu_layers,
@@ -1565,11 +1565,12 @@ fn split_generation_load_settings<'a>(
         resolved.hardware.device = Some(gpu.backend_device.clone());
     }
     let embedded_openai = resolved.to_embedded_openai_args(activation_width, true)?;
-    let runtime_options = resolved.to_embedded_runtime_options(
+    let mut runtime_options = resolved.to_embedded_runtime_options(
         &spec.skippy_telemetry,
         Some(spec.package.clone()),
         load_mode.clone(),
     )?;
+    runtime_options.config.lane_count = split_stage_lane_count(spec.slots, &embedded_openai)?;
     tracing::info!(
         model = spec.model_ref,
         "KV cache: {} K + {} V",
@@ -1584,6 +1585,22 @@ fn split_generation_load_settings<'a>(
         activation_width,
         activation_wire_dtype: resolved.skippy.activation_wire_dtype,
     })
+}
+
+fn split_stage_lane_count(
+    slots: usize,
+    embedded_openai: &skippy::ResolvedEmbeddedOpenAiArgs,
+) -> Result<u32> {
+    let lane_count = if embedded_openai.spd_rolling_executor {
+        // Canonical request + work shadow + retained rolling snapshots + transient copy lanes.
+        embedded_openai
+            .speculative_window
+            .saturating_add(7)
+            .max(slots)
+    } else {
+        slots
+    };
+    u32::try_from(lane_count).context("split stage lane count exceeds u32")
 }
 
 fn split_generation_load_mode(package: &skippy::SkippyPackageIdentity) -> LoadMode {
@@ -4356,6 +4373,7 @@ spd_max_tokens = 4
 spd_top_k = 1
 spd_gpu_layers = 0
 spd_optimistic_decode = true
+spd_rolling_executor = true
 "#,
             model_path = model_path.display(),
             manifest_path = manifest_path.display(),
@@ -4409,6 +4427,8 @@ spd_optimistic_decode = true
             Some(manifest_path.as_path())
         );
         assert!(settings.embedded_openai.spd_optimistic_decode);
+        assert!(settings.embedded_openai.spd_rolling_executor);
+        assert_eq!(settings.runtime_options.config.lane_count, 11);
 
         let stage1_load = split_runtime_stage_load_request(
             &spec,
@@ -4422,6 +4442,7 @@ spd_optimistic_decode = true
             stage1_load.spd_tap_return_hf_indices,
             [8, 10, 16, 20, 24, 31]
         );
+        assert_eq!(stage1_load.lane_count, 11);
     }
 
     #[tokio::test]

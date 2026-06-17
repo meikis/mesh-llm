@@ -280,7 +280,7 @@ pub struct SpdOpenAiSmokeArgs {
     pub speculative_window: usize,
     #[arg(long, default_value_t = 1)]
     pub spd_top_k: usize,
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
     pub spd_n_gpu_layers: i32,
     #[arg(
         long,

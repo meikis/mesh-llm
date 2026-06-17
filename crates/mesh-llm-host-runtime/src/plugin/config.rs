@@ -1437,6 +1437,7 @@ mmproj = "multimodal.gguf"
             "skippy.prefill_chunk_schedule",
             "speculative.draft_gpu_layers",
             "speculative.spd_manifest_path",
+            "speculative.spd_rolling_executor",
             "request_defaults.reasoning_budget",
             "multimodal.mmproj",
             "advanced.server.alias",

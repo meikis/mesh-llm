@@ -140,19 +140,30 @@ impl SpdRollingShadowLane {
     }
 }
 
-#[derive(Debug, Default)]
 struct SpdRollingShadowSession {
     work: Option<SpdRollingShadowLane>,
     snapshots: std::collections::BTreeMap<usize, SpdRollingShadowLane>,
+    snapshot_retention: usize,
 }
 
 impl SpdRollingShadowSession {
+    fn new(logical_stage_count: usize) -> Self {
+        Self {
+            work: None,
+            snapshots: std::collections::BTreeMap::new(),
+            // Keep enough pre-step views for recurrent models, where canonical
+            // KV cannot be rewound to an older materialized prefix.
+            snapshot_retention: logical_stage_count.saturating_mul(2).max(3),
+        }
+    }
+
     fn ensure_work_at(
         &mut self,
         backend: &StageOpenAiBackend,
         request: &EmbeddedStageZeroGeneration<'_>,
         downstream: &mut TcpStream,
         source_session_id: u64,
+        source_materialized_token_count: usize,
         token_count: usize,
     ) -> OpenAiResult<()> {
         if self.work.is_none() {
@@ -171,6 +182,7 @@ impl SpdRollingShadowSession {
                 ))
             })?;
             self.work = Some(lane);
+            self.snapshot_work_at(backend, request, downstream, token_count)?;
             return Ok(());
         }
 
@@ -179,13 +191,141 @@ impl SpdRollingShadowSession {
             .as_ref()
             .ok_or_else(|| OpenAiError::backend("missing SPD rolling work shadow"))?;
         if work.token_count != token_count {
-            return Err(OpenAiError::backend(format!(
-                "SPD rolling work shadow is at token_count {}, cannot launch at {}",
-                work.token_count, token_count
-            )));
+            if self.snapshots.contains_key(&token_count) {
+                self.swap_work_to_snapshot(backend, request, downstream, token_count)?;
+            } else if token_count == source_materialized_token_count {
+                self.reseed_work_from_source(
+                    backend,
+                    request,
+                    downstream,
+                    source_session_id,
+                    token_count,
+                )?;
+            } else {
+                return Err(self.missing_snapshot_error(token_count));
+            }
         }
+        self.prune_snapshots(backend, request, downstream)?;
         self.snapshot_work_at(backend, request, downstream, token_count)?;
         Ok(())
+    }
+
+    fn missing_snapshot_error(&self, token_count: usize) -> OpenAiError {
+        let work_token_count = self.work.as_ref().map(|work| work.token_count);
+        let snapshot_token_counts = self.snapshots.keys().copied().collect::<Vec<_>>();
+        OpenAiError::backend(format!(
+            "SPD rolling work shadow is at token_count {work_token_count:?}, cannot launch at {token_count}; available snapshots: {snapshot_token_counts:?}"
+        ))
+    }
+
+    fn preserve_or_drop_current_work(
+        &mut self,
+        backend: &StageOpenAiBackend,
+        request: &EmbeddedStageZeroGeneration<'_>,
+        downstream: &mut TcpStream,
+    ) -> OpenAiResult<()> {
+        let Some(current_work) = self.work.take() else {
+            return Ok(());
+        };
+        match self.snapshots.entry(current_work.token_count) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(current_work);
+            }
+            std::collections::btree_map::Entry::Occupied(_) => {
+                backend.drop_embedded_stage_session(
+                    request,
+                    downstream,
+                    request.ids.request_id,
+                    current_work.session_id,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn swap_work_to_snapshot(
+        &mut self,
+        backend: &StageOpenAiBackend,
+        request: &EmbeddedStageZeroGeneration<'_>,
+        downstream: &mut TcpStream,
+        token_count: usize,
+    ) -> OpenAiResult<()> {
+        let replacement = self
+            .snapshots
+            .remove(&token_count)
+            .ok_or_else(|| self.missing_snapshot_error(token_count))?;
+        self.preserve_or_drop_current_work(backend, request, downstream)?;
+        self.work = Some(replacement);
+        Ok(())
+    }
+
+    fn reseed_work_from_source(
+        &mut self,
+        backend: &StageOpenAiBackend,
+        request: &EmbeddedStageZeroGeneration<'_>,
+        downstream: &mut TcpStream,
+        source_session_id: u64,
+        token_count: usize,
+    ) -> OpenAiResult<()> {
+        self.preserve_or_drop_current_work(backend, request, downstream)?;
+        let lane = SpdRollingShadowLane::new(token_count)?;
+        backend.copy_embedded_stage_session(
+            request,
+            downstream,
+            source_session_id,
+            lane.session_id,
+            token_count as u64,
+        )
+        .map_err(|error| {
+            OpenAiError::backend(format!(
+                "failed to reseed SPD rolling work shadow {} from source {} at token_count {}: {}",
+                lane.session_id, source_session_id, token_count, error
+            ))
+        })?;
+        self.work = Some(lane);
+        Ok(())
+    }
+
+    fn prune_snapshots(
+        &mut self,
+        backend: &StageOpenAiBackend,
+        request: &EmbeddedStageZeroGeneration<'_>,
+        downstream: &mut TcpStream,
+    ) -> OpenAiResult<()> {
+        let newest = self
+            .work
+            .as_ref()
+            .map(|work| work.token_count)
+            .into_iter()
+            .chain(self.snapshots.keys().copied())
+            .max()
+            .unwrap_or(0);
+        let min_keep = newest.saturating_sub(self.snapshot_retention);
+        let stale = self
+            .snapshots
+            .keys()
+            .copied()
+            .filter(|token_count| *token_count < min_keep)
+            .collect::<Vec<_>>();
+        for token_count in stale {
+            if let Some(snapshot) = self.snapshots.remove(&token_count) {
+                backend.drop_embedded_stage_session(
+                    request,
+                    downstream,
+                    request.ids.request_id,
+                    snapshot.session_id,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn empty_with_same_retention(&self) -> Self {
+        Self {
+            work: None,
+            snapshots: std::collections::BTreeMap::new(),
+            snapshot_retention: self.snapshot_retention,
+        }
     }
 
     fn work_execution_session(&self) -> OpenAiResult<SpdExecutionSession<'_>> {
@@ -237,8 +377,8 @@ impl SpdRollingShadowSession {
         Ok(Some(control))
     }
 
-    fn remove_snapshot(&mut self, token_count: usize) -> Option<SpdRollingShadowLane> {
-        self.snapshots.remove(&token_count)
+    fn snapshot_at(&self, token_count: usize) -> Option<&SpdRollingShadowLane> {
+        self.snapshots.get(&token_count)
     }
 
     fn work_at(&self, token_count: usize) -> Option<&SpdRollingShadowLane> {
@@ -247,12 +387,8 @@ impl SpdRollingShadowSession {
             .filter(|work| work.token_count == token_count)
     }
 
-    fn stale_snapshot_token_counts(&self, token_count: usize) -> Vec<usize> {
-        self.snapshots
-            .keys()
-            .copied()
-            .filter(|snapshot_token_count| *snapshot_token_count <= token_count)
-            .collect()
+    fn has_view_at(&self, token_count: usize) -> bool {
+        self.work_at(token_count).is_some() || self.snapshots.contains_key(&token_count)
     }
 
     fn drain_lanes(self) -> Vec<SpdRollingShadowLane> {
@@ -310,6 +446,15 @@ fn start_spd_rolling_executor_decode(
         args.executor.record_launch_miss();
         return Ok(None);
     }
+    if launch.position < args.source_materialized_token_count
+        && args
+            .shadow_session
+            .as_ref()
+            .is_some_and(|shadow| !shadow.has_view_at(launch.position))
+    {
+        args.executor.record_launch_miss();
+        return Ok(None);
+    }
     let decode = {
         let shadow = args
             .shadow_session
@@ -320,6 +465,7 @@ fn start_spd_rolling_executor_decode(
             args.request,
             args.downstream,
             args.request.ids.session_id,
+            args.source_materialized_token_count,
             launch.position,
         )?;
         let execution_session = Some(shadow.work_execution_session()?);
@@ -379,8 +525,7 @@ fn promote_spd_rolling_shadow_session(
     let Some(shadow) = shadow_session.as_mut() else {
         return Ok(None);
     };
-    let mut promoted_snapshot = shadow.remove_snapshot(token_count);
-    let source_session_id = if let Some(snapshot) = promoted_snapshot.as_ref() {
+    let source_session_id = if let Some(snapshot) = shadow.snapshot_at(token_count) {
         snapshot.session_id
     } else if let Some(work) = shadow.work_at(token_count) {
         work.session_id
@@ -406,30 +551,9 @@ fn promote_spd_rolling_shadow_session(
             ))
         })?,
     );
-    if let Some(snapshot) = promoted_snapshot.take() {
-        merge_session_control(
-            &mut total,
-            backend.drop_embedded_stage_session(
-                request,
-                downstream,
-                request.ids.request_id,
-                snapshot.session_id,
-            )?,
-        );
-    }
-    for stale in shadow.stale_snapshot_token_counts(token_count) {
-        if let Some(snapshot) = shadow.remove_snapshot(stale) {
-            merge_session_control(
-                &mut total,
-                backend.drop_embedded_stage_session(
-                    request,
-                    downstream,
-                    request.ids.request_id,
-                    snapshot.session_id,
-                )?,
-            );
-        }
-    }
+    // Do not consume or prune snapshots here. The rolling scheduler can still
+    // launch from a pre-step view behind the newest work lane while younger
+    // verifier work is in flight; request cleanup drains remaining snapshots.
     Ok(total)
 }
 
@@ -463,8 +587,12 @@ fn reset_spd_rolling_shadow_session(
     downstream: &mut TcpStream,
     shadow_session: &mut Option<SpdRollingShadowSession>,
 ) -> OpenAiResult<Option<EmbeddedSessionControl>> {
+    let replacement = shadow_session
+        .as_ref()
+        .map(SpdRollingShadowSession::empty_with_same_retention)
+        .unwrap_or_else(|| SpdRollingShadowSession::new(0));
     let drop = drop_spd_rolling_shadow_session(backend, request, downstream, shadow_session)?;
-    *shadow_session = Some(SpdRollingShadowSession::default());
+    *shadow_session = Some(replacement);
     Ok(drop)
 }
 
@@ -1325,7 +1453,8 @@ impl StageOpenAiBackend {
                         SpdRollingExecutor::new(logical_stage_count, &context_tokens)
                             .map_err(openai_backend_error)?,
                     );
-                    spd_rolling_shadow_session = Some(SpdRollingShadowSession::default());
+                    spd_rolling_shadow_session =
+                        Some(SpdRollingShadowSession::new(logical_stage_count));
                 }
                 if !prefer_rolling_spd_optimistic_decode
                     && (spd_guard.is_some() || draft_guard.is_some())

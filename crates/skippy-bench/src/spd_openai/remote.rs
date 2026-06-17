@@ -78,6 +78,7 @@ pub(super) fn prepare_case_deployment(
     run_id: &str,
     stage_ranges: &[(u32, u32)],
     tap_allowlist: &[u32],
+    case: SmokeCase,
 ) -> Result<CaseDeployment> {
     let explicit_stage_hosts = !args.stage_hosts.is_empty();
     let endpoint_hosts = parse_string_map(args.endpoint_host_map.as_deref())?;
@@ -156,6 +157,7 @@ pub(super) fn prepare_case_deployment(
         ports: &ports,
         endpoint_hosts: &endpoint_hosts,
         explicit_stage_hosts,
+        case,
     })?;
     Ok(CaseDeployment {
         stages,
@@ -291,6 +293,7 @@ struct StageConfigPlan<'a> {
     ports: &'a [u16],
     endpoint_hosts: &'a BTreeMap<String, String>,
     explicit_stage_hosts: bool,
+    case: SmokeCase,
 }
 
 fn write_stage_configs(plan: StageConfigPlan<'_>) -> Result<()> {
@@ -329,7 +332,7 @@ fn write_stage_configs(plan: StageConfigPlan<'_>) -> Result<()> {
             || args.model_path.display().to_string(),
             ToString::to_string,
         );
-        let lane_count = stage_lane_count(args)?;
+        let lane_count = stage_lane_count(args, plan.case)?;
         fs::write(
             &stage.config_path,
             serde_json::to_vec_pretty(&json!({
@@ -364,9 +367,10 @@ fn write_stage_configs(plan: StageConfigPlan<'_>) -> Result<()> {
     Ok(())
 }
 
-fn stage_lane_count(args: &SpdOpenAiSmokeArgs) -> Result<u32> {
-    let per_generation = if args.spd_rolling_executor {
-        args.speculative_window.saturating_add(2).max(4)
+fn stage_lane_count(args: &SpdOpenAiSmokeArgs, case: SmokeCase) -> Result<u32> {
+    let per_generation = if case.uses_spd() && args.spd_rolling_executor {
+        // Canonical request + work shadow + retained rolling snapshots + transient copy lanes.
+        args.speculative_window.saturating_add(7)
     } else {
         4
     };
@@ -676,8 +680,10 @@ pub(super) fn start_case_stages(
                     .arg(&args.model_path)
                     .arg("--openai-spd-top-k")
                     .arg(args.spd_top_k.to_string())
-                    .arg("--openai-spd-n-gpu-layers")
-                    .arg(args.spd_n_gpu_layers.to_string())
+                    .arg(format!(
+                        "--openai-spd-n-gpu-layers={}",
+                        args.spd_n_gpu_layers
+                    ))
                     .arg("--openai-speculative-window")
                     .arg(args.speculative_window.to_string());
                 if args.optimistic_decode {

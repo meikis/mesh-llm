@@ -1176,6 +1176,30 @@ stage-0-local plus worker endpoint plan. Use
 `spd-openai-smoke --preflight-only` before a real node launch, then remove the
 flag for the smoke once model paths and reachable endpoint maps are real.
 
+2026-06-17 KV/rolling checkpoint: the release `max_tokens=24` rolling smoke at
+`/private/tmp/spd-local-skippy-rolling-release-24-final.json` preserved exact
+baseline/SPD content for the pretrained Qwen3.5-4B S4/L4 sidecar on the
+tap-aligned split `8,10,16,20,24,31`. It accepted `19 / 23` proposals,
+committed `13` optimistic target results (`11` chained), reached
+`max_in_flight=4`, and passed the explicit bounded gate with
+`missing_proposals=9`, `out_of_order=0`, `rejected_oldest=1`, and
+`drained_younger=3`. The same pass fixed the post-rejection rolling executor
+base position so fresh launches after an oldest rejection no longer collide
+with the corrected target position.
+
+The relevant PR-860 KV lesson is narrower than importing its native MTP work.
+Routing hybrid `skippy_trim_session` through the hybrid memory owner is useful
+because it prevents silently trimming only attention KV while leaving recurrent
+state stale. Copying PR-860's `n_rs_seq=2` recurrent rollback allocation is not
+valid on this branch: combined with the current multi-checkpoint lane layout it
+inflated every stage to `99 seqs 2 rs_seq`, allocated about `14.9 GiB` of
+recurrent state per stage on Metal, and failed the real smoke with GPU
+out-of-memory. The checked-in patch therefore keeps `n_rs_seq=0` and only makes
+hybrid partial trim fail through the recurrent owner instead of pretending KV
+alone was rolled back. True recurrent rollback for SPD shadow lanes still needs
+a separate design that budgets rollback planes against Skippy's checkpoint and
+lane counts.
+
 ## What Does Not Work Yet
 
 - The `spd-replay` request path has a correctness fallback, not a final speed

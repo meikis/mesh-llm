@@ -145,6 +145,9 @@ pub(super) fn resolve_speculative_config(
         if spd.optimistic_min_logit_margin.is_some() && spd.top_k < 2 {
             bail!("skippy SPD optimistic margin gating requires spd_top_k >= 2");
         }
+        if spd.rolling_executor && !spd.optimistic_decode {
+            bail!("skippy SPD rolling executor requires spd_optimistic_decode = true");
+        }
         mode = "spd".to_string();
         draft_model_path = None;
     } else {
@@ -191,6 +194,7 @@ pub(super) fn resolve_speculative_config(
         spd_top_k: spd.top_k,
         spd_replay_fallback: spd.replay_fallback,
         spd_optimistic_decode: spd.optimistic_decode,
+        spd_rolling_executor: spd.rolling_executor,
         spd_optimistic_min_logit_margin: spd.optimistic_min_logit_margin,
     })
 }
@@ -204,6 +208,7 @@ struct SpdSpeculativeFields {
     top_k: usize,
     replay_fallback: bool,
     optimistic_decode: bool,
+    rolling_executor: bool,
     optimistic_min_logit_margin: Option<f32>,
 }
 
@@ -252,6 +257,11 @@ impl SpdSpeculativeFields {
                 global_config.and_then(|config| config.spd_optimistic_decode),
                 false,
             ),
+            rolling_executor: super::support::pick_value(
+                model_config.and_then(|config| config.spd_rolling_executor),
+                global_config.and_then(|config| config.spd_rolling_executor),
+                false,
+            ),
             optimistic_min_logit_margin: pick_owned(
                 model_config.and_then(|config| config.spd_optimistic_min_logit_margin),
                 global_config.and_then(|config| config.spd_optimistic_min_logit_margin),
@@ -269,6 +279,7 @@ impl SpdSpeculativeFields {
             || self.top_k != 1
             || self.replay_fallback
             || self.optimistic_decode
+            || self.rolling_executor
             || self.optimistic_min_logit_margin.is_some()
     }
 

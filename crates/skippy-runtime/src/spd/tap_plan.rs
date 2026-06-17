@@ -198,6 +198,21 @@ mod tests {
         }
     }
 
+    fn qwen35_s2_l4_topology() -> SpdHeadTopology {
+        SpdHeadTopology {
+            hidden_size: 2560,
+            vocab_size: 248_320,
+            draft_vocab_size: 50_000,
+            num_stages: 2,
+            stage_layer_boundaries: Some(vec![16, 32]),
+            num_spec_layers: 4,
+            trained_with_use_deepest: true,
+            shallow_hidden_layer_indices: vec![vec![0, 16, 32], vec![0, 16]],
+            spec_init_from_base_layers: None,
+            draft_token_ids: None,
+        }
+    }
+
     #[test]
     fn qwen35_pretrained_head_needs_internal_taps_on_even_four_way_split() {
         let plan = plan_hidden_state_taps(
@@ -255,6 +270,53 @@ mod tests {
             SpdHiddenStateSource::StageBoundary {
                 stage_index: 5,
                 layer_end: 31
+            }
+        );
+    }
+
+    #[test]
+    fn qwen35_two_stage_head_can_use_boundary_only_split() {
+        let plan = plan_hidden_state_taps(
+            &qwen35_s2_l4_topology(),
+            &[
+                SpdStageLayerRange::new(0, 0, 16),
+                SpdStageLayerRange::new(1, 16, 32),
+            ],
+        )
+        .unwrap();
+
+        assert!(plan.can_use_stage_boundaries_only());
+        assert_eq!(plan.required_hf_indices, vec![0, 16, 32]);
+        assert_eq!(plan.stage_boundary_hf_indices, vec![16, 32]);
+        assert_eq!(plan.boundary_only_missing_hf_indices, Vec::<u32>::new());
+        assert_eq!(
+            plan.requirements
+                .iter()
+                .find(|requirement| requirement.hf_index == 0)
+                .unwrap()
+                .source,
+            SpdHiddenStateSource::Embedding
+        );
+        assert_eq!(
+            plan.requirements
+                .iter()
+                .find(|requirement| requirement.hf_index == 16)
+                .unwrap()
+                .source,
+            SpdHiddenStateSource::StageBoundary {
+                stage_index: 0,
+                layer_end: 16
+            }
+        );
+        assert_eq!(
+            plan.requirements
+                .iter()
+                .find(|requirement| requirement.hf_index == 32)
+                .unwrap()
+                .source,
+            SpdHiddenStateSource::StageBoundary {
+                stage_index: 1,
+                layer_end: 32
             }
         );
     }

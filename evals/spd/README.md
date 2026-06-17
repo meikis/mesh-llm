@@ -262,6 +262,17 @@ Rust.
   six remote Metal-backed stage processes oversubscribed the worker and stage 3
   hit out-of-memory on the first `DecodeEmbd`; future speed gates need distinct
   devices/workers or fewer Metal-backed stage processes per worker.
+- 2026-06-18 the product-shaped two-stage baseline now works on the real
+  M4-plus-worker split. The report
+  `/private/tmp/skippy-two-stage-baseline.json` used exactly two physical
+  stages, `--splits 16 --layer-end 32`, with stage 0 on the coordinator and
+  stage 1 on the worker, `--n-gpu-layers=-1`, and a 24-token bounded prompt.
+  Baseline wall time was `1678.9ms`, decode was `1293.2ms`, stage-0 compute was
+  `253.0ms`, downstream wait was `990.2ms`, and tap counters stayed clean. This
+  is a baseline split proof only: the current pretrained Qwen3.5 S4/L4 sidecar
+  requires the physical tap split `8,10,16,20,24,31` and must not be used for a
+  two-stage speed claim. The matching sidecar topology is `num_stages=2` with
+  `stage_layer_boundaries=16,32`, deriving tap rows `0,16,32;0,16`.
 - 2026-06-17 the first model-backed 24-token rolling-executor smoke after the
   replay reset cleanup is
   `/private/tmp/spd-rolling-executor-real-local-smoke24-4.json`. It restores
@@ -1412,22 +1423,28 @@ The tap-row-to-`cur_in` projection bridge lives in
 
 ## Next Engineering Steps
 
-1. Move from the completed one-worker CPU LAN correctness proofs to a real speed
-   gate: distinct hardware for downstream stages, stage 0 plus sidecar on the
-   coordinator, paired baseline/SPD content and timing, and no one-worker
-   all-Metal oversubscription. Do not call it a speed proof until rolling replay
-   is back to `0` missing / `0` out-of-order proposals on the measured prompt
-   set, oldest rejection drains are explained as sidecar-quality misses, and the
-   report shows useful overlap rather than same-worker stage contention.
-2. Run a larger local `spd-openai-smoke --prompt-file ...` sweep to measure
+1. Train or fetch a topology-matched sidecar for the real two-stage product
+   split before making the next speed claim. For Qwen3.5-4B that means
+   `num_stages=2`, `stage_layer_boundaries=16,32`, and tap rows
+   `0,16,32;0,16`; the current pretrained S4/L4 sidecar is intentionally
+   excluded from this test.
+2. Move from the completed one-worker CPU LAN correctness proofs and the
+   completed two-stage Metal baseline to a real speed gate: stage 0 plus sidecar
+   on the coordinator, stage 1 on the worker, paired baseline/SPD content and
+   timing, and no one-worker all-Metal oversubscription. Do not call it a speed
+   proof until rolling replay is back to `0` missing / `0` out-of-order
+   proposals on the measured prompt set, oldest rejection drains are explained
+   as sidecar-quality misses, and the report shows useful overlap rather than
+   same-worker stage contention.
+3. Run a larger local `spd-openai-smoke --prompt-file ...` sweep to measure
    acceptance distribution, rollback frequency, rolling gaps, and
    `summary.paper_pipeline_estimate` across prompt types.
-3. Use injected downstream delay only as a bounded diagnostic while no separate
+4. Use injected downstream delay only as a bounded diagnostic while no separate
    worker is available; do not report it as distributed speedup.
-4. When another worker is available, rerun `spd-openai-smoke` with explicit
+5. When another worker is available, rerun `spd-openai-smoke` with explicit
    `--stage-hosts`, staged model artifacts, and ordinary split baseline/SPD
    pairs to test real wall-clock speed.
-5. Add an SPD sidecar package workflow around the Python reference trainer:
+6. Add an SPD sidecar package workflow around the Python reference trainer:
    plan logical tap topology, train, eval `L'_acc`, export safetensors/manifest,
    validate Rust parity, then publish sidecar metadata alongside Skippy model
    artifacts.

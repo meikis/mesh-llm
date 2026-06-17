@@ -223,6 +223,28 @@ real stage transport. The SPD-only sweep proves rejection/drain recovery over
 the same split path. The checker for SPD-only reports must pass
 `--require-content-match false` because no baseline half exists in that report.
 
+Product-shaped two-stage baseline on 2026-06-18:
+
+| Check | Result |
+| --- | --- |
+| Report | `/private/tmp/skippy-two-stage-baseline.json` |
+| Preflight | `/private/tmp/skippy-two-stage-baseline-preflight.json` |
+| Topology | two physical stages, `--splits 16 --layer-end 32`, ranges `0..16` and `16..32` |
+| Placement | stage 0 and OpenAI frontend on the coordinator; stage 1 on one worker |
+| Runtime device choice | `--n-gpu-layers=-1`; both inspected stage logs selected Metal |
+| Baseline output | 24-token bounded count prompt, finish reason `length` |
+| Baseline timing | wall `1678.9ms`, decode `1293.2ms`, stage-0 compute `253.0ms`, downstream wait `990.2ms` |
+| Tap/KV evidence | no tap return failures, no tap record failures, no ignored taps |
+| Cleanup | local and worker stage ports were free after the run; no worker `skippy-server` process remained |
+
+This is the first ordinary two-stage Skippy split proof for the product shape
+the speed gate should use. It is baseline-only because the current pretrained
+Qwen3.5-4B S4/L4 sidecar does not match this topology. That artifact requires
+the tap-aligned split `8,10,16,20,24,31`; a true two-stage split exposes only
+hidden-state boundaries `16` and `32` plus the embedding row `0`. The matching
+sidecar must be trained for `num_stages=2` and `stage_layer_boundaries=16,32`,
+which derives tap rows `0,16,32;0,16`.
+
 The first attempted LAN smoke with all remote stages using Metal
 (`--n-gpu-layers -1`) failed before a full token because one worker was running
 six Metal-backed stage processes. Stage 3 hit Metal out-of-memory on the first
@@ -266,6 +288,10 @@ Open items:
 - Run the multi-token baseline-vs-SPD sweep on distinct devices/nodes; both CPU
   and Metal local repeats passed correctness, but same-machine repeats are not
   speed oracles.
+- For the two-node product shape, train a Qwen3.5-4B sidecar for
+  `num_stages=2` and `stage_layer_boundaries=16,32` before attempting
+  baseline-vs-SPD. The pretrained S4/L4 sidecar is not a valid artifact for the
+  two-stage split.
 - Use a topology-compatible artifact and record both logical SPD stage count and
   physical tap-aligned stage count.
 - Use distinct devices or nodes so target stage work and sidecar work can
@@ -420,6 +446,32 @@ Run these before making any speedup claim:
      proof. It already clones/patches the reference repo, trains/evaluates,
      exports the Skippy manifest, and supports `--stage-layer-boundaries` plus
      explicit `--shallow-hidden-layer-indices`.
+   - For the two-node product split, train a Qwen3.5-4B S2/L4 sidecar before
+     running SPD. The command shape is:
+
+     ```bash
+     python3 evals/spd/hf_train_eval_qwen06.py \
+       --work-dir /tmp/skippy-spd-qwen35-4b-s2-16 \
+       --model-name Qwen/Qwen3.5-4B \
+       --dataset HuggingFaceH4/ultrachat_200k \
+       --dataset-split train_sft \
+       --train-rows 8192 \
+       --eval-rows-per-set 32 \
+       --num-stages 2 \
+       --stage-layer-boundaries 16,32 \
+       --num-spec-layers 4 \
+       --max-length 512 \
+       --max-new-tokens 64 \
+       --draft-top-k 4 \
+       --device mps \
+       --upload-repo ''
+     ```
+
+     After training, export `spd-head.safetensors`, export a parity fixture,
+     run fixture parity, run live-tap parity with `--splits 16 --layer-end 32`,
+     and only then run the paired two-node
+     `spd-openai-smoke --run-baseline true --run-spd true
+     --spd-rolling-executor` gate.
    - Do not blindly reuse the pretrained Qwen3.5 S4/L4 tap layout for a cleaner
      physical split. For any intended Skippy split, write the exact tap rows
      first, then train/evaluate the sidecar against those rows.

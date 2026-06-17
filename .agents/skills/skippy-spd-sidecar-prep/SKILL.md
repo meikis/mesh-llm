@@ -148,6 +148,51 @@ Qwen3.5-4B sidecar. The clean paired LAN report
 failures, and `0` out-of-order replay proposals. Treat these as KV/transport
 correctness evidence, not speed evidence.
 
+## Product Two-Stage Target
+
+For the product-shaped two-node Skippy test, use exactly two physical stages:
+`0..16` on the coordinator and `16..32` on the worker. The current pretrained
+Qwen3.5-4B S4/L4 sidecar is not compatible with that topology because it needs
+non-boundary taps from the `8,10,16,20,24,31` split. Do not use it for a
+two-stage SPD-vs-baseline speed claim.
+
+The first real two-stage baseline checkpoint is
+`/private/tmp/skippy-two-stage-baseline.json`: one coordinator stage plus one
+worker stage, `--splits 16 --layer-end 32`, `--n-gpu-layers=-1`, `24` generated
+tokens, baseline decode `1293.2ms`, wall `1678.9ms`, stage-0 compute
+`253.0ms`, downstream wait `990.2ms`, and zero tap/record/ignored-tap
+failures. This proves the ordinary two-stage Metal split shape and cleanup, not
+SPD speed.
+
+Train the matching sidecar with logical boundaries that match the physical
+split. The trainer derives the required tap rows as `0,16,32;0,16`, where `0`
+is the embedding row and nonzero rows are stage-boundary hidden states:
+
+```bash
+python3 evals/spd/hf_train_eval_qwen06.py \
+  --work-dir /tmp/skippy-spd-qwen35-4b-s2-16 \
+  --model-name Qwen/Qwen3.5-4B \
+  --dataset HuggingFaceH4/ultrachat_200k \
+  --dataset-split train_sft \
+  --train-rows 8192 \
+  --eval-rows-per-set 32 \
+  --num-stages 2 \
+  --stage-layer-boundaries 16,32 \
+  --num-spec-layers 4 \
+  --max-length 512 \
+  --max-new-tokens 64 \
+  --draft-top-k 4 \
+  --device mps \
+  --upload-repo ''
+```
+
+Use a smaller row count only to debug trainer/export plumbing. For the real
+artifact, use a larger local run or a confirmed Hugging Face job, export
+`spd-head.safetensors`, export a parity fixture, run fixture parity, run live
+tap parity on `--splits 16 --layer-end 32`, and only then run
+`spd-openai-smoke --run-baseline true --run-spd true --spd-rolling-executor`
+on the same two-node topology.
+
 ## First Larger Training Target
 
 Use `Qwen/Qwen3-8B` for the first larger dense sidecar training proof. Keep the

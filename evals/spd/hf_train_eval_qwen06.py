@@ -118,6 +118,14 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Override the base_model_path written to the Skippy SPD manifest.",
     )
+    parser.add_argument(
+        "--dry-run-topology",
+        action="store_true",
+        help=(
+            "Validate and print the Skippy SPD topology plan as JSON, then exit "
+            "before cloning, downloading, training, evaluating, or uploading."
+        ),
+    )
     parser.add_argument("--skip-train", action="store_true")
     parser.add_argument("--skip-eval", action="store_true")
     return parser.parse_args()
@@ -358,9 +366,35 @@ def parse_stage_layer_boundaries(value: str) -> list[int] | None:
     boundaries = [int(part.strip()) for part in value.split(",") if part.strip()]
     if not boundaries:
         raise RuntimeError("--stage-layer-boundaries must not be empty when set")
+    if any(boundary <= 0 for boundary in boundaries):
+        raise RuntimeError(f"--stage-layer-boundaries must be positive: {boundaries}")
     if any(left >= right for left, right in zip(boundaries, boundaries[1:])):
         raise RuntimeError(f"--stage-layer-boundaries must be strictly increasing: {boundaries}")
     return boundaries
+
+
+def parse_hidden_tap_rows(value: str) -> list[list[int]]:
+    value = (value or "").strip()
+    if not value:
+        return []
+    rows: list[list[int]] = []
+    for row_text in value.split(";"):
+        row_text = row_text.strip()
+        if not row_text:
+            continue
+        row = [int(part.strip()) for part in row_text.split(",") if part.strip()]
+        if not row:
+            raise RuntimeError("--shallow-hidden-layer-indices contains an empty row")
+        if any(index < 0 for index in row):
+            raise RuntimeError(f"hidden-state tap indices must be non-negative: {row}")
+        if row[0] != 0:
+            raise RuntimeError(f"hidden-state tap rows must start with embedding row 0: {row}")
+        if any(left >= right for left, right in zip(row, row[1:])):
+            raise RuntimeError(f"hidden-state tap rows must be strictly increasing: {row}")
+        rows.append(row)
+    if not rows:
+        raise RuntimeError("--shallow-hidden-layer-indices must not be empty when set")
+    return rows
 
 
 def derive_hidden_tap_indices(boundaries: list[int]) -> list[list[int]]:
@@ -383,6 +417,66 @@ def hidden_tap_rows_arg(args: argparse.Namespace) -> str:
             f"--num-stages is {args.num_stages}"
         )
     return ";".join(",".join(str(index) for index in row) for row in derive_hidden_tap_indices(boundaries))
+
+
+def topology_dry_run(args: argparse.Namespace) -> None:
+    if args.num_stages <= 0:
+        raise RuntimeError(f"--num-stages must be positive: {args.num_stages}")
+    if args.num_spec_layers <= 0:
+        raise RuntimeError(f"--num-spec-layers must be positive: {args.num_spec_layers}")
+
+    boundaries = parse_stage_layer_boundaries(args.stage_layer_boundaries)
+    explicit_rows = parse_hidden_tap_rows(args.shallow_hidden_layer_indices)
+    if explicit_rows:
+        tap_rows = explicit_rows
+        hidden_rows_arg = ";".join(",".join(str(index) for index in row) for row in tap_rows)
+        derived_from_stage_layer_boundaries = False
+    else:
+        hidden_rows_arg = hidden_tap_rows_arg(args)
+        tap_rows = parse_hidden_tap_rows(hidden_rows_arg) if hidden_rows_arg else []
+        derived_from_stage_layer_boundaries = bool(boundaries)
+
+    physical_split_boundaries = boundaries[:-1] if boundaries else []
+    layer_end = boundaries[-1] if boundaries else None
+    required_hf_hidden_state_indices = sorted({index for row in tap_rows for index in row})
+    spd_tap_return_hf_indices = [index for index in required_hf_hidden_state_indices if index != 0]
+    manifest_base_model_path = args.manifest_base_model_path.strip() or args.model_name
+    plan = {
+        "model_name": args.model_name,
+        "manifest_base_model_path": manifest_base_model_path,
+        "dataset": args.dataset,
+        "dataset_split": args.dataset_split,
+        "train_rows": args.train_rows,
+        "eval_rows_per_set": args.eval_rows_per_set,
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "learning_rate": args.learning_rate,
+        "max_length": args.max_length,
+        "max_new_tokens": args.max_new_tokens,
+        "device": args.device,
+        "attn_implementation": args.attn_implementation,
+        "num_stages": args.num_stages,
+        "stage_layer_boundaries": boundaries,
+        "physical_split_boundaries": physical_split_boundaries,
+        "layer_end": layer_end,
+        "num_spec_layers": args.num_spec_layers,
+        "draft_top_k": args.draft_top_k,
+        "draft_vocab_json": args.draft_vocab_json,
+        "shallow_hidden_layer_indices": hidden_rows_arg,
+        "shallow_hidden_layer_index_rows": tap_rows,
+        "derived_from_stage_layer_boundaries": derived_from_stage_layer_boundaries,
+        "required_hf_hidden_state_indices": required_hf_hidden_state_indices,
+        "spd_tap_return_hf_indices": spd_tap_return_hf_indices,
+        "dry_run": {
+            "clones_reference_repo": False,
+            "downloads_model": False,
+            "trains": False,
+            "evaluates": False,
+            "uploads": False,
+        },
+    }
+    print(json.dumps(plan, indent=2, sort_keys=True), flush=True)
 
 
 def train_head(args: argparse.Namespace, reference_dir: Path, train_jsonl: Path, train_dir: Path) -> Path:
@@ -628,6 +722,10 @@ def reference_env(args: argparse.Namespace) -> dict[str, str]:
 
 def main() -> None:
     args = parse_args()
+    if args.dry_run_topology:
+        topology_dry_run(args)
+        return
+
     work_dir = Path(args.work_dir).resolve()
     reference_dir = work_dir / "speculative_pipeline_decoding"
     artifact_dir = work_dir / "artifacts" / time.strftime("%Y%m%d-%H%M%S")

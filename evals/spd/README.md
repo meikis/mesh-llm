@@ -291,6 +291,34 @@ Rust.
   trained for different boundaries. The post-run Ctrl-C shutdown hit a
   ggml-metal cleanup assert after the successful inference; that was not an
   inference-path failure.
+
+Topology preflight for that exact product split is now a no-spend trainer mode.
+It exits before cloning the reference repo or downloading model data:
+
+```bash
+python3 evals/spd/hf_train_eval_qwen06.py \
+  --dry-run-topology \
+  --model-name Qwen/Qwen3-8B \
+  --manifest-base-model-path Qwen/Qwen3-8B \
+  --dataset HuggingFaceH4/ultrachat_200k \
+  --dataset-split train_sft \
+  --train-rows 8192 \
+  --eval-rows-per-set 32 \
+  --num-stages 2 \
+  --stage-layer-boundaries 23,36 \
+  --num-spec-layers 4 \
+  --max-length 512 \
+  --max-new-tokens 64 \
+  --draft-top-k 4 \
+  --device mps \
+  --upload-repo ''
+```
+
+The expected topology output is `physical_split_boundaries=[23]`,
+`layer_end=36`, `shallow_hidden_layer_indices="0,23,36;0,23"`, and worker
+tap-return allowlist `[23,36]`. A real sidecar training run should use the same
+topology arguments without `--dry-run-topology`; use smaller `--train-rows`
+only for plumbing, not for the quality artifact.
 - 2026-06-17 the first model-backed 24-token rolling-executor smoke after the
   replay reset cleanup is
   `/private/tmp/spd-rolling-executor-real-local-smoke24-4.json`. It restores

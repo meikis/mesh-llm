@@ -237,6 +237,29 @@ serving evidence. It is not SPD evidence yet. For an SPD run on this exact
 topology, train/export a `Qwen/Qwen3-8B` sidecar with `num_stages=2` and
 `stage_layer_boundaries=23,36`, or add a product planner constraint so an SPD
 manifest can force/reject incompatible Mesh stage boundaries before serving.
+Use the trainer dry-run before spending time or HF money:
+
+```bash
+python3 evals/spd/hf_train_eval_qwen06.py \
+  --dry-run-topology \
+  --model-name Qwen/Qwen3-8B \
+  --manifest-base-model-path Qwen/Qwen3-8B \
+  --dataset HuggingFaceH4/ultrachat_200k \
+  --dataset-split train_sft \
+  --train-rows 8192 \
+  --eval-rows-per-set 32 \
+  --num-stages 2 \
+  --stage-layer-boundaries 23,36 \
+  --num-spec-layers 4 \
+  --max-length 512 \
+  --max-new-tokens 64 \
+  --draft-top-k 4 \
+  --device mps \
+  --upload-repo ''
+```
+
+This must report `physical_split_boundaries=[23]`, `layer_end=36`, tap rows
+`0,23,36;0,23`, and worker tap-return allowlist `[23,36]`.
 
 ## First Larger Training Target
 

@@ -14,7 +14,7 @@ use skippy_runtime::spd::{
     SpdHeadManifest, SpdRollingTraceReplay, required_spd_hf_indices_for_topology,
 };
 
-use crate::cli::SpdOpenAiSmokeArgs;
+use crate::{cli::SpdOpenAiSmokeArgs, support::ChildGuard};
 
 mod attrs;
 mod preflight;
@@ -24,7 +24,9 @@ use attrs::{
     attr_bool, attr_f64, attr_f64_array, attr_i64, attr_i64_array, attr_i64_array_map, attr_string,
     attr_u64, attr_u64_array, attrs_for, count_events, count_events_by_hf_index, read_events,
 };
-use remote::{collect_remote_case_logs, prepare_case_deployment, start_case_stages};
+use remote::{
+    collect_remote_case_logs, prepare_case_deployment, start_case_stages, stop_remote_case_stages,
+};
 
 const OPENAI_PATH_MODELS: &str = "/v1/models";
 const OPENAI_PATH_CHAT_COMPLETIONS: &str = "/v1/chat/completions";
@@ -1636,6 +1638,7 @@ fn run_case(
     let status = response.status();
     let response_text = response.text().context("read OpenAI response body")?;
     fs::write(case_dir.join("response.json"), &response_text).context("write response JSON")?;
+    finish_case_stages(&deployment, &mut stage_processes)?;
     if !status.is_success() {
         bail!(
             "{} OpenAI request failed with status {status}: {response_text}",
@@ -1645,8 +1648,6 @@ fn run_case(
     let response_json =
         serde_json::from_str::<Value>(&response_text).context("parse OpenAI response JSON")?;
 
-    stage_processes.clear();
-    collect_remote_case_logs(&deployment)?;
     let summary = CaseSummaryContext {
         case,
         case_dir: &case_dir,
@@ -1658,6 +1659,15 @@ fn run_case(
         elapsed_ms,
     };
     summarize_case_logs(&summary, &response_json)
+}
+
+fn finish_case_stages(
+    deployment: &remote::CaseDeployment,
+    stage_processes: &mut Vec<ChildGuard>,
+) -> Result<()> {
+    stop_remote_case_stages(deployment)?;
+    stage_processes.clear();
+    collect_remote_case_logs(deployment)
 }
 
 fn wait_openai_ready(client: &Client, base_url: &str, timeout_secs: u64) -> Result<()> {

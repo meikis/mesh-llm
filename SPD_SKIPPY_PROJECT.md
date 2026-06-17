@@ -1200,6 +1200,25 @@ alone was rolled back. True recurrent rollback for SPD shadow lanes still needs
 a separate design that budgets rollback planes against Skippy's checkpoint and
 lane counts.
 
+2026-06-17 remote split checkpoint: a release `max_tokens=8` rolling smoke with
+one downstream stage on a separate lab node and the remaining stages local
+passed with exact baseline/SPD content. Report:
+`/private/tmp/spd-one-remote-combined-rolling-8.json`. The split used the
+same tap-aligned topology `8,10,16,20,24,31`; stage 0 stayed local for OpenAI,
+stage 1 ran remotely, and stages 2-6 ran locally. The run accepted `7 / 7`
+proposals, committed `7` optimistic target results (`6` chained), reached
+`max_in_flight=4`, had `0` oldest rejections, `0` younger drains, `0` tap
+record/return failures, and rolling replay verified the target prefix with only
+`1` bounded missing proposal at the end of the short generation. The same pass
+fixed `spd-openai-smoke` remote cleanup so a successful baseline case stops its
+remote stage PID before the next SPD case reuses the fixed stage ports.
+
+Attempting to place three recurrent/hybrid stages on the small remote node was
+not viable for this model/topology: each stage allocated about `4.9 GiB` of
+recurrent memory at `99 seqs`, so three remote stage processes overcommitted
+Metal memory and broke the binary chain during prefill. That is a placement
+budgeting constraint, not a content/KV mismatch.
+
 ## What Does Not Work Yet
 
 - The `spd-replay` request path has a correctness fallback, not a final speed

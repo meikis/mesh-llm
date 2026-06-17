@@ -933,6 +933,25 @@ pub(super) fn collect_remote_case_logs(deployment: &CaseDeployment) -> Result<()
     Ok(())
 }
 
+pub(super) fn stop_remote_case_stages(deployment: &CaseDeployment) -> Result<()> {
+    for stage in deployment.stages.iter().filter(|stage| !stage.local) {
+        stop_remote_stage(stage).with_context(|| format!("stop remote {}", stage.stage_id()))?;
+    }
+    Ok(())
+}
+
+fn stop_remote_stage(stage: &StageDeployment) -> Result<()> {
+    let remote_pid = stage
+        .remote_pid_path
+        .as_ref()
+        .context("remote stage has no pid path")?;
+    let pid_path = shell_quote(remote_pid);
+    let command = format!(
+        "if test -f {pid_path}; then pid=$(cat {pid_path}); kill \"$pid\" 2>/dev/null || true; for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 \"$pid\" 2>/dev/null || exit 0; sleep 0.2; done; kill -9 \"$pid\" 2>/dev/null || true; fi"
+    );
+    run_command(Command::new("ssh").arg(&stage.host).arg(command))
+}
+
 fn append_wire_condition_args(command: &mut Command, args: &SpdOpenAiSmokeArgs) {
     if args.downstream_wire_delay_ms > 0.0 {
         command

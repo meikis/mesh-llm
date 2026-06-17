@@ -91,6 +91,33 @@ fn request_summary_tracks_verify_span_compute_ms() {
 }
 
 #[test]
+fn request_summary_tracks_auto_align_totals() {
+    let config = prefix_cache_test_config();
+    let mut summary = super::BinaryRequestSummary::default();
+    let verify = test_message(WireMessageKind::VerifySpan, 2);
+    let decode = test_message(WireMessageKind::DecodeEmbd, 1);
+
+    let mut verify_observation = summary_observation(&config, &verify, 12.5);
+    verify_observation.session_auto_align_count = 1;
+    verify_observation.session_auto_align_ms = 0.75;
+    verify_observation.session_auto_align_trimmed_tokens = 1;
+    summary.observe(verify_observation);
+
+    let mut decode_observation = summary_observation(&config, &decode, 7.0);
+    decode_observation.session_auto_align_count = 1;
+    decode_observation.session_auto_align_ms = 1.25;
+    decode_observation.session_auto_align_trimmed_tokens = 2;
+    summary.observe(decode_observation);
+
+    assert_eq!(summary.session_auto_align_count, 2);
+    assert_eq!(summary.session_auto_align_ms, 2.0);
+    assert_eq!(summary.session_auto_align_trimmed_tokens, 3);
+    assert_eq!(summary.verify_span_session_auto_align_count, 1);
+    assert_eq!(summary.verify_span_session_auto_align_ms, 0.75);
+    assert_eq!(summary.verify_span_session_auto_align_trimmed_tokens, 1);
+}
+
+#[test]
 fn restore_prefill_decode_as_decode_preserves_chat_metadata() {
     let metadata = r#"{"grammar":"chat"}"#;
     let sampling = StageSamplingConfig {
@@ -258,6 +285,9 @@ fn summary_observation<'a>(
         pending_prefill_replies_after: 0,
         credit_wait_count: 0,
         deferred_prefill_replies_drained: 0,
+        session_auto_align_count: 0,
+        session_auto_align_ms: 0.0,
+        session_auto_align_trimmed_tokens: 0,
         verify_span_pre_compute_ms: 0.25,
         verify_span_post_compute_ms: 0.5,
         verify_span_pre_reply_ms: 0.0,

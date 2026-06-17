@@ -803,6 +803,9 @@ fn handle_binary_connection(
         }
 
         let token_ids = token_sideband_or_fill(&message)?;
+        let mut session_auto_align_count = 0usize;
+        let mut session_auto_align_ms = 0.0;
+        let mut session_auto_align_trimmed_tokens = 0u64;
         if binary_auto_align_session_enabled()
             && message_allows_session_auto_align(&message)
             && let Some(target_token_count) = message_pos_start_as_token_count(&message)
@@ -815,6 +818,12 @@ fn handle_binary_connection(
                     .context("auto-align binary stage session")?
             };
             if let Some(align) = align {
+                let align_ms = elapsed_ms(align_started);
+                session_auto_align_count = 1;
+                session_auto_align_ms = align_ms;
+                session_auto_align_trimmed_tokens = align
+                    .before_token_count
+                    .saturating_sub(align.after_token_count);
                 let mut attrs = binary_message_attrs(config, session_id, &message);
                 attrs.insert(
                     "llama_stage.session_auto_align_before_tokens".to_string(),
@@ -824,10 +833,7 @@ fn handle_binary_connection(
                     "llama_stage.session_auto_align_after_tokens".to_string(),
                     json!(align.after_token_count),
                 );
-                attrs.insert(
-                    "llama_stage.elapsed_ms".to_string(),
-                    json!(elapsed_ms(align_started)),
-                );
+                attrs.insert("llama_stage.elapsed_ms".to_string(), json!(align_ms));
                 telemetry.emit_debug("stage.binary_session_auto_align", attrs);
             }
         }
@@ -1533,6 +1539,9 @@ fn handle_binary_connection(
             pending_prefill_replies_after: pending_prefill_replies,
             credit_wait_count,
             deferred_prefill_replies_drained,
+            session_auto_align_count,
+            session_auto_align_ms,
+            session_auto_align_trimmed_tokens,
             verify_span_pre_compute_ms,
             verify_span_post_compute_ms,
             verify_span_pre_reply_ms,
@@ -3153,7 +3162,13 @@ struct BinaryRequestSummary {
     prefill_credit_wait_count: usize,
     prefill_deferred_replies_drained: usize,
     prefill_pending_replies_max: usize,
+    session_auto_align_count: usize,
+    session_auto_align_ms: f64,
+    session_auto_align_trimmed_tokens: u64,
     verify_span_count: usize,
+    verify_span_session_auto_align_count: usize,
+    verify_span_session_auto_align_ms: f64,
+    verify_span_session_auto_align_trimmed_tokens: u64,
     verify_span_compute_ms: f64,
     verify_span_pre_compute_ms: f64,
     verify_span_post_compute_ms: f64,
@@ -3182,6 +3197,9 @@ struct BinaryMessageObservation<'a> {
     pending_prefill_replies_after: usize,
     credit_wait_count: usize,
     deferred_prefill_replies_drained: usize,
+    session_auto_align_count: usize,
+    session_auto_align_ms: f64,
+    session_auto_align_trimmed_tokens: u64,
     verify_span_pre_compute_ms: f64,
     verify_span_post_compute_ms: f64,
     verify_span_pre_reply_ms: f64,
@@ -3335,8 +3353,18 @@ impl BinaryRequestSummary {
             .prefill_pending_replies_max
             .max(observation.pending_prefill_replies_before)
             .max(observation.pending_prefill_replies_after);
+        self.session_auto_align_count += observation.session_auto_align_count;
+        self.session_auto_align_ms += observation.session_auto_align_ms;
+        self.session_auto_align_trimmed_tokens = self
+            .session_auto_align_trimmed_tokens
+            .saturating_add(observation.session_auto_align_trimmed_tokens);
         if message.kind == WireMessageKind::VerifySpan {
             self.verify_span_count += 1;
+            self.verify_span_session_auto_align_count += observation.session_auto_align_count;
+            self.verify_span_session_auto_align_ms += observation.session_auto_align_ms;
+            self.verify_span_session_auto_align_trimmed_tokens = self
+                .verify_span_session_auto_align_trimmed_tokens
+                .saturating_add(observation.session_auto_align_trimmed_tokens);
             self.verify_span_compute_ms += observation.compute_ms;
             self.verify_span_pre_compute_ms += observation.verify_span_pre_compute_ms;
             self.verify_span_post_compute_ms += observation.verify_span_post_compute_ms;
@@ -3451,9 +3479,48 @@ impl BinaryRequestSummary {
             json!(self.prefill_pending_replies_max),
         );
         attrs.insert(
+            "skippy.session_auto_align_count".to_string(),
+            json!(self.session_auto_align_count),
+        );
+        attrs.insert(
+            "skippy.session_auto_align_ms".to_string(),
+            json!(self.session_auto_align_ms),
+        );
+        attrs.insert(
+            "skippy.session_auto_align_trimmed_tokens".to_string(),
+            json!(self.session_auto_align_trimmed_tokens),
+        );
+        if self.session_auto_align_count > 0 {
+            attrs.insert(
+                "skippy.session_auto_align_ms_avg".to_string(),
+                json!(self.session_auto_align_ms / self.session_auto_align_count as f64),
+            );
+        }
+        attrs.insert(
             "skippy.verify_span_count".to_string(),
             json!(self.verify_span_count),
         );
+        attrs.insert(
+            "skippy.verify_span_session_auto_align_count".to_string(),
+            json!(self.verify_span_session_auto_align_count),
+        );
+        attrs.insert(
+            "skippy.verify_span_session_auto_align_ms".to_string(),
+            json!(self.verify_span_session_auto_align_ms),
+        );
+        attrs.insert(
+            "skippy.verify_span_session_auto_align_trimmed_tokens".to_string(),
+            json!(self.verify_span_session_auto_align_trimmed_tokens),
+        );
+        if self.verify_span_session_auto_align_count > 0 {
+            attrs.insert(
+                "skippy.verify_span_session_auto_align_ms_avg".to_string(),
+                json!(
+                    self.verify_span_session_auto_align_ms
+                        / self.verify_span_session_auto_align_count as f64
+                ),
+            );
+        }
         attrs.insert(
             "skippy.verify_span_pre_compute_ms".to_string(),
             json!(self.verify_span_pre_compute_ms),

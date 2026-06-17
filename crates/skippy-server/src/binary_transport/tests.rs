@@ -86,6 +86,8 @@ fn request_summary_tracks_verify_span_compute_ms() {
     summary.observe(summary_observation(&config, &decode, 7.0));
 
     assert_eq!(summary.verify_span_count, 1);
+    assert_eq!(summary.verify_span_token_count, 2);
+    assert_eq!(summary.verify_span_max_tokens, 2);
     assert_eq!(summary.verify_span_compute_ms, 12.5);
     assert_eq!(summary.compute_ms, 19.5);
 }

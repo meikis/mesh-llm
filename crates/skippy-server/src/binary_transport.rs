@@ -3169,6 +3169,8 @@ struct BinaryRequestSummary {
     verify_span_session_auto_align_count: usize,
     verify_span_session_auto_align_ms: f64,
     verify_span_session_auto_align_trimmed_tokens: u64,
+    verify_span_token_count: u64,
+    verify_span_max_tokens: u64,
     verify_span_compute_ms: f64,
     verify_span_pre_compute_ms: f64,
     verify_span_post_compute_ms: f64,
@@ -3359,7 +3361,10 @@ impl BinaryRequestSummary {
             .session_auto_align_trimmed_tokens
             .saturating_add(observation.session_auto_align_trimmed_tokens);
         if message.kind == WireMessageKind::VerifySpan {
+            let token_count = message.token_count.max(0) as u64;
             self.verify_span_count += 1;
+            self.verify_span_token_count = self.verify_span_token_count.saturating_add(token_count);
+            self.verify_span_max_tokens = self.verify_span_max_tokens.max(token_count);
             self.verify_span_session_auto_align_count += observation.session_auto_align_count;
             self.verify_span_session_auto_align_ms += observation.session_auto_align_ms;
             self.verify_span_session_auto_align_trimmed_tokens = self
@@ -3501,6 +3506,14 @@ impl BinaryRequestSummary {
             json!(self.verify_span_count),
         );
         attrs.insert(
+            "skippy.verify_span_token_count".to_string(),
+            json!(self.verify_span_token_count),
+        );
+        attrs.insert(
+            "skippy.verify_span_max_tokens".to_string(),
+            json!(self.verify_span_max_tokens),
+        );
+        attrs.insert(
             "skippy.verify_span_session_auto_align_count".to_string(),
             json!(self.verify_span_session_auto_align_count),
         );
@@ -3554,6 +3567,10 @@ impl BinaryRequestSummary {
             attrs.insert(
                 "skippy.verify_span_compute_ms_avg".to_string(),
                 json!(self.verify_span_compute_ms / verify_span_count),
+            );
+            attrs.insert(
+                "skippy.verify_span_tokens_avg".to_string(),
+                json!(self.verify_span_token_count as f64 / verify_span_count),
             );
             attrs.insert(
                 "skippy.verify_span_post_compute_ms_avg".to_string(),

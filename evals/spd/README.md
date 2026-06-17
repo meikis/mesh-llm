@@ -294,12 +294,16 @@ The next quality gate needs more rows, more positions, and then the `N=1,2,4`
 sweep.
 
 To avoid paying full GLM target-forward cost for every sidecar architecture
-iteration, write a reusable hidden-state example cache:
+iteration, write a reusable hidden-state example cache. Prefer generating the
+cache with the widest draft window you plan to test, for example
+`--num-spec-layers 4`; narrower `N=1` and `N=2` runs can load the same cache and
+truncate labels during training/eval.
 
 ```bash
 uv run evals/spd/generic_layer_tap_sidecar.py \
   --model-name /path/to/GLM-4.7-Flash \
   --examples-cache-out /tmp/glm47-layer-tap-examples.pt \
+  --num-spec-layers 4 \
   ...same extraction/training flags...
 ```
 
@@ -310,7 +314,7 @@ uv run evals/spd/generic_layer_tap_sidecar.py \
   --examples-cache-in /tmp/glm47-layer-tap-examples.pt \
   --encoder attention \
   --attention-heads 4 \
-  --num-spec-layers 1 \
+  --num-spec-layers 2 \
   --batch-size 16 \
   --epochs 3 \
   --device mps \

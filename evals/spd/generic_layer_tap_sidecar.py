@@ -175,8 +175,8 @@ def main() -> None:
             plan,
             args,
         )
-    validate_example_width(train_examples, int(args.num_spec_layers), "train")
-    validate_example_width(eval_examples, int(args.num_spec_layers), "eval")
+    train_examples = align_example_width(train_examples, int(args.num_spec_layers), "train")
+    eval_examples = align_example_width(eval_examples, int(args.num_spec_layers), "eval")
 
     device = resolve_device(args.device)
     sidecar = GenericLayerTapSidecar(
@@ -353,13 +353,33 @@ def record_to_example(record: dict[str, Any]) -> TapExample:
     )
 
 
-def validate_example_width(examples: list[TapExample], num_spec_layers: int, label: str) -> None:
-    bad = [len(example.labels) for example in examples if len(example.labels) != num_spec_layers]
-    if bad:
+def align_example_width(
+    examples: list[TapExample],
+    num_spec_layers: int,
+    label: str,
+) -> list[TapExample]:
+    widths = [len(example.labels) for example in examples]
+    too_narrow = [width for width in widths if width < num_spec_layers]
+    if too_narrow:
         raise RuntimeError(
-            f"{label} examples do not match --num-spec-layers={num_spec_layers}; "
-            f"found label widths including {bad[:5]}"
+            f"{label} examples cannot satisfy --num-spec-layers={num_spec_layers}; "
+            f"found label widths including {too_narrow[:5]}"
         )
+    if any(width > num_spec_layers for width in widths):
+        print(
+            f"truncating {label} examples to --num-spec-layers={num_spec_layers}",
+            flush=True,
+        )
+        return [
+            TapExample(
+                hidden=example.hidden,
+                features=example.features,
+                labels=example.labels[:num_spec_layers],
+                topology_key=example.topology_key,
+            )
+            for example in examples
+        ]
+    return examples
 
 
 def synthetic_examples(

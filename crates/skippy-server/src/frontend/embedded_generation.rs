@@ -663,6 +663,7 @@ impl StageOpenAiBackend {
             let mut native_mtp_deferred_reject_trim_local_ms = 0.0_f64;
             let mut native_mtp_suppressed_cooldown_draft_count = 0usize;
             let mut native_mtp_batched_verification_count = 0usize;
+            let mut native_mtp_batched_timing = NativeMtpBatchedTimingStats::default();
             let mut native_mtp_initial_serial_verification_count = 0usize;
             let mut native_mtp_initial_serial_accepted_count = 0usize;
             let mut native_mtp_serial_after_gap_verification_count = 0usize;
@@ -1032,14 +1033,12 @@ impl StageOpenAiBackend {
                             }
                         }
                     }
-                    let mut commit_tokens = vec![target_token];
-                    if accepted {
-                        commit_tokens.push(after_draft_token);
-                    }
+                    let commit_tokens = [target_token, after_draft_token];
+                    let commit_token_count = if accepted { 2 } else { 1 };
                     let consumed_positions = verify_inputs.len();
                     let mut committed_positions = 0usize;
                     let mut reached_stop = false;
-                    for token in commit_tokens {
+                    for token in commit_tokens.into_iter().take(commit_token_count) {
                         current = token;
                         decoded_tokens += 1;
                         committed_positions += 1;
@@ -1163,6 +1162,38 @@ impl StageOpenAiBackend {
                         };
                         trim_control = Some(trim);
                     }
+                    let trim_elapsed_ms = trim_control
+                        .as_ref()
+                        .map(|trim| trim.elapsed_ms)
+                        .unwrap_or_default();
+                    let trim_local_ms = trim_control
+                        .as_ref()
+                        .map(|trim| trim.local_ms)
+                        .unwrap_or_default();
+                    let trim_downstream_write_ms = trim_control
+                        .as_ref()
+                        .map(|trim| trim.downstream_write_ms)
+                        .unwrap_or_default();
+                    let trim_downstream_wait_ms = trim_control
+                        .as_ref()
+                        .map(|trim| trim.downstream_wait_ms)
+                        .unwrap_or_default();
+                    native_mtp_batched_timing.record(NativeMtpBatchedTimingSample {
+                        verification: native_mtp_decision,
+                        verify_elapsed_ms: verify.elapsed_ms,
+                        stage0_compute_ms: verify.stats.stage0_compute_ms,
+                        runtime_lock_wait_ms: verify.stats.runtime_lock_wait_ms,
+                        runtime_lock_hold_ms: verify.stats.runtime_lock_hold_ms,
+                        activation_encode_ms: verify.stats.activation_encode_ms,
+                        forward_write_ms: verify.stats.forward_write_ms,
+                        downstream_wait_ms: verify.stats.downstream_wait_ms,
+                        trim_elapsed_ms,
+                        trim_local_ms,
+                        trim_downstream_write_ms,
+                        trim_downstream_wait_ms,
+                        consumed_positions,
+                        committed_positions,
+                    });
                     decode_stage0_compute_ms += verify.stats.stage0_compute_ms;
                     decode_runtime_lock_wait_ms += verify.stats.runtime_lock_wait_ms;
                     decode_runtime_lock_wait_max_ms =
@@ -1196,6 +1227,10 @@ impl StageOpenAiBackend {
                     token_attrs.insert(
                         "llama_stage.native_mtp.verification".to_string(),
                         json!(native_mtp_decision.label()),
+                    );
+                    token_attrs.insert(
+                        "llama_stage.native_mtp.verify_elapsed_ms".to_string(),
+                        json!(verify.elapsed_ms),
                     );
                     token_attrs.insert(
                         "llama_stage.native_mtp.draft_token".to_string(),
@@ -1342,7 +1377,7 @@ impl StageOpenAiBackend {
                         json!(native_mtp_defer_reject_trim),
                     );
                     native_mtp_adaptive_disable.insert_attrs(&mut token_attrs);
-                    if let Some(trim) = trim_control {
+                    if let Some(trim) = trim_control.as_ref() {
                         token_attrs.insert(
                             "llama_stage.native_mtp.trim_ms".to_string(),
                             json!(trim.elapsed_ms),
@@ -2041,6 +2076,7 @@ impl StageOpenAiBackend {
             );
             speculative_stats.insert_attrs(&mut decode_attrs);
             native_mtp.stats().insert_attrs(&mut decode_attrs);
+            native_mtp_batched_timing.insert_attrs(&mut decode_attrs);
             native_mtp_adaptive_disable.insert_attrs(&mut decode_attrs);
             decode_attrs.insert(
                 "llama_stage.native_mtp.serial_stage0_verification".to_string(),

@@ -81,6 +81,57 @@ fn apply_generation_summary(metrics: &mut NativeMtpOpenAiMetricsReport, attrs: &
     {
         metrics.accept_rate = accept_rate;
     }
+    if let Some(value) = attr_f64(
+        attrs,
+        "llama_stage.native_mtp.batched.accepted_verify_elapsed_ms",
+    ) {
+        metrics.batched_accepted_verify_elapsed_ms = value;
+    }
+    if let Some(value) = attr_f64(
+        attrs,
+        "llama_stage.native_mtp.batched.accepted_verify_elapsed_avg_ms",
+    ) {
+        metrics.batched_accepted_verify_avg_ms = value;
+    }
+    if let Some(value) = attr_f64(
+        attrs,
+        "llama_stage.native_mtp.batched.rejected_verify_elapsed_ms",
+    ) {
+        metrics.batched_rejected_verify_elapsed_ms = value;
+    }
+    if let Some(value) = attr_f64(
+        attrs,
+        "llama_stage.native_mtp.batched.rejected_verify_elapsed_avg_ms",
+    ) {
+        metrics.batched_rejected_verify_avg_ms = value;
+    }
+    if let Some(value) = attr_u64(attrs, "llama_stage.native_mtp.batched.consumed_positions") {
+        metrics.batched_consumed_positions = value;
+    }
+    if let Some(value) = attr_u64(attrs, "llama_stage.native_mtp.batched.committed_positions") {
+        metrics.batched_committed_positions = value;
+    }
+    if let Some(value) = attr_u64(attrs, "llama_stage.native_mtp.batched.trim_count") {
+        metrics.batched_trim_count = value;
+    }
+    if let Some(value) = attr_f64(attrs, "llama_stage.native_mtp.batched.trim_elapsed_ms") {
+        metrics.batched_trim_elapsed_ms = value;
+    }
+    if let Some(value) = attr_f64(attrs, "llama_stage.native_mtp.batched.trim_local_ms") {
+        metrics.batched_trim_local_ms = value;
+    }
+    if let Some(value) = attr_f64(
+        attrs,
+        "llama_stage.native_mtp.batched.trim_downstream_write_ms",
+    ) {
+        metrics.batched_trim_downstream_write_ms = value;
+    }
+    if let Some(value) = attr_f64(
+        attrs,
+        "llama_stage.native_mtp.batched.trim_downstream_wait_ms",
+    ) {
+        metrics.batched_trim_downstream_wait_ms = value;
+    }
 }
 
 fn apply_native_mtp_verification<'a>(
@@ -128,6 +179,10 @@ fn attr_i64(attrs: &Value, key: &str) -> Option<i64> {
     attrs.get(key).and_then(Value::as_i64)
 }
 
+fn attr_f64(attrs: &Value, key: &str) -> Option<f64> {
+    attrs.get(key).and_then(Value::as_f64)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -167,6 +222,17 @@ mod tests {
                     "llama_stage.native_mtp.accept_rate": 0.75,
                     "llama_stage.native_mtp.proposal_compute_us": 11,
                     "llama_stage.native_mtp.verification_compute_us": 22,
+                    "llama_stage.native_mtp.batched.accepted_verify_elapsed_ms": 30.0,
+                    "llama_stage.native_mtp.batched.accepted_verify_elapsed_avg_ms": 10.0,
+                    "llama_stage.native_mtp.batched.rejected_verify_elapsed_ms": 12.0,
+                    "llama_stage.native_mtp.batched.rejected_verify_elapsed_avg_ms": 12.0,
+                    "llama_stage.native_mtp.batched.consumed_positions": 8,
+                    "llama_stage.native_mtp.batched.committed_positions": 7,
+                    "llama_stage.native_mtp.batched.trim_count": 1,
+                    "llama_stage.native_mtp.batched.trim_elapsed_ms": 4.0,
+                    "llama_stage.native_mtp.batched.trim_local_ms": 1.0,
+                    "llama_stage.native_mtp.batched.trim_downstream_write_ms": 0.5,
+                    "llama_stage.native_mtp.batched.trim_downstream_wait_ms": 2.5,
                 }
             }),
         );
@@ -179,6 +245,17 @@ mod tests {
         assert_eq!(metrics.accept_rate, 0.75);
         assert_eq!(metrics.proposal_compute_us, 11);
         assert_eq!(metrics.verification_compute_us, 22);
+        assert_eq!(metrics.batched_accepted_verify_elapsed_ms, 30.0);
+        assert_eq!(metrics.batched_accepted_verify_avg_ms, 10.0);
+        assert_eq!(metrics.batched_rejected_verify_elapsed_ms, 12.0);
+        assert_eq!(metrics.batched_rejected_verify_avg_ms, 12.0);
+        assert_eq!(metrics.batched_consumed_positions, 8);
+        assert_eq!(metrics.batched_committed_positions, 7);
+        assert_eq!(metrics.batched_trim_count, 1);
+        assert_eq!(metrics.batched_trim_elapsed_ms, 4.0);
+        assert_eq!(metrics.batched_trim_local_ms, 1.0);
+        assert_eq!(metrics.batched_trim_downstream_write_ms, 0.5);
+        assert_eq!(metrics.batched_trim_downstream_wait_ms, 2.5);
         assert_eq!(metrics.batched_verify_events, 1);
         assert_eq!(metrics.batched_accepted_events, 1);
         assert_eq!(metrics.decode_token_events, 1);

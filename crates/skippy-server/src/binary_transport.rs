@@ -454,6 +454,10 @@ fn handle_binary_connection(
             );
             recv_attrs.insert("llama_stage.recv_read_ms".to_string(), json!(recv_read_ms));
             recv_attrs.insert(
+                "skippy.upstream_message_wait_ms".to_string(),
+                json!(recv_read_ms),
+            );
+            recv_attrs.insert(
                 "llama_stage.source_stage_index".to_string(),
                 json!(message.state.source_stage_index),
             );
@@ -1535,6 +1539,7 @@ fn handle_binary_connection(
             verify_span_post_compute_ms,
             verify_span_pre_reply_ms,
             verify_span_after_reply_ms,
+            upstream_message_wait_ms: recv_read_ms,
         });
 
         if telemetry.is_debug_enabled() {
@@ -1556,6 +1561,11 @@ fn handle_binary_connection(
                 json!(compute_end_unix_nanos),
             );
             timing_attrs.insert("llama_stage.compute_ms".to_string(), json!(compute_ms));
+            timing_attrs.insert("llama_stage.recv_read_ms".to_string(), json!(recv_read_ms));
+            timing_attrs.insert(
+                "skippy.upstream_message_wait_ms".to_string(),
+                json!(recv_read_ms),
+            );
             timing_attrs.insert(
                 "llama_stage.input_activation_decode_ms".to_string(),
                 json!(input_activation_decode_ms),
@@ -3145,6 +3155,7 @@ struct BinaryRequestSummary {
     verify_span_post_compute_ms: f64,
     verify_span_pre_reply_ms: f64,
     verify_span_after_reply_ms: f64,
+    verify_span_upstream_message_wait_ms: f64,
     reply_stats: StageReplyStats,
 }
 
@@ -3171,6 +3182,7 @@ struct BinaryMessageObservation<'a> {
     verify_span_post_compute_ms: f64,
     verify_span_pre_reply_ms: f64,
     verify_span_after_reply_ms: f64,
+    upstream_message_wait_ms: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -3325,6 +3337,7 @@ impl BinaryRequestSummary {
             self.verify_span_post_compute_ms += observation.verify_span_post_compute_ms;
             self.verify_span_pre_reply_ms += observation.verify_span_pre_reply_ms;
             self.verify_span_after_reply_ms += observation.verify_span_after_reply_ms;
+            self.verify_span_upstream_message_wait_ms += observation.upstream_message_wait_ms;
         }
         self.reply_stats.merge(observation.reply_stats);
     }
@@ -3452,6 +3465,10 @@ impl BinaryRequestSummary {
             "skippy.verify_span_after_reply_ms".to_string(),
             json!(self.verify_span_after_reply_ms),
         );
+        attrs.insert(
+            "skippy.verify_span_upstream_message_wait_ms".to_string(),
+            json!(self.verify_span_upstream_message_wait_ms),
+        );
         if self.verify_span_count > 0 {
             let verify_span_count = self.verify_span_count as f64;
             attrs.insert(
@@ -3469,6 +3486,10 @@ impl BinaryRequestSummary {
             attrs.insert(
                 "skippy.verify_span_after_reply_ms_avg".to_string(),
                 json!(self.verify_span_after_reply_ms / verify_span_count),
+            );
+            attrs.insert(
+                "skippy.verify_span_upstream_message_wait_ms_avg".to_string(),
+                json!(self.verify_span_upstream_message_wait_ms / verify_span_count),
             );
         }
         let lookups = self.reply_stats.kv_lookup_hits + self.reply_stats.kv_lookup_misses;

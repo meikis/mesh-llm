@@ -18,5 +18,8 @@ pub(super) use env::{
     native_mtp_suppress_cooldown_draft_limit, native_mtp_suppress_cooldown_drafts_enabled,
     native_mtp_verify_next_draft_min_margin, native_mtp_verify_next_reject_recovery_serial_accepts,
 };
-pub(super) use stats::{NativeMtpN1Stats, NativeMtpVerification};
+pub(super) use stats::{
+    NativeMtpBatchedTimingSample, NativeMtpBatchedTimingStats, NativeMtpN1Stats,
+    NativeMtpVerification,
+};
 pub(super) use verifier::NativeMtpN1Verifier;

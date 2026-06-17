@@ -2,11 +2,18 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::frontend) enum NativeMtpVerification {
+    #[default]
     NoPending,
-    Accepted { draft: i32, target: i32 },
-    Rejected { draft: i32, target: i32 },
+    Accepted {
+        draft: i32,
+        target: i32,
+    },
+    Rejected {
+        draft: i32,
+        target: i32,
+    },
 }
 
 impl NativeMtpVerification {
@@ -16,6 +23,10 @@ impl NativeMtpVerification {
             Self::Accepted { .. } => "accepted",
             Self::Rejected { .. } => "rejected",
         }
+    }
+
+    fn accepted(self) -> bool {
+        matches!(self, Self::Accepted { .. })
     }
 }
 
@@ -28,6 +39,165 @@ pub(in crate::frontend) struct NativeMtpN1Stats {
     pub(in crate::frontend) verification_count: u64,
     pub(in crate::frontend) proposal_compute_us: i64,
     pub(in crate::frontend) verification_compute_us: i64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(in crate::frontend) struct NativeMtpBatchedTimingSample {
+    pub(in crate::frontend) verification: NativeMtpVerification,
+    pub(in crate::frontend) verify_elapsed_ms: f64,
+    pub(in crate::frontend) stage0_compute_ms: f64,
+    pub(in crate::frontend) runtime_lock_wait_ms: f64,
+    pub(in crate::frontend) runtime_lock_hold_ms: f64,
+    pub(in crate::frontend) activation_encode_ms: f64,
+    pub(in crate::frontend) forward_write_ms: f64,
+    pub(in crate::frontend) downstream_wait_ms: f64,
+    pub(in crate::frontend) trim_elapsed_ms: f64,
+    pub(in crate::frontend) trim_local_ms: f64,
+    pub(in crate::frontend) trim_downstream_write_ms: f64,
+    pub(in crate::frontend) trim_downstream_wait_ms: f64,
+    pub(in crate::frontend) consumed_positions: usize,
+    pub(in crate::frontend) committed_positions: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(in crate::frontend) struct NativeMtpBatchedTimingStats {
+    accepted: NativeMtpBatchedPathTimingStats,
+    rejected: NativeMtpBatchedPathTimingStats,
+    consumed_positions: u64,
+    committed_positions: u64,
+    trim_count: u64,
+    trim_elapsed_ms: f64,
+    trim_local_ms: f64,
+    trim_downstream_write_ms: f64,
+    trim_downstream_wait_ms: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct NativeMtpBatchedPathTimingStats {
+    count: u64,
+    verify_elapsed_ms: f64,
+    stage0_compute_ms: f64,
+    runtime_lock_wait_ms: f64,
+    runtime_lock_hold_ms: f64,
+    activation_encode_ms: f64,
+    forward_write_ms: f64,
+    downstream_wait_ms: f64,
+}
+
+impl NativeMtpBatchedTimingStats {
+    pub(in crate::frontend) fn record(&mut self, sample: NativeMtpBatchedTimingSample) {
+        if sample.verification == NativeMtpVerification::NoPending {
+            return;
+        }
+        if sample.verification.accepted() {
+            self.accepted.record(sample);
+        } else {
+            self.rejected.record(sample);
+        }
+        self.consumed_positions = self
+            .consumed_positions
+            .saturating_add(sample.consumed_positions as u64);
+        self.committed_positions = self
+            .committed_positions
+            .saturating_add(sample.committed_positions as u64);
+        if sample.trim_elapsed_ms > 0.0
+            || sample.trim_local_ms > 0.0
+            || sample.trim_downstream_write_ms > 0.0
+            || sample.trim_downstream_wait_ms > 0.0
+        {
+            self.trim_count = self.trim_count.saturating_add(1);
+            self.trim_elapsed_ms += sample.trim_elapsed_ms;
+            self.trim_local_ms += sample.trim_local_ms;
+            self.trim_downstream_write_ms += sample.trim_downstream_write_ms;
+            self.trim_downstream_wait_ms += sample.trim_downstream_wait_ms;
+        }
+    }
+
+    pub(in crate::frontend) fn insert_attrs(self, attrs: &mut BTreeMap<String, Value>) {
+        self.accepted
+            .insert_attrs(attrs, "llama_stage.native_mtp.batched.accepted");
+        self.rejected
+            .insert_attrs(attrs, "llama_stage.native_mtp.batched.rejected");
+        attrs.insert(
+            "llama_stage.native_mtp.batched.consumed_positions".to_string(),
+            json!(self.consumed_positions),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.batched.committed_positions".to_string(),
+            json!(self.committed_positions),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.batched.trim_count".to_string(),
+            json!(self.trim_count),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.batched.trim_elapsed_ms".to_string(),
+            json!(self.trim_elapsed_ms),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.batched.trim_local_ms".to_string(),
+            json!(self.trim_local_ms),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.batched.trim_downstream_write_ms".to_string(),
+            json!(self.trim_downstream_write_ms),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.batched.trim_downstream_wait_ms".to_string(),
+            json!(self.trim_downstream_wait_ms),
+        );
+    }
+}
+
+impl NativeMtpBatchedPathTimingStats {
+    fn record(&mut self, sample: NativeMtpBatchedTimingSample) {
+        self.count = self.count.saturating_add(1);
+        self.verify_elapsed_ms += sample.verify_elapsed_ms;
+        self.stage0_compute_ms += sample.stage0_compute_ms;
+        self.runtime_lock_wait_ms += sample.runtime_lock_wait_ms;
+        self.runtime_lock_hold_ms += sample.runtime_lock_hold_ms;
+        self.activation_encode_ms += sample.activation_encode_ms;
+        self.forward_write_ms += sample.forward_write_ms;
+        self.downstream_wait_ms += sample.downstream_wait_ms;
+    }
+
+    fn insert_attrs(self, attrs: &mut BTreeMap<String, Value>, prefix: &str) {
+        attrs.insert(format!("{prefix}_count"), json!(self.count));
+        attrs.insert(
+            format!("{prefix}_verify_elapsed_ms"),
+            json!(self.verify_elapsed_ms),
+        );
+        attrs.insert(
+            format!("{prefix}_stage0_compute_ms"),
+            json!(self.stage0_compute_ms),
+        );
+        attrs.insert(
+            format!("{prefix}_runtime_lock_wait_ms"),
+            json!(self.runtime_lock_wait_ms),
+        );
+        attrs.insert(
+            format!("{prefix}_runtime_lock_hold_ms"),
+            json!(self.runtime_lock_hold_ms),
+        );
+        attrs.insert(
+            format!("{prefix}_activation_encode_ms"),
+            json!(self.activation_encode_ms),
+        );
+        attrs.insert(
+            format!("{prefix}_forward_write_ms"),
+            json!(self.forward_write_ms),
+        );
+        attrs.insert(
+            format!("{prefix}_downstream_wait_ms"),
+            json!(self.downstream_wait_ms),
+        );
+        if self.count > 0 {
+            attrs.insert(
+                format!("{prefix}_verify_elapsed_avg_ms"),
+                json!(self.verify_elapsed_ms / self.count as f64),
+            );
+        }
+    }
 }
 
 impl NativeMtpN1Stats {
@@ -138,6 +308,67 @@ mod tests {
             }
             .label(),
             "rejected"
+        );
+    }
+
+    #[test]
+    fn batched_timing_stats_split_accepted_and_rejected_paths() {
+        let mut stats = NativeMtpBatchedTimingStats::default();
+        stats.record(NativeMtpBatchedTimingSample {
+            verification: NativeMtpVerification::Accepted {
+                draft: 1,
+                target: 1,
+            },
+            verify_elapsed_ms: 10.0,
+            stage0_compute_ms: 4.0,
+            downstream_wait_ms: 3.0,
+            consumed_positions: 2,
+            committed_positions: 2,
+            ..NativeMtpBatchedTimingSample::default()
+        });
+        stats.record(NativeMtpBatchedTimingSample {
+            verification: NativeMtpVerification::Rejected {
+                draft: 2,
+                target: 3,
+            },
+            verify_elapsed_ms: 20.0,
+            trim_elapsed_ms: 5.0,
+            trim_downstream_wait_ms: 2.0,
+            consumed_positions: 2,
+            committed_positions: 1,
+            ..NativeMtpBatchedTimingSample::default()
+        });
+
+        let mut attrs = BTreeMap::new();
+        stats.insert_attrs(&mut attrs);
+
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.batched.accepted_count"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.batched.rejected_count"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.batched.accepted_verify_elapsed_ms"),
+            Some(&json!(10.0))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.batched.rejected_verify_elapsed_ms"),
+            Some(&json!(20.0))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.batched.trim_count"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.batched.consumed_positions"),
+            Some(&json!(4))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.batched.committed_positions"),
+            Some(&json!(3))
         );
     }
 }

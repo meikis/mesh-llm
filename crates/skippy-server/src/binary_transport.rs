@@ -54,10 +54,8 @@ mod wire;
 pub(crate) use self::decode_batcher::DecodeFrameBatcher;
 pub use self::direct_return::PredictionReturnHub;
 pub(crate) use self::forwarding::{forwarded_stage_message, forwarded_stage_message_timed};
-#[cfg(test)]
-use self::kv_eviction::BinaryProactiveEviction;
 use self::kv_eviction::{
-    BinaryProactiveEvictionPlan, binary_proactive_eviction_plan,
+    BinaryProactiveEviction, BinaryProactiveEvictionPlan, binary_proactive_eviction_plan,
     evict_binary_resident_prefix_for_decode,
 };
 pub use self::options::{BinaryStageOptions, EmbeddedOpenAiStageOptions, parse_wire_dtype};
@@ -1051,7 +1049,7 @@ fn handle_binary_connection(
             );
         }
         if let Some(eviction) = proactive_eviction {
-            telemetry.emit("stage.binary_kv_record_decision", eviction.attrs());
+            emit_binary_proactive_eviction(telemetry, &eviction);
         }
 
         if message.kind.is_prefill() && !restored_prefill {
@@ -2378,10 +2376,7 @@ fn handle_binary_restore_prefill_decode_control(
         )
     };
     let compute_ms = elapsed_ms(compute_started);
-    telemetry.emit(
-        "stage.binary_kv_record_decision",
-        proactive_eviction.attrs(),
-    );
+    emit_binary_proactive_eviction(telemetry, &proactive_eviction);
 
     if let Some(downstream) = downstream {
         let forwarded =
@@ -2514,6 +2509,14 @@ fn send_stage_reply(stream: &mut TcpStream, reply: StageReply) -> Result<()> {
             send_reply_predicted_tokens_with_stats(stream, &reply.predicted_tokens, reply.stats)
                 .context("send stage predicted-tokens reply")
         }
+    }
+}
+
+fn emit_binary_proactive_eviction(telemetry: &Telemetry, eviction: &BinaryProactiveEviction) {
+    if eviction.should_emit_summary() {
+        telemetry.emit("stage.binary_kv_record_decision", eviction.attrs());
+    } else {
+        telemetry.emit_debug("stage.binary_kv_record_decision", eviction.attrs());
     }
 }
 

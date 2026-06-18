@@ -1848,6 +1848,17 @@ not consume the SPD manifest when choosing stage boundaries. Until that hook
 exists, a product SPD sidecar must be trained for the actual planned Mesh
 topology, not for a convenient or previously tested split.
 
+The reusable artifact key is the logical layer-boundary topology, not the
+hostname list. For the first Qwen3-8B two-node proof, the sidecar is trained for
+`23,36`, which corresponds to Skippy ranges `0..23` and `23..36`. The same
+sidecar can move between M4+mini, two cloud nodes, or local stage servers if
+those ranges and taps are preserved. A future planner can avoid a combinatorial
+explosion by precomputing a small set of canonical logical SPD topologies and
+packing adjacent logical stages onto a larger node, provided the runtime still
+returns every manifest-required logical boundary tap. Such clumping changes the
+amount of physical overlap available, so it needs separate timing evidence, but
+it should not require retraining when the logical taps are unchanged.
+
 `spd_bundle_ref` is the product-shaped sidecar input: the coordinator resolves a
 local sidecar directory/manifest or `hf://namespace/repo[@revision]` containing
 `skippy-spd-head.json`, the manifest-declared serving checkpoint

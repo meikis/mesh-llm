@@ -18,6 +18,12 @@ Skippy taps.
   head is tied to the base model/tokenizer, chat template, hidden size, logical
   SPD stage count, selected hidden-state taps, projection layout, draft vocab,
   and spec-layer count.
+- Treat the reusable artifact key as the logical layer-boundary/tap topology,
+  not the physical hostname list. If a deployment packs adjacent logical stages
+  onto a larger node, the same sidecar can be reused only when the runtime still
+  exposes every manifest-required boundary tap. This is the path to avoid
+  training every possible physical grouping: precompute a small set of canonical
+  logical topologies, then clump contiguous logical stages at placement time.
 - Treat the serving sidecar as a coordinator-owned companion bundle. Worker
   stages should only need the derived `spd_tap_return_hf_indices` allowlist;
   they should not need the sidecar weights, fixture, or local trainer outputs.
@@ -102,10 +108,33 @@ Before training or evaluating a sidecar, write down:
 - Tokenizer and chat template settings; for Qwen, explicitly decide thinking
   versus no-thinking template behavior.
 - Logical SPD stage count and `stage_layer_boundaries`.
+- Physical placement plan: one logical stage per node for the first proof, or
+  explicit contiguous clumping of logical stages onto larger nodes. Clumped
+  nodes must still return internal logical-boundary taps required by the
+  manifest, and timing evidence must call out reduced physical overlap.
 - Explicit `shallow_hidden_layer_indices` if the reference trainer needs taps
   that do not match simple stage boundaries.
 - `num_spec_layers`, draft vocab choice, and `draft_top_k` for evaluation.
 - Physical Skippy split boundaries that expose every required hidden tap.
+
+## Quality Validation Without a Physical Split
+
+Do not spend real-node time to discover whether a predictor is low quality.
+Validate sidecar quality and artifact correctness locally before using Ethernet
+or multi-node Mesh:
+
+1. Run reference/HF held-out eval and report acceptance rate, equivalent
+   accepted length, top-k target coverage, and theoretical saved decoder steps.
+2. Export `spd-head.safetensors` and a parity fixture, then run Rust fixture
+   parity to prove Python and Rust proposals match on fixed hidden-tap rows.
+3. Run local live-tap parity with localhost stages for the logical split to
+   prove Skippy returns every manifest-required tap.
+4. Run local package-backed baseline versus SPD smoke and require nonzero
+   accepted proposals plus nonzero saved candidate token round trips before
+   moving to real nodes.
+
+Treat the physical split as distributed-system validation: endpoint placement,
+QUIC/LAN latency, per-stage KV cleanup, tap transport, and measured timing.
 
 For the current pretrained Qwen3.5-4B S4/L4 proof, the tap-aligned physical
 split is `8,10,16,20,24,31`, which exposes ranges

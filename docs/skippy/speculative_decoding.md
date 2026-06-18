@@ -61,6 +61,14 @@ measured wall-clock speed. The next gate is a robust same-topology product
 sidecar whose held-out package-backed serving clears `paper_pipeline_estimate >
 1.0` with margin on the real split.
 
+A physical split is not required to decide whether a newly trained SPD sidecar
+predicts useful tokens. The quality ladder is reference/HF held-out acceptance,
+Rust fixture parity for the exported sidecar, local live-tap parity on the
+logical split, and local package-backed baseline-versus-SPD smoke with nonzero
+accepted proposals and saved candidate token round trips. The real M4+mini run
+then validates distributed transport, endpoint placement, per-stage KV cleanup,
+and timing under actual node latency.
+
 A later no-spend max120 product-corpus check confirmed that simply fitting the
 small HF-teacher bridge harder is not enough. The
 `/tmp/spd-qwen3-8b-product-prompts-paper3-train32-heldout16-max120` split
@@ -308,6 +316,14 @@ Paper fidelity:
   The current Qwen3.5-4B proof required all tap boundaries
   `8,10,16,20,24,31`, even though the sidecar's logical topology has four SPD
   stages.
+- Treat this as a logical layer-boundary contract, not a hostname contract. A
+  sidecar trained for `Qwen3-8B` `23,36` may run on M4+mini, two cloud nodes, or
+  two local stage servers if the stages expose `0..23` and `23..36`. If future
+  placement packs adjacent logical stages onto one larger node, the sidecar can
+  still be reused only when the runtime exposes every manifest-required logical
+  boundary tap. This lets us precompute a small set of logical SPD topologies and
+  clump contiguous stages at placement time instead of training every physical
+  grouping.
 - The performance claim is not proven. The current proof is CPU-heavy and either
   local or one-worker LAN placement; it does not yet reproduce the paper's useful
   overlap regime where target pipeline work and sidecar work hide each other on

@@ -48,6 +48,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-name", default=DEFAULT_MODEL)
     parser.add_argument("--dataset", default=DEFAULT_DATASET)
     parser.add_argument("--dataset-split", default=DEFAULT_DATASET_SPLIT)
+    parser.add_argument(
+        "--train-jsonl",
+        default="",
+        help=(
+            "Prebuilt JSONL with one {'messages': [...]} conversation per row. "
+            "When set, --dataset/--dataset-split are recorded but not downloaded."
+        ),
+    )
     parser.add_argument("--train-rows", type=int, default=1024)
     parser.add_argument("--eval-rows-per-set", type=int, default=8)
     parser.add_argument("--num-stages", type=int, default=2)
@@ -706,6 +714,7 @@ def topology_dry_run(args: argparse.Namespace) -> None:
         "manifest_base_model_path": manifest_base_model_path,
         "dataset": args.dataset,
         "dataset_split": args.dataset_split,
+        "train_jsonl": args.train_jsonl,
         "train_rows": args.train_rows,
         "eval_rows_per_set": args.eval_rows_per_set,
         "epochs": args.epochs,
@@ -1045,8 +1054,17 @@ def main() -> None:
     if existing_ckpt is not None:
         ckpt = existing_ckpt
     elif not args.skip_train:
-        rows = load_training_rows(args.dataset, args.dataset_split, args.train_rows)
-        write_jsonl(train_jsonl, rows)
+        if args.train_jsonl.strip():
+            source_jsonl = Path(args.train_jsonl).expanduser().resolve()
+            if not source_jsonl.is_file():
+                raise FileNotFoundError(f"--train-jsonl not found: {source_jsonl}")
+            train_jsonl.parent.mkdir(parents=True, exist_ok=True)
+            if source_jsonl != train_jsonl:
+                shutil.copy2(source_jsonl, train_jsonl)
+            print(f"using prebuilt train JSONL: {source_jsonl}", flush=True)
+        else:
+            rows = load_training_rows(args.dataset, args.dataset_split, args.train_rows)
+            write_jsonl(train_jsonl, rows)
         ckpt = train_head(args, reference_dir, train_jsonl, train_dir)
     else:
         ckpt = train_dir / "speculation_head_final.pt"

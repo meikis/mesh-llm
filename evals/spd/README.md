@@ -311,6 +311,7 @@ python3 evals/spd/hf_train_eval_qwen06.py \
   --max-new-tokens 64 \
   --draft-top-k 4 \
   --device mps \
+  --model-torch-dtype float16 \
   --upload-repo ''
 ```
 
@@ -318,7 +319,10 @@ The expected topology output is `physical_split_boundaries=[23]`,
 `layer_end=36`, `shallow_hidden_layer_indices="0,23,36;0,23"`, and worker
 tap-return allowlist `[23,36]`. A real sidecar training run should use the same
 topology arguments without `--dry-run-topology`; use smaller `--train-rows`
-only for plumbing, not for the quality artifact.
+only for plumbing, not for the quality artifact. On local MPS, keep
+`--model-torch-dtype float16` for Qwen3-8B plumbing runs; the runner's default
+`auto` dtype preserves the older float32 MPS behavior used by smaller proof
+heads.
 - 2026-06-17 the first model-backed 24-token rolling-executor smoke after the
   replay reset cleanup is
   `/private/tmp/spd-rolling-executor-real-local-smoke24-4.json`. It restores

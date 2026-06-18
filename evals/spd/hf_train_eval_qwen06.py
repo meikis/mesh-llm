@@ -88,6 +88,15 @@ def parse_args() -> argparse.Namespace:
         help="Device for local/reference execution. HF GPU jobs can leave this as auto.",
     )
     parser.add_argument(
+        "--model-torch-dtype",
+        choices=("auto", "float32", "float16", "bfloat16"),
+        default="auto",
+        help=(
+            "Base-model dtype for the patched reference trainer. 'auto' preserves "
+            "the current proof defaults: float32 on MPS, bfloat16 otherwise."
+        ),
+    )
+    parser.add_argument(
         "--draft-vocab-json",
         default="draft_vocab/ultrachat_qwen3_0.6b_top_32k.json",
         help="Path inside the reference repo; empty disables reduced draft vocab.",
@@ -244,7 +253,10 @@ def patch_train_for_device(path: Path) -> None:
         path,
         "        torch_dtype=torch.bfloat16,\n",
         '''        torch_dtype=(
-            torch.float32 if os.environ.get("SPD_DEVICE", "auto").lower() == "mps" else torch.bfloat16
+            {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}.get(
+                os.environ.get("SPD_TORCH_DTYPE", "auto").lower()
+            )
+            or (torch.float32 if os.environ.get("SPD_DEVICE", "auto").lower() == "mps" else torch.bfloat16)
         ),
 ''',
     )
@@ -455,6 +467,7 @@ def topology_dry_run(args: argparse.Namespace) -> None:
         "max_length": args.max_length,
         "max_new_tokens": args.max_new_tokens,
         "device": args.device,
+        "model_torch_dtype": args.model_torch_dtype,
         "attn_implementation": args.attn_implementation,
         "num_stages": args.num_stages,
         "stage_layer_boundaries": boundaries,
@@ -716,6 +729,7 @@ def reference_env(args: argparse.Namespace) -> dict[str, str]:
     env = os.environ.copy()
     if args.device != "auto":
         env["SPD_DEVICE"] = args.device
+    env["SPD_TORCH_DTYPE"] = args.model_torch_dtype
     env["SPD_ATTN_IMPLEMENTATION"] = args.attn_implementation
     return env
 

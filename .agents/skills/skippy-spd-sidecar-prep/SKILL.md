@@ -209,6 +209,7 @@ python3 evals/spd/hf_train_eval_qwen06.py \
   --max-new-tokens 64 \
   --draft-top-k 4 \
   --device mps \
+  --model-torch-dtype float16 \
   --upload-repo ''
 ```
 
@@ -259,7 +260,9 @@ python3 evals/spd/hf_train_eval_qwen06.py \
 ```
 
 This must report `physical_split_boundaries=[23]`, `layer_end=36`, tap rows
-`0,23,36;0,23`, and worker tap-return allowlist `[23,36]`.
+`0,23,36;0,23`, and worker tap-return allowlist `[23,36]`. For local MPS
+Qwen3-8B plumbing, keep `--model-torch-dtype float16`; leave `auto` or use
+`bfloat16` on CUDA/HF jobs after confirming the target hardware.
 
 ## First Larger Training Target
 

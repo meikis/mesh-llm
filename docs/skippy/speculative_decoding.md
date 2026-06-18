@@ -29,6 +29,38 @@ Current policy:
 Status as of 2026-06-18: SPD is a real native request-path proof, but not a
 speedup proof yet.
 
+For the current `Qwen/Qwen3-8B` product target, use the exact two-stage
+`23,36` topology observed through Mesh and keep the sidecar tied to that split.
+The immediate blocker is not ordinary LAN orchestration. A topology-correct
+512-row BF16 reference-trained head has weak product Q4 package acceptance,
+while a tiny product-tap fine-tune recovers high acceptance only on its training
+prompts. The newest product-distribution bridge trains on `48` prompts and
+evaluates on `24` held-out prompts across MT-Bench, GSM8K, and HumanEval. It is
+the first same-topology product head to clear the all-local held-out
+paper-style break-even gate: live-tap validation accepts `110 / 192` proposals
+with matched greedy output, and the all-local rolling OpenAI request path
+matches baseline/SPD content on all `24 / 24` held-out prompts with `0` tap
+failures, `0` ignored taps, and `81 / 160` accepted proposals.
+
+That is correctness and first-quality evidence, not speed evidence. After
+refreshing the native Metal stage ABI build so the final-stage tap patch was
+actually linked, the real two-node direct-cable gate at
+`/tmp/spd-qwen3-8b-product-finetune-paper3-train16-e5-lr2e5/openai-heldout8-rolling-direct-nativefresh.json`
+matched baseline/SPD content on all `24 / 24` held-out prompts, returned HF36
+taps, accepted `78 / 156` proposals, and recorded `0` tap return failures, `0`
+tap record failures, and `0` ignored taps. Its idealized two-stage
+`paper_pipeline_estimate` is exactly break-even at `1.0x` (`78` saved / `78`
+unsaved candidate token round trips), while measured decode is still only
+`0.321x` of baseline because sidecar/native overhead dominates this two-node
+topology. Do not spend on or claim a larger generic reference-distribution
+sidecar until the train/serve activation-distribution gap and
+HF-teacher-versus-native-logit question are addressed. This keeps the work
+aligned with the SPD paper: speed requires speculation to be hidden under the
+target pipeline step, and theoretical `L'_acc = N/K*n` must remain separate from
+measured wall-clock speed. The next gate is a robust same-topology product
+sidecar whose held-out package-backed serving clears `paper_pipeline_estimate >
+1.0` with margin on the real split.
+
 What is working:
 
 - Real `skippy-bench spd-openai-smoke` can launch local binary stages, start the
@@ -496,10 +528,15 @@ Run these before making any speedup claim:
      on matched GSM8K prompts: `2 / 120` proposals accepted with clean taps.
      It still accepted `0 / 90` on the original code/math/writing sweep, so it
      is evidence that the recipe direction is better, not a speed candidate.
-     Before scaling on HF/CUDA, align the reference train/eval chat template
-     with the product OpenAI/GGUF path; the reference generations start at the
-     answer text while product completions currently include the Qwen
-     `<think></think>` preamble even with thinking disabled.
+   - The first broader product-row bridge captured `192` train rows and `96`
+     held-out rows from the exact Q4 layer package, attached HF teacher logits,
+     fine-tuned from the LR `1e-4` checkpoint, and exported a BF16 serving
+     bundle that passes Rust fixture parity. Held-out live-tap acceptance is
+     `39 / 96`; held-out all-local OpenAI rolling acceptance is `30 / 82` with
+     exact content and `0` tap failures. This is a real generalization signal,
+     but it is still below two-stage break-even: `paper_pipeline_estimate` is
+     `0.73x`. The next gate is more same-topology product data and/or native
+     Q4_K_M verifier logits, not a speed run.
    - Run a local or dry-run HF job on `Qwen/Qwen3-0.6B` only when debugging the
      trainer/export path itself. It is no longer the next scaling target now
      that the Qwen3.5-4B request path has real LAN KV evidence.

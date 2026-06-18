@@ -22,6 +22,7 @@ pub(super) enum SpdTapRecordOutcome {
     Recorded(SpdInlineTapRecord),
     Pending(SpdPendingTapRecord),
     Ignored(SpdIgnoredTap),
+    Stale(SpdIgnoredTap),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +43,7 @@ pub(super) struct SpdIgnoredTap {
 pub(super) struct SpdInlineTapLifecycle {
     pub(super) accepted_context_len: usize,
     pending_future_positions: BTreeSet<usize>,
+    stale_future_positions: BTreeSet<usize>,
 }
 
 impl SpdInlineTapLifecycle {
@@ -49,14 +51,23 @@ impl SpdInlineTapLifecycle {
         self.accepted_context_len = context_len;
         self.pending_future_positions
             .retain(|position| *position >= context_len);
+        self.stale_future_positions
+            .retain(|position| *position >= context_len);
     }
 
     pub(super) fn reset_context_len(&mut self, context_len: usize) {
         self.accepted_context_len = context_len;
+        self.stale_future_positions = self
+            .pending_future_positions
+            .iter()
+            .copied()
+            .filter(|position| *position >= context_len)
+            .collect();
         self.pending_future_positions.clear();
     }
 
     pub(super) fn mark_pending_optimistic_position(&mut self, position: usize) {
+        self.stale_future_positions.remove(&position);
         self.pending_future_positions.insert(position);
     }
 
@@ -64,17 +75,28 @@ impl SpdInlineTapLifecycle {
         &mut self,
         positions: impl IntoIterator<Item = usize>,
     ) {
-        self.pending_future_positions.extend(positions);
+        for position in positions {
+            self.stale_future_positions.remove(&position);
+            self.pending_future_positions.insert(position);
+        }
     }
 
-    pub(super) fn record_decision(&self, tap: &StageReplySpdTap) -> Result<SpdTapRecordDecision> {
+    pub(super) fn record_decision(
+        &mut self,
+        tap: &StageReplySpdTap,
+    ) -> Result<SpdTapRecordDecision> {
         let positions = tap.positions.clone();
+        let mut stale_positions = Vec::new();
         for position in &positions {
             let position = usize::try_from(*position)
                 .with_context(|| format!("negative SPD returned tap position {position}"))?;
             if position < self.accepted_context_len
                 || self.pending_future_positions.contains(&position)
             {
+                continue;
+            }
+            if self.stale_future_positions.contains(&position) {
+                stale_positions.push(position);
                 continue;
             }
             return Ok(SpdTapRecordDecision {
@@ -84,9 +106,27 @@ impl SpdInlineTapLifecycle {
                     accepted_context_len: self.accepted_context_len,
                     pending_positions: self.pending_future_positions.iter().copied().collect(),
                 }),
+                stale: None,
             });
         }
-        Ok(SpdTapRecordDecision { ignored: None })
+        if !stale_positions.is_empty() {
+            for position in stale_positions {
+                self.stale_future_positions.remove(&position);
+            }
+            return Ok(SpdTapRecordDecision {
+                ignored: None,
+                stale: Some(SpdIgnoredTap {
+                    reason: "stale_future_after_context_reset",
+                    positions,
+                    accepted_context_len: self.accepted_context_len,
+                    pending_positions: self.pending_future_positions.iter().copied().collect(),
+                }),
+            });
+        }
+        Ok(SpdTapRecordDecision {
+            ignored: None,
+            stale: None,
+        })
     }
 
     pub(super) fn accepted_context_len(&self) -> usize {
@@ -96,6 +136,7 @@ impl SpdInlineTapLifecycle {
 
 pub(super) struct SpdTapRecordDecision {
     pub(super) ignored: Option<SpdIgnoredTap>,
+    pub(super) stale: Option<SpdIgnoredTap>,
 }
 
 impl SpdInlineTapCache {

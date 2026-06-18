@@ -527,6 +527,64 @@ fn tap_lifecycle_allows_pending_verify_span_positions() {
 }
 
 #[test]
+fn tap_lifecycle_allows_pending_decode_boundary_position() {
+    let mut lifecycle = SpdInlineTapLifecycle::default();
+    lifecycle.accept_context_len(4);
+    lifecycle.mark_pending_future_positions([4]);
+
+    assert_eq!(
+        lifecycle
+            .record_decision(&returned_tap_at_positions(vec![4]))
+            .unwrap()
+            .ignored,
+        None
+    );
+
+    lifecycle.accept_context_len(5);
+    assert_eq!(
+        lifecycle
+            .record_decision(&returned_tap_at_positions(vec![4]))
+            .unwrap()
+            .ignored,
+        None
+    );
+    assert!(
+        lifecycle
+            .record_decision(&returned_tap_at_positions(vec![5]))
+            .unwrap()
+            .ignored
+            .is_some()
+    );
+}
+
+#[test]
+fn tap_lifecycle_classifies_reset_pending_future_tap_as_stale() {
+    let mut lifecycle = SpdInlineTapLifecycle::default();
+    lifecycle.accept_context_len(4);
+    lifecycle.mark_pending_future_positions([4]);
+    lifecycle.reset_context_len(4);
+
+    let decision = lifecycle
+        .record_decision(&returned_tap_at_positions(vec![4]))
+        .unwrap();
+    assert_eq!(decision.ignored, None);
+    let stale = decision.stale.expect("reset pending tap should be stale");
+    assert_eq!(stale.reason, "stale_future_after_context_reset");
+    assert_eq!(stale.positions, vec![4]);
+    assert_eq!(stale.accepted_context_len, 4);
+
+    let ignored = lifecycle
+        .record_decision(&returned_tap_at_positions(vec![4]))
+        .unwrap()
+        .ignored
+        .expect("same future tap should not stay stale forever");
+    assert_eq!(
+        ignored.reason,
+        "future_position_without_pending_optimistic_context"
+    );
+}
+
+#[test]
 fn inline_tap_cache_zero_prefix_drops_recorded_rows() {
     let mut cache = SpdInlineTapCache::new(2, vec![8]);
     let config = stage_config("stage-0", 0, 0, 8);

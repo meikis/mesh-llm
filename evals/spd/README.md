@@ -9,6 +9,103 @@ accepted token. The work in this directory proves the training/evaluation path
 and records the artifact contract Skippy needs before serving the head from
 Rust.
 
+## Current Handoff: Qwen3-8B `23,36`
+
+The immediate product target is `Qwen/Qwen3-8B` against the immutable
+`meshllm/Qwen3-8B-Q4_K_M-layers` package with logical SPD boundaries `23,36`.
+The topology dry run is clean: `physical_split_boundaries=[23]`,
+`layer_end=36`, tap rows `0,23,36;0,23`, and product tap-return allowlist
+`[23,36]`. Keep this as a hard constraint for every training artifact and speed
+claim.
+
+Current evidence still points to train/serve activation-distribution mismatch,
+but the latest product sidecar is the first checkpoint that clears the local
+held-out paper-style break-even gate on this exact product topology:
+
+- the 512-row BF16 reference-trained `Qwen3-8B` S2 `23,36` head is
+  topology-correct and parity-clean, but product Q4 package serving still
+  accepts poorly;
+- exact-prompt diagnostics show target-token parity is mostly aligned while
+  proposal-token parity is poor;
+- a 72-row product-tap fine-tune recovers high product-path acceptance on its
+  training prompts, proving the mechanics can learn the product activation
+  distribution but not proving generalization;
+- a broader product-distribution bridge now trains on `48` prompts and evaluates
+  on `24` held-out prompts across MT-Bench, GSM8K, and HumanEval.
+
+The current prompt-token seed set is
+`/tmp/spd-qwen3-8b-product-prompts-paper3-train16-heldout8`, rendered with the
+Qwen chat template and `enable_thinking=false`. The exact product split produced
+`384` train rows and `192` held-out rows from the Q4 layer package. HF teacher
+augmentation wrote draft-width BF16 logits over the top-32k draft vocabulary
+(`378 / 384` train labels and `190 / 192` held-out labels inside scope). The HF
+teacher is not native Q4_K_M verifier KL, but it is aligned enough for this
+bridge: teacher top-1 matches the product Q4 target on `363 / 384` train rows
+and `180 / 192` held-out rows; teacher top-4 contains the Q4 target on
+`378 / 384` train rows and `190 / 192` held-out rows.
+
+The 5-epoch BF16 MPS fine-tune from the LR `1e-4` checkpoint reached train
+argmax accuracy `0.875`. The serving export is
+`/tmp/spd-qwen3-8b-product-finetune-paper3-train16-e5-lr2e5/`, with BF16
+`spd-head.safetensors` SHA
+`43501aa95fd191ad087af1396f6b1909cb2bc72e83391085d23997978427531b`.
+`skippy-bench spd-fixture-parity` exits successfully for that export.
+
+The held-out live-tap check at
+`/tmp/spd-qwen3-8b-product-finetune-paper3-train16-e5-lr2e5/live-tap-heldout8.json`
+matched non-SPD greedy output on all `24` prompts and accepted `110 / 192`
+proposals (`57.3%`). The old product head on the same held-out corpus accepted
+`102 / 192`, so this is a real but modest quality improvement.
+
+The all-local rolling OpenAI request-path smoke at
+`/tmp/spd-qwen3-8b-product-finetune-paper3-train16-e5-lr2e5/openai-heldout8-rolling.json`
+matched baseline/SPD content on all `24 / 24` held-out prompts, accepted
+`81 / 160` proposals (`50.6%`), committed `74` optimistic tokens, saved `81`
+candidate token round trips, left `79` unsaved, and recorded `0` tap return
+failures, `0` tap record failures, and `0` ignored taps. Its idealized
+two-stage `paper_pipeline_estimate` is `1.0125x` versus serial split. Measured
+all-local decode is still only `0.140x` of baseline because local stages and
+the sidecar contend on the same machine. Mean probe head time is `62.5ms`,
+normal downstream wait is `104.0ms`, optimistic downstream wait is `91.4ms`,
+and chained hidden wait is `33.1ms`.
+
+A real two-node direct-cable smoke then exercised the same package, sidecar,
+and `23,36` split with stage 0 on the coordinator and stage 1 on the worker.
+The cable route measured about `1ms` ping, versus much higher and jitterier
+ordinary LAN latency. One stale-native rerun produced exact text but `0`
+proposals because the Rust release binary had been relinked without rebuilding
+the Metal llama stage ABI after the final-stage tap patch. The fix was to run
+`scripts/build-llama.sh` for the Metal stage ABI dir and then rebuild
+`skippy-server` / `skippy-bench` against the refreshed native library.
+
+With the refreshed native library, a one-prompt direct-cable smoke returned
+HF36 taps, proposed `7`, accepted `1`, and had `0` tap failures or ignored
+taps. The three-prompt paired regression set matched content on `3 / 3`,
+accepted `8 / 18`, and also kept tap failures and ignored taps at `0`.
+
+The full paired rolling report
+`/tmp/spd-qwen3-8b-product-finetune-paper3-train16-e5-lr2e5/openai-heldout8-rolling-direct-nativefresh.json`
+matched baseline/SPD content on all `24 / 24` prompts, accepted `78 / 156`
+proposals (`50.0%`), launched `137` rolling verifier entries, reached
+`max_in_flight=2`, accepted `65` oldest entries, rejected `58` oldest entries,
+and drained `72` younger entries. It recorded `0` tap return failures, `0` tap
+record failures, and `0` ignored taps. The paper estimate is exactly break-even
+at `1.0x` (`78` saved / `78` unsaved), and measured decode is `0.321x` of
+baseline (`439.0ms` baseline decode mean versus `1366.6ms` SPD decode mean).
+Mean probe head time is `64.7ms`, normal downstream wait is `144.0ms`,
+optimistic downstream wait is `66.5ms`, and chained hidden wait is `77.1ms`.
+
+This is training-bridge, Rust parity, live-tap, request-path correctness, and
+real two-node mechanics evidence. It is still not a speedup result. The sidecar
+quality margin is too thin: local is barely above the paper threshold and the
+real split is exactly break-even. The next spend should therefore be either
+more product-distribution training data for the same `23,36` topology or native
+Q4_K_M verifier logits for paper-faithful KL, not a larger generic
+reference-distribution run and not a speed claim. This keeps the work aligned
+with `spd.pdf`: speculation latency has to be hidden under target pipeline work,
+and theoretical `L'_acc = N/K*n` must stay separate from measured wall-clock
+speed.
+
 ## What Works
 
 - A real SPD head can be trained locally for `Qwen/Qwen3-0.6B` with the paper's
@@ -58,6 +155,15 @@ Rust.
   teacher logits to product-captured rows, aligned by `query_row_index` and
   target position. This is KL-compatible training data for the reference head,
   but it is still HF-teacher data, not native Q4_K_M verifier logits.
+- `evals/spd/build_product_prompt_tokens.py` can render the reference
+  MT-Bench, GSM8K, and HumanEval prompt JSONL files through the target
+  tokenizer chat template, split them into train and held-out prompt-token
+  files, and write the exact JSONL accepted by
+  `skippy-bench spd-live-tap-parity --prompt-token-file`.
+- `evals/spd/diagnose_product_teacher_alignment.py` compares product Q4 target
+  tokens, HF teacher top-k tokens, corpus-captured proposals, and optional live
+  head proposals so sidecar-quality work can separate teacher/verifier mismatch
+  from a head that simply has not learned the available teacher.
 - `evals/spd/train_product_activation_head.py` can fine-tune an existing
   `speculation_head_final.pt` on product `cur_in` rows plus aligned teacher
   logits and save a reference-compatible checkpoint.
@@ -590,6 +696,44 @@ normal downstream wait averaged `150.7ms`, optimistic downstream wait averaged
 `115.7ms`, and chained hidden waits averaged `108.9ms`. Treat this as real
 two-node correctness plus overhead decomposition for an overfit debug head, not
 a final generalizing sidecar.
+
+2026-06-18 product-distribution held-out checkpoint: the next non-overfit
+bridge used
+`/tmp/spd-qwen3-8b-product-prompts-paper3-train8-heldout4`, with `24` train
+prompts and `12` held-out prompts drawn evenly from MT-Bench, GSM8K, and
+HumanEval. Product row capture against the exact
+`meshllm/Qwen3-8B-Q4_K_M-layers` package and `--splits 23 --layer-end 36`
+wrote `192` train rows to
+`/tmp/spd-qwen3-8b-product-corpus-paper3-train8` and `96` held-out rows to
+`/tmp/spd-qwen3-8b-product-corpus-paper3-heldout4`. HF teacher augmentation
+over `Qwen/Qwen3-8B` wrote
+`/tmp/spd-qwen3-8b-product-teacher-paper3-train8.safetensors` and
+`/tmp/spd-qwen3-8b-product-teacher-paper3-heldout4.safetensors` with
+draft-width BF16 logits; this remains HF-teacher KL data aligned to product
+tap inputs, not native Q4_K_M verifier logits. A 5-epoch BF16 MPS fine-tune
+from the LR `1e-4` S2 `23,36` checkpoint wrote
+`/tmp/spd-qwen3-8b-product-finetune-paper3-train8-e5-lr2e5/speculation_head_final.pt`,
+reached train argmax accuracy `0.875`, exported finite BF16 serving weights
+with SHA
+`e1928134128ffb0f05bdb20a6d635ecba2d890b09c7257f98304e27a2fe80130`, and passed
+Rust fixture parity.
+
+The held-out live-tap report
+`/tmp/spd-qwen3-8b-product-finetune-paper3-train8-e5-lr2e5/live-tap-heldout4.json`
+matched ordinary greedy output on all `12` prompts and accepted `39 / 96`
+top-1 proposals (`40.6%`). The all-local rolling OpenAI request-path report
+`/tmp/spd-qwen3-8b-product-finetune-paper3-train8-e5-lr2e5/openai-heldout4-rolling.json`
+matched baseline/SPD content on all `12 / 12` held-out prompts, accepted
+`30 / 82` proposals (`36.6%`), committed `29` optimistic tokens, and recorded
+`0` tap return failures, `0` tap record failures, and `0` ignored taps. The
+request-path run saved `30` candidate token round trips but left `52` unsaved,
+so the idealized two-stage `paper_pipeline_estimate` is still below break-even
+at `0.73x`. Observed all-local decode is `0.13x` of baseline, with mean probe
+head time `63.5ms`, normal downstream wait `111.5ms`, optimistic downstream
+wait `94.3ms`, and chained hidden wait `39.8ms`. This is the first honest
+held-out generalization signal for product taps, but not a speed proof; do not
+run a two-node speed claim with this head until held-out package-backed serving
+clears `paper_pipeline_estimate > 1.0`.
 
 - 2026-06-17 the first model-backed 24-token rolling-executor smoke after the
   replay reset cleanup is
@@ -1894,96 +2038,48 @@ The tap-row-to-`cur_in` projection bridge lives in
    semantic mismatch is understood: Skippy's terminal boundary is pre-final-norm
    and the HF fixture/training row is post-final-norm, so serving now applies the
    Qwen final RMSNorm before projecting unflagged terminal rows. Product inline
-   HF36 delivery now works locally without replay fallback, but the current
-   Qwen3-8B S2/23 head is still weak: the no-replay Q4 request-path smoke accepts
-   only `1 / 7` greedy proposals and is much slower than baseline on one machine.
-   The newest identical-prompt comparator proves target-token parity but not
-   proposal-token parity. Current Q8/Q4 live-tap reruns make a remaining broad
-   tap/row semantic mismatch less likely than distribution drift: final-normed
-   Q8 is close but not exact, Q4 is materially farther away, and both preserve
-   normal target verification. The package-aware live-tap harness now confirms
-   the same Q4 drift on the Mesh-resolved layer package. A one-step product
-   corpus smoke wrote `/tmp/spd-qwen3-8b-product-corpus-smoke` from the exact
-   `meshllm/Qwen3-8B-Q4_K_M-layers` package, `--splits 23 --layer-end 36`,
-   with `sample_count=1`, `row_count=2`, `hidden_size=4096`, and
-   `rows_f32_bytes=32768`; the proposal was still rejected
-   (`proposal=9914`, `target=23`). The next sidecar-quality step should be
-   product-distribution training/eval for the exact `23,36` split. The current
-   corpus is sufficient for a local top-1 supervised debug fine-tune/eval gate;
-   paper-faithful KL training from product execution still needs either target
-   logits exposed from the native runtime or an HF teacher pass aligned to the
-   captured product rows.
+   HF36 delivery works on the real two-node split after rebuilding the native
+   Metal stage ABI, and the product-tap training bridge now generalizes enough
+   to propose on all held-out request-path runs. The current full direct-cable
+   gate accepts `78 / 156` proposals, saves `78` candidate token round trips,
+   leaves `78` unsaved, and has `0` tap failures or ignored taps. Its idealized
+   two-stage `paper_pipeline_estimate` is exactly `1.0x`, and measured direct
+   decode is `0.321x`. The next sidecar-quality gate is therefore not another
+   LAN mechanics comparison; improve held-out acceptance for the exact `23,36`
+   product split until the package-backed paper estimate clears `1.0` with
+   margin.
 
-   The first HF-teacher bridge is now validated on that one-row corpus. The
-   converter wrote `/tmp/spd-qwen3-8b-product-corpus-smoke.safetensors` with
-   `cur_in` shape `[1, 2, 4096]`, query row index `1`, query position `23`, and
-   target position `24`. The teacher augmentation wrote
-   `/tmp/spd-qwen3-8b-product-teacher-smoke.safetensors` over the Qwen top-32k
-   draft vocabulary; HF teacher top-1 was token `23`, matching the product
-   greedy target for the captured row. A one-step MPS BF16 fine-tune smoke then
-   consumed those two files plus the LR `1e-4` Qwen3-8B S2 `23,36` checkpoint
-   and wrote
-   `/tmp/spd-qwen3-8b-product-finetune-smoke/speculation_head_final.pt` with
-   `steps_completed=1` and finite loss `12.719`. This proves the
-   product-tap/teacher-logit training bridge only; it is not quality evidence,
-   and it is not native product KL because the teacher logits are still from HF
-   `Qwen/Qwen3-8B`.
+   The concrete quality path is to expand product-captured rows beyond the
+   current `384` train / `192` held-out samples, keep held-out prompts separate,
+   and dry-run any HF/CUDA BF16 job before spending. Paper-faithful KL training
+   from product execution still needs either target logits exposed from the
+   native Q4_K_M runtime or an explicit decision that HF `Qwen/Qwen3-8B` teacher
+   logits aligned to captured product rows are sufficient for the next scale
+   run. Also keep a build provenance check in every speed run: after llama.cpp
+   patch changes, rebuild the native stage ABI before relinking release
+   `skippy-server` / `skippy-bench`.
 
-   Repro command for the current one-step corpus smoke:
-
-   ```bash
-   target/debug/skippy-bench spd-live-tap-parity \
-     --manifest /private/tmp/skippy-spd-qwen3-8b-s2-23-bf16-train512-lr1e4-20260618/artifacts/20260618-114627/train/skippy-spd-head.json \
-     --fixture /private/tmp/skippy-spd-qwen3-8b-s2-23-bf16-train512-lr1e4-20260618/artifacts/20260618-114627/train/spd-parity-fixture.safetensors \
-     --model-path /Users/micn/.cache/huggingface/hub/models--meshllm--Qwen3-8B-Q4_K_M-layers/snapshots/3e7a18e5e6e861998189f14bf7f4b45a0d63e07d \
-     --splits 23 \
-     --layer-end 36 \
-     --ctx-size 128 \
-     --n-gpu-layers=-1 \
-     --top-k 4 \
-     --verify-steps 1 \
-     --cur-in-tol 999 \
-     --logits-tol 999 \
-     --product-corpus-dir /tmp/spd-qwen3-8b-product-corpus-smoke \
-     --output /tmp/spd-qwen3-8b-product-corpus-smoke.json
-   ```
-
-   The command exits nonzero today because the existing BF16-trained head still
-   fails the live-vs-fixture top-k parity gate on Q4 product activations; that
-   is expected for this diagnostic. The corpus is written before that final
-   gate and is described by `/tmp/spd-qwen3-8b-product-corpus-smoke/summary.json`.
 2. Train or fetch a topology-matched sidecar for each real two-stage product
    split before making any speed claim. For Qwen3.5-4B that means
    `num_stages=2`, `stage_layer_boundaries=16,32`, and tap rows
    `0,16,32;0,16`; the current pretrained S4/L4 sidecar is intentionally
    excluded from this test. For the Mesh-native Qwen3-8B split, the logical
    target is `Qwen/Qwen3-8B` with `num_stages=2` and
-   `stage_layer_boundaries=23,36`, but the current local 512-row head is only a
-   debugging artifact until live GGUF request-path acceptance is useful without
-   replay fallback.
-3. Move from the completed one-worker CPU LAN correctness proofs, the completed
-   two-stage Metal baseline, and the completed local package-backed SPD smoke to
-   a real speed gate: Mesh-resolved package materialization on both nodes, stage
-   0 plus sidecar on the coordinator, stage 1 on the worker, paired
-   baseline/SPD content and timing, and no one-worker all-Metal
-   oversubscription. Do not call it a speed proof until terminal taps are
-   produced inline across the actual node split, rolling replay is back to `0`
-   missing / `0` out-of-order proposals on the measured prompt set, oldest
-   rejection drains are explained as sidecar-quality misses, and the report
-   shows useful overlap rather than same-worker stage contention.
-4. Run a larger local `spd-openai-smoke --prompt-file ...` sweep to measure
-   acceptance distribution, rollback frequency, rolling gaps, and
-   `summary.paper_pipeline_estimate` across prompt types. Report accepted
-   speculative tokens/windows, estimated critical-path split-stage round trips
-   saved, measured decode speedup, and the sidecar/tap/transport overhead that
-   remains after those savings.
-5. Use injected downstream delay only as a bounded diagnostic while no separate
-   worker is available; do not report it as distributed speedup.
-6. When another worker is available, rerun `spd-openai-smoke` with explicit
-   `--stage-hosts`, pre-materialized package directories or Mesh-resolved
-   package artifacts, and ordinary split baseline/SPD pairs to test real
-   wall-clock speed.
-7. Add an SPD sidecar package workflow around the Python reference trainer:
+   `stage_layer_boundaries=23,36`. The current product-trained head is a real
+   held-out quality checkpoint, but still only at two-stage paper break-even on
+   the real split.
+3. Run a larger product-row training gate on the same `23,36` topology before
+   speed testing: more product-captured rows, held-out prompts kept separate,
+   BF16 on CUDA/HF if local MPS is too slow, and no spend-bearing job without a
+   dry-run plan and approval.
+4. Only after held-out package-backed serving clears a `1.0` paper estimate,
+   rerun `spd-openai-smoke` with explicit `--stage-hosts`,
+   pre-materialized package directories or Mesh-resolved package artifacts, and
+   ordinary split baseline/SPD pairs to test real wall-clock speed. Stage 0 plus
+   the sidecar should stay on the coordinator; stage 1 should be on the worker.
+5. Use injected downstream delay only as a bounded diagnostic; do not report it
+   as distributed speedup.
+6. Add an SPD sidecar package workflow around the Python reference trainer:
    plan logical tap topology, train, eval `L'_acc`, export safetensors/manifest,
    validate Rust parity, then publish sidecar metadata alongside Skippy model
    artifacts.

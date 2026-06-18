@@ -1628,7 +1628,7 @@ fn restore_prefill_decode_message_carries_chat_sampling_metadata() {
         ..WireSamplingConfig::default()
     };
 
-    let message = embedded_restore_prefill_decode_message(
+    let mut message = embedded_restore_prefill_decode_message(
         WireActivationDType::F16,
         RestorePrefillDecodeMessageArgs {
             request_id: 11,
@@ -1643,11 +1643,13 @@ fn restore_prefill_decode_message_carries_chat_sampling_metadata() {
         },
     )
     .unwrap();
+    message.state.flags |= state_flags::SPD_TAP_RETURN;
 
     assert_eq!(message.kind, WireMessageKind::TryRestorePrefillDecode);
     assert_eq!(message.tokens, vec![101, 102, 103, 104]);
     assert_eq!(message.sampling, Some(sampling.clone()));
     assert_eq!(message.chat_sampling_metadata.as_deref(), Some(metadata));
+    assert_ne!(message.state.flags & state_flags::SPD_TAP_RETURN, 0);
 
     let mut encoded = Vec::new();
     write_stage_message(&mut encoded, &message, WireActivationDType::F16).unwrap();
@@ -1656,6 +1658,7 @@ fn restore_prefill_decode_message_carries_chat_sampling_metadata() {
     assert_eq!(decoded.tokens, vec![101, 102, 103, 104]);
     assert_eq!(decoded.sampling, Some(sampling));
     assert_eq!(decoded.chat_sampling_metadata.as_deref(), Some(metadata));
+    assert_ne!(decoded.state.flags & state_flags::SPD_TAP_RETURN, 0);
 }
 
 #[test]
@@ -1690,6 +1693,8 @@ fn reusable_decode_message_updates_hot_path_fields() {
     assert_eq!(first.state.current_token, 104);
     assert_eq!(first.tokens, vec![104]);
 
+    message.enable_spd_tap_return();
+
     let second = message
         .update_with_tokens(1, 105, &[101, 102, 104, 105])
         .unwrap();
@@ -1701,6 +1706,7 @@ fn reusable_decode_message_updates_hot_path_fields() {
     assert_eq!(second.state.prompt_token_count, 4);
     assert_eq!(second.state.decode_step, 1);
     assert_eq!(second.state.current_token, 105);
+    assert_ne!(second.state.flags & state_flags::SPD_TAP_RETURN, 0);
     assert_eq!(second.tokens, vec![101, 102, 104, 105]);
     assert!(second.positions.is_empty());
     assert!(second.activation.is_empty());

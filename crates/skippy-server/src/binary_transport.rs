@@ -1712,6 +1712,14 @@ fn binary_message_attrs(
         attr::MESSAGE_KIND.to_string(),
         json!(format!("{:?}", message.kind)),
     );
+    attrs.insert(
+        "llama_stage.state_flags".to_string(),
+        json!(message.state.flags),
+    );
+    attrs.insert(
+        "llama_stage.spd_tap_return_requested".to_string(),
+        json!(message_requests_spd_tap_return(config, message)),
+    );
     attrs.insert(attr::TOKEN_COUNT.to_string(), json!(message.token_count));
     attrs.insert(
         attr::CHECKPOINT_GENERATION.to_string(),

@@ -1203,6 +1203,20 @@ pub(super) fn open_spd_replay_source(
 }
 
 impl SpdReplayProposalState {
+    fn mark_pending_tap_positions(&self, positions: impl IntoIterator<Item = u32>) -> Result<()> {
+        let positions = positions
+            .into_iter()
+            .map(|position| {
+                usize::try_from(position).context("SPD returned tap position exceeds usize")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.tap_lifecycle
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SPD tap lifecycle lock poisoned"))?
+            .mark_pending_future_positions(positions);
+        Ok(())
+    }
+
     pub(super) fn mark_pending_optimistic_tap_position(&self, position: usize) -> Result<()> {
         self.tap_lifecycle
             .lock()
@@ -1216,7 +1230,7 @@ impl SpdReplayProposalState {
         tap: &StageReplySpdTap,
         origin: Option<PredictionReturnOrigin>,
     ) -> Result<SpdTapRecordOutcome> {
-        let lifecycle = self
+        let mut lifecycle = self
             .tap_lifecycle
             .lock()
             .map_err(|_| anyhow::anyhow!("SPD tap lifecycle lock poisoned"))?;
@@ -1225,6 +1239,9 @@ impl SpdReplayProposalState {
         drop(lifecycle);
         if let Some(ignored) = decision.ignored {
             return Ok(SpdTapRecordOutcome::Ignored(ignored));
+        }
+        if let Some(stale) = decision.stale {
+            return Ok(SpdTapRecordOutcome::Stale(stale));
         }
         if !tap_positions_before(tap, accepted_context_len)? {
             let record = self
@@ -1714,6 +1731,16 @@ impl StageOpenAiBackend {
             .and_then(|mut taps| taps.record_stage_output(request.config, message, frame));
         match outcome {
             Ok(Some(record)) => {
+                if let Err(error) = spd.mark_pending_tap_positions(record.positions.iter().copied())
+                {
+                    let mut attrs = self.openai_attrs(request.ids);
+                    attrs.insert(
+                        "llama_stage.spd_inline_tap_error".to_string(),
+                        json!(error.to_string()),
+                    );
+                    self.telemetry
+                        .emit_debug("stage.openai_spd_tap_record_failed", attrs);
+                }
                 let mut attrs = self.openai_attrs(request.ids);
                 attrs.insert(
                     "llama_stage.spd_inline_tap_hf_index".to_string(),
@@ -1901,6 +1928,31 @@ impl StageOpenAiBackend {
                 );
                 self.telemetry
                     .emit_debug("stage.openai_spd_tap_ignored", attrs);
+            }
+            Ok(SpdTapRecordOutcome::Stale(stale)) => {
+                let mut attrs = self.openai_attrs(request.ids);
+                attrs.insert(
+                    "llama_stage.spd_inline_tap_hf_index".to_string(),
+                    json!(tap.hf_index),
+                );
+                attrs.insert(
+                    "llama_stage.spd_inline_tap_stale_reason".to_string(),
+                    json!(stale.reason),
+                );
+                attrs.insert(
+                    "llama_stage.spd_inline_tap_positions".to_string(),
+                    json!(stale.positions),
+                );
+                attrs.insert(
+                    "llama_stage.spd_inline_tap_accepted_context_len".to_string(),
+                    json!(stale.accepted_context_len),
+                );
+                attrs.insert(
+                    "llama_stage.spd_inline_tap_pending_positions".to_string(),
+                    json!(stale.pending_positions),
+                );
+                self.telemetry
+                    .emit_debug("stage.openai_spd_tap_stale", attrs);
             }
             Err(error) => {
                 let mut attrs = self.openai_attrs(request.ids);

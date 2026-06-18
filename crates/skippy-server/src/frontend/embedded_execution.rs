@@ -59,7 +59,7 @@ impl StageOpenAiBackend {
         };
         let stage0_compute_ms = stage0_timer.elapsed_ms();
         self.record_spd_stage0_boundary_tap(request, message, &output.output);
-        let forwarded = forwarded_stage_message_timed(
+        let mut forwarded = forwarded_stage_message_timed(
             request.config,
             message,
             &output.output,
@@ -67,6 +67,7 @@ impl StageOpenAiBackend {
             request.activation_width,
         )
         .map_err(openai_backend_error)?;
+        self.mark_spd_tap_return(request, &mut forwarded.message);
         let write_timer = PhaseTimer::start();
         write_stage_message_conditioned(
             &mut *downstream,
@@ -172,7 +173,7 @@ impl StageOpenAiBackend {
         if spd_tap_return {
             self.record_spd_stage0_boundary_tap(request, message, &output.output);
         }
-        let forwarded = forwarded_stage_message_timed(
+        let mut forwarded = forwarded_stage_message_timed(
             request.config,
             message,
             &output.output,
@@ -180,6 +181,9 @@ impl StageOpenAiBackend {
             request.activation_width,
         )
         .map_err(openai_backend_error)?;
+        if spd_tap_return {
+            self.mark_spd_tap_return(request, &mut forwarded.message);
+        }
         let write_timer = PhaseTimer::start();
         write_stage_message_conditioned(
             &mut *downstream,

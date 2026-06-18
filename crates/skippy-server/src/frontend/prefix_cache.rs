@@ -680,7 +680,7 @@ impl StageOpenAiBackend {
         let Some(kv) = self.kv.as_ref() else {
             return Ok(None);
         };
-        if request.prompt_token_ids.is_empty() || !kv.should_lookup() {
+        if request.prompt_token_ids.is_empty() || request.spd.is_some() || !kv.should_lookup() {
             return Ok(None);
         }
         let timer = PhaseTimer::start();
@@ -913,7 +913,7 @@ impl StageOpenAiBackend {
                     )
                     .map_err(openai_backend_error)?;
             }
-            let decode_message = embedded_decode_message(
+            let mut decode_message = embedded_decode_message(
                 request.wire_dtype,
                 DecodeMessageArgs {
                     request_id: request.ids.request_id,
@@ -925,6 +925,7 @@ impl StageOpenAiBackend {
                     sampling: wire_sampling.clone(),
                 },
             )?;
+            self.mark_spd_tap_return(request, &mut decode_message);
             let output = run_binary_stage_message(
                 &mut runtime,
                 session_key,
@@ -946,7 +947,7 @@ impl StageOpenAiBackend {
         };
         let stage0_compute_ms = stage0_timer.elapsed_ms();
 
-        let fused_message = embedded_restore_prefill_decode_message(
+        let mut fused_message = embedded_restore_prefill_decode_message(
             request.wire_dtype,
             RestorePrefillDecodeMessageArgs {
                 request_id: request.ids.request_id,
@@ -960,6 +961,7 @@ impl StageOpenAiBackend {
                 chat_sampling_metadata: request.chat_sampling_metadata,
             },
         )?;
+        self.mark_spd_tap_return(request, &mut fused_message);
         let forwarded = forwarded_stage_message_timed(
             request.config,
             &fused_message,

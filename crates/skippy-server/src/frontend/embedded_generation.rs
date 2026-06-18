@@ -889,7 +889,7 @@ impl StageOpenAiBackend {
                     self.record_spd_stage0_boundary_tap(&request, &message, &output);
                     let chunk_stage0_compute_ms = stage0_timer.elapsed_ms();
                     prefill_stage0_compute_ms += chunk_stage0_compute_ms;
-                    let forwarded = forwarded_stage_message(
+                    let mut forwarded = forwarded_stage_message(
                         request.config,
                         &message,
                         &output,
@@ -897,6 +897,7 @@ impl StageOpenAiBackend {
                         request.activation_width,
                     )
                     .map_err(openai_backend_error)?;
+                    self.mark_spd_tap_return(&request, &mut forwarded);
                     prefill_output_activation_bytes =
                         prefill_output_activation_bytes.saturating_add(output.payload.len());
                     prefill_forward_activation_bytes =
@@ -1987,7 +1988,7 @@ impl StageOpenAiBackend {
                 let stage0_compute_ms = stage0_timer.elapsed_ms();
                 decode_stage0_compute_ms += stage0_compute_ms;
                 self.record_spd_stage0_boundary_tap(&request, message, &output);
-                let forwarded = forwarded_stage_message_timed(
+                let mut forwarded = forwarded_stage_message_timed(
                     request.config,
                     message,
                     &output,
@@ -1995,6 +1996,7 @@ impl StageOpenAiBackend {
                     request.activation_width,
                 )
                 .map_err(openai_backend_error)?;
+                self.mark_spd_tap_return(&request, &mut forwarded.message);
                 decode_forward_activation_encode_ms += forwarded.activation_encode_ms;
                 decode_output_activation_bytes =
                     decode_output_activation_bytes.saturating_add(output.payload.len());

@@ -490,6 +490,16 @@ Run these before making any speedup claim:
      (`3.23%` theoretical gain), and package-backed serving accepted `0 / 90`
      proposals across the six-prompt smoke. Scale or change the training recipe
      before spending a two-node speed run on this topology.
+   - A repeat 512-row run with the paper/reference LR `1e-4` improved
+     reference top-1 acceptance to `41 / 384` flags (`7.50%` theoretical gain)
+     and produced the first nonzero Qwen3-8B package-backed serving acceptance
+     on matched GSM8K prompts: `2 / 120` proposals accepted with clean taps.
+     It still accepted `0 / 90` on the original code/math/writing sweep, so it
+     is evidence that the recipe direction is better, not a speed candidate.
+     Before scaling on HF/CUDA, align the reference train/eval chat template
+     with the product OpenAI/GGUF path; the reference generations start at the
+     answer text while product completions currently include the Qwen
+     `<think></think>` preamble even with thinking disabled.
    - Run a local or dry-run HF job on `Qwen/Qwen3-0.6B` only when debugging the
      trainer/export path itself. It is no longer the next scaling target now
      that the Qwen3.5-4B request path has real LAN KV evidence.

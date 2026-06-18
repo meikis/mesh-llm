@@ -446,6 +446,25 @@ draft flags, with equivalent accept length `1.0323` and theoretical gain
 `3.23%`. This is the serving-aligned quality metric for this checkpoint; it is
 nonzero but too weak to justify a two-node speed run.
 
+2026-06-18 LR diagnostic: the same 512-row BF16 local MPS run repeated with the
+paper/reference learning rate `1e-4` instead of `1e-5`, still on Qwen3-8B S2
+`23,36`, `max_length=256`, `num_spec_layers=4`, and `draft_top_k=1` eval. The
+run lives under
+`/private/tmp/skippy-spd-qwen3-8b-s2-23-bf16-train512-lr1e4-20260618/artifacts/20260618-114627`.
+Training completed in `10.35min`, `train_loss=27.14`, and the end-of-run train
+log accuracy rose to about `0.099`. Reference top-1 eval on the same 12-prompt
+mini benchmark set improved to `41 / 384` accepted draft flags, equivalent
+accept length `1.0741`, and theoretical gain `7.50%`. BF16 serving export SHA
+is `04629f50d1499a8714451e711ca5bc65087e311f82a03ff1f69b63d43ed26054`; parity
+fixture SHA is `fef2b8be57e3385c0f2c9d0f716e5d0e38db074171ba22f453964b2636fb8682`.
+Rust fixture parity matches the forward and cached top-4, with a BF16-scale
+rank swap only at forward top-8. Package-backed serving on the six original
+code/math/writing prompts still accepted `0 / 90`, but a targeted GSM8K
+mini-eval smoke with `ctx_size=256` accepted `2 / 120`, matched content on all
+4 prompts, and kept tap counters clean. This proves the improved head can
+accept through Rust/package-backed serving, but the product acceptance rate is
+still far below the reference eval.
+
 The corrected parity did **not** make the 512-row Qwen3-8B sidecar a product
 candidate. The paired local package-backed OpenAI sweep
 `/private/tmp/spd-qwen3-8b-s2-23-bf16-train512-local-openai-sweep6-16-after-parity.json`
@@ -458,6 +477,14 @@ comparison with this head; it would only prove overhead. The next real sidecar
 step is training scale/config/top-1 quality, not LAN orchestration: use a
 confirmed HF-scale bfloat16/CUDA job or change the training recipe until
 package-backed serving saves token round trips locally.
+
+The LR diagnostic shows the direction: `1e-4` improves top-1 quality, but this
+is still not enough. The next gate is to align the reference training/eval chat
+template with the product OpenAI/GGUF path before scaling rows: the reference
+GSM8K generations start directly with answer text, while the product path emits
+the Qwen `<think></think>` preamble in generated content even with
+`--enable-thinking false`. Do not spend an HF-scale job until the reference eval
+and product smoke agree on this prompt/template surface.
 
 - 2026-06-17 the first model-backed 24-token rolling-executor smoke after the
   replay reset cleanup is

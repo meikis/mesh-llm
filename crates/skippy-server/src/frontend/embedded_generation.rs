@@ -31,6 +31,23 @@ impl StageOpenAiBackend {
             .as_ref()
             .ok_or_else(|| OpenAiError::backend("embedded stage 0 has no downstream lane pool"))?;
         let mut lane = lane_pool.checkout(request.ids)?;
+        if let Some(prediction_return) = request.prediction_return.as_ref() {
+            match crate::binary_transport::direct_return::open_downstream_prediction_return_stream(
+                request.config,
+                request_id,
+                session_id,
+                request.wire_dtype,
+            ) {
+                Ok(stream) => {
+                    prediction_return.attach_opened_stream(stream);
+                }
+                Err(error) => {
+                    eprintln!(
+                        "direct prediction return upstream-opened sink unavailable: {error:#}"
+                    );
+                }
+            }
+        }
         let mut cache_stats = GenerationCacheStats::default();
 
         let result = (|| {

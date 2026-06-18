@@ -59,8 +59,8 @@ use crate::{
     binary_transport::{
         DecodeFrameBatcher, PredictionReturnHub, PredictionReturnReceiver, WireCondition,
         connect_binary_downstream, forwarded_stage_message, forwarded_stage_message_timed,
-        run_binary_stage_message, stage_output_activation_capacity,
-        write_stage_message_conditioned,
+        run_binary_stage_message, send_client_ready_hello_if_enabled,
+        stage_output_activation_capacity, write_stage_message_conditioned,
     },
     cli::ServeOpenAiArgs,
     config::{load_json, validate_config},
@@ -1068,6 +1068,8 @@ impl PersistentStageLanePool {
             "openai downstream lane waiting ready: stage_id={} lane_id={lane_id} local={local_addr:?} peer={peer_addr:?}",
             self.config.stage_id
         );
+        send_client_ready_hello_if_enabled(&mut stream)
+            .context("send persistent downstream lane client ready hello")?;
         recv_ready(&mut stream).context("persistent downstream lane did not become ready")?;
         eprintln!(
             "openai downstream lane received ready: stage_id={} lane_id={lane_id} local={local_addr:?} peer={peer_addr:?}",

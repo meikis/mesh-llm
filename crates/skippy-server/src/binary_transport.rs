@@ -27,8 +27,8 @@ use skippy_metrics::{attr, metric};
 use skippy_protocol::{
     MessageBase, SCHEMA_VERSION, StageConfig, StageTopology,
     binary::{
-        StageReply, StageReplyStats, StageSamplingConfig, StageStateHeader, StageWireMessage,
-        WireActivationDType, WireMessageKind, WireReplyKind,
+        READY_MAGIC, StageReply, StageReplyStats, StageSamplingConfig, StageStateHeader,
+        StageWireMessage, WireActivationDType, WireMessageKind, WireReplyKind,
         activation_frame_flags_from_state_flags, read_stage_message, recv_reply, send_ready,
         send_reply_ack, send_reply_ack_with_stats, send_reply_predicted_tokens_with_stats,
         send_reply_predicted_with_tokens_and_stats, state_flags,
@@ -54,6 +54,7 @@ pub(crate) use self::decode_batcher::DecodeFrameBatcher;
 pub use self::direct_return::PredictionReturnHub;
 pub use self::direct_return::PredictionReturnListener;
 pub(crate) use self::direct_return::PredictionReturnReceiver;
+use self::direct_return::PredictionReturnSinks;
 pub(crate) use self::forwarding::{forwarded_stage_message, forwarded_stage_message_timed};
 use self::kv_eviction::{
     BinaryProactiveEviction, BinaryProactiveEvictionPlan, binary_proactive_eviction_plan,
@@ -66,6 +67,8 @@ pub(crate) use self::wire::write_stage_message_conditioned;
 
 static BINARY_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 const NATIVE_MTP_ENABLED_ENV: &str = "SKIPPY_NATIVE_MTP_ENABLED";
+const CLIENT_READY_HELLO_ENV: &str = "SKIPPY_STAGE_CLIENT_READY_HELLO";
+const CLIENT_READY_HELLO_OPT_IN_PEEK_MS: u64 = 500;
 
 #[derive(Default)]
 struct BinaryKvLookupResult {
@@ -238,6 +241,7 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
     }
     let kv = KvStageIntegration::from_config(&config)?.map(Arc::new);
     let prediction_returns = Arc::new(PredictionReturnHub::default());
+    let prediction_return_sinks = Arc::new(PredictionReturnSinks::default());
     let listener = TcpListener::bind(bind_addr)?;
     listener.set_nonblocking(true)?;
     if let Some(openai_options) = openai {
@@ -315,12 +319,15 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
         let kv = kv.clone();
         let telemetry = telemetry.clone();
         let prediction_returns = prediction_returns.clone();
+        let prediction_return_sinks = prediction_return_sinks.clone();
         thread::spawn(move || {
             let connection_result = (|| -> Result<()> {
                 eprintln!(
                     "binary sending ready: stage_id={} peer={peer_addr:?}",
                     config.stage_id
                 );
+                consume_optional_client_ready_hello(&mut upstream)
+                    .context("consume optional client ready hello")?;
                 send_ready(&mut upstream).context("failed to send binary ready")?;
                 upstream.flush().ok();
                 eprintln!(
@@ -333,7 +340,11 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
                     Err(error) => return Err(error.into()),
                 };
                 if first_message.kind == WireMessageKind::PredictionReturnOpen {
-                    return prediction_returns.handle_return_connection(first_message, upstream);
+                    if config.stage_index == 0 {
+                        return prediction_returns
+                            .handle_return_connection(first_message, upstream);
+                    }
+                    return prediction_return_sinks.insert_opened_sink(first_message, upstream);
                 }
                 let downstream =
                     connect_binary_downstream(&config, downstream_connect_timeout_secs)?;
@@ -353,6 +364,7 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
                     async_prefill_forward,
                     downstream_wire_condition,
                     downstream_connect_timeout_secs,
+                    &prediction_return_sinks,
                     first_message,
                 )
             })()
@@ -379,6 +391,56 @@ fn prepare_binary_stage_connection(stream: &TcpStream) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn send_client_ready_hello_if_enabled(stream: &mut TcpStream) -> Result<()> {
+    if !client_ready_hello_enabled() {
+        return Ok(());
+    }
+    send_ready(&mut *stream).context("send client ready hello")?;
+    stream.flush().ok();
+    Ok(())
+}
+
+pub(super) fn consume_optional_client_ready_hello(stream: &mut TcpStream) -> Result<()> {
+    if !client_ready_hello_enabled() {
+        return Ok(());
+    }
+    let previous_timeout = stream
+        .read_timeout()
+        .context("read stage connection timeout")?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(
+            CLIENT_READY_HELLO_OPT_IN_PEEK_MS,
+        )))
+        .context("set client ready hello peek timeout")?;
+    let mut bytes = [0_u8; 4];
+    let peek_result = stream.peek(&mut bytes);
+    stream
+        .set_read_timeout(previous_timeout)
+        .context("restore stage connection timeout")?;
+
+    match peek_result {
+        Ok(4) if i32::from_le_bytes(bytes) == READY_MAGIC => {
+            skippy_protocol::binary::recv_ready(&mut *stream)
+                .context("consume client ready hello")?;
+            eprintln!("binary consumed client ready hello");
+        }
+        Ok(_) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) => {}
+        Err(error) => return Err(error).context("peek optional client ready hello"),
+    }
+    Ok(())
+}
+
+fn client_ready_hello_enabled() -> bool {
+    env::var(CLIENT_READY_HELLO_ENV)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_binary_connection(
     config: &StageConfig,
@@ -396,9 +458,12 @@ fn handle_binary_connection(
     async_prefill_forward: bool,
     downstream_wire_condition: WireCondition,
     downstream_connect_timeout_secs: u64,
+    prediction_return_sinks: &PredictionReturnSinks,
     first_message: StageWireMessage,
 ) -> Result<()> {
     if let Some(downstream) = downstream.as_mut() {
+        send_client_ready_hello_if_enabled(&mut *downstream)
+            .context("send downstream client ready hello")?;
         skippy_protocol::binary::recv_ready(&mut *downstream)
             .context("downstream binary stage did not become ready")?;
     }
@@ -693,24 +758,16 @@ fn handle_binary_connection(
                         )
                         .context("configure binary stage generation")?;
                 }
-                match direct_return::open_prediction_return_stream(
+                configure_prediction_return_stream(
                     config,
                     topology,
                     message.request_id,
                     message.session_id,
                     wire_dtype,
                     downstream_connect_timeout_secs,
-                ) {
-                    Ok(stream) => {
-                        prediction_return_streams
-                            .insert((message.request_id, message.session_id), stream);
-                    }
-                    Err(error) => {
-                        eprintln!(
-                            "direct prediction return unavailable; falling back to upstream reply: {error:#}"
-                        );
-                    }
-                }
+                    prediction_return_sinks,
+                    &mut prediction_return_streams,
+                );
             }
             send_reply_ack_with_stats(&mut *upstream, generation_stats)
                 .context("generation config ack")?;
@@ -2244,6 +2301,48 @@ fn restore_binary_prefix(
                     )
                 })
             }),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn configure_prediction_return_stream(
+    config: &StageConfig,
+    topology: Option<&StageTopology>,
+    request_id: u64,
+    session_id: u64,
+    wire_dtype: WireActivationDType,
+    downstream_connect_timeout_secs: u64,
+    prediction_return_sinks: &PredictionReturnSinks,
+    prediction_return_streams: &mut BTreeMap<(u64, u64), TcpStream>,
+) {
+    match prediction_return_sinks.take_wait(request_id, session_id, Duration::from_millis(250)) {
+        Ok(Some(stream)) => {
+            prediction_return_streams.insert((request_id, session_id), stream);
+            eprintln!("direct prediction return using upstream-opened sink");
+            return;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("direct prediction return sink lookup failed: {error:#}");
+        }
+    }
+
+    match direct_return::open_prediction_return_stream(
+        config,
+        topology,
+        request_id,
+        session_id,
+        wire_dtype,
+        downstream_connect_timeout_secs,
+    ) {
+        Ok(stream) => {
+            prediction_return_streams.insert((request_id, session_id), stream);
+        }
+        Err(error) => {
+            eprintln!(
+                "direct prediction return unavailable; falling back to upstream reply: {error:#}"
+            );
+        }
     }
 }
 

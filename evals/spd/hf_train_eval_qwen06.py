@@ -292,6 +292,7 @@ def patch_reference_for_transformers(reference_dir: Path) -> None:
 def patch_reference_for_glm_training_smoke(reference_dir: Path) -> None:
     patch_pipeline_model_for_glm(reference_dir / "pipeline_model.py")
     patch_train_for_glm_template(reference_dir / "train.py")
+    patch_train_for_label_filtering(reference_dir / "train.py")
 
 
 def patch_train_for_glm_template(path: Path) -> None:
@@ -317,6 +318,59 @@ def patch_train_for_glm_template(path: Path) -> None:
     if model_type is not None and not _model_type_looks_like_qwen(model_type):
         log.info("Skip Qwen file chat template (model_type=%s).", model_type)
         return
+''',
+    )
+
+
+def patch_train_for_label_filtering(path: Path) -> None:
+    replace_once(
+        path,
+        'ENCODE_PIPELINE_CACHE_VERSION = "spd-encode-1"\n',
+        'ENCODE_PIPELINE_CACHE_VERSION = "spd-encode-2-next-labels"\n',
+    )
+    replace_once(
+        path,
+        '''def _encoded_example_length_ok(
+    ex: Dict[str, Any],
+    *,
+    min_length: int,
+    max_length: int,
+    max_length_overflow: str,
+) -> bool:
+    ids = ex.get("input_ids")
+    if ids is None:
+        return False
+    n = len(ids)
+    if n < min_length:
+        return False
+    if max_length_overflow == "discard" and n > max_length:
+        return False
+    return True
+''',
+        '''def _encoded_example_length_ok(
+    ex: Dict[str, Any],
+    *,
+    min_length: int,
+    max_length: int,
+    max_length_overflow: str,
+) -> bool:
+    ids = ex.get("input_ids")
+    if ids is None:
+        return False
+    n = len(ids)
+    if n < min_length:
+        return False
+    if max_length_overflow == "discard" and n > max_length:
+        return False
+    labels = ex.get("labels")
+    if labels is None:
+        return False
+    labels = labels[:n]
+    if not any(int(label) != -100 for label in labels):
+        return False
+    if n <= 1 or not any(int(label) != -100 for label in labels[1:n]):
+        return False
+    return True
 ''',
     )
 

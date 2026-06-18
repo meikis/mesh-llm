@@ -54,6 +54,13 @@ Rust.
   helper `evals/spd/prepare_product_activation_corpus.py` converts that corpus
   to a safetensors tensor dataset and maps labels into `draft_token_ids` when
   the SPD manifest provides a draft vocab.
+- `evals/spd/augment_product_activation_teacher_logits.py` can attach frozen HF
+  teacher logits to product-captured rows, aligned by `query_row_index` and
+  target position. This is KL-compatible training data for the reference head,
+  but it is still HF-teacher data, not native Q4_K_M verifier logits.
+- `evals/spd/train_product_activation_head.py` can fine-tune an existing
+  `speculation_head_final.pt` on product `cur_in` rows plus aligned teacher
+  logits and save a reference-compatible checkpoint.
 - `skippy-server` has a request-path speculative proposal-source boundary in
   front of the existing target verify/repair/rollback loop. The current draft
   model path uses it, and an experimental `spd-replay` source can load the
@@ -1846,6 +1853,21 @@ The tap-row-to-`cur_in` projection bridge lives in
    paper-faithful KL training from product execution still needs either target
    logits exposed from the native runtime or an HF teacher pass aligned to the
    captured product rows.
+
+   The first HF-teacher bridge is now validated on that one-row corpus. The
+   converter wrote `/tmp/spd-qwen3-8b-product-corpus-smoke.safetensors` with
+   `cur_in` shape `[1, 2, 4096]`, query row index `1`, query position `23`, and
+   target position `24`. The teacher augmentation wrote
+   `/tmp/spd-qwen3-8b-product-teacher-smoke.safetensors` over the Qwen top-32k
+   draft vocabulary; HF teacher top-1 was token `23`, matching the product
+   greedy target for the captured row. A one-step MPS BF16 fine-tune smoke then
+   consumed those two files plus the LR `1e-4` Qwen3-8B S2 `23,36` checkpoint
+   and wrote
+   `/tmp/spd-qwen3-8b-product-finetune-smoke/speculation_head_final.pt` with
+   `steps_completed=1` and finite loss `12.719`. This proves the
+   product-tap/teacher-logit training bridge only; it is not quality evidence,
+   and it is not native product KL because the teacher logits are still from HF
+   `Qwen/Qwen3-8B`.
 
    Repro command for the current one-step corpus smoke:
 

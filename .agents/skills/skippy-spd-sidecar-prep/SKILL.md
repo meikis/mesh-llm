@@ -58,6 +58,15 @@ Skippy taps.
   corpus into safetensors for local supervised debug fine-tuning/eval. This is
   not paper-faithful KL data yet because the native verifier currently exposes
   greedy target tokens, not full teacher logits.
+- `evals/spd/augment_product_activation_teacher_logits.py` attaches frozen HF
+  teacher logits to product-captured rows by rerunning the same context tokens
+  through the base model and saving logits aligned to `query_row_index` /
+  `target_position`. Treat this as HF-teacher KL data over product tap inputs,
+  not native quantized-verifier logits.
+- `evals/spd/train_product_activation_head.py` fine-tunes an existing reference
+  `speculation_head_final.pt` on product `cur_in` safetensors plus aligned
+  teacher logits. Use it as a local recipe/debug bridge before spending on a
+  larger BF16/CUDA run.
 - `evals/spd/README.md` is the live progress log and command cookbook for the
   current SPD proof.
 
@@ -249,6 +258,15 @@ The current product-corpus smoke for this exact package/split is
 `hidden_size=4096`, `rows_f32_bytes=32768`, and the old BF16-trained sidecar
 still rejects the first product proposal (`proposal=9914`, `target=23`). Use
 this as corpus-export evidence only, not quality or speed evidence.
+That corpus converts to `/tmp/spd-qwen3-8b-product-corpus-smoke.safetensors`.
+The matching one-sample HF teacher augmentation writes
+`/tmp/spd-qwen3-8b-product-teacher-smoke.safetensors`; its teacher top-1 is
+token `23`, matching the product greedy target for the captured row. A one-step
+MPS BF16 fine-tune smoke writes
+`/tmp/spd-qwen3-8b-product-finetune-smoke/speculation_head_final.pt` from the
+existing LR `1e-4` Qwen3-8B sidecar. Treat this as data/training-bridge
+evidence only: the teacher logits come from HF `Qwen/Qwen3-8B`, not native
+Q4_K_M verifier logits, and the sample count is `1`.
 Use the trainer dry-run before spending time or HF money:
 
 ```bash

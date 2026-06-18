@@ -531,6 +531,66 @@ The LR diagnostic shows the direction: `1e-4` improves top-1 quality, but this
 is still not enough. Do not spend an HF-scale job until the reference evaluator
 and product smoke agree on proposal/verification behavior for identical prompts.
 
+2026-06-18 identical-prompt/product-distribution checkpoint: the Qwen3-8B S2
+`23,36` sidecar was evaluated on the same 9 reference prompts through the
+package-backed product request path. The unfine-tuned LR `1e-4` checkpoint
+matched baseline/SPD content on all `9 / 9` prompts but accepted only
+`8 / 63` proposals
+(`/tmp/spd-qwen3-8b-identical-prompts-product-nt9.json`). The per-prompt
+reference/product comparator showed mostly aligned target streams (`60 / 63`
+target-token positions, `7 / 9` prompts exact) but poor proposal parity
+(`10 / 63` proposal-token matches, no prompt with full proposal parity), so the
+gap was not just prompt rendering. `skippy-bench spd-live-tap-parity` now
+accepts a tokenized prompt JSONL and exported a 72-row product activation
+corpus from those same 9 prompts:
+`/tmp/spd-qwen3-8b-product-corpus-nt9.safetensors`. HF teacher augmentation
+over `Qwen/Qwen3-8B` produced
+`/tmp/spd-qwen3-8b-product-teacher-nt9.safetensors` with draft-width BF16
+logits for all 72 samples; 71 labels were inside the draft-vocab scope. This is
+KL-compatible product-tap data, but still uses HF teacher logits rather than
+native Q4_K_M verifier logits.
+
+Two local product fine-tune bridges proved the product-path proposal source can
+move. A 2-epoch, batch-8 BF16 pass wrote
+`/tmp/spd-qwen3-8b-product-finetune-nt9-b8/speculation_head_final.pt`, improving
+product-row argmax accuracy from `0.0` to `0.25` and local package-backed
+acceptance from `8 / 63` to `25 / 63`. A stronger 10-epoch, batch-8, LR
+`2e-5` debug pass wrote
+`/tmp/spd-qwen3-8b-product-finetune-nt9-b8-e10-lr2e5/speculation_head_final.pt`,
+reached product-row argmax accuracy `0.875`, exported finite BF16 serving
+weights with SHA
+`3b87a779034fd2974da76e3c368ee0000b5bbec5a735f3c7a7d3fec65c3d8866`, and
+passed Rust fixture parity. Local package-backed serving on the exact 9 prompts
+matched content on all `9 / 9`, accepted `42 / 63` proposals without the
+rolling executor, and accepted `44 / 59` with the rolling executor. The rolling
+report
+`/tmp/spd-qwen3-8b-product-finetune-nt9-b8-e10-lr2e5/openai-product-nt9-rolling.json`
+recorded `0` tap failures, `54` rolling launches, `9` no-proposal launch
+misses, `max_in_flight=2`, `39` oldest accepts, `15` oldest rejections, and `15`
+drained younger replies. The paper-style two-stage estimate is now positive
+(`44` saved token round trips, `15` unsaved, `1.49x` versus serial split), but
+the current same-machine implementation remains slower (`0.156x` decode)
+because proposal/head work and stage waits are not hidden.
+
+The same stronger debug sidecar has now run through a real one-worker LAN split
+with one physical stage per machine. A no-launch preflight validated the
+package-backed `23,36` split and tap allowlist in
+`/tmp/spd-qwen3-8b-product-finetune-nt9-b8-e10-lr2e5/openai-lan-preflight.json`.
+The remote worker cache initially lacked downstream package parts; copying only
+the required `23..35` layer parts plus `shared/output.gguf` fixed that
+materialization gap. The full 9-prompt paired LAN rolling report at
+`/tmp/spd-qwen3-8b-product-finetune-nt9-b8-e10-lr2e5/openai-lan-nt9-rolling.json`
+matched content on all `9 / 9`, accepted `44 / 59` proposals, committed `39`
+optimistic tokens, recorded `0` tap failures, and had `0` rolling launch
+misses with `max_in_flight=2`. Mean baseline decode was `554.0ms`; mean SPD
+decode was `1702.7ms` (`0.325x`). The paper-style round-trip estimate remained
+positive (`1.49x`, `44` saved / `15` unsaved), so the current negative wall
+speed is now concrete overhead evidence: mean sidecar head time was `69.5ms`,
+normal downstream wait averaged `150.7ms`, optimistic downstream wait averaged
+`115.7ms`, and chained hidden waits averaged `108.9ms`. Treat this as real
+two-node correctness plus overhead decomposition for an overfit debug head, not
+a final generalizing sidecar.
+
 - 2026-06-17 the first model-backed 24-token rolling-executor smoke after the
   replay reset cleanup is
   `/private/tmp/spd-rolling-executor-real-local-smoke24-4.json`. It restores

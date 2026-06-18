@@ -267,6 +267,54 @@ MPS BF16 fine-tune smoke writes
 existing LR `1e-4` Qwen3-8B sidecar. Treat this as data/training-bridge
 evidence only: the teacher logits come from HF `Qwen/Qwen3-8B`, not native
 Q4_K_M verifier logits, and the sample count is `1`.
+
+Current exact-prompt Qwen3-8B product bridge: the unfine-tuned LR `1e-4`
+checkpoint matched content on all `9 / 9` exact reference prompts but accepted
+only `8 / 63` product proposals
+(`/tmp/spd-qwen3-8b-identical-prompts-product-nt9.json`). Target tokens were
+mostly aligned between reference and product (`60 / 63` positions, `7 / 9`
+prompts exact), but proposal parity was poor (`10 / 63` proposal-token matches).
+The product-corpus path now supports tokenized prompt JSONL and exported
+`/tmp/spd-qwen3-8b-product-corpus-nt9.safetensors` from those exact prompts:
+`72` samples, `9` prompts, `8` verify steps, `row_count=2`, `hidden_size=4096`.
+HF teacher augmentation wrote
+`/tmp/spd-qwen3-8b-product-teacher-nt9.safetensors` with draft-width BF16 logits
+for all `72` samples; `71` labels were in draft-vocab scope. This is
+KL-compatible product-tap data with an HF teacher, not native Q4_K_M verifier
+logits.
+
+Current product-distribution debug sidecar: a stronger local BF16 fine-tune
+over the 72 product rows wrote
+`/tmp/spd-qwen3-8b-product-finetune-nt9-b8-e10-lr2e5/speculation_head_final.pt`
+from the LR `1e-4` checkpoint using batch `8`, `10` epochs, LR `2e-5`, and
+reached product-row argmax accuracy `0.875`. The BF16 serving export SHA is
+`3b87a779034fd2974da76e3c368ee0000b5bbec5a735f3c7a7d3fec65c3d8866`, and Rust
+fixture parity passes. Local package-backed serving on the same 9 prompts
+accepted `42 / 63` proposals without the rolling executor and `44 / 59` with
+the rolling executor, with exact content and `0` tap failures. The rolling
+report is
+`/tmp/spd-qwen3-8b-product-finetune-nt9-b8-e10-lr2e5/openai-product-nt9-rolling.json`:
+`54` rolling launches, `9` no-proposal launch misses, `max_in_flight=2`, `39`
+oldest accepts, `15` oldest rejections, and `15` drained younger replies. Treat
+this as a successful product-path training bridge and overfit debug sidecar, not
+a final generalizing artifact.
+
+Current one-worker LAN checkpoint for that debug sidecar: the no-launch
+preflight at
+`/tmp/spd-qwen3-8b-product-finetune-nt9-b8-e10-lr2e5/openai-lan-preflight.json`
+validated the package-backed `23,36` split and `[23,36]` tap allowlist. The
+remote worker cache initially had only stage-0 package parts; copying the
+selected downstream layer parts `23..35` and `shared/output.gguf` fixed package
+materialization. The full 9-prompt paired LAN rolling report at
+`/tmp/spd-qwen3-8b-product-finetune-nt9-b8-e10-lr2e5/openai-lan-nt9-rolling.json`
+matched content on all `9 / 9`, accepted `44 / 59` proposals, committed `39`
+optimistic tokens, recorded `0` tap failures and `0` rolling launch misses, and
+reached `max_in_flight=2`. Baseline decode mean was `554.0ms`; SPD decode mean
+was `1702.7ms` (`0.325x`). The paper-style estimate was positive (`1.49x`,
+`44` saved / `15` unsaved token round trips), so the remaining gap is concrete
+overhead: sidecar head mean `69.5ms`, normal downstream wait mean `150.7ms`,
+optimistic downstream wait mean `115.7ms`, and chained hidden-wait mean
+`108.9ms`.
 Use the trainer dry-run before spending time or HF money:
 
 ```bash

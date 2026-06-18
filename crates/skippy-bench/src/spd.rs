@@ -102,6 +102,7 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
     let fixture = SpdSafetensorsFile::open(&args.fixture)?;
     let serving = SpdSafetensorsFile::open(manifest.serving_checkpoint_path(&args.manifest)?)?;
     let prompt_tokens = fixture_prompt_tokens(&fixture)?;
+    let verified_prompt_tokens = verified_prompt_token_sets(&args, &prompt_tokens)?;
     let row_positions = fixture.read_tensor_i64("row_positions")?;
     let row_i_stages = fixture.read_tensor_i64("row_i_stages")?;
     let position_ids = fixture.read_tensor_i64("position_ids")?;
@@ -191,7 +192,7 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
                 dir: dir.clone(),
                 args: &args,
                 manifest: &manifest,
-                prompt_tokens: &prompt_tokens,
+                prompt_token_sets: &verified_prompt_tokens,
                 row_count,
                 row_i_stages: &row_i_stages,
                 row_hf_indices: &row_hf_indices,
@@ -201,27 +202,38 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
         )?),
         None => None,
     };
-    let verified_generation = run_verified_generation(
-        &args,
-        &live_runner,
-        &spd_head,
-        &tap_projector,
-        VerifiedGenerationInputs {
-            prompt_tokens: &prompt_tokens,
-            row_i_stages: &row_i_stages,
-            row_hf_indices: &row_hf_indices,
-            final_norm_weight: &final_norm_weight,
-            row_count,
-            hidden_size,
-        },
-        product_corpus.as_mut(),
-    )
-    .context("run repeated live SPD target verification")?;
+    let mut verified_generations = Vec::with_capacity(verified_prompt_tokens.len());
+    for (prompt_index, prompt_tokens) in verified_prompt_tokens.iter().enumerate() {
+        verified_generations.push(
+            run_verified_generation(
+                &args,
+                &live_runner,
+                &spd_head,
+                &tap_projector,
+                VerifiedGenerationInputs {
+                    prompt_index,
+                    prompt_tokens,
+                    row_i_stages: &row_i_stages,
+                    row_hf_indices: &row_hf_indices,
+                    final_norm_weight: &final_norm_weight,
+                    row_count,
+                    hidden_size,
+                },
+                product_corpus.as_mut(),
+            )
+            .with_context(|| {
+                format!("run live SPD target verification for prompt_index={prompt_index}")
+            })?,
+        );
+    }
     let product_corpus_report = product_corpus
         .as_mut()
         .map(ProductActivationCorpusWriter::finish)
         .transpose()?;
-    let target_verification = verified_generation
+    let first_verified_generation = verified_generations
+        .first()
+        .context("no verified-generation prompt sets were provided")?;
+    let target_verification = first_verified_generation
         .first_step
         .clone()
         .context("verified SPD generation produced no steps")?;
@@ -233,6 +245,8 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
         "splits": args.splits,
         "layer_end": args.layer_end,
         "prompt_token_count": prompt_tokens.len(),
+        "verified_prompt_count": verified_prompt_tokens.len(),
+        "prompt_token_file": &args.prompt_token_file,
         "tap_plan": {
             "required_hf_indices": tap_plan.required_hf_indices,
             "stage_boundary_hf_indices": tap_plan.stage_boundary_hf_indices,
@@ -273,7 +287,11 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
             }
         },
         "target_verification": target_verification,
-        "verified_generation": verified_generation.report,
+        "verified_generation": first_verified_generation.report,
+        "verified_generations": verified_generations
+            .iter()
+            .map(|generation| generation.report.clone())
+            .collect::<Vec<_>>(),
         "product_activation_corpus": product_corpus_report,
     });
     let json = serde_json::to_vec_pretty(&report)?;
@@ -351,6 +369,7 @@ fn evaluate_live_tap_parity_gate(
 }
 
 struct VerifiedGenerationInputs<'a> {
+    prompt_index: usize,
     prompt_tokens: &'a [i32],
     row_i_stages: &'a [i64],
     row_hf_indices: &'a [Vec<u32>],
@@ -466,6 +485,7 @@ fn run_verified_generation(
         let baseline_token_count_after = target_session.token_count();
         if let Some(writer) = product_corpus.as_deref_mut() {
             writer.write_step(ProductActivationSample {
+                prompt_index: inputs.prompt_index,
                 step_index,
                 context_tokens: &context_tokens,
                 row_positions: &row_positions,
@@ -530,6 +550,8 @@ fn run_verified_generation(
         .iter()
         .all(|step| step["verifier_rewound"].as_bool() == Some(true));
     let report = json!({
+        "prompt_index": inputs.prompt_index,
+        "prompt_token_count": inputs.prompt_tokens.len(),
         "steps_requested": args.verify_steps,
         "steps_completed": steps.len(),
         "generated_tokens": generated_tokens,
@@ -632,6 +654,71 @@ fn prefill_target_prefix(
     Ok(())
 }
 
+fn verified_prompt_token_sets(
+    args: &SpdLiveTapParityArgs,
+    fixture_prompt_tokens: &[i32],
+) -> Result<Vec<Vec<i32>>> {
+    let Some(path) = &args.prompt_token_file else {
+        return Ok(vec![fixture_prompt_tokens.to_vec()]);
+    };
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("read SPD prompt token file {}", path.display()))?;
+    let mut prompts = Vec::new();
+    for (line_index, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(trimmed).with_context(|| {
+            format!(
+                "parse SPD prompt token JSON at {}:{}",
+                path.display(),
+                line_index + 1
+            )
+        })?;
+        prompts.push(prompt_tokens_from_json_value(&value, line_index + 1)?);
+    }
+    if prompts.is_empty() {
+        bail!(
+            "SPD prompt token file {} contained no prompts",
+            path.display()
+        );
+    }
+    Ok(prompts)
+}
+
+fn prompt_tokens_from_json_value(
+    value: &serde_json::Value,
+    line_number: usize,
+) -> Result<Vec<i32>> {
+    let tokens = if let Some(array) = value.as_array() {
+        array
+    } else {
+        value
+            .get("prompt_token_ids")
+            .or_else(|| value.get("tokens"))
+            .and_then(serde_json::Value::as_array)
+            .with_context(|| {
+                format!(
+                    "SPD prompt token line {line_number} must be an array or object with prompt_token_ids/tokens"
+                )
+            })?
+    };
+    let mut out = Vec::with_capacity(tokens.len());
+    for (token_index, token) in tokens.iter().enumerate() {
+        let value = token.as_i64().with_context(|| {
+            format!("SPD prompt token line {line_number} token {token_index} is not an integer")
+        })?;
+        out.push(i32::try_from(value).with_context(|| {
+            format!("SPD prompt token line {line_number} token {token_index} exceeds i32")
+        })?);
+    }
+    if out.is_empty() {
+        bail!("SPD prompt token line {line_number} is empty");
+    }
+    Ok(out)
+}
+
 struct LiveRows {
     cur_in: Vec<f32>,
     rows: Vec<serde_json::Value>,
@@ -649,7 +736,7 @@ struct ProductActivationCorpusConfig<'a> {
     dir: PathBuf,
     args: &'a SpdLiveTapParityArgs,
     manifest: &'a SpdHeadManifest,
-    prompt_tokens: &'a [i32],
+    prompt_token_sets: &'a [Vec<i32>],
     row_count: usize,
     row_i_stages: &'a [i64],
     row_hf_indices: &'a [Vec<u32>],
@@ -667,6 +754,7 @@ struct ProductActivationCorpusWriter {
 }
 
 struct ProductActivationSample<'a> {
+    prompt_index: usize,
     step_index: usize,
     context_tokens: &'a [i32],
     row_positions: &'a [i64],
@@ -712,6 +800,9 @@ impl ProductActivationCorpusWriter {
             &config.dir.join("final_norm_weight.f32"),
             config.final_norm_weight,
         )?;
+        let single_prompt_tokens = (config.prompt_token_sets.len() == 1)
+            .then(|| config.prompt_token_sets.first())
+            .flatten();
         let manifest = json!({
             "schema": "skippy-spd-product-activation-corpus/v1",
             "producer": "skippy-bench spd-live-tap-parity",
@@ -725,7 +816,10 @@ impl ProductActivationCorpusWriter {
             "selected_backend_device": &config.args.selected_backend_device,
             "top_k": config.args.top_k,
             "verify_steps": config.args.verify_steps,
-            "prompt_tokens": config.prompt_tokens,
+            "prompt_token_file": &config.args.prompt_token_file,
+            "prompt_count": config.prompt_token_sets.len(),
+            "prompt_tokens": single_prompt_tokens,
+            "prompt_token_sets": config.prompt_token_sets,
             "topology": &config.manifest.topology,
             "row_count": config.row_count,
             "hidden_size": config.hidden_size,
@@ -795,6 +889,7 @@ impl ProductActivationCorpusWriter {
         let row = json!({
             "schema": "skippy-spd-product-activation-row/v1",
             "sample_index": self.sample_count,
+            "prompt_index": sample.prompt_index,
             "row_f32_offset": self.sample_count * expected_len,
             "row_f32_count": expected_len,
             "step_index": sample.step_index,

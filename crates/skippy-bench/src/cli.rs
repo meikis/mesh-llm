@@ -138,6 +138,11 @@ pub struct SpdLiveTapParityArgs {
     pub output: Option<PathBuf>,
     #[arg(
         long,
+        help = "Optional JSONL prompt-token file for verified-generation/product-corpus rows. Each line may be a token id array or an object with prompt_token_ids/tokens."
+    )]
+    pub prompt_token_file: Option<PathBuf>,
+    #[arg(
+        long,
         help = "Write product live-tap SPD training rows into this corpus directory. Emits rows.f32 plus rows.jsonl metadata."
     )]
     pub product_corpus_dir: Option<PathBuf>,
@@ -811,6 +816,8 @@ mod tests {
             "32",
             "--selected-backend-device",
             "CPU0",
+            "--prompt-token-file",
+            "/tmp/spd-prompt-tokens.jsonl",
             "--product-corpus-dir",
             "/tmp/spd-product-corpus",
         ])
@@ -829,6 +836,10 @@ mod tests {
         assert_eq!(args.splits, vec![8, 10, 16, 20, 24, 31]);
         assert_eq!(args.layer_end, 32);
         assert_eq!(args.selected_backend_device.as_deref(), Some("CPU0"));
+        assert_eq!(
+            args.prompt_token_file,
+            Some(PathBuf::from("/tmp/spd-prompt-tokens.jsonl"))
+        );
         assert_eq!(
             args.product_corpus_dir,
             Some(PathBuf::from("/tmp/spd-product-corpus"))

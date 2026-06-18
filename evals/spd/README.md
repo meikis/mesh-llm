@@ -348,12 +348,17 @@ Python exactly, and the cached diagnostic returned the same top-token set with
 one rank swap. Treat this as training/export/Rust-forward plumbing evidence
 only.
 
-Reference acceptance eval for the debug `23,36` head is still blocked. The
-reference `eval.py` generation path failed with `KeyError: 23` during pipeline
-fill because it tried to build a `g1` row from a snapshot that only contained
-the embedding row. Do not report an acceptance rate for Qwen3-8B S2 `23,36`
-until either the reference eval path handles custom boundary taps during fill
-or a Rust request-path smoke reports proposals/accepts on the same topology.
+The reference eval patch now propagates explicit `stage_layer_boundaries` into
+the Python pipeline simulator, so the Qwen3-8B S2 head runs target stages as
+`0..23` and `23..36` instead of the old equal `0..18` and `18..36` split. The
+previous `KeyError: 23` custom-tap fill failure is fixed for boundary-derived
+rows. A tiny debug eval of the 2-row head with `3` one-row eval sets,
+`max_new_tokens=8`, greedy decoding, and `draft_top_k=4` reported
+`24` generated tokens, `42` decode steps, aggregate acceptance `0.5714`,
+equivalent accept length `1.1429`, theoretical throughput gain `14.29%`, and
+`3 / 24` accepted draft flags. This is only a plumbing acceptance signal for
+the tiny debug head; the real artifact still needs a larger training run and a
+same-topology baseline/SPD request-path comparison.
 - 2026-06-17 the first model-backed 24-token rolling-executor smoke after the
   replay reset cleanup is
   `/private/tmp/spd-rolling-executor-real-local-smoke24-4.json`. It restores

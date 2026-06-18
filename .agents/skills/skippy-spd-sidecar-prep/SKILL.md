@@ -274,9 +274,14 @@ Rust external manifest validation, external fixture validation, and
 `skippy-bench spd-fixture-parity` passed for the BF16 export. Do not use this
 artifact for quality or speed claims: it used only two rows. Do not export this
 head as F16 for Rust today; current SPD safetensors reads reject F16 head
-tensors. No acceptance rate exists yet for the Qwen3-8B S2 `23,36` target:
-reference eval failed with `KeyError: 23` during custom-tap pipeline fill, so
-acceptance must come from a fixed reference eval or a Rust request-path smoke.
+tensors. The reference eval patch now propagates explicit
+`stage_layer_boundaries` into the Python pipeline simulator, so the old
+`KeyError: 23` custom-tap fill failure is fixed for boundary-derived rows. A
+tiny debug eval of this 2-row head reported `24` generated tokens, `42` decode
+steps, aggregate acceptance `0.5714`, equivalent accept length `1.1429`,
+theoretical throughput gain `14.29%`, and `3 / 24` accepted draft flags. Treat
+that as plumbing acceptance only; the real Qwen3-8B artifact still needs a
+larger training run and same-topology baseline/SPD request-path comparison.
 
 ## First Larger Training Target
 

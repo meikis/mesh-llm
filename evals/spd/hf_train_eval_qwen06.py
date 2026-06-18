@@ -191,6 +191,144 @@ def patch_reference_for_transformers(reference_dir: Path) -> None:
         '            "cache_position": cache_position,\n',
         "",
     )
+    patch_reference_for_stage_boundaries(reference_dir)
+
+
+def patch_reference_for_stage_boundaries(reference_dir: Path) -> None:
+    patch_pipeline_model_for_stage_boundaries(reference_dir / "pipeline_model.py")
+    patch_pipeline_inference_for_stage_boundaries(reference_dir / "pipeline_inference.py")
+    patch_train_checkpoint_for_stage_boundaries(reference_dir / "train.py")
+
+
+def patch_pipeline_model_for_stage_boundaries(path: Path) -> None:
+    replace_once(
+        path,
+        """        shallow_hidden_layer_indices: Optional[Sequence[Sequence[int]]] = None,
+        trained_with_use_deepest: bool = False,
+    ):
+""",
+        """        shallow_hidden_layer_indices: Optional[Sequence[Sequence[int]]] = None,
+        trained_with_use_deepest: bool = False,
+        stage_layer_boundaries: Optional[Sequence[int]] = None,
+    ):
+""",
+    )
+    replace_once(
+        path,
+        """        self.shallow_hidden_layer_indices = self._normalize_stage_feature_indices(shallow_hidden_layer_indices)
+
+        v_full = int(dec_cfg.vocab_size)
+""",
+        """        self.shallow_hidden_layer_indices = self._normalize_stage_feature_indices(shallow_hidden_layer_indices)
+        self.stage_layer_boundaries = self._normalize_stage_layer_boundaries(stage_layer_boundaries)
+
+        v_full = int(dec_cfg.vocab_size)
+""",
+    )
+    replace_once(
+        path,
+        """    def _default_stage_feature_indices(self) -> List[Tuple[int, ...]]:
+""",
+        """    def _normalize_stage_layer_boundaries(
+        self,
+        stage_layer_boundaries: Optional[Sequence[int]],
+    ) -> List[int]:
+        if stage_layer_boundaries is None:
+            first_row = self.shallow_hidden_layer_indices[0] if self.shallow_hidden_layer_indices else ()
+            if (
+                len(first_row) == self.num_stages + 1
+                and int(first_row[0]) == 0
+                and int(first_row[-1]) == self.num_layers
+            ):
+                stage_layer_boundaries = [int(x) for x in first_row[1:]]
+            else:
+                stage_layer_boundaries = [
+                    (idx + 1) * self.layers_per_stage for idx in range(self.num_stages)
+                ]
+
+        boundaries = [int(x) for x in stage_layer_boundaries]
+        if len(boundaries) != self.num_stages:
+            raise ValueError(
+                f"stage_layer_boundaries must have length num_stages={self.num_stages}, got {len(boundaries)}"
+            )
+        if boundaries[-1] != self.num_layers:
+            raise ValueError(
+                f"stage_layer_boundaries must end at num_layers={self.num_layers}, got {boundaries}"
+            )
+        prev = 0
+        for boundary in boundaries:
+            if boundary <= prev:
+                raise ValueError(f"stage_layer_boundaries must be strictly increasing: {boundaries}")
+            prev = boundary
+        return boundaries
+
+    def _stage_layer_range(self, stage_idx: int) -> Tuple[int, int]:
+        idx = int(stage_idx)
+        if idx < 0 or idx >= self.num_stages:
+            raise IndexError(f"stage_idx out of range: {idx}")
+        start = 0 if idx == 0 else int(self.stage_layer_boundaries[idx - 1])
+        end = int(self.stage_layer_boundaries[idx])
+        return start, end
+
+    def _default_stage_feature_indices(self) -> List[Tuple[int, ...]]:
+""",
+    )
+    for _ in range(2):
+        replace_once(
+            path,
+            """                    start_layer = stage_idx * lps
+                    end_layer = (stage_idx + 1) * lps
+""",
+            """                    start_layer, end_layer = self._stage_layer_range(stage_idx)
+""",
+        )
+
+
+def patch_pipeline_inference_for_stage_boundaries(path: Path) -> None:
+    replace_once(
+        path,
+        """    shallow_hidden_layer_indices = (
+        [[int(y) for y in x] for x in raw_shallow] if raw_shallow is not None else None
+    )
+    kw: dict[str, Any] = {
+""",
+        """    shallow_hidden_layer_indices = (
+        [[int(y) for y in x] for x in raw_shallow] if raw_shallow is not None else None
+    )
+    raw_boundaries = cfg.get("stage_layer_boundaries")
+    if raw_boundaries is None and shallow_hidden_layer_indices:
+        first_row = shallow_hidden_layer_indices[0]
+        if len(first_row) == int(cfg["num_stages"]) + 1 and first_row[0] == 0:
+            raw_boundaries = first_row[1:]
+    stage_layer_boundaries = (
+        [int(x) for x in raw_boundaries] if raw_boundaries is not None else None
+    )
+    kw: dict[str, Any] = {
+""",
+    )
+    replace_once(
+        path,
+        """        "shallow_hidden_layer_indices": shallow_hidden_layer_indices,
+    }
+""",
+        """        "shallow_hidden_layer_indices": shallow_hidden_layer_indices,
+        "stage_layer_boundaries": stage_layer_boundaries,
+    }
+""",
+    )
+
+
+def patch_train_checkpoint_for_stage_boundaries(path: Path) -> None:
+    replace_once(
+        path,
+        """                    "num_stages": pm.num_stages,
+                    "num_spec_layers": pm.num_spec_layers,
+""",
+        """                    "num_stages": pm.num_stages,
+                    "stage_layer_boundaries": list(getattr(pm, "stage_layer_boundaries", [])),
+                    "num_spec_layers": pm.num_spec_layers,
+""",
+    )
 
 
 def patch_reference_linear_cache_import(path: Path) -> None:

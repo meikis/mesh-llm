@@ -31,7 +31,7 @@ use skippy_protocol::{
         WireActivationDType, WireMessageKind, WireReplyKind,
         activation_frame_flags_from_state_flags, read_stage_message, recv_reply, send_ready,
         send_reply_ack, send_reply_ack_with_stats, send_reply_predicted_tokens_with_stats,
-        send_reply_predicted_with_stats, state_flags,
+        send_reply_predicted_with_tokens_and_stats, state_flags,
     },
 };
 use skippy_runtime::{
@@ -2478,10 +2478,13 @@ fn send_one_off_direct_return(
 
 fn send_stage_reply(stream: &mut TcpStream, reply: StageReply) -> Result<()> {
     match reply.kind {
-        WireReplyKind::PredictedToken => {
-            send_reply_predicted_with_stats(stream, reply.predicted, reply.stats)
-                .context("send predicted-token reply")
-        }
+        WireReplyKind::PredictedToken => send_reply_predicted_with_tokens_and_stats(
+            stream,
+            reply.predicted,
+            &reply.predicted_tokens,
+            reply.stats,
+        )
+        .context("send predicted-token reply"),
         WireReplyKind::PredictedTokens => {
             send_reply_predicted_tokens_with_stats(stream, &reply.predicted_tokens, reply.stats)
                 .context("send predicted-tokens reply")

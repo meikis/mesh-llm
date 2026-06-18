@@ -6,6 +6,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc,
+        mpsc::TryRecvError,
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -18,7 +19,7 @@ use skippy_protocol::{
         StageReply, StageStateHeader, StageWireMessage, WireActivationDType, WireMessageKind,
         WireReplyKind, read_stage_message, recv_ready, recv_reply, send_ready,
         send_reply_ack_with_stats, send_reply_predicted_tokens_with_stats,
-        send_reply_predicted_with_stats, write_stage_message,
+        send_reply_predicted_with_tokens_and_stats, write_stage_message,
     },
 };
 
@@ -142,7 +143,6 @@ impl PredictionReturnHub {
             key,
             hub: self.clone(),
             receiver,
-            timeout: Duration::from_secs(300),
         })
     }
 
@@ -189,28 +189,31 @@ pub(crate) struct PredictionReturnReceiver {
     key: PredictionReturnKey,
     hub: Arc<PredictionReturnHub>,
     receiver: mpsc::Receiver<Result<StageReply, String>>,
-    timeout: Duration,
 }
 
 impl PredictionReturnReceiver {
-    pub(crate) fn recv_expected(&self, expected: WireReplyKind) -> Result<StageReply> {
-        let reply = self.recv()?;
+    pub(crate) fn try_recv_expected(&self, expected: WireReplyKind) -> Result<Option<StageReply>> {
+        let Some(reply) = self.try_recv()? else {
+            return Ok(None);
+        };
         if reply.kind != expected {
             bail!(
                 "expected {expected:?} direct prediction return, got {:?}",
                 reply.kind
             );
         }
-        Ok(reply)
+        Ok(Some(reply))
     }
 
-    pub(crate) fn recv(&self) -> Result<StageReply> {
-        let reply = self
-            .receiver
-            .recv_timeout(self.timeout)
-            .context("timed out waiting for direct prediction return")?
-            .map_err(|error| anyhow!(error))?;
-        Ok(reply)
+    fn try_recv(&self) -> Result<Option<StageReply>> {
+        match self.receiver.try_recv() {
+            Ok(Ok(reply)) => Ok(Some(reply)),
+            Ok(Err(error)) => Err(anyhow!(error)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => {
+                Err(anyhow!("prediction return channel disconnected"))
+            }
+        }
     }
 }
 
@@ -264,10 +267,13 @@ pub(crate) fn send_direct_prediction_return(
     reply: StageReply,
 ) -> Result<()> {
     match reply.kind {
-        WireReplyKind::PredictedToken => {
-            send_reply_predicted_with_stats(stream, reply.predicted, reply.stats)
-                .context("send direct predicted-token return")
-        }
+        WireReplyKind::PredictedToken => send_reply_predicted_with_tokens_and_stats(
+            stream,
+            reply.predicted,
+            &reply.predicted_tokens,
+            reply.stats,
+        )
+        .context("send direct predicted-token return"),
         WireReplyKind::PredictedTokens => {
             send_reply_predicted_tokens_with_stats(stream, &reply.predicted_tokens, reply.stats)
                 .context("send direct predicted-tokens return")
@@ -331,6 +337,7 @@ fn prediction_return_open_message(request_id: u64, session_id: u64) -> StageWire
 #[cfg(test)]
 mod tests {
     use super::*;
+    use skippy_protocol::binary::{recv_reply, send_reply_predicted_with_stats};
 
     #[test]
     fn handle_return_connection_delivers_reply_to_registered_waiter() {
@@ -350,11 +357,44 @@ mod tests {
 
         send_reply_predicted_with_stats(&mut client, 42, Default::default()).unwrap();
 
-        let reply = receiver
-            .recv_expected(WireReplyKind::PredictedToken)
-            .unwrap();
+        let reply = poll_test_reply(&receiver, WireReplyKind::PredictedToken);
         assert_eq!(reply.predicted, 42);
         drop(client);
         handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn direct_prediction_return_preserves_predicted_token_sideband() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+
+        let reply = StageReply {
+            kind: WireReplyKind::PredictedToken,
+            predicted: 42,
+            predicted_tokens: vec![42, 43, 123],
+            stats: Default::default(),
+        };
+        send_direct_prediction_return(&mut server, reply).unwrap();
+
+        let received = recv_reply(&mut client).unwrap();
+        assert_eq!(received.kind, WireReplyKind::PredictedToken);
+        assert_eq!(received.predicted, 42);
+        assert_eq!(received.predicted_tokens, vec![42, 43, 123]);
+    }
+
+    fn poll_test_reply(receiver: &PredictionReturnReceiver, expected: WireReplyKind) -> StageReply {
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(reply) = receiver.try_recv_expected(expected).unwrap() {
+                return reply;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "timed out waiting for prediction return reply"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
     }
 }

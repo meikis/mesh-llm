@@ -3,14 +3,16 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 
 use super::{
-    NativeMtpDraftOrigin, native_mtp_batched_verify_enabled, native_mtp_reject_cooldown_tokens,
-    native_mtp_suppress_cooldown_draft_limit, native_mtp_suppress_cooldown_drafts_enabled,
+    NativeMtpDraftOrigin, native_mtp_batched_verify_enabled, native_mtp_defer_reject_trim_enabled,
+    native_mtp_reject_cooldown_tokens, native_mtp_suppress_cooldown_draft_limit,
+    native_mtp_suppress_cooldown_drafts_enabled,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::frontend) struct NativeMtpDecodeOptions {
     pub(in crate::frontend) batched_verify: bool,
     pub(in crate::frontend) reject_cooldown_tokens: usize,
+    pub(in crate::frontend) defer_reject_trim: bool,
     pub(in crate::frontend) suppress_cooldown_drafts: bool,
     pub(in crate::frontend) suppress_cooldown_draft_limit: usize,
 }
@@ -20,6 +22,7 @@ impl NativeMtpDecodeOptions {
         Self {
             batched_verify: native_mtp_batched_verify_enabled(),
             reject_cooldown_tokens: native_mtp_reject_cooldown_tokens(),
+            defer_reject_trim: native_mtp_defer_reject_trim_enabled(),
             suppress_cooldown_drafts: native_mtp_suppress_cooldown_drafts_enabled(),
             suppress_cooldown_draft_limit: native_mtp_suppress_cooldown_draft_limit(),
         }
@@ -38,6 +41,8 @@ pub(in crate::frontend) struct NativeMtpDecodeCounters {
     verify_next_accepted_count: usize,
     verify_next_draft_available_count: usize,
     verify_next_draft_adopted_count: usize,
+    deferred_reject_trim_count: usize,
+    deferred_reject_trim_local_ms: f64,
 }
 
 impl NativeMtpDecodeCounters {
@@ -90,6 +95,11 @@ impl NativeMtpDecodeCounters {
         }
     }
 
+    pub(in crate::frontend) fn observe_deferred_reject_trim(&mut self, local_ms: f64) {
+        self.deferred_reject_trim_count += 1;
+        self.deferred_reject_trim_local_ms += local_ms;
+    }
+
     pub(in crate::frontend) fn insert_summary_attrs(
         &self,
         attrs: &mut BTreeMap<String, Value>,
@@ -98,6 +108,10 @@ impl NativeMtpDecodeCounters {
         attrs.insert(
             "llama_stage.native_mtp.reject_cooldown_tokens".to_string(),
             json!(options.reject_cooldown_tokens),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.defer_reject_trim".to_string(),
+            json!(options.defer_reject_trim),
         );
         attrs.insert(
             "llama_stage.native_mtp.suppress_cooldown_drafts".to_string(),
@@ -147,6 +161,14 @@ impl NativeMtpDecodeCounters {
             "llama_stage.native_mtp.verify_next_draft_adopted_count".to_string(),
             json!(self.verify_next_draft_adopted_count),
         );
+        attrs.insert(
+            "llama_stage.native_mtp.deferred_reject_trim_count".to_string(),
+            json!(self.deferred_reject_trim_count),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.deferred_reject_trim_local_ms".to_string(),
+            json!(self.deferred_reject_trim_local_ms),
+        );
     }
 }
 
@@ -163,6 +185,7 @@ mod tests {
         counters.observe_verify_next_draft(true, false);
         counters.observe_verify_next_draft(true, true);
         counters.observe_suppressed_cooldown_draft();
+        counters.observe_deferred_reject_trim(1.25);
 
         let mut attrs = BTreeMap::new();
         counters.insert_summary_attrs(
@@ -170,6 +193,7 @@ mod tests {
             NativeMtpDecodeOptions {
                 batched_verify: true,
                 reject_cooldown_tokens: 6,
+                defer_reject_trim: true,
                 suppress_cooldown_drafts: false,
                 suppress_cooldown_draft_limit: 2,
             },
@@ -206,6 +230,18 @@ mod tests {
         assert_eq!(
             attrs.get("llama_stage.native_mtp.reject_cooldown_tokens"),
             Some(&json!(6))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.defer_reject_trim"),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.deferred_reject_trim_count"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.deferred_reject_trim_local_ms"),
+            Some(&json!(1.25))
         );
     }
 }

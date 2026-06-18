@@ -934,14 +934,25 @@ impl StageOpenAiBackend {
                         NativeMtpTrimAction::None => {}
                         NativeMtpTrimAction::FullSession => {
                             let target_token_count = prefill_token_count + decoded_tokens;
-                            let trim = self.trim_embedded_stage_session(
-                                &request,
-                                downstream,
-                                &session_key,
-                                request_id,
-                                session_id,
-                                target_token_count,
-                            )?;
+                            let defer_trim =
+                                native_mtp_options.defer_reject_trim && !accepted && !reached_stop;
+                            let trim = if defer_trim {
+                                let trim = self.trim_embedded_stage_session_local(
+                                    &session_key,
+                                    target_token_count,
+                                )?;
+                                native_mtp_counters.observe_deferred_reject_trim(trim.local_ms);
+                                trim
+                            } else {
+                                self.trim_embedded_stage_session(
+                                    &request,
+                                    downstream,
+                                    &session_key,
+                                    request_id,
+                                    session_id,
+                                    target_token_count,
+                                )?
+                            };
                             trim_control = Some(trim);
                         }
                     }
@@ -1027,6 +1038,10 @@ impl StageOpenAiBackend {
                         token_attrs.insert(
                             "llama_stage.native_mtp.reject_cooldown_remaining".to_string(),
                             json!(native_mtp_reject_cooldown_remaining),
+                        );
+                        token_attrs.insert(
+                            "llama_stage.native_mtp.defer_reject_trim".to_string(),
+                            json!(native_mtp_options.defer_reject_trim),
                         );
                         if let Some(trim) = trim_control.as_ref() {
                             token_attrs.insert(

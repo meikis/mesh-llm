@@ -34,6 +34,9 @@ def write_topology_plan(args: Namespace, artifact_dir: Path) -> Path:
 def build_topology_plan(args: Namespace) -> dict[str, Any]:
     model = resolve_model_config_summary(args)
     num_layers = int(model["num_hidden_layers"])
+    fixed_layer_taps = parse_fixed_layer_taps(getattr(args, "fixed_layer_taps", ""), num_layers)
+    if fixed_layer_taps:
+        return fixed_layer_tap_plan(args, model, fixed_layer_taps)
     min_stages = validate_positive_int("topology_min_stages", args.topology_min_stages)
     max_stages = validate_positive_int("topology_max_stages", args.topology_max_stages)
     if min_stages > max_stages:
@@ -82,6 +85,70 @@ def build_topology_plan(args: Namespace) -> dict[str, Any]:
             "The current reference SPD architecture still has per-stage projection weights.",
             "Generic training must consume logical layer-indexed taps plus masks rather than fixed stage IDs.",
         ],
+    }
+
+
+def parse_fixed_layer_taps(raw: str, num_layers: int) -> list[int]:
+    if not raw.strip():
+        return []
+    taps = [int(part.strip()) for part in raw.split(",") if part.strip()]
+    validate_sorted_unique_indices("fixed_layer_taps", taps)
+    if taps[0] != 0:
+        raise RuntimeError("--fixed-layer-taps must include 0 as the first tap")
+    if taps[-1] != num_layers:
+        raise RuntimeError(
+            f"--fixed-layer-taps must end at final hidden index {num_layers}, got {taps[-1]}"
+        )
+    return taps
+
+
+def fixed_layer_tap_plan(
+    args: Namespace,
+    model: dict[str, Any],
+    taps: list[int],
+) -> dict[str, Any]:
+    num_layers = int(model["num_hidden_layers"])
+    return {
+        "schema": TOPOLOGY_PLAN_SCHEMA,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "model": model,
+        "hidden_state_convention": {
+            "index_0": "token embedding before layer 0",
+            "index_k": "hidden state after target layer k-1",
+            "final_index": num_layers,
+        },
+        "policy": {
+            "name": "fixed-layer-tap-plan",
+            "seed": int(args.topology_seed),
+            "samples": 1,
+            "min_stages": len(taps) - 1,
+            "max_stages": len(taps) - 1,
+            "tap_dropout": 0.0,
+            "num_spec_layers": int(args.num_spec_layers),
+            "draft_top_k": int(args.draft_top_k),
+            "fixed_layer_taps": list(taps),
+        },
+        "layouts": [fixed_layer_tap_layout_record(taps)],
+        "notes": [
+            "This plan fixes logical layer evidence for a GLM SPD control run.",
+            "Fixed layer taps are not physical Skippy stage or machine IDs.",
+            "Use this plan to prove model-specific SPD learnability before randomized layer-tap training.",
+        ],
+    }
+
+
+def fixed_layer_tap_layout_record(taps: list[int]) -> dict[str, Any]:
+    return {
+        "source": "fixed-layer-taps",
+        "num_stages": len(taps) - 1,
+        "stage_layer_boundaries": taps[1:],
+        "shallow_hidden_layer_indices": [list(taps)],
+        "logical_hidden_taps": [logical_hidden_taps(taps)],
+        "tap_dropout": {
+            "probability": 0.0,
+            "required_indices": list(taps),
+            "dropout_applies_to": "none",
+        },
     }
 
 
@@ -225,3 +292,12 @@ def validate_positive_int(name: str, value: int) -> int:
     if value <= 0:
         raise RuntimeError(f"{name} must be greater than zero, got {value}")
     return value
+
+
+def validate_sorted_unique_indices(name: str, values: list[int]) -> None:
+    if not values:
+        raise RuntimeError(f"{name} must not be empty")
+    if any(value < 0 for value in values):
+        raise RuntimeError(f"{name} must not contain negative indices: {values}")
+    if values != sorted(set(values)):
+        raise RuntimeError(f"{name} must be sorted and unique: {values}")

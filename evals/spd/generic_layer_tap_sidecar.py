@@ -60,6 +60,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--topology-seed", type=int, default=47)
     parser.add_argument("--topology-tap-dropout", type=float, default=0.25)
     parser.add_argument("--topology-num-hidden-layers", type=int, default=47)
+    parser.add_argument(
+        "--fixed-layer-taps",
+        default="",
+        help=(
+            "Comma-separated logical hidden-state indices for a fixed layer-tap "
+            "control run, for example 0,12,24,35,47."
+        ),
+    )
     parser.add_argument("--num-spec-layers", type=int, default=1)
     parser.add_argument("--draft-top-k", type=int, default=1)
     parser.add_argument("--draft-vocab-size", type=int, default=4096)

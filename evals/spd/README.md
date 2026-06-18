@@ -338,6 +338,22 @@ All encoder variants export `generic-layer-tap-v1` safetensors manifests that
 validate through `skippy-runtime`; the manifest records the exact safetensors
 tensor count for encoder-specific tensors.
 
+For the fixed GLM layer-tap control, bypass randomized layer-tap sampling and
+pin the logical evidence schedule:
+
+```bash
+uv run evals/spd/generic_layer_tap_sidecar.py \
+  --model-name /path/to/GLM-4.7-Flash \
+  --fixed-layer-taps 0,12,24,35,47 \
+  --examples-cache-out /tmp/glm47-fixed-s4-examples-n4.pt \
+  --num-spec-layers 4 \
+  ...same extraction/training flags...
+```
+
+The fixed taps are logical hidden-state indices, not Skippy host or stage IDs.
+Use this control to prove GLM-specific SPD learnability before returning to
+randomized layer-tap training.
+
 ## Reproduce Qwen3-0.6B Training
 
 This is the smallest useful proof that the training path and artifact shape

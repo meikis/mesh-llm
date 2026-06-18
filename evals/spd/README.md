@@ -30,8 +30,9 @@ Rust.
   SPD hidden-state-index `0` embedding tap on the current Qwen3.5-4B proof
   model.
 - `skippy-runtime` can also read the SPD h0 embedding tap from selected Skippy
-  layer-package parts, so package-backed stage-0 SPD replay no longer has to
-  open an invalid `0..0` layer stage or carry a coordinator-side full GGUF.
+  layer-package parts, including quantized Q4_K and Q6_K embeddings, so
+  package-backed stage-0 SPD replay no longer has to open an invalid `0..0`
+  layer stage or carry a coordinator-side full GGUF.
 - `skippy-runtime` can reconstruct the SPD `cur_in` rows from raw recorded
   hidden-state tap inputs using `g0_proj` and `stage_projs.*`.
 - `skippy-model-package` can plan, write, and preflight explicit tap-aligned
@@ -359,6 +360,25 @@ equivalent accept length `1.1429`, theoretical throughput gain `14.29%`, and
 `3 / 24` accepted draft flags. This is only a plumbing acceptance signal for
 the tiny debug head; the real artifact still needs a larger training run and a
 same-topology baseline/SPD request-path comparison.
+
+The package-backed Qwen3-8B request path now reaches the local release smoke
+with the same `23,36` topology and `--activation-width 4096`. The stage-0 SPD
+h0 reader can open Q4_K `token_embd.weight` from the Skippy layer package's
+`embeddings.gguf`, so the smoke no longer needs a coordinator-side full-GGUF
+override only for embedding rows. A preflight guard now rejects
+`--activation-width` values that do not match the manifest hidden size; the old
+Qwen3-8B `2560` default mistake fails before launching stages. The paired local
+report `/private/tmp/spd-qwen3-8b-s2-23-debug-local-openai-paired-8.json`
+matched baseline/SPD content, proposed `7`, accepted `0`, rejected `7`,
+recorded `0` tap return/record/ignored failures, and used inline package taps
+for all proposals (`7` inline hits, `0` replay fallbacks). Baseline decode was
+`134.3ms`; SPD decode was `586.4ms`, with about `426ms` spent in the sidecar
+forward/head path. This proves package-backed Qwen3-8B SPD request-path
+plumbing for the exact product topology. It is not speed or quality evidence:
+with `0 / 7` accepted proposals, there are no future verifier/stage round trips
+to remove from the critical path, so the expected ideal speedup is effectively
+`1.0x` before overhead and the measured result is necessarily slower.
+
 - 2026-06-17 the first model-backed 24-token rolling-executor smoke after the
   replay reset cleanup is
   `/private/tmp/spd-rolling-executor-real-local-smoke24-4.json`. It restores
@@ -1168,7 +1188,19 @@ diagnostics as well as normal pre-target inline probes.
 `summary.paper_pipeline_estimate` projects the
 observed accept rate onto the paper/reference rolling pipeline schedule using
 the manifest's logical SPD stage count, while still reporting the physical
-tap-aligned Skippy stage count. `summary.rolling_trace_replay` replays observed
+tap-aligned Skippy stage count. For speed interpretation, treat the accepted
+token count as the first-order count of future split-stage verifier trips that
+can be removed from the critical path only if the rolling executor overlaps
+those verifier trips. The simple benchmark math is: count baseline emitted
+tokens and split-stage trips, count accepted speculative tokens/windows from
+the same prompt set, derive the paper-style critical-path reduction from the
+rolling trace or `paper_pipeline_estimate`, then compare that upper bound with
+the measured `decode_speedup_spd_vs_baseline`. Sidecar forward/head time,
+tap-collection time, transport latency, rejected windows, and rollback drains
+come directly out of the same report and explain the gap between the paper
+estimate and measured wall/decode speed. If accepted proposals are zero, the
+round-trip savings are zero and the only valid expectation is slowdown from
+SPD overhead. `summary.rolling_trace_replay` replays observed
 pre-target and diagnostic `optimistic_commit` proposals through
 `SpdRollingScheduler` when token/proposal traces exist, and otherwise falls
 back to final live `cases[].decode.rolling` telemetry for primary-verify-only
@@ -1554,7 +1586,10 @@ The tap-row-to-`cur_in` projection bridge lives in
    report shows useful overlap rather than same-worker stage contention.
 3. Run a larger local `spd-openai-smoke --prompt-file ...` sweep to measure
    acceptance distribution, rollback frequency, rolling gaps, and
-   `summary.paper_pipeline_estimate` across prompt types.
+   `summary.paper_pipeline_estimate` across prompt types. Report accepted
+   speculative tokens/windows, estimated critical-path split-stage round trips
+   saved, measured decode speedup, and the sidecar/tap/transport overhead that
+   remains after those savings.
 4. Use injected downstream delay only as a bounded diagnostic while no separate
    worker is available; do not report it as distributed speedup.
 5. When another worker is available, rerun `spd-openai-smoke` with explicit

@@ -74,6 +74,19 @@ fn stage_ranges_reject_non_ascending_splits() {
 }
 
 #[test]
+fn manifest_activation_width_must_match_hidden_size() {
+    let manifest = test_spd_manifest(4096);
+
+    validate_manifest_activation_width(4096, &manifest).unwrap();
+    let error = validate_manifest_activation_width(2560, &manifest)
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("--activation-width 2560"));
+    assert!(error.contains("hidden_size 4096"));
+}
+
+#[test]
 fn decode_report_reads_spec_attrs() {
     let event = json!({
         "event": "stage.openai_decode",
@@ -167,6 +180,35 @@ fn decode_report_reads_spec_attrs() {
     assert_eq!(report.spd_proposal_total_head_total_ms, Some(270.0));
     assert_eq!(report.spd_proposal_total_last_cache_prefix_len, Some(31));
     assert_eq!(report.spd_proposal_total_max_cache_prefix_len, Some(31));
+}
+
+fn test_spd_manifest(hidden_size: u32) -> SpdHeadManifest {
+    serde_json::from_value(json!({
+        "schema": "skippy-spd-head/v1",
+        "checkpoint": {
+            "path": "speculation_head_final.pt",
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bytes": 1
+        },
+        "source": {
+            "format": "torch-speculation-head-v10",
+            "reference_repo": null,
+            "base_model_path": "Qwen/Qwen3-8B",
+            "model_type": "qwen3",
+            "checkpoint_version": 10
+        },
+        "topology": {
+            "hidden_size": hidden_size,
+            "vocab_size": 151936,
+            "draft_vocab_size": 32000,
+            "num_stages": 2,
+            "stage_layer_boundaries": [23, 36],
+            "num_spec_layers": 4,
+            "trained_with_use_deepest": true,
+            "shallow_hidden_layer_indices": [[0, 23, 36], [0, 23]]
+        }
+    }))
+    .unwrap()
 }
 
 #[test]

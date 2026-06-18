@@ -72,11 +72,11 @@ The base model should remain a normal Mesh/Skippy model reference or layer
 package so each node materializes its assigned stage through the existing
 resolver. When stage 0 is configured with a resolved local Skippy layer package,
 the SPD proposal source can replay boundary taps from package parts and read h0
-from the package embedding part, so a coordinator-side full GGUF override is no
-longer required for that shape. `spd_model_path` remains useful as an explicit
-full-GGUF override for lower-level smokes. Do not use
-`spd-openai-smoke --rsync-model-artifacts` as product proof; that is a
-harness-only shortcut.
+from the package embedding part, including Q4_K and Q6_K token embeddings, so a
+coordinator-side full GGUF override is no longer required for that shape.
+`spd_model_path` remains useful as an explicit full-GGUF override for
+lower-level smokes. Do not use `spd-openai-smoke --rsync-model-artifacts` as
+product proof; that is a harness-only shortcut.
 
 ## Topology Checklist
 
@@ -282,6 +282,16 @@ steps, aggregate acceptance `0.5714`, equivalent accept length `1.1429`,
 theoretical throughput gain `14.29%`, and `3 / 24` accepted draft flags. Treat
 that as plumbing acceptance only; the real Qwen3-8B artifact still needs a
 larger training run and same-topology baseline/SPD request-path comparison.
+The package-backed local release smoke for the same `23,36` topology now opens
+Q4_K h0 rows from the Qwen3-8B layer package, rejects wrong activation widths
+before launching stages, matches baseline/SPD content, and records clean tap
+counters. The paired report
+`/private/tmp/spd-qwen3-8b-s2-23-debug-local-openai-paired-8.json` proposed
+`7`, accepted `0`, rejected `7`, used `7` inline package taps with `0` replay
+fallbacks, and measured `134.3ms` baseline decode versus `586.4ms` SPD decode.
+This is request-path plumbing evidence only. With `0 / 7` accepted proposals,
+there are zero critical-path token round trips saved, so the slowdown is
+expected from sidecar overhead.
 
 ## First Larger Training Target
 

@@ -36,6 +36,7 @@ pub fn spd_openai_smoke(args: SpdOpenAiSmokeArgs) -> Result<()> {
     let prompts = load_prompts(&args)?;
     let stage_ranges = stage_ranges(&args.splits, args.layer_end)?;
     let manifest = SpdHeadManifest::from_path(&args.manifest)?;
+    validate_manifest_activation_width(args.activation_width, &manifest)?;
     let logical_spd_stage_count = usize::try_from(manifest.topology.num_stages)
         .context("SPD manifest num_stages exceeds usize")?;
     let tap_allowlist = spd_tap_allowlist(&args, &manifest)?;
@@ -1573,6 +1574,22 @@ fn validate_args(args: &SpdOpenAiSmokeArgs) -> Result<()> {
         bail!("at least one of --run-baseline or --run-spd must be enabled");
     }
     stage_ranges(&args.splits, args.layer_end)?;
+    Ok(())
+}
+
+fn validate_manifest_activation_width(
+    activation_width: i32,
+    manifest: &SpdHeadManifest,
+) -> Result<()> {
+    let activation_width =
+        u32::try_from(activation_width).context("--activation-width must be greater than zero")?;
+    if activation_width != manifest.topology.hidden_size {
+        bail!(
+            "--activation-width {} must match SPD manifest hidden_size {}",
+            activation_width,
+            manifest.topology.hidden_size
+        );
+    }
     Ok(())
 }
 

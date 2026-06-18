@@ -5,7 +5,8 @@ use serde_json::json;
 use skippy_runtime::{
     ActivationFrame, GGML_TYPE_F16, RuntimeConfig, RuntimeLoadMode, StageModel,
     spd::{
-        SpdHeadManifest, SpdQwen3ForwardInput, SpdQwen3ForwardTiming, SpdQwen3Head,
+        SpdHeadManifest, SpdLiveTapModelSource, SpdLiveTapRunner, SpdLiveTapRunnerConfig,
+        SpdQwen3FixtureTopK, SpdQwen3ForwardInput, SpdQwen3ForwardTiming, SpdQwen3Head,
         SpdSafetensorsFile, SpdStageLayerRange, SpdTapInputProjector, plan_hidden_state_taps,
         run_qwen3_cached_fixture_parity, run_qwen3_fixture_parity,
         run_spd_tap_input_fixture_parity, spd_fixture_row_hf_indices,
@@ -102,6 +103,7 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
     let row_count = fixture_cur_in_row_count(&fixture, manifest.topology.hidden_size as usize)?;
     validate_fixture_row_inputs(row_count, &row_positions, &row_i_stages, &position_ids)?;
     let row_hf_indices = spd_fixture_row_hf_indices(&fixture, row_count)?;
+    let fixture_concat_rows = read_fixture_concat_rows(&fixture, row_count)?;
     let tap_projector = SpdTapInputProjector::from_rows(
         &manifest.topology,
         &serving,
@@ -126,7 +128,7 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
     let hidden_size =
         usize::try_from(manifest.topology.hidden_size).context("SPD hidden_size exceeds usize")?;
     let spd_head = SpdQwen3Head::open(&args.manifest).context("open Qwen SPD head")?;
-    let live_runner = LiveTapRunner::open(&args, &ranges)?;
+    let live_runner = open_live_tap_runner(&args, &manifest, &ranges)?;
     let taps = live_runner.collect_taps(&prompt_tokens)?;
     let live_rows = assemble_live_cur_in(
         &tap_projector,
@@ -137,6 +139,9 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
             row_i_stages: &row_i_stages,
             row_hf_indices: &row_hf_indices,
             fixture_cur_in: &fixture_cur_in,
+            fixture_concat_rows: &fixture_concat_rows,
+            final_norm_weight: &final_norm_weight,
+            layer_end: args.layer_end,
             hidden_size,
         },
     )?;
@@ -144,13 +149,35 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
         SpdQwen3ForwardInput {
             cur_in: live_rows.cur_in.clone(),
             seq_len: row_count,
-            position_ids,
+            position_ids: position_ids.clone(),
+            fixed_stage_ids: None,
+            final_norm_weight: final_norm_weight.clone(),
+        },
+        args.top_k,
+    )?;
+    let live_terminal_normed_topk = spd_head.forward(
+        SpdQwen3ForwardInput {
+            cur_in: live_rows.terminal_normed_cur_in.clone(),
+            seq_len: row_count,
+            position_ids: position_ids.clone(),
             fixed_stage_ids: None,
             final_norm_weight: final_norm_weight.clone(),
         },
         args.top_k,
     )?;
     let fixture_forward = run_qwen3_fixture_parity(&args.manifest, &args.fixture, args.top_k)?;
+    let parity_gate = evaluate_live_tap_parity_gate(
+        &args,
+        live_rows.max_abs_diff,
+        &live_topk,
+        &fixture_forward.rust,
+    )?;
+    let terminal_normed_parity_gate = evaluate_live_tap_parity_gate(
+        &args,
+        live_rows.terminal_normed_max_abs_diff,
+        &live_terminal_normed_topk,
+        &fixture_forward.rust,
+    )?;
     let verified_generation = run_verified_generation(
         &args,
         &live_runner,
@@ -183,16 +210,28 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
             "stage_boundary_hf_indices": tap_plan.stage_boundary_hf_indices,
             "boundary_only": tap_plan.can_use_stage_boundaries_only(),
         },
+        "gated_path": "terminal_final_normed_cur_in",
+        "parity_gate": parity_gate.report,
+        "terminal_final_normed_parity_gate": terminal_normed_parity_gate.report,
         "live_taps": live_tap_report(&taps),
         "cur_in": {
             "max_abs_diff_vs_fixture": live_rows.max_abs_diff,
             "rows": live_rows.rows,
+        },
+        "terminal_final_normed_cur_in": {
+            "max_abs_diff_vs_fixture": live_rows.terminal_normed_max_abs_diff,
+            "rows": live_rows.terminal_normed_rows,
         },
         "forward": {
             "live_skippy": {
                 "draft_indices": live_topk.draft_indices,
                 "token_ids": live_topk.token_ids,
                 "logits": live_topk.logits,
+            },
+            "live_skippy_terminal_final_normed": {
+                "draft_indices": live_terminal_normed_topk.draft_indices,
+                "token_ids": live_terminal_normed_topk.token_ids,
+                "logits": live_terminal_normed_topk.logits,
             },
             "fixture_rust": {
                 "draft_indices": fixture_forward.rust.draft_indices,
@@ -214,12 +253,72 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
             .with_context(|| format!("failed to write {}", output.display()))?;
     }
     println!("{}", String::from_utf8(json)?);
-    Ok(())
+    terminal_normed_parity_gate.ensure_passed()
 }
 
 struct VerifiedGenerationReport {
     first_step: Option<serde_json::Value>,
     report: serde_json::Value,
+}
+
+struct LiveTapParityGate {
+    report: serde_json::Value,
+    failures: Vec<String>,
+}
+
+impl LiveTapParityGate {
+    fn ensure_passed(&self) -> Result<()> {
+        if self.failures.is_empty() {
+            return Ok(());
+        }
+        bail!("SPD live tap parity failed: {}", self.failures.join("; "))
+    }
+}
+
+fn evaluate_live_tap_parity_gate(
+    args: &SpdLiveTapParityArgs,
+    cur_in_max_abs_diff: f32,
+    live_topk: &SpdQwen3FixtureTopK,
+    fixture_topk: &SpdQwen3FixtureTopK,
+) -> Result<LiveTapParityGate> {
+    let rank_logit_max_abs_diff = max_abs_diff(&live_topk.logits, &fixture_topk.logits)
+        .context("compare live SPD logits with fixture logits")?;
+    let cur_in_within_tol = cur_in_max_abs_diff <= args.cur_in_tol;
+    let logits_within_tol = rank_logit_max_abs_diff <= args.logits_tol;
+    let draft_indices_match = live_topk.draft_indices == fixture_topk.draft_indices;
+    let token_ids_match = live_topk.token_ids == fixture_topk.token_ids;
+    let mut failures = Vec::new();
+    if !cur_in_within_tol {
+        failures.push(format!(
+            "cur_in max_abs_diff {cur_in_max_abs_diff} exceeds --cur-in-tol {}",
+            args.cur_in_tol
+        ));
+    }
+    if !logits_within_tol {
+        failures.push(format!(
+            "rank-paired logit max_abs_diff {rank_logit_max_abs_diff} exceeds --logits-tol {}",
+            args.logits_tol
+        ));
+    }
+    if !draft_indices_match {
+        failures.push("live draft_indices differ from fixture Rust draft_indices".to_string());
+    }
+    if !token_ids_match {
+        failures.push("live token_ids differ from fixture Rust token_ids".to_string());
+    }
+    let report = json!({
+        "cur_in_tol": args.cur_in_tol,
+        "logits_tol": args.logits_tol,
+        "cur_in_max_abs_diff": cur_in_max_abs_diff,
+        "rank_logit_max_abs_diff_vs_fixture_rust": rank_logit_max_abs_diff,
+        "cur_in_within_tol": cur_in_within_tol,
+        "rank_logits_within_tol": logits_within_tol,
+        "topk_draft_indices_match_fixture_rust": draft_indices_match,
+        "topk_token_ids_match_fixture_rust": token_ids_match,
+        "passed": failures.is_empty(),
+        "failures": &failures,
+    });
+    Ok(LiveTapParityGate { report, failures })
 }
 
 struct VerifiedGenerationInputs<'a> {
@@ -233,7 +332,7 @@ struct VerifiedGenerationInputs<'a> {
 
 fn run_verified_generation(
     args: &SpdLiveTapParityArgs,
-    live_runner: &LiveTapRunner,
+    live_runner: &SpdLiveTapRunner,
     spd_head: &SpdQwen3Head,
     tap_projector: &SpdTapInputProjector,
     inputs: VerifiedGenerationInputs<'_>,
@@ -279,6 +378,8 @@ fn run_verified_generation(
                 row_positions: &row_positions,
                 row_i_stages: inputs.row_i_stages,
                 row_hf_indices: inputs.row_hf_indices,
+                final_norm_weight: inputs.final_norm_weight,
+                layer_end: args.layer_end,
                 hidden_size: inputs.hidden_size,
             },
         )?;
@@ -463,6 +564,9 @@ struct LiveRows {
     cur_in: Vec<f32>,
     rows: Vec<serde_json::Value>,
     max_abs_diff: f32,
+    terminal_normed_cur_in: Vec<f32>,
+    terminal_normed_rows: Vec<serde_json::Value>,
+    terminal_normed_max_abs_diff: f32,
 }
 
 struct DynamicLiveRows {
@@ -475,6 +579,9 @@ struct LiveRowInputs<'a> {
     row_i_stages: &'a [i64],
     row_hf_indices: &'a [Vec<u32>],
     fixture_cur_in: &'a [f32],
+    fixture_concat_rows: &'a [Vec<f32>],
+    final_norm_weight: &'a [f32],
+    layer_end: u32,
     hidden_size: usize,
 }
 
@@ -482,81 +589,9 @@ struct DynamicLiveRowInputs<'a> {
     row_positions: &'a [i64],
     row_i_stages: &'a [i64],
     row_hf_indices: &'a [Vec<u32>],
-    hidden_size: usize,
-}
-
-struct LiveTapRunner {
-    h0: StageModel,
-    stages: Vec<LiveStage>,
-}
-
-struct LiveStage {
-    stage_index: u32,
-    layer_start: u32,
+    final_norm_weight: &'a [f32],
     layer_end: u32,
-    include_output: bool,
-    model: StageModel,
-}
-
-impl LiveTapRunner {
-    fn open(args: &SpdLiveTapParityArgs, ranges: &[SpdStageLayerRange]) -> Result<Self> {
-        let h0 = open_live_stage_model(args, 0, 0, 0, false, true)
-            .context("open embedding-only h0 tap stage")?;
-        let stages = ranges
-            .iter()
-            .map(|range| {
-                // Live-tap parity needs the final boundary hidden state too.
-                // Target logits are verified with the separate full target model.
-                let include_output = false;
-                let model = open_live_stage_model(
-                    args,
-                    range.stage_index,
-                    range.layer_start,
-                    range.layer_end,
-                    include_output,
-                    false,
-                )?;
-                Ok(LiveStage {
-                    stage_index: range.stage_index,
-                    layer_start: range.layer_start,
-                    layer_end: range.layer_end,
-                    include_output,
-                    model,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Self { h0, stages })
-    }
-
-    fn collect_taps(&self, prompt_tokens: &[i32]) -> Result<BTreeMap<u32, ActivationFrame>> {
-        let mut taps = BTreeMap::new();
-        let h0 = run_live_stage_model(&self.h0, 0, 0, 0, prompt_tokens, None)
-            .context("run embedding-only h0 tap")?;
-        taps.insert(0, h0);
-
-        let mut input = None;
-        for stage in &self.stages {
-            let output = run_live_stage_model(
-                &stage.model,
-                stage.stage_index,
-                stage.layer_start,
-                stage.layer_end,
-                prompt_tokens,
-                input.as_ref(),
-            )
-            .with_context(|| {
-                format!(
-                    "run live Skippy stage {} {}..{}",
-                    stage.stage_index, stage.layer_start, stage.layer_end
-                )
-            })?;
-            if !stage.include_output {
-                taps.insert(stage.layer_end, output.clone());
-                input = Some(output);
-            }
-        }
-        Ok(taps)
-    }
+    hidden_size: usize,
 }
 
 fn fixture_prompt_tokens(fixture: &SpdSafetensorsFile) -> Result<Vec<i32>> {
@@ -583,6 +618,15 @@ fn fixture_cur_in_row_count(fixture: &SpdSafetensorsFile, hidden_size: usize) ->
         );
     }
     usize::try_from(shape[1]).context("SPD fixture row count exceeds usize")
+}
+
+fn read_fixture_concat_rows(
+    fixture: &SpdSafetensorsFile,
+    row_count: usize,
+) -> Result<Vec<Vec<f32>>> {
+    (0..row_count)
+        .map(|row_index| fixture.read_tensor_f32(&format!("tap_row_{row_index}_concat")))
+        .collect()
 }
 
 fn validate_fixture_row_inputs(
@@ -622,58 +666,24 @@ fn live_stage_ranges(args: &SpdLiveTapParityArgs) -> Result<Vec<SpdStageLayerRan
         .collect())
 }
 
-fn open_live_stage_model(
+fn open_live_tap_runner(
     args: &SpdLiveTapParityArgs,
-    stage_index: u32,
-    layer_start: u32,
-    layer_end: u32,
-    include_output: bool,
-    embedding_only: bool,
-) -> Result<StageModel> {
-    let config = RuntimeConfig {
-        stage_index,
-        layer_start,
-        layer_end,
+    manifest: &SpdHeadManifest,
+    ranges: &[SpdStageLayerRange],
+) -> Result<SpdLiveTapRunner> {
+    SpdLiveTapRunner::open(SpdLiveTapRunnerConfig {
+        model_source: SpdLiveTapModelSource::Gguf(&args.model_path),
+        stage_ranges: ranges,
+        layer_end: args.layer_end,
+        hidden_size: usize::try_from(manifest.topology.hidden_size)
+            .context("SPD hidden_size exceeds usize")?,
+        vocab_size: usize::try_from(manifest.topology.vocab_size)
+            .context("SPD vocab_size exceeds usize")?,
         ctx_size: args.ctx_size,
-        lane_count: 1,
-        n_batch: None,
-        n_ubatch: None,
-        n_threads: None,
-        n_threads_batch: None,
         n_gpu_layers: args.n_gpu_layers,
         selected_backend_device: args.selected_backend_device.clone(),
-        cache_type_k: GGML_TYPE_F16,
-        cache_type_v: GGML_TYPE_F16,
-        flash_attn_type: skippy_runtime::FlashAttentionType::Auto,
-        load_mode: RuntimeLoadMode::RuntimeSlice,
-        projector_path: None,
-        include_embeddings: layer_start == 0 || embedding_only,
-        include_output,
-        filter_tensors_on_load: true,
-    };
-    StageModel::open(&args.model_path, &config)
-        .with_context(|| format!("open live Skippy stage {stage_index} {layer_start}..{layer_end}"))
-}
-
-fn run_live_stage_model(
-    model: &StageModel,
-    stage_index: u32,
-    layer_start: u32,
-    layer_end: u32,
-    prompt_tokens: &[i32],
-    input: Option<&ActivationFrame>,
-) -> Result<ActivationFrame> {
-    let mut session = model.create_session().with_context(|| {
-        format!("create live Skippy stage {stage_index} {layer_start}..{layer_end} session")
-    })?;
-    let positions = sequential_positions(prompt_tokens.len())?;
-    session.prefill_chunk_frame_with_positions(prompt_tokens, &positions, input, 0)
-}
-
-fn sequential_positions(token_count: usize) -> Result<Vec<i32>> {
-    (0..token_count)
-        .map(|position| i32::try_from(position).context("prompt position exceeds i32"))
-        .collect()
+    })
+    .context("open live SPD tap runner")
 }
 
 fn assemble_live_cur_in(
@@ -682,32 +692,68 @@ fn assemble_live_cur_in(
     inputs: LiveRowInputs<'_>,
 ) -> Result<LiveRows> {
     let mut cur_in = Vec::with_capacity(inputs.row_count * inputs.hidden_size);
+    let mut terminal_normed_cur_in = Vec::with_capacity(inputs.row_count * inputs.hidden_size);
     let mut rows = Vec::with_capacity(inputs.row_count);
+    let mut terminal_normed_rows = Vec::with_capacity(inputs.row_count);
     let mut max_diff = 0.0_f32;
+    let mut terminal_normed_max_diff = 0.0_f32;
     for row_index in 0..inputs.row_count {
         let position = inputs.row_positions[row_index];
         let stage_id = u32::try_from(inputs.row_i_stages[row_index])
             .with_context(|| format!("SPD fixture row {row_index} has negative stage id"))?;
         let hf_indices = &inputs.row_hf_indices[row_index];
         let concat_hidden = concat_live_hidden(taps, hf_indices, position, inputs.hidden_size)?;
+        let tap_components = tap_component_diffs(
+            &concat_hidden,
+            &inputs.fixture_concat_rows[row_index],
+            hf_indices,
+            inputs.hidden_size,
+            inputs.layer_end,
+            inputs.final_norm_weight,
+        )?;
         let projection = tap_projector.project(stage_id, hf_indices, &concat_hidden)?;
+        let terminal_normed_concat = terminal_final_normed_concat(
+            &concat_hidden,
+            hf_indices,
+            inputs.hidden_size,
+            inputs.layer_end,
+            inputs.final_norm_weight,
+        )?;
+        let terminal_normed_projection =
+            tap_projector.project(stage_id, hf_indices, &terminal_normed_concat)?;
         let expected = row(inputs.fixture_cur_in, row_index, inputs.hidden_size);
         let row_diff = max_abs_diff(&projection.projected, expected)?;
+        let terminal_normed_row_diff =
+            max_abs_diff(&terminal_normed_projection.projected, expected)?;
         max_diff = max_diff.max(row_diff);
+        terminal_normed_max_diff = terminal_normed_max_diff.max(terminal_normed_row_diff);
         cur_in.extend_from_slice(&projection.projected);
+        terminal_normed_cur_in.extend_from_slice(&terminal_normed_projection.projected);
         rows.push(json!({
             "row_index": row_index,
             "position_id": position,
             "stage_id": stage_id,
             "projection_name": projection.projection_name,
             "hf_indices": projection.hf_indices,
+            "tap_components": tap_components,
             "max_abs_diff_vs_fixture": row_diff,
+        }));
+        terminal_normed_rows.push(json!({
+            "row_index": row_index,
+            "position_id": position,
+            "stage_id": stage_id,
+            "projection_name": terminal_normed_projection.projection_name,
+            "hf_indices": terminal_normed_projection.hf_indices,
+            "max_abs_diff_vs_fixture": terminal_normed_row_diff,
         }));
     }
     Ok(LiveRows {
         cur_in,
         rows,
         max_abs_diff: max_diff,
+        terminal_normed_cur_in,
+        terminal_normed_rows,
+        terminal_normed_max_abs_diff: terminal_normed_max_diff,
     })
 }
 
@@ -733,7 +779,14 @@ fn assemble_live_cur_in_for_positions(
             .with_context(|| format!("SPD dynamic row {row_index} has negative stage id"))?;
         let hf_indices = &inputs.row_hf_indices[row_index];
         let concat_hidden = concat_live_hidden(taps, hf_indices, position, inputs.hidden_size)?;
-        let projection = tap_projector.project(stage_id, hf_indices, &concat_hidden)?;
+        let normed_concat = terminal_final_normed_concat(
+            &concat_hidden,
+            hf_indices,
+            inputs.hidden_size,
+            inputs.layer_end,
+            inputs.final_norm_weight,
+        )?;
+        let projection = tap_projector.project(stage_id, hf_indices, &normed_concat)?;
         cur_in.extend_from_slice(&projection.projected);
     }
     Ok(DynamicLiveRows { cur_in })
@@ -754,6 +807,164 @@ fn concat_live_hidden(
     }
     Ok(concat)
 }
+
+fn tap_component_diffs(
+    live_concat: &[f32],
+    fixture_concat: &[f32],
+    hf_indices: &[u32],
+    hidden_size: usize,
+    layer_end: u32,
+    final_norm_weight: &[f32],
+) -> Result<Vec<serde_json::Value>> {
+    let expected_width = hf_indices
+        .len()
+        .checked_mul(hidden_size)
+        .context("SPD tap component width overflow")?;
+    if live_concat.len() != expected_width || fixture_concat.len() != expected_width {
+        bail!(
+            "SPD tap component width mismatch: live {}, fixture {}, expected {}",
+            live_concat.len(),
+            fixture_concat.len(),
+            expected_width
+        );
+    }
+    hf_indices
+        .iter()
+        .enumerate()
+        .map(|(component_index, hf_index)| {
+            let start = component_index * hidden_size;
+            let end = start + hidden_size;
+            let live = &live_concat[start..end];
+            let fixture = &fixture_concat[start..end];
+            let terminal_final_norm = if *hf_index == layer_end {
+                let normed = qwen_final_rms_norm(live, final_norm_weight)?;
+                Some(json!({
+                    "max_abs_diff_vs_fixture": max_abs_diff(&normed, fixture)?,
+                    "mean_abs_diff_vs_fixture": mean_abs_diff(&normed, fixture)?,
+                    "cosine_similarity_vs_fixture": cosine_similarity(&normed, fixture)?,
+                    "inferred_output_norm_weight_vs_gguf": inferred_output_norm_weight_report(
+                        live,
+                        fixture,
+                        final_norm_weight,
+                    )?,
+                }))
+            } else {
+                None
+            };
+            Ok(json!({
+                "component_index": component_index,
+                "hf_index": hf_index,
+                "max_abs_diff_vs_fixture": max_abs_diff(live, fixture)?,
+                "mean_abs_diff_vs_fixture": mean_abs_diff(live, fixture)?,
+                "cosine_similarity_vs_fixture": cosine_similarity(live, fixture)?,
+                "terminal_final_norm_vs_fixture": terminal_final_norm,
+            }))
+        })
+        .collect()
+}
+
+fn terminal_final_normed_concat(
+    concat: &[f32],
+    hf_indices: &[u32],
+    hidden_size: usize,
+    layer_end: u32,
+    final_norm_weight: &[f32],
+) -> Result<Vec<f32>> {
+    let mut normed = concat.to_vec();
+    for (component_index, hf_index) in hf_indices.iter().enumerate() {
+        if *hf_index != layer_end {
+            continue;
+        }
+        let start = component_index * hidden_size;
+        let end = start + hidden_size;
+        let normalized = qwen_final_rms_norm(&normed[start..end], final_norm_weight)?;
+        normed[start..end].copy_from_slice(&normalized);
+    }
+    Ok(normed)
+}
+
+fn qwen_final_rms_norm(values: &[f32], weight: &[f32]) -> Result<Vec<f32>> {
+    if values.len() != weight.len() {
+        bail!(
+            "final RMSNorm weight length {} does not match values {}",
+            weight.len(),
+            values.len()
+        );
+    }
+    if values.is_empty() {
+        return Ok(Vec::new());
+    }
+    let scale = qwen_rms_norm_scale(values);
+    Ok(values
+        .iter()
+        .zip(weight)
+        .map(|(value, weight)| value * scale * weight)
+        .collect())
+}
+
+fn inferred_output_norm_weight_report(
+    live_pre_norm: &[f32],
+    fixture_post_norm: &[f32],
+    output_norm_weight: &[f32],
+) -> Result<serde_json::Value> {
+    if live_pre_norm.len() != fixture_post_norm.len()
+        || live_pre_norm.len() != output_norm_weight.len()
+    {
+        bail!(
+            "terminal gamma diagnostic length mismatch: live {}, fixture {}, weight {}",
+            live_pre_norm.len(),
+            fixture_post_norm.len(),
+            output_norm_weight.len()
+        );
+    }
+    let scale = qwen_rms_norm_scale(live_pre_norm);
+    let inferred = inferred_output_norm_weights(live_pre_norm, fixture_post_norm, scale);
+    let inferred_values: Vec<f32> = inferred.iter().filter_map(|value| *value).collect();
+    let expected_values: Vec<f32> = inferred
+        .iter()
+        .zip(output_norm_weight)
+        .filter_map(|(inferred, expected)| inferred.map(|_| *expected))
+        .collect();
+    let skipped = inferred.len() - inferred_values.len();
+    Ok(json!({
+        "rms_scale": scale,
+        "min_abs_denominator": MIN_INFERRED_GAMMA_DENOMINATOR,
+        "sample_count": inferred_values.len(),
+        "skipped_near_zero_denominator": skipped,
+        "max_abs_diff_vs_gguf_weight": max_abs_diff(&inferred_values, &expected_values)?,
+        "mean_abs_diff_vs_gguf_weight": mean_abs_diff(&inferred_values, &expected_values)?,
+        "cosine_similarity_vs_gguf_weight": cosine_similarity(&inferred_values, &expected_values)?,
+    }))
+}
+
+fn qwen_rms_norm_scale(values: &[f32]) -> f32 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f32 = values.iter().map(|value| value * value).sum();
+    (sum_sq / values.len() as f32 + 1.0e-6).sqrt().recip()
+}
+
+fn inferred_output_norm_weights(
+    live_pre_norm: &[f32],
+    fixture_post_norm: &[f32],
+    scale: f32,
+) -> Vec<Option<f32>> {
+    live_pre_norm
+        .iter()
+        .zip(fixture_post_norm)
+        .map(|(live_value, fixture_value)| {
+            let normalized_without_weight = live_value * scale;
+            if normalized_without_weight.abs() < MIN_INFERRED_GAMMA_DENOMINATOR {
+                None
+            } else {
+                Some(fixture_value / normalized_without_weight)
+            }
+        })
+        .collect()
+}
+
+const MIN_INFERRED_GAMMA_DENOMINATOR: f32 = 5.0e-2;
 
 fn live_hidden_row(frame: &ActivationFrame, position: i64, hidden_size: usize) -> Result<Vec<f32>> {
     let position = usize::try_from(position).context("negative live tap position")?;
@@ -801,6 +1012,41 @@ fn max_abs_diff(left: &[f32], right: &[f32]) -> Result<f32> {
         .zip(right)
         .map(|(left, right)| (left - right).abs())
         .fold(0.0, f32::max))
+}
+
+fn mean_abs_diff(left: &[f32], right: &[f32]) -> Result<f32> {
+    if left.len() != right.len() {
+        bail!("vector length mismatch: {} vs {}", left.len(), right.len());
+    }
+    if left.is_empty() {
+        return Ok(0.0);
+    }
+    let sum = left
+        .iter()
+        .zip(right)
+        .map(|(left, right)| (left - right).abs())
+        .sum::<f32>();
+    Ok(sum / left.len() as f32)
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> Result<Option<f32>> {
+    if left.len() != right.len() {
+        bail!("vector length mismatch: {} vs {}", left.len(), right.len());
+    }
+    let (dot, left_norm_sq, right_norm_sq) = left.iter().zip(right).fold(
+        (0.0_f32, 0.0_f32, 0.0_f32),
+        |(dot, left_norm_sq, right_norm_sq), (left, right)| {
+            (
+                dot + left * right,
+                left_norm_sq + left * left,
+                right_norm_sq + right * right,
+            )
+        },
+    );
+    if left_norm_sq == 0.0 || right_norm_sq == 0.0 {
+        return Ok(None);
+    }
+    Ok(Some(dot / (left_norm_sq.sqrt() * right_norm_sq.sqrt())))
 }
 
 fn live_tap_report(taps: &BTreeMap<u32, ActivationFrame>) -> Vec<serde_json::Value> {

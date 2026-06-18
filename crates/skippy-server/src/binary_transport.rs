@@ -950,11 +950,7 @@ fn handle_binary_connection(
                     executable_token_ids,
                     input.as_ref(),
                     message.kind == WireMessageKind::PrefillFinalEmbd && downstream.is_none(),
-                    stage_output_activation_capacity(
-                        config,
-                        message.token_count,
-                        activation_width,
-                    )?,
+                    stage_output_activation_capacity(config, &message, activation_width)?,
                 )
                 .context("execute binary stage message")?;
                 runtime_sessions_after = Some(runtime.session_stats());
@@ -1594,18 +1590,22 @@ fn insert_optional_unix_nanos(attrs: &mut BTreeMap<String, Value>, key: &str, va
 
 pub(crate) fn stage_output_activation_capacity(
     config: &StageConfig,
-    token_count: i32,
+    message: &StageWireMessage,
     activation_width: i32,
 ) -> Result<usize> {
-    if config.downstream.is_none() || token_count <= 0 {
+    if (!stage_needs_output_activation(config, message)) || message.token_count <= 0 {
         return Ok(0);
     }
     skippy_protocol::binary::activation_wire_bytes(
         WireActivationDType::F32,
-        token_count,
+        message.token_count,
         activation_width,
     )
     .context("estimate output activation capacity")
+}
+
+fn stage_needs_output_activation(config: &StageConfig, message: &StageWireMessage) -> bool {
+    config.downstream.is_some() || message_requests_spd_tap_return(config, message)
 }
 
 fn estimated_reply_wire_bytes(reply_kind: WireReplyKind, predicted_token_count: usize) -> usize {
@@ -2213,7 +2213,7 @@ fn handle_binary_restore_prefill_decode_control(
             &[current_token],
             input.as_ref(),
             downstream.is_none(),
-            stage_output_activation_capacity(config, decode_message.token_count, activation_width)?,
+            stage_output_activation_capacity(config, &decode_message, activation_width)?,
         )
         .context("execute restore-decode stage message")?;
         (
@@ -2387,10 +2387,11 @@ fn should_send_spd_tap_return(
     message: &StageWireMessage,
     output: &ActivationFrame,
 ) -> bool {
+    message_requests_spd_tap_return(config, message) && !output.payload.is_empty()
+}
+
+fn message_requests_spd_tap_return(config: &StageConfig, message: &StageWireMessage) -> bool {
     if config.stage_index == 0 || (message.state.flags & state_flags::SPD_TAP_RETURN) == 0 {
-        return false;
-    }
-    if output.payload.is_empty() {
         return false;
     }
     config.spd_tap_return_hf_indices.is_empty()

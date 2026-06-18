@@ -15,6 +15,7 @@ const GGUF_TYPE_STRING: u32 = 8;
 const GGUF_TYPE_ARRAY: u32 = 9;
 const GGML_TYPE_F32: u32 = 0;
 const GGML_TYPE_F16: u32 = 1;
+const GGML_TYPE_Q8_0: u32 = 8;
 const GGML_TYPE_Q4_K: u32 = 12;
 const GGML_TYPE_Q6_K: u32 = 14;
 const MAX_GGUF_STRING_BYTES: u64 = 1_000_000;
@@ -23,6 +24,8 @@ const MAX_GGUF_ARRAY_DEPTH: u32 = 64;
 const MAX_GGUF_TENSOR_DIMS: u32 = 8;
 const MAX_GGUF_HEADER_COUNT: usize = 1_000_000;
 const QK_K: usize = 256;
+const QK8_0: usize = 32;
+const Q8_0_BLOCK_BYTES: usize = 34;
 const Q4_K_BLOCK_BYTES: usize = 144;
 const Q6_K_BLOCK_BYTES: usize = 210;
 const TOKEN_EMBD_TENSOR: &str = "token_embd.weight";
@@ -41,6 +44,7 @@ pub struct GgufTokenEmbeddingTable {
 enum GgmlTensorType {
     F32,
     F16,
+    Q8_0,
     Q4K,
     Q6K,
 }
@@ -175,6 +179,7 @@ impl GgufTokenEmbeddingTable {
         match self.tensor_type {
             GgmlTensorType::F32 => read_f32_row(file, self.hidden_size),
             GgmlTensorType::F16 => read_f16_row(file, self.hidden_size),
+            GgmlTensorType::Q8_0 => read_q8_0_row(file, self.hidden_size),
             GgmlTensorType::Q4K => read_q4_k_row(file, self.hidden_size),
             GgmlTensorType::Q6K => read_q6_k_row(file, self.hidden_size),
         }
@@ -186,6 +191,7 @@ impl GgmlTensorType {
         match value {
             GGML_TYPE_F32 => Ok(Self::F32),
             GGML_TYPE_F16 => Ok(Self::F16),
+            GGML_TYPE_Q8_0 => Ok(Self::Q8_0),
             GGML_TYPE_Q4_K => Ok(Self::Q4K),
             GGML_TYPE_Q6_K => Ok(Self::Q6K),
             _ => bail!("unsupported GGUF token embedding tensor type {value}"),
@@ -200,6 +206,7 @@ impl GgmlTensorType {
             Self::F16 => hidden_size
                 .checked_mul(2)
                 .context("GGUF f16 row size overflow")?,
+            Self::Q8_0 => quantized_row_size(hidden_size, QK8_0, Q8_0_BLOCK_BYTES, "Q8_0")?,
             Self::Q4K => quantized_k_row_size(hidden_size, Q4_K_BLOCK_BYTES, "Q4_K")?,
             Self::Q6K => quantized_k_row_size(hidden_size, Q6_K_BLOCK_BYTES, "Q6_K")?,
         };
@@ -208,11 +215,22 @@ impl GgmlTensorType {
 }
 
 fn quantized_k_row_size(hidden_size: usize, block_bytes: usize, type_name: &str) -> Result<usize> {
-    if !hidden_size.is_multiple_of(QK_K) {
-        bail!("{type_name} token embedding hidden size {hidden_size} is not a multiple of {QK_K}");
+    quantized_row_size(hidden_size, QK_K, block_bytes, type_name)
+}
+
+fn quantized_row_size(
+    hidden_size: usize,
+    block_width: usize,
+    block_bytes: usize,
+    type_name: &str,
+) -> Result<usize> {
+    if !hidden_size.is_multiple_of(block_width) {
+        bail!(
+            "{type_name} token embedding hidden size {hidden_size} is not a multiple of {block_width}"
+        );
     }
     hidden_size
-        .checked_div(QK_K)
+        .checked_div(block_width)
         .and_then(|blocks| blocks.checked_mul(block_bytes))
         .with_context(|| format!("GGUF {type_name} row size overflow"))
 }
@@ -360,6 +378,18 @@ fn read_f16_row(file: &mut File, hidden_size: usize) -> Result<Vec<f32>> {
         .collect())
 }
 
+fn read_q8_0_row(file: &mut File, hidden_size: usize) -> Result<Vec<f32>> {
+    let block_count = hidden_size / QK8_0;
+    let mut row = Vec::with_capacity(hidden_size);
+    for _ in 0..block_count {
+        let mut block = [0_u8; Q8_0_BLOCK_BYTES];
+        file.read_exact(&mut block)
+            .context("read GGUF Q8_0 token embedding block")?;
+        dequantize_q8_0_block(&block, &mut row);
+    }
+    Ok(row)
+}
+
 fn read_q4_k_row(file: &mut File, hidden_size: usize) -> Result<Vec<f32>> {
     let block_count = hidden_size / QK_K;
     let mut row = Vec::with_capacity(hidden_size);
@@ -382,6 +412,13 @@ fn read_q6_k_row(file: &mut File, hidden_size: usize) -> Result<Vec<f32>> {
         dequantize_q6_k_block(&block, &mut row);
     }
     Ok(row)
+}
+
+fn dequantize_q8_0_block(block: &[u8; Q8_0_BLOCK_BYTES], output: &mut Vec<f32>) {
+    let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+    for byte in &block[2..] {
+        output.push(d * f32::from(i8::from_le_bytes([*byte])));
+    }
 }
 
 fn dequantize_q4_k_block(block: &[u8; Q4_K_BLOCK_BYTES], output: &mut Vec<f32>) {
@@ -568,6 +605,27 @@ mod tests {
     }
 
     #[test]
+    fn reads_q8_0_token_embedding_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("embeddings.gguf");
+        write_minimal_q8_0_embedding_gguf(&path);
+
+        let table = GgufTokenEmbeddingTable::open(&path, QK8_0, 2).unwrap();
+        let frame = table.frame_for_positions(&[1, 0], &[0, 1]).unwrap();
+        assert_eq!(frame.desc.layer_start, 0);
+        assert_eq!(frame.desc.layer_end, 0);
+        assert_eq!(frame.desc.token_count, 2);
+
+        let values = frame
+            .payload
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert!(values[..QK8_0].iter().all(|value| *value == 2.0));
+        assert!(values[QK8_0..].iter().all(|value| *value == 1.0));
+    }
+
+    #[test]
     fn rejects_hidden_size_mismatch() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("embeddings.gguf");
@@ -583,11 +641,31 @@ mod tests {
         write_minimal_embedding_gguf(path, GGML_TYPE_Q4_K, &q4_k_block(1), &q4_k_block(2));
     }
 
+    fn write_minimal_q8_0_embedding_gguf(path: &Path) {
+        write_minimal_embedding_gguf_with_hidden(
+            path,
+            GGML_TYPE_Q8_0,
+            QK8_0,
+            &q8_0_block(1),
+            &q8_0_block(2),
+        );
+    }
+
     fn write_minimal_q6_k_embedding_gguf(path: &Path) {
         write_minimal_embedding_gguf(path, GGML_TYPE_Q6_K, &q6_k_block(1), &q6_k_block(2));
     }
 
     fn write_minimal_embedding_gguf(path: &Path, tensor_type: u32, row_0: &[u8], row_1: &[u8]) {
+        write_minimal_embedding_gguf_with_hidden(path, tensor_type, QK_K, row_0, row_1);
+    }
+
+    fn write_minimal_embedding_gguf_with_hidden(
+        path: &Path,
+        tensor_type: u32,
+        hidden_size: usize,
+        row_0: &[u8],
+        row_1: &[u8],
+    ) {
         let mut file = File::create(path).unwrap();
         file.write_all(GGUF_MAGIC).unwrap();
         file.write_all(&3_u32.to_le_bytes()).unwrap();
@@ -598,7 +676,7 @@ mod tests {
         file.write_all(&32_u32.to_le_bytes()).unwrap();
         write_gguf_string(&mut file, TOKEN_EMBD_TENSOR);
         file.write_all(&2_u32.to_le_bytes()).unwrap();
-        file.write_all(&(QK_K as u64).to_le_bytes()).unwrap();
+        file.write_all(&(hidden_size as u64).to_le_bytes()).unwrap();
         file.write_all(&2_u64.to_le_bytes()).unwrap();
         file.write_all(&tensor_type.to_le_bytes()).unwrap();
         file.write_all(&0_u64.to_le_bytes()).unwrap();
@@ -625,6 +703,15 @@ mod tests {
         let packed = value | (value << 4);
         for byte in &mut block[16..] {
             *byte = packed;
+        }
+        block
+    }
+
+    fn q8_0_block(value: i8) -> [u8; Q8_0_BLOCK_BYTES] {
+        let mut block = [0_u8; Q8_0_BLOCK_BYTES];
+        block[0..2].copy_from_slice(&0x3c00_u16.to_le_bytes());
+        for byte in &mut block[2..] {
+            *byte = value as u8;
         }
         block
     }

@@ -1969,7 +1969,7 @@ impl StageOpenAiBackend {
                         false,
                         stage_output_activation_capacity(
                             request.config,
-                            message.token_count,
+                            message,
                             request.activation_width,
                         )
                         .map_err(openai_backend_error)?,

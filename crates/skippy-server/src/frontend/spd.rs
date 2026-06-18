@@ -502,6 +502,8 @@ impl SpdReplayProposalSource {
             row_stage_ids,
             row_hf_indices,
             hidden_size: self.hidden_size,
+            terminal_hidden_hf_index: self.manifest.topology.terminal_hidden_hf_index(),
+            final_norm_weight: Some(&self.final_norm_weight),
         })?;
         let cur_in_ms = cur_in_timer.elapsed_ms();
         let forward_timer = PhaseTimer::start();
@@ -622,6 +624,8 @@ impl SpdReplayProposalSource {
             row_stage_ids: &row_stage_ids,
             row_hf_indices: &row_hf_indices,
             hidden_size: self.hidden_size,
+            terminal_hidden_hf_index: self.manifest.topology.terminal_hidden_hf_index(),
+            final_norm_weight: Some(&self.final_norm_weight),
         })?;
         self.head.prefill_cache(
             SpdQwen3ForwardInput {
@@ -703,10 +707,12 @@ impl SpdReplayProposalSource {
         if self.context_tokens.last().copied() != Some(current) {
             return Ok(None);
         }
-        if let Some(rows) = self.resolved_rolling_speculation_rows()?
-            && let Some(proposal) =
-                self.propose_one_from_rolling_rows(&self.context_tokens, &rows)?
-        {
+        let rolling_proposal = self
+            .resolved_rolling_speculation_rows()?
+            .map(|rows| self.propose_one_from_rolling_rows(&self.context_tokens, &rows))
+            .transpose()?
+            .flatten();
+        if let Some(proposal) = rolling_proposal {
             return Ok(Some(proposal));
         }
         self.propose_one(&self.context_tokens)
@@ -1418,9 +1424,11 @@ impl StageOpenAiBackend {
             if reply.kind == WireReplyKind::SpdTap {
                 let trigger_hf_index = reply.spd_tap.as_ref().map(|tap| tap.hf_index);
                 self.record_spd_direct_return_tap(request, &reply, item.origin);
-                if pre_target_probe.is_none()
-                    && let Some(spd) = wait.spd_source.as_mut()
-                {
+                let spd_source = pre_target_probe
+                    .is_none()
+                    .then_some(wait.spd_source.as_mut())
+                    .flatten();
+                if let Some(spd) = spd_source {
                     let probe_timer = PhaseTimer::start();
                     let proposal = spd.propose_inline_for_current_context(wait.current)?;
                     let elapsed_ms = probe_timer.elapsed_ms();
@@ -2257,10 +2265,10 @@ fn rolling_rows_ready_for_executor_launch(
 
 fn resolve_rolling_row_stage_role(
     topology: &skippy_runtime::spd::SpdHeadTopology,
-    position: usize,
+    _position: usize,
     nominal: usize,
     has_evicted_prefix: bool,
-    inline_taps: &SpdInlineTapCache,
+    _inline_taps: &SpdInlineTapCache,
 ) -> Result<usize> {
     let stage_count =
         usize::try_from(topology.num_stages).context("SPD num_stages exceeds usize")?;
@@ -2278,20 +2286,12 @@ fn resolve_rolling_row_stage_role(
     } else {
         stage_count
     };
-    let search_hi = if nominal == stage_count {
+    let desired = if nominal == stage_count {
         stage_count
     } else {
         deepest_fused
     };
-    for stage_id in (1..=search_hi).rev() {
-        let hf_indices = spd_hf_indices_for_stage_id(
-            topology,
-            u32::try_from(stage_id).context("SPD stage id exceeds u32")?,
-        )?;
-        let inline_hf_indices = inline_required_hf_indices(&hf_indices);
-        if inline_taps.has_rows_for_hf_indices(position, &inline_hf_indices) {
-            return Ok(stage_id);
-        }
-    }
-    Ok(nominal)
+    // A head trained with deepest rows must not silently degrade to shallower
+    // rows. Returning the desired stage makes collection miss or replay instead.
+    Ok(desired)
 }

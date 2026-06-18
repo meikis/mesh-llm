@@ -190,6 +190,36 @@ fn spd_tap_return_ignores_stage_zero_even_when_filtered() {
     ));
 }
 
+#[test]
+fn final_stage_reserves_output_activation_for_spd_tap_return() {
+    let mut config = prefix_cache_test_config();
+    config.stage_index = 1;
+    config.layer_end = 36;
+    config.downstream = None;
+    config.spd_tap_return_hf_indices = vec![36];
+    let mut message = spd_tap_message();
+    message.token_count = 2;
+
+    let capacity = super::stage_output_activation_capacity(&config, &message, 4096).unwrap();
+
+    assert_eq!(capacity, 2 * 4096 * std::mem::size_of::<f32>());
+}
+
+#[test]
+fn final_stage_without_spd_tap_return_keeps_zero_output_activation_capacity() {
+    let mut config = prefix_cache_test_config();
+    config.stage_index = 1;
+    config.layer_end = 36;
+    config.downstream = None;
+    config.spd_tap_return_hf_indices = vec![36];
+    let mut message = first_decode_message_with_full_prompt_sideband();
+    message.token_count = 2;
+
+    let capacity = super::stage_output_activation_capacity(&config, &message, 4096).unwrap();
+
+    assert_eq!(capacity, 0);
+}
+
 fn prefix_cache_test_config() -> StageConfig {
     StageConfig {
         run_id: "run".to_string(),

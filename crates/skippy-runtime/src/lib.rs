@@ -66,6 +66,8 @@ pub use skippy_ffi::{
     ActivationDType as RuntimeActivationDType, ActivationLayout as RuntimeActivationLayout,
 };
 
+pub const ACTIVATION_FLAG_FINAL_NORMED: u64 = 1 << 2;
+
 #[cfg(feature = "dynamic-native-runtime")]
 pub use skippy_ffi::{
     NativeRuntimeLoadError, load_native_runtime_libraries, load_native_runtime_library,

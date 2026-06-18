@@ -130,6 +130,10 @@ pub struct SpdLiveTapParityArgs {
     pub top_k: usize,
     #[arg(long, default_value_t = 1)]
     pub verify_steps: usize,
+    #[arg(long, default_value_t = 0.05)]
+    pub cur_in_tol: f32,
+    #[arg(long, default_value_t = 0.25)]
+    pub logits_tol: f32,
     #[arg(long)]
     pub output: Option<PathBuf>,
 }
@@ -819,6 +823,8 @@ mod tests {
         assert_eq!(args.layer_end, 32);
         assert_eq!(args.selected_backend_device.as_deref(), Some("CPU0"));
         assert_eq!(args.verify_steps, 1);
+        assert_eq!(args.cur_in_tol, 0.05);
+        assert_eq!(args.logits_tol, 0.25);
     }
 
     #[test]

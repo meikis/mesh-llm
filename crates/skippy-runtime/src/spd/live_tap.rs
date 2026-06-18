@@ -7,7 +7,8 @@ use super::{
     SpdTapInputProjector, project_spd_tap_input_row,
 };
 use crate::{
-    ActivationFrame, GGML_TYPE_F16, RuntimeConfig, RuntimeLoadMode, StageModel,
+    ACTIVATION_FLAG_FINAL_NORMED, ActivationFrame, GGML_TYPE_F16, RuntimeConfig, RuntimeLoadMode,
+    StageModel,
     package::{PackageStageRequest, select_layer_package_parts},
 };
 
@@ -58,6 +59,8 @@ pub struct SpdLiveCurInRequest<'a> {
     pub row_stage_ids: &'a [i64],
     pub row_hf_indices: &'a [Vec<u32>],
     pub hidden_size: usize,
+    pub terminal_hidden_hf_index: Option<u32>,
+    pub final_norm_weight: Option<&'a [f32]>,
 }
 
 pub struct SpdLiveCurInRows {
@@ -154,8 +157,9 @@ pub fn assemble_spd_live_cur_in_for_positions(
         let stage_id = u32::try_from(request.row_stage_ids[row_index])
             .with_context(|| format!("SPD row {row_index} has negative stage id"))?;
         let hf_indices = &request.row_hf_indices[row_index];
-        let concat_hidden =
+        let mut concat_hidden =
             concat_live_hidden(request.taps, hf_indices, position, request.hidden_size)?;
+        apply_terminal_final_norm(&mut concat_hidden, &request, hf_indices)?;
         let projection = project_live_tap_input(&request, stage_id, hf_indices, &concat_hidden)?;
         cur_in.extend_from_slice(&projection.projected);
     }
@@ -376,7 +380,66 @@ fn validate_live_cur_in_request(request: &SpdLiveCurInRequest<'_>) -> Result<()>
             request.row_hf_indices.len()
         );
     }
+    if request.terminal_hidden_hf_index.is_some() != request.final_norm_weight.is_some() {
+        bail!(
+            "SPD terminal hidden final norm requires both terminal_hidden_hf_index and final_norm_weight"
+        );
+    }
+    match request.final_norm_weight {
+        Some(weight) if weight.len() != request.hidden_size => {
+            bail!(
+                "SPD terminal final norm weight length {} does not match hidden size {}",
+                weight.len(),
+                request.hidden_size
+            );
+        }
+        _ => {}
+    }
     Ok(())
+}
+
+fn apply_terminal_final_norm(
+    concat_hidden: &mut [f32],
+    request: &SpdLiveCurInRequest<'_>,
+    hf_indices: &[u32],
+) -> Result<()> {
+    let (Some(terminal_hf_index), Some(final_norm_weight)) =
+        (request.terminal_hidden_hf_index, request.final_norm_weight)
+    else {
+        return Ok(());
+    };
+    for (component_index, hf_index) in hf_indices.iter().enumerate() {
+        if *hf_index != terminal_hf_index {
+            continue;
+        }
+        if terminal_frame_is_final_normed(request.taps, terminal_hf_index)? {
+            continue;
+        }
+        let start = component_index
+            .checked_mul(request.hidden_size)
+            .context("SPD terminal final norm component offset overflow")?;
+        let end = start + request.hidden_size;
+        qwen_final_rms_norm_in_place(&mut concat_hidden[start..end], final_norm_weight);
+    }
+    Ok(())
+}
+
+fn terminal_frame_is_final_normed(
+    taps: &BTreeMap<u32, ActivationFrame>,
+    terminal_hf_index: u32,
+) -> Result<bool> {
+    let frame = taps.get(&terminal_hf_index).with_context(|| {
+        format!("missing live Skippy terminal tap for HF hidden-state {terminal_hf_index}")
+    })?;
+    Ok((frame.desc.flags & ACTIVATION_FLAG_FINAL_NORMED) != 0)
+}
+
+fn qwen_final_rms_norm_in_place(values: &mut [f32], weight: &[f32]) {
+    let sum_sq: f32 = values.iter().map(|value| value * value).sum();
+    let scale = (sum_sq / values.len() as f32 + 1.0e-6).sqrt().recip();
+    for (value, weight) in values.iter_mut().zip(weight) {
+        *value *= scale * *weight;
+    }
 }
 
 fn concat_live_hidden(
@@ -445,5 +508,42 @@ mod tests {
                 .to_string()
                 .contains("context length 3 is shorter than SPD row count 4")
         );
+    }
+
+    #[test]
+    fn terminal_frame_final_norm_flag_is_detected() {
+        let mut taps = BTreeMap::new();
+        taps.insert(
+            36,
+            activation_frame_with_flags(36, ACTIVATION_FLAG_FINAL_NORMED),
+        );
+
+        assert!(terminal_frame_is_final_normed(&taps, 36).unwrap());
+    }
+
+    #[test]
+    fn terminal_frame_without_final_norm_flag_requires_runtime_norm() {
+        let mut taps = BTreeMap::new();
+        taps.insert(36, activation_frame_with_flags(36, 0));
+
+        assert!(!terminal_frame_is_final_normed(&taps, 36).unwrap());
+    }
+
+    fn activation_frame_with_flags(hf_index: i32, flags: u64) -> ActivationFrame {
+        ActivationFrame {
+            desc: crate::ActivationDesc {
+                version: 1,
+                dtype: crate::RuntimeActivationDType::F32,
+                layout: crate::RuntimeActivationLayout::TokenMajor,
+                producer_stage_index: 1,
+                layer_start: hf_index - 1,
+                layer_end: hf_index,
+                token_count: 1,
+                sequence_count: 1,
+                payload_bytes: 4,
+                flags,
+            },
+            payload: 1.0_f32.to_le_bytes().to_vec(),
+        }
     }
 }

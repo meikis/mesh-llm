@@ -80,6 +80,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--draft-top-k", type=int, default=1)
+    parser.add_argument(
+        "--use-deepest",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Pass reference eval --use_deepest/--no-use_deepest. Keep this explicit "
+            "when comparing reference proposal rows with live Skippy rows."
+        ),
+    )
     parser.add_argument("--attn-implementation", default="sdpa")
     parser.add_argument(
         "--device",
@@ -160,6 +169,7 @@ def patch_reference_for_proof(reference_dir: Path) -> None:
         "        report_to=[],\n",
     )
     patch_eval_for_token_trace(reference_dir / "eval.py")
+    patch_pipeline_model_for_token_trace(reference_dir / "pipeline_model.py")
     patch_reference_for_transformers(reference_dir)
 
 
@@ -353,7 +363,71 @@ def patch_eval_for_token_trace(path: Path) -> None:
             "prompt_token_ids": [int(x) for x in input_ids[0].detach().cpu().tolist()],
             "generated_token_ids": [int(x) for x in gen_only_ids.detach().cpu().tolist()],
             "token_acceptance": [bool(x) for x in token_acceptance],
+            "proposal_trace": getattr(pipeline, "_last_generate_trace", {}),
             "new_tokens": new_tokens,
+""",
+    )
+
+
+def patch_pipeline_model_for_token_trace(path: Path) -> None:
+    replace_once(
+        path,
+        """        acc_timings = [0.0, 0.0]
+
+        _sync_dev()
+""",
+        """        acc_timings = [0.0, 0.0]
+        draft_trace: List[Dict[str, Any]] = []
+
+        _sync_dev()
+""",
+    )
+    replace_once(
+        path,
+        """            self._last_generate_timing = {
+                "prefill_wall_sec": float(prefill_wall_sec),
+""",
+        """            self._last_generate_trace = {
+                "draft_proposals": [dict(item) for item in draft_trace],
+            }
+            self._last_generate_timing = {
+                "prefill_wall_sec": float(prefill_wall_sec),
+""",
+    )
+    replace_once(
+        path,
+        """                        if not accepted:
+                            if use_streams:
+""",
+        """                        for item in reversed(draft_trace):
+                            if int(item.get("target_gen_idx", -1)) == int(target_gen_idx):
+                                item["target_token"] = int(verified_next_id)
+                                item["accepted"] = bool(accepted)
+                                break
+
+                        if not accepted:
+                            draft_trace[:] = [
+                                item
+                                for item in draft_trace
+                                if int(item.get("target_gen_idx", -1)) <= int(target_gen_idx)
+                            ]
+                            if use_streams:
+""",
+    )
+    replace_once(
+        path,
+        """            generated_ids.append(next_id)
+            token_acceptance.append(True)
+""",
+        """            draft_trace.append(
+                {
+                    "target_position": int(next_position),
+                    "target_gen_idx": int(next_position - s0),
+                    "proposal_token": int(next_id),
+                }
+            )
+            generated_ids.append(next_id)
+            token_acceptance.append(True)
 """,
     )
 
@@ -872,6 +946,7 @@ def evaluate_head(
         str(args.draft_top_k),
         "--no-baseline",
     ]
+    cmd.append("--use_deepest" if args.use_deepest else "--no-use_deepest")
     started = time.perf_counter()
     run(cmd, cwd=reference_dir, env=reference_env(args))
     elapsed = time.perf_counter() - started

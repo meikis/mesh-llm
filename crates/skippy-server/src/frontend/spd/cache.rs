@@ -404,17 +404,6 @@ impl SpdInlineTapCache {
         Ok(missing)
     }
 
-    pub(super) fn has_rows_for_hf_indices(&self, position: usize, hf_indices: &[u32]) -> bool {
-        let Ok(position) = u32::try_from(position) else {
-            return false;
-        };
-        hf_indices.iter().all(|hf_index| {
-            self.frames
-                .get(hf_index)
-                .is_some_and(|cached| cached.rows.contains_key(&position))
-        })
-    }
-
     pub(super) fn frame_for_positions(
         &self,
         hf_index: u32,

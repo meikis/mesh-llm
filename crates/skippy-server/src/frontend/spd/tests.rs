@@ -87,7 +87,7 @@ fn inline_probe_margin_gate_controls_optimistic_decode() {
 }
 
 #[test]
-fn rolling_row_roles_use_deepest_available_snapshot() {
+fn rolling_row_roles_require_deepest_trained_snapshot() {
     let rows = SpdRollingSpeculationRows {
         evicted_prefix_position: None,
         row_positions: vec![20, 21, 22, 23],
@@ -102,7 +102,7 @@ fn rolling_row_roles_use_deepest_available_snapshot() {
 
     assert_eq!(
         resolve_rolling_row_stage_roles(&test_spd_topology(true), &rows, &partial_cache).unwrap(),
-        vec![3, 2, 1, 0]
+        vec![4, 4, 4, 0]
     );
 
     let mut full_cache = spd_role_cache();

@@ -410,6 +410,12 @@ impl SpdHeadServingCheckpoint {
 }
 
 impl SpdHeadTopology {
+    pub fn terminal_hidden_hf_index(&self) -> Option<u32> {
+        self.stage_layer_boundaries
+            .as_ref()
+            .and_then(|boundaries| boundaries.last().copied())
+    }
+
     fn validate(&self) -> Result<()> {
         if self.hidden_size == 0 {
             bail!("SPD head hidden_size must be greater than zero");

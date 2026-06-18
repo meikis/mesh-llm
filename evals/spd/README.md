@@ -28,7 +28,7 @@ Rust.
   time.
 - `skippy-runtime` can read GGUF `token_embd.weight` rows directly for the
   SPD hidden-state-index `0` embedding tap on the current Qwen3.5-4B proof
-  model.
+  model, including Q8_0 rows used by the Qwen3-8B diagnostics.
 - `skippy-runtime` can also read the SPD h0 embedding tap from selected Skippy
   layer-package parts, including quantized Q4_K and Q6_K embeddings, so
   package-backed stage-0 SPD replay no longer has to open an invalid `0..0`
@@ -1625,6 +1625,69 @@ baseline/SPD content, proposed `3`, accepted `0`, rejected `3`, and recorded
 correctness for the two-stage shape; it is not speed evidence and not a quality
 claim for the tiny debug sidecar.
 
+2026-06-18 Qwen3-8B S2/23 checkpoint: a topology-matched
+`Qwen/Qwen3-8B` sidecar was trained locally with `num_stages=2` and
+`stage_layer_boundaries=23,36`, exported to BF16 safetensors, and passed Rust
+fixture parity. Reference eval over the same GSM8K rows used by the product
+prompt file reported nonzero acceptance, but release `spd-openai-smoke` on the
+GGUF request path did not. The initial Q4/Q8 product smokes proposed from
+shallow `[1,0]` rows when HF36 was absent; this was not true to a manifest with
+`trained_with_use_deepest=true`. The runtime now treats those deepest rows as
+required: without replay fallback, the strict diagnostic report
+`/private/tmp/spd-qwen3-8b-s2-23-lr1e4-direct-q4-gsm8k-prompt2-strict-no-replay.json`
+made `0` proposals and explicitly reported missing HF36 rows instead of
+silently using shallower taps.
+
+The same strict diagnostic with `--spd-replay-fallback` proved the remaining
+gap is not just row-role routing. Q4 replay
+`/private/tmp/spd-qwen3-8b-s2-23-lr1e4-direct-q4-gsm8k-prompt2-strict-replay.json`
+used deepest `[2,0]` rows for every proposal but accepted `0 / 8`; the first
+post-target proposal was `48146` while the Python reference trace proposed the
+target token `594` at the same target position. Q8 replay
+`/private/tmp/spd-qwen3-8b-s2-23-lr1e4-direct-q8-gsm8k-prompt2-strict-replay.json`
+also used deepest rows and accepted `0 / 8`, with first post-target proposal
+`7570`. Q8 therefore does not explain the reference/product acceptance gap.
+
+`skippy-bench spd-live-tap-parity` now uses the shared runtime live-tap runner
+instead of the older benchmark-local embedding-only `0..0` stage path, so the
+Qwen3-8B Q4/Q8 checks no longer abort in native llama.cpp. It also fails closed:
+the JSON report is written first, then the command exits nonzero when the actual
+terminal-final-normed serving path diverges from the fixture. The Q8 diagnostic
+`/private/tmp/spd-qwen3-8b-s2-23-lr1e4-live-tap-q8-gamma-diagnostic-v2.json`
+shows the raw terminal h36 mismatch is a semantic pre-final-norm vs
+post-final-norm mismatch: raw h36 has `max_abs=121.346748`, mean abs
+`5.174249`, and cosine `0.883039` against the fixture, while applying Qwen final
+RMSNorm with GGUF `output_norm.weight` moves it to `max_abs=0.654507`, mean abs
+`0.053620`, and cosine `0.999539`. A robust inferred-gamma check on the same
+row reports cosine `0.991195` against GGUF `output_norm.weight` after skipping
+near-zero denominators. The normalized path still fails the strict gate:
+`cur_in_max_abs_diff=0.09765625`, rank-paired logit diff `0.0625` within
+tolerance, top-1 token matching the Rust fixture (`9914`), but exact top-k rank
+drift remains. Target verification rejects that first normalized proposal
+because the Q8 target greedy token is `23`, not `9914`.
+
+Current release request-path smoke on Q4 with strict deepest rows and no replay
+fallback is
+`/private/tmp/spd-qwen3-8b-q4-current-gsm8k-prompt2-inline-finaltap-v5.json`.
+It matched baseline/SPD content, recorded `0` tap return/record failures, used
+inline terminal HF36 taps (`tap_returns_by_hf_index={"36":12}` and
+`tap_records_by_hf_index={"23":13,"36":8}`), and made every proposal from
+inline deepest rows: `inline_tap_hits=7`, `replay_fallbacks=0`, row stages
+`[2,0]`, `missing_proposals=0`, and `out_of_order_proposals=0`. This closes the
+local product request-path gap for terminal HF36 delivery. The native side adds
+`SKIPPY_ACTIVATION_FLAG_FINAL_NORMED` and enables llama embeddings only for
+final filtered stages that actually reserve activation-output capacity, so
+ordinary final-stage baseline decode remains a no-op for activation return.
+
+The same report proposed `7`, accepted `1`, rejected `6`, and saved `1 / 7`
+candidate token round trips. Baseline decode was `120.9ms`; SPD decode was
+`1055.7ms`, with proposal/head work dominating (`head_total_ms=455.7ms`,
+`cur_in_ms=40.0ms`) and same-machine stage contention inflating downstream
+wait. This is mechanics evidence, not speed evidence. Also keep acceptance
+metrics honest: reference eval with `draft_top_k=4` is an oracle-style metric and
+cannot be compared directly to serving greedy top-1 verification. For speed
+work, the serving-path metric that matters for this checkpoint is `1 / 7`.
+
 Bounded local `llama-spec-bench` status for ordinary target/draft speculative
 decoding, separate from SPD:
 
@@ -1706,36 +1769,47 @@ The tap-row-to-`cur_in` projection bridge lives in
 
 ## Next Engineering Steps
 
-1. Train or fetch a topology-matched sidecar for the real two-stage product
-   split before making the next speed claim. For Qwen3.5-4B that means
+1. Do not run the Qwen3-8B S2/23 head as a speed proof yet. The terminal h36
+   semantic mismatch is understood: Skippy's terminal boundary is pre-final-norm
+   and the HF fixture/training row is post-final-norm, so serving now applies the
+   Qwen final RMSNorm before projecting unflagged terminal rows. Product inline
+   HF36 delivery now works locally without replay fallback, but the current
+   Qwen3-8B S2/23 head is still weak: the no-replay Q4 request-path smoke accepts
+   only `1 / 7` greedy proposals and is much slower than baseline on one machine.
+   The remaining blockers are sidecar quality, broader prompt acceptance, and a
+   real two-node speed gate.
+2. Train or fetch a topology-matched sidecar for each real two-stage product
+   split before making any speed claim. For Qwen3.5-4B that means
    `num_stages=2`, `stage_layer_boundaries=16,32`, and tap rows
    `0,16,32;0,16`; the current pretrained S4/L4 sidecar is intentionally
-   excluded from this test. For the Mesh-native Qwen3-8B split just observed,
-   the sidecar target is `Qwen/Qwen3-8B` with `num_stages=2` and
-   `stage_layer_boundaries=23,36` unless a manifest-driven topology constraint
-   is added first.
-2. Move from the completed one-worker CPU LAN correctness proofs, the completed
+   excluded from this test. For the Mesh-native Qwen3-8B split, the logical
+   target is `Qwen/Qwen3-8B` with `num_stages=2` and
+   `stage_layer_boundaries=23,36`, but the current local 512-row head is only a
+   debugging artifact until live GGUF request-path acceptance is useful without
+   replay fallback.
+3. Move from the completed one-worker CPU LAN correctness proofs, the completed
    two-stage Metal baseline, and the completed local package-backed SPD smoke to
    a real speed gate: Mesh-resolved package materialization on both nodes, stage
    0 plus sidecar on the coordinator, stage 1 on the worker, paired
    baseline/SPD content and timing, and no one-worker all-Metal
-   oversubscription. Do not call it a speed proof until rolling replay is back
-   to `0` missing / `0` out-of-order proposals on the measured prompt set,
-   oldest rejection drains are explained as sidecar-quality misses, and the
-   report shows useful overlap rather than same-worker stage contention.
-3. Run a larger local `spd-openai-smoke --prompt-file ...` sweep to measure
+   oversubscription. Do not call it a speed proof until terminal taps are
+   produced inline across the actual node split, rolling replay is back to `0`
+   missing / `0` out-of-order proposals on the measured prompt set, oldest
+   rejection drains are explained as sidecar-quality misses, and the report
+   shows useful overlap rather than same-worker stage contention.
+4. Run a larger local `spd-openai-smoke --prompt-file ...` sweep to measure
    acceptance distribution, rollback frequency, rolling gaps, and
    `summary.paper_pipeline_estimate` across prompt types. Report accepted
    speculative tokens/windows, estimated critical-path split-stage round trips
    saved, measured decode speedup, and the sidecar/tap/transport overhead that
    remains after those savings.
-4. Use injected downstream delay only as a bounded diagnostic while no separate
+5. Use injected downstream delay only as a bounded diagnostic while no separate
    worker is available; do not report it as distributed speedup.
-5. When another worker is available, rerun `spd-openai-smoke` with explicit
+6. When another worker is available, rerun `spd-openai-smoke` with explicit
    `--stage-hosts`, pre-materialized package directories or Mesh-resolved
    package artifacts, and ordinary split baseline/SPD pairs to test real
    wall-clock speed.
-6. Add an SPD sidecar package workflow around the Python reference trainer:
+7. Add an SPD sidecar package workflow around the Python reference trainer:
    plan logical tap topology, train, eval `L'_acc`, export safetensors/manifest,
    validate Rust parity, then publish sidecar metadata alongside Skippy model
    artifacts.

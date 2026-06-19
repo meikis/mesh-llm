@@ -760,6 +760,10 @@ Bash execute `Rust`. The planner now emits a single `printf` and the same
 resident dry run plus generated `rust_fixture_parity` group pass locally. The
 next retry should reuse the same resident-small profile and target
 package-backed rolling smoke plus upload.
+Fixed retry `meshllm/6a356b6d3093dba73ce2a5da` uses input artifact
+`job-inputs/20260619T161546Z-a6dae908/` at revision
+`f57a5053d8c1ff20ca74798dd076fcb317a6038a`; its first new gate is passing the
+parity-skip step and reaching package-backed smoke/upload.
 If the local branch is not pushed, upload a patch artifact and set
 `MESH_LLM_PATCH_PATH` so the job applies it after cloning. Remaining risk for
 the first capped job is runtime compatibility with the Qwen480 MoE config and

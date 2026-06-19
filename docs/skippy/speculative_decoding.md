@@ -195,6 +195,12 @@ as one `printf`; local validation passes for Python compile, the resident dry
 run, and the generated `rust_fixture_parity` group. The next retry should reuse
 the same profile and resume at the package-smoke/upload gate.
 
+Fixed retry `meshllm/6a356b6d3093dba73ce2a5da` was submitted with input
+artifact `job-inputs/20260619T161546Z-a6dae908/`, upload revision
+`f57a5053d8c1ff20ca74798dd076fcb317a6038a`, and the same 32/8/1 resident
+profile. Its first new gate is continuing past the parity-skip step into
+package-backed rolling smoke and artifact upload.
+
 Predigested SPD splits should be logical artifacts. A sidecar is trained for a
 canonical logical topology and tap set; Mesh may fit contiguous logical stages
 onto fewer physical nodes when hardware is scarce. That placement is only valid

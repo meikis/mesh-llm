@@ -275,6 +275,23 @@ resident 32/8/1 dry run, and
 should reuse the same resident-small profile; the first new gate is
 package-backed rolling smoke plus upload.
 
+Fixed resident-small retry submitted on 2026-06-20 local time: HF Job
+`meshllm/6a356b6d3093dba73ce2a5da`, URL
+`https://huggingface.co/jobs/meshllm/6a356b6d3093dba73ce2a5da`, using input
+artifact `job-inputs/20260619T161546Z-a6dae908/` from upload commit
+`f57a5053d8c1ff20ca74798dd076fcb317a6038a`. Patch SHA256 is
+`b432270244c258d9621f05afe1a8de455ba3d540b445d6a158e56f33f4d3bc25`;
+bootstrap SHA256 is
+`c8e2efa7ec104ec6c38d6b8584cd8851ea84692b73ff3df40dcb5fe08e79a022`; dry-run
+plan SHA256 is
+`2493c61db82bc1e0d77b684dc606256ead3bbc54e3679a6e66c5345e01bf763f`. The job is
+labeled `spd-qwen480-resident-small-fixed` and uses the same
+`TRAIN_PROMPTS=32`, `HELDOUT_PROMPTS=8`, `VERIFY_STEPS=1`,
+`STREAM_LIVE_TAP_STAGES=false`, and `JOB_TIMEOUT=2h` profile. At submission it
+was scheduling. The first new gate is passing the now-fixed
+`rust_fixture_parity` skip and reaching package-backed rolling smoke plus
+upload.
+
 If this Qwen480 lane clears the sidecar quality and package-backed smoke gates,
 the next HF validation spike should be a single-job meshlet: one HF Job starts
 the coordinator, stage servers, SPD sidecar, and OpenAI frontend as separate

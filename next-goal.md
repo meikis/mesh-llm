@@ -350,6 +350,28 @@ run, and `run_hf_spd_qualification_plan.py --groups rust_fixture_parity`. The
 first new gate is package-backed rolling smoke and upload, because capture,
 train, score, and export already worked once.
 
+Submitted fixed resident-small retry:
+
+```bash
+id=6a356b6d3093dba73ce2a5da
+url=https://huggingface.co/jobs/meshllm/6a356b6d3093dba73ce2a5da
+run_id=20260619T161546Z-a6dae908
+local_artifact_dir=/tmp/spd-qwen480-native-job-20260619T161546Z-a6dae908
+output_repo=meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8
+input_prefix=job-inputs/20260619T161546Z-a6dae908/
+upload_commit=f57a5053d8c1ff20ca74798dd076fcb317a6038a
+patch_revision=f57a5053d8c1ff20ca74798dd076fcb317a6038a
+patch_sha256=b432270244c258d9621f05afe1a8de455ba3d540b445d6a158e56f33f4d3bc25
+bootstrap_sha256=c8e2efa7ec104ec6c38d6b8584cd8851ea84692b73ff3df40dcb5fe08e79a022
+dry_run_plan_sha256=2493c61db82bc1e0d77b684dc606256ead3bbc54e3679a6e66c5345e01bf763f
+```
+
+The job is labeled `spd-qwen480-resident-small-fixed` and uses the same
+`TRAIN_PROMPTS=32`, `HELDOUT_PROMPTS=8`, `VERIFY_STEPS=1`,
+`STREAM_LIVE_TAP_STAGES=false`, and `JOB_TIMEOUT=2h` profile. At submission it
+was scheduling. First gate: it should replay the already-proven capture path,
+then continue past `rust_fixture_parity` into package smoke and upload.
+
 Startup attempts before the latest two-phase retry:
 
 - `meshllm/6a35304a953ed90bfb9446a8` failed in 3 seconds with exit `126`

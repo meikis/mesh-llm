@@ -398,6 +398,28 @@ and no `--stream-live-tap-stages`. The generated smoke command includes the
 600s timeouts and artifact-owned work dir, and the command graph includes
 `upload_pre_smoke` before `package_smoke`.
 
+Submitted observable resident-small retry:
+
+```bash
+id=6a3575be3093dba73ce2a692
+url=https://huggingface.co/jobs/meshllm/6a3575be3093dba73ce2a692
+run_id=20260619T165954Z-76662252
+local_artifact_dir=/tmp/spd-qwen480-native-job-20260619T165954Z-76662252
+output_repo=meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8
+input_prefix=job-inputs/20260619T165954Z-76662252/
+upload_commit=83a6631a29fcb534057d34353d9e78a2d248cbf3
+patch_revision=83a6631a29fcb534057d34353d9e78a2d248cbf3
+patch_sha256=dc33c52493b3c6bc2bcf478052e57b4700ecaaf77fe3b323d7bfcc612bf37c10
+bootstrap_sha256=c8e2efa7ec104ec6c38d6b8584cd8851ea84692b73ff3df40dcb5fe08e79a022
+dry_run_plan_sha256=d04bb5d3bbe785e7ca572dabee59c9eed1cc817e7bdeb9084fc2c199962217bf
+```
+
+This job is labeled `spd-qwen480-resident-small-observable`, uses
+`rtx-pro-6000x4`, `TRAIN_PROMPTS=32`, `HELDOUT_PROMPTS=8`, `VERIFY_STEPS=1`,
+`STREAM_LIVE_TAP_STAGES=false`, and `JOB_TIMEOUT=2h`. First gates: reach
+`upload_pre_smoke` after export, then either pass package smoke or fail with
+stage-log tails showing why the baseline OpenAI frontend did not bind.
+
 Startup attempts before the latest two-phase retry:
 
 - `meshllm/6a35304a953ed90bfb9446a8` failed in 3 seconds with exit `126`

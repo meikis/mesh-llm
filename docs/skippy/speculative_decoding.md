@@ -217,6 +217,13 @@ with smoke work under the uploaded artifact directory. The current local 32/8/1
 dry run is still native-package-first and still avoids `AutoModelForCausalLM`,
 `hf_train_eval_qwen06.py`, `spd-live-tap-parity`, and streamed tap capture.
 
+Observable retry `meshllm/6a3575be3093dba73ce2a692` is running with uploaded
+artifact `job-inputs/20260619T165954Z-76662252/` at revision
+`83a6631a29fcb534057d34353d9e78a2d248cbf3`. It keeps the same `rtx-pro-6000x4`
+32/8/1 resident profile. The new gate is not quality yet; it is whether the
+run reaches `upload_pre_smoke` after export and then either passes package
+smoke or emits useful stage-log tails for the embedded OpenAI readiness failure.
+
 Predigested SPD splits should be logical artifacts. A sidecar is trained for a
 canonical logical topology and tap set; Mesh may fit contiguous logical stages
 onto fewer physical nodes when hardware is scarce. That placement is only valid

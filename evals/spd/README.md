@@ -318,6 +318,21 @@ native-package-first: `rtx-pro-6000x4`, timeout `7200s`, max cost
 `spd-live-tap-parity`, no `--stream-live-tap-stages`, and command groups ordered
 with `upload_pre_smoke` before `package_smoke`.
 
+Observable resident-small retry submitted on 2026-06-20 local time: HF Job
+`meshllm/6a3575be3093dba73ce2a692`, URL
+`https://huggingface.co/jobs/meshllm/6a3575be3093dba73ce2a692`, using input
+artifact `job-inputs/20260619T165954Z-76662252/` from upload commit
+`83a6631a29fcb534057d34353d9e78a2d248cbf3`. Patch SHA256 is
+`dc33c52493b3c6bc2bcf478052e57b4700ecaaf77fe3b323d7bfcc612bf37c10`;
+bootstrap SHA256 is
+`c8e2efa7ec104ec6c38d6b8584cd8851ea84692b73ff3df40dcb5fe08e79a022`; dry-run
+plan SHA256 is
+`d04bb5d3bbe785e7ca572dabee59c9eed1cc817e7bdeb9084fc2c199962217bf`. The job is
+labeled `spd-qwen480-resident-small-observable` and uses the same 32/8/1
+resident profile on `rtx-pro-6000x4` with `JOB_TIMEOUT=2h`. Its first new gates
+are pre-smoke artifact upload, then package smoke with longer readiness/request
+timeouts and stage-log tails on failure.
+
 If this Qwen480 lane clears the sidecar quality and package-backed smoke gates,
 the next HF validation spike should be a single-job meshlet: one HF Job starts
 the coordinator, stage servers, SPD sidecar, and OpenAI frontend as separate

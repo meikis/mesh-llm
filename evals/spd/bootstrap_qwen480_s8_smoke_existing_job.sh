@@ -10,14 +10,15 @@ MESH_REF="${MESH_REF:-codex/skippy-spd-proof}"
 WORK_DIR="${WORK_DIR:-/workspace/spd-qualification}"
 BOOTSTRAP_DIR="${BOOTSTRAP_DIR:-/workspace/spd-bootstrap}"
 OUTPUT_REPO="${OUTPUT_REPO:-meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8}"
-JOB_TIMEOUT="${JOB_TIMEOUT:-4.5h}"
-TRAIN_PROMPTS="${TRAIN_PROMPTS:-512}"
-HELDOUT_PROMPTS="${HELDOUT_PROMPTS:-64}"
-VERIFY_STEPS="${VERIFY_STEPS:-4}"
-STREAM_LIVE_TAP_STAGES="${STREAM_LIVE_TAP_STAGES:-false}"
-SMOKE_STAGE_BACKEND_DEVICES="${SMOKE_STAGE_BACKEND_DEVICES:-}"
-export PATCH_REPO PATCH_REVISION PATCH_PATH_IN_REPO MESH_REF WORK_DIR BOOTSTRAP_DIR OUTPUT_REPO JOB_TIMEOUT
-export TRAIN_PROMPTS HELDOUT_PROMPTS VERIFY_STEPS STREAM_LIVE_TAP_STAGES SMOKE_STAGE_BACKEND_DEVICES
+ARTIFACT_REPO="${ARTIFACT_REPO:-$OUTPUT_REPO}"
+ARTIFACT_REVISION="${ARTIFACT_REVISION:-main}"
+ARTIFACT_RUN_PATH="${ARTIFACT_RUN_PATH:-runs/native-package-fresh}"
+JOB_TIMEOUT="${JOB_TIMEOUT:-1.5h}"
+HELDOUT_PROMPTS="${HELDOUT_PROMPTS:-8}"
+SMOKE_STAGE_BACKEND_DEVICES="${SMOKE_STAGE_BACKEND_DEVICES:-CPU,CUDA0,CPU,CUDA1,CPU,CUDA2,CPU,CUDA3}"
+export PATCH_REPO PATCH_REVISION PATCH_PATH_IN_REPO MESH_REF WORK_DIR BOOTSTRAP_DIR OUTPUT_REPO
+export ARTIFACT_REPO ARTIFACT_REVISION ARTIFACT_RUN_PATH JOB_TIMEOUT HELDOUT_PROMPTS
+export SMOKE_STAGE_BACKEND_DEVICES
 
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates git python3-pip
@@ -48,14 +49,6 @@ export MESH_LLM_PATCH_PATH="$BOOTSTRAP_DIR/mesh-llm.patch"
 git apply "$MESH_LLM_PATCH_PATH"
 git status --short
 
-EXTRA_PLANNER_ARGS=()
-if [[ "$STREAM_LIVE_TAP_STAGES" == "true" ]]; then
-  EXTRA_PLANNER_ARGS+=(--stream-live-tap-stages)
-fi
-if [[ -n "$SMOKE_STAGE_BACKEND_DEVICES" ]]; then
-  EXTRA_PLANNER_ARGS+=(--smoke-stage-backend-devices "$SMOKE_STAGE_BACKEND_DEVICES")
-fi
-
 python3 evals/spd/plan_hf_spd_qualification.py \
   --base-model Qwen/Qwen3-Coder-480B-A35B-Instruct \
   --package-ref meshllm/Qwen3-Coder-480B-A35B-Instruct-UD-Q4_K_XL-layers \
@@ -68,10 +61,10 @@ python3 evals/spd/plan_hf_spd_qualification.py \
   --vocab-size 151936 \
   --dataset HuggingFaceH4/ultrachat_200k \
   --dataset-split train_sft \
-  --train-prompts "$TRAIN_PROMPTS" \
+  --train-prompts 32 \
   --heldout-prompts "$HELDOUT_PROMPTS" \
   --max-prompt-tokens 480 \
-  --verify-steps "$VERIFY_STEPS" \
+  --verify-steps 1 \
   --ctx-size 1024 \
   --physical-node-count 4 \
   --logical-stage-ms 40 \
@@ -82,10 +75,54 @@ python3 evals/spd/plan_hf_spd_qualification.py \
   --mesh-llm-ref "$MESH_REF" \
   --output-repo "$OUTPUT_REPO" \
   --work-dir "$WORK_DIR" \
+  --smoke-stage-backend-devices "$SMOKE_STAGE_BACKEND_DEVICES" \
   --out "$WORK_DIR/native-package-fresh-plan.json" \
-  --json \
-  "${EXTRA_PLANNER_ARGS[@]}"
+  --json
 
 python3 evals/spd/run_hf_spd_qualification_plan.py \
   --plan "$WORK_DIR/native-package-fresh-plan.json" \
-  --script-out "$WORK_DIR/native-package-fresh-plan.sh"
+  --groups setup,write_physical_stage_ms,build_prompts \
+  --script-out "$WORK_DIR/native-package-fresh-setup-plan.sh"
+
+python3 - <<'PY'
+import os
+import shutil
+from pathlib import Path
+from huggingface_hub import snapshot_download
+
+work_dir = Path(os.environ["WORK_DIR"])
+artifact_dir = work_dir / "artifact"
+download_dir = work_dir / "existing-artifact"
+run_path = os.environ["ARTIFACT_RUN_PATH"].strip("/")
+snapshot_download(
+    repo_id=os.environ["ARTIFACT_REPO"],
+    repo_type="model",
+    revision=os.environ.get("ARTIFACT_REVISION", "main"),
+    allow_patterns=[run_path + "/*"],
+    local_dir=download_dir,
+)
+source = download_dir / run_path
+if not source.is_dir():
+    raise SystemExit(f"artifact run path not found after download: {source}")
+artifact_dir.mkdir(parents=True, exist_ok=True)
+for item in source.iterdir():
+    destination = artifact_dir / item.name
+    if item.is_dir():
+        shutil.copytree(item, destination, dirs_exist_ok=True)
+    else:
+        shutil.copy2(item, destination)
+required = [
+    "skippy-spd-head.json",
+    "spd-head.safetensors",
+    "spd-serving-fixture.safetensors",
+]
+missing = [name for name in required if not (artifact_dir / name).is_file()]
+if missing:
+    raise SystemExit(f"hydrated artifact missing required files: {missing}")
+print(f"hydrated {source} into {artifact_dir}")
+PY
+
+python3 evals/spd/run_hf_spd_qualification_plan.py \
+  --plan "$WORK_DIR/native-package-fresh-plan.json" \
+  --groups package_smoke,latency_simulation,upload \
+  --script-out "$WORK_DIR/native-package-fresh-smoke-plan.sh"

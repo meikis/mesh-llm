@@ -1583,7 +1583,23 @@ fn validate_args(args: &SpdOpenAiSmokeArgs) -> Result<()> {
     if !args.run_baseline && !args.run_spd {
         bail!("at least one of --run-baseline or --run-spd must be enabled");
     }
-    stage_ranges(&args.splits, args.layer_end)?;
+    let stage_ranges = stage_ranges(&args.splits, args.layer_end)?;
+    if args
+        .stage_backend_devices
+        .iter()
+        .any(|backend_device| backend_device.trim().is_empty())
+    {
+        bail!("--stage-backend-devices entries must not be empty");
+    }
+    if !args.stage_backend_devices.is_empty()
+        && args.stage_backend_devices.len() != stage_ranges.len()
+    {
+        bail!(
+            "--stage-backend-devices has {} entries but --splits produce {} stages",
+            args.stage_backend_devices.len(),
+            stage_ranges.len()
+        );
+    }
     Ok(())
 }
 

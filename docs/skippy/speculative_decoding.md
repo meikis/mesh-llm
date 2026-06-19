@@ -217,12 +217,28 @@ with smoke work under the uploaded artifact directory. The current local 32/8/1
 dry run is still native-package-first and still avoids `AutoModelForCausalLM`,
 `hf_train_eval_qwen06.py`, `spd-live-tap-parity`, and streamed tap capture.
 
-Observable retry `meshllm/6a3575be3093dba73ce2a692` is running with uploaded
-artifact `job-inputs/20260619T165954Z-76662252/` at revision
-`83a6631a29fcb534057d34353d9e78a2d248cbf3`. It keeps the same `rtx-pro-6000x4`
-32/8/1 resident profile. The new gate is not quality yet; it is whether the
-run reaches `upload_pre_smoke` after export and then either passes package
-smoke or emits useful stage-log tails for the embedded OpenAI readiness failure.
+Observable retry `meshllm/6a3575be3093dba73ce2a692` finished `ERROR` after
+`1898s`, but it reached the first durable artifact checkpoint. It completed
+release build, full `69`-file / `276G` package download, Qwen480 verifier load,
+two-phase native target/logit capture, resident tap replay, native
+train/held-out conversion, head-only train/score with `base_model_load=skipped`,
+serving export, and `upload_pre_smoke`. The uploaded serving head is
+`8,723,214,136` bytes with SHA
+`f77dbfb1f83a1c3a79446b983c7de3e77f63c22f4bacbd8ae0d92efbeef3fc75`, under
+`meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8/runs/native-package-fresh`.
+Tiny-lane held-out quality was `2 / 8` top-1 and `5 / 8` top-4, so this is not
+a sidecar-quality claim.
+
+The remaining failure is package-smoke placement. Stage logs showed stage `1`
+already resident on CUDA0, then stage `0` failed allocating a `34051.88 MiB`
+CUDA0 buffer; the other stages had started cleanly. `spd-openai-smoke` now
+supports per-stage backend placement, and the planner/bootstrap can pass a
+separate smoke map. The next capped HF step should hydrate the uploaded
+artifact and run only package smoke with
+`CPU,CUDA0,CPU,CUDA1,CPU,CUDA2,CPU,CUDA3`, plus latency simulation and upload,
+instead of repeating capture/train. The first single-job HF meshlet remains a
+follow-on only after package-backed smoke produces matched content, zero tap
+failures, and useful saved/unsaved candidate-token round-trip counts.
 
 Predigested SPD splits should be logical artifacts. A sidecar is trained for a
 canonical logical topology and tap set; Mesh may fit contiguous logical stages

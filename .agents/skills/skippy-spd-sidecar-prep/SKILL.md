@@ -760,22 +760,35 @@ Bash execute `Rust`. The planner now emits a single `printf` and the same
 resident dry run plus generated `rust_fixture_parity` group pass locally. The
 next retry should reuse the same resident-small profile and target
 package-backed rolling smoke plus upload.
-Fixed retry `meshllm/6a356b6d3093dba73ce2a5da` uses input artifact
-`job-inputs/20260619T161546Z-a6dae908/` at revision
-`f57a5053d8c1ff20ca74798dd076fcb317a6038a`; its first new gate is passing the
-parity-skip step and reaching package-backed smoke/upload.
-It passed the parity-skip step and repeated capture/train/score/export, then
-failed at package-backed smoke readiness because the baseline OpenAI frontend
-did not bind before the readiness timeout. The retry after this must preserve
-the same native-package-first 32/8/1 resident profile, but include
-`upload_pre_smoke`, longer package-smoke startup/request timeouts, and
-readiness-failure stage-log tails. This makes another smoke failure actionable
-and prevents losing the exported `8.72GB` serving head before upload.
+Fixed retry `meshllm/6a356b6d3093dba73ce2a5da` passed the parity-skip step and
+repeated capture/train/score/export, then failed at package-backed smoke
+readiness because the baseline OpenAI frontend did not bind before the
+readiness timeout. Observable retry `meshllm/6a3575be3093dba73ce2a692`
+completed the artifact-producing path and uploaded the bundle before smoke:
+train labels `31 / 32` in draft scope, held-out `8 / 8`, held-out score
+`2 / 8` top-1 and `5 / 8` top-4, serving head `8,723,214,136` bytes with SHA
+`f77dbfb1f83a1c3a79446b983c7de3e77f63c22f4bacbd8ae0d92efbeef3fc75`.
+Artifacts are in
+`meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8/runs/native-package-fresh`.
+Package smoke failed because stage `1` was already resident on CUDA0 and stage
+`0` then failed allocating a `34051.88 MiB` CUDA0 buffer. This is a smoke
+placement failure, not a capture/train/export failure.
+
+Next Qwen480 spend step: use
+`evals/spd/bootstrap_qwen480_s8_smoke_existing_job.sh` to hydrate the uploaded
+artifact, regenerate prompts, download the same package, and run only
+package-smoke, latency simulation, and upload. Default smoke map:
+`CPU,CUDA0,CPU,CUDA1,CPU,CUDA2,CPU,CUDA3`; default timeout `1.5h`, about
+`$16.50` max on `rtx-pro-6000x4`. Use
+`SMOKE_STAGE_BACKEND_DEVICES` with either bootstrap if changing the placement.
+Do not repeat capture/train unless the uploaded artifact is unusable or the
+smoke-only path proves invalid.
 If the local branch is not pushed, upload a patch artifact and set
-`MESH_LLM_PATCH_PATH` so the job applies it after cloning. Remaining risk for
-the first capped job is runtime compatibility with the Qwen480 MoE config and
-package-backed capture startup under the timeout. True Rust/Python fixture
-parity is still skipped until native parity fixture export exists.
+`MESH_LLM_PATCH_PATH` so the job applies it after cloning. Remaining risk is
+package-backed smoke placement/runtime behavior for the uploaded bundle, plus
+sidecar quality on broader held-out prompts after smoke works. True
+Rust/Python fixture parity is still skipped until native parity fixture export
+exists.
 
 Do not submit spend until the dry run prints model/package ref, dataset shard,
 prompt counts, topology, hardware flavor, timeout, output repo, and max cost.

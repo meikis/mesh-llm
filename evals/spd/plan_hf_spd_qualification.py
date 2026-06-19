@@ -140,6 +140,15 @@ def parse_args() -> argparse.Namespace:
         help="Override fitted physical stage costs for latency-simulation commands.",
     )
     parser.add_argument("--hop-ms", default="0.2,1,5,10")
+    parser.add_argument(
+        "--smoke-stage-backend-devices",
+        default="",
+        help=(
+            "Optional comma-separated backend-device map passed to "
+            "skippy-bench spd-openai-smoke. Use explicitly for memory-shaped "
+            "local HF smoke runs, e.g. CPU,CUDA0,CPU,CUDA1."
+        ),
+    )
     parser.add_argument("--out", type=Path)
     parser.add_argument("--json", action="store_true")
     return parser.parse_args()
@@ -157,6 +166,7 @@ def main() -> None:
     )
     vocab_size = resolve_vocab_size(args, package_metadata)
     boundaries = resolve_boundaries(args, layer_count)
+    validate_smoke_stage_backend_devices(args, len(boundaries))
     tap_rows = derive_hidden_tap_indices(boundaries)
     physical_groups = resolve_physical_groups(args, len(boundaries))
     physical_stage_ms = resolve_physical_stage_ms(args, physical_groups)
@@ -390,6 +400,28 @@ def derive_cuda_stage_backend_devices(
     return devices
 
 
+def parse_stage_backend_devices(value: str) -> list[str]:
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def validate_smoke_stage_backend_devices(
+    args: argparse.Namespace, stage_count: int
+) -> None:
+    devices = parse_stage_backend_devices(args.smoke_stage_backend_devices)
+    if devices and len(devices) != stage_count:
+        raise SystemExit(
+            "--smoke-stage-backend-devices has "
+            f"{len(devices)} entries but the smoke split has {stage_count} stages"
+        )
+
+
+def smoke_stage_backend_arg(args: argparse.Namespace) -> str:
+    devices = ",".join(parse_stage_backend_devices(args.smoke_stage_backend_devices))
+    if not devices:
+        return ""
+    return f"--stage-backend-devices {shell_quote(devices)} "
+
+
 def parse_float_list(value: str, label: str) -> list[float]:
     try:
         parsed = [float(part.strip()) for part in value.split(",") if part.strip()]
@@ -616,6 +648,9 @@ def build_plan(
             )
             if args.qualification_mode == "native-package-fresh"
             else [],
+            "smoke_stage_backend_devices": parse_stage_backend_devices(
+                args.smoke_stage_backend_devices
+            ),
             "capture_stream_live_tap_stages": bool(args.stream_live_tap_stages),
             "physical_stage_ms_for_latency_sim": physical_stage_ms,
             "hop_ms_scenarios": parse_float_list(args.hop_ms, "--hop-ms"),
@@ -926,6 +961,7 @@ def build_commands(
         f"--model-path {package_dir} --model-id {shell_quote(args.package_ref)} "
         f"--splits {split_arg} --layer-end {layer_end} "
         f"--ctx-size {args.ctx_size} --n-gpu-layers=-1 "
+        f"{smoke_stage_backend_arg(args)}"
         f"--activation-width {activation_width} --max-tokens 4 "
         f"--prompt-file {prompt_dir}/heldout-prompts.jsonl --prompt-limit {args.heldout_prompts} "
         "--repeat-count 1 --run-baseline true --run-spd true "
@@ -1082,6 +1118,7 @@ def build_native_package_fresh_commands(
         f"--model-path {package_dir} --model-id {shell_quote(args.package_ref)} "
         f"--splits {split_arg} --layer-end {layer_end} "
         f"--ctx-size {args.ctx_size} --n-gpu-layers=-1 "
+        f"{smoke_stage_backend_arg(args)}"
         f"--activation-width {activation_width} --max-tokens 4 "
         f"--prompt-file {prompt_dir}/heldout-prompts.jsonl --prompt-limit {args.heldout_prompts} "
         "--repeat-count 1 --run-baseline true --run-spd true "
@@ -1198,6 +1235,7 @@ def build_reference_train_commands(
         f"--model-path {package_dir} --model-id {shell_quote(args.package_ref)} "
         f"--splits {split_arg} --layer-end {layer_end} "
         f"--ctx-size {args.ctx_size} --n-gpu-layers=-1 "
+        f"{smoke_stage_backend_arg(args)}"
         f"--activation-width {activation_width} --max-tokens 4 "
         f"--prompt-file {prompt_dir}/heldout-prompts.jsonl --prompt-limit {args.heldout_prompts} "
         "--repeat-count 1 --run-baseline true --run-spd true "
@@ -1274,6 +1312,8 @@ def emit_human_summary(plan: dict[str, Any]) -> None:
     print(f"  physical fit: {fit['logical_stage_groups']} -> stage-ms {fit['physical_stage_ms_for_latency_sim']}")
     if fit.get("capture_stage_backend_devices"):
         print(f"  capture CUDA map: {fit['capture_stage_backend_devices']}")
+    if fit.get("smoke_stage_backend_devices"):
+        print(f"  smoke backend map: {fit['smoke_stage_backend_devices']}")
     print(f"  data: {plan['data']['train_prompts']} train / {plan['data']['heldout_prompts']} heldout prompts")
     print(
         "  hardware: "

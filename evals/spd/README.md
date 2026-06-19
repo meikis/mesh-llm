@@ -49,11 +49,10 @@ the old full-base product trainer/scorer.
 
 Important remaining gap: the native fresh lane exports a serving fixture, not a
 true Python/reference parity fixture. Do not claim Rust/Python fixture parity
-for Qwen480 S8 until a native parity fixture exporter exists. The first capped
-job may also expose a reference-code compatibility issue between
-`SpeculationHeadTransformer` and the Qwen3-Coder-480B MoE config; because this
-path uses AutoConfig only, that should fail early without loading the full
-model if unsupported.
+for Qwen480 S8 until a native parity fixture exporter exists. The current
+capped runs have not exposed a Qwen3-Coder-480B MoE/AutoConfig compatibility
+blocker; the immediate unproven gate is package-backed smoke placement and
+request-path behavior for the uploaded bundle.
 
 HF Jobs rates checked on 2026-06-19 put `rtx-pro-6000x4` at about `$11/hr`,
 `h200x2` at about `$10/hr`, `h200x4` at about `$20/hr`, and
@@ -332,6 +331,42 @@ labeled `spd-qwen480-resident-small-observable` and uses the same 32/8/1
 resident profile on `rtx-pro-6000x4` with `JOB_TIMEOUT=2h`. Its first new gates
 are pre-smoke artifact upload, then package smoke with longer readiness/request
 timeouts and stage-log tails on failure.
+
+Observable resident-small result: the job is `ERROR` after `1898s`, but it
+completed the artifact-producing path and preserved the sidecar before smoke.
+It repeated the native-package mechanics gates: release build, full `69`-file /
+`276G` package download, full Qwen480 verifier load/offload, two-phase native
+target/logit capture, resident tap replay, native train/held-out conversion,
+head-only train/score with `base_model_load=skipped`, serving export, and
+`upload_pre_smoke`. Train conversion had `31 / 32` labels in draft scope;
+held-out had `8 / 8`. Held-out score was `2 / 8` top-1 and `5 / 8` top-4,
+which is tiny-lane quality evidence only. The uploaded serving head is
+`8,723,214,136` bytes with SHA
+`f77dbfb1f83a1c3a79446b983c7de3e77f63c22f4bacbd8ae0d92efbeef3fc75`.
+Artifacts are under
+`meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8/runs/native-package-fresh`.
+
+Package smoke failed for a concrete placement reason, not because capture,
+training, export, or upload failed. Stage logs showed stage `1` listening on
+CUDA0, then stage `0` tried to allocate a `34051.88 MiB` CUDA0 buffer and
+failed with `cudaMalloc failed: out of memory`. Stages `1..7` had already
+started cleanly. The immediate fix is to run package smoke with an explicit
+per-stage backend map so two large logical stages are not resident on the same
+GPU during smoke. `spd-openai-smoke` now supports
+`--stage-backend-devices`, `plan_hf_spd_qualification.py` accepts
+`--smoke-stage-backend-devices`, and
+`bootstrap_qwen480_s8_native_job.sh` passes `SMOKE_STAGE_BACKEND_DEVICES`
+through to the planner for any full retry.
+
+Next spend-bearing step: use
+`evals/spd/bootstrap_qwen480_s8_smoke_existing_job.sh` to hydrate the uploaded
+`runs/native-package-fresh` artifact, regenerate the deterministic held-out
+prompt shard, download the same Qwen480 package, and run only package smoke,
+latency simulation, and upload. Default map:
+`CPU,CUDA0,CPU,CUDA1,CPU,CUDA2,CPU,CUDA3`; default timeout `1.5h`, planned max
+about `$16.50` on `rtx-pro-6000x4`. This is a mechanics/economics smoke, not a
+speed claim, and CPU-mapped stages may be slow. A full recapture/retrain retry
+is now lower priority unless the uploaded artifact proves unusable.
 
 If this Qwen480 lane clears the sidecar quality and package-backed smoke gates,
 the next HF validation spike should be a single-job meshlet: one HF Job starts

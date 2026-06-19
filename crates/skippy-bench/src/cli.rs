@@ -269,6 +269,12 @@ pub struct SpdOpenAiSmokeArgs {
     #[arg(
         long,
         value_delimiter = ',',
+        help = "Optional per-stage backend device map for local SPD OpenAI smoke, e.g. CPU,CUDA0,CPU,CUDA1."
+    )]
+    pub stage_backend_devices: Vec<String>,
+    #[arg(
+        long,
+        value_delimiter = ',',
         help = "Optional stage host placement for SPD OpenAI smoke. Use 'local' for the coordinator host; other values are passed to ssh/rsync. Hosts repeat cyclically across stages."
     )]
     pub stage_hosts: Vec<String>,
@@ -1125,6 +1131,33 @@ mod tests {
             Some("worker=/models/model.gguf")
         );
         assert!(args.rsync_model_artifacts);
+    }
+
+    #[test]
+    fn parses_spd_openai_smoke_stage_backend_devices() {
+        let cli = Cli::try_parse_from([
+            "skippy-bench",
+            "spd-openai-smoke",
+            "--manifest",
+            "skippy-spd-head.json",
+            "--fixture",
+            "spd-parity-fixture.safetensors",
+            "--model-path",
+            "model.gguf",
+            "--splits",
+            "8,16,24",
+            "--layer-end",
+            "32",
+            "--stage-backend-devices",
+            "CPU,CUDA0,CPU,CUDA1",
+        ])
+        .unwrap();
+
+        let CommandKind::SpdOpenAiSmoke(args) = cli.command else {
+            panic!("expected spd-openai-smoke subcommand");
+        };
+
+        assert_eq!(args.stage_backend_devices, ["CPU", "CUDA0", "CPU", "CUDA1"]);
     }
 
     #[test]

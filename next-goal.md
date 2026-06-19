@@ -420,6 +420,44 @@ This job is labeled `spd-qwen480-resident-small-observable`, uses
 `upload_pre_smoke` after export, then either pass package smoke or fail with
 stage-log tails showing why the baseline OpenAI frontend did not bind.
 
+Observed result: the job is `ERROR` after `1898s`, but it reached and uploaded
+the real sidecar artifact before smoke. It repeated release build, full Qwen480
+package download, verifier load, two-phase native target/logit capture,
+resident tap replay, native conversion, head-only train/score, serving export,
+and `upload_pre_smoke`. Train conversion had `31 / 32` labels in draft scope;
+held-out had `8 / 8`; held-out quality was `2 / 8` top-1 and `5 / 8` top-4.
+The uploaded `spd-head.safetensors` is `8,723,214,136` bytes with SHA
+`f77dbfb1f83a1c3a79446b983c7de3e77f63c22f4bacbd8ae0d92efbeef3fc75`.
+Artifacts are available under
+`meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8/runs/native-package-fresh`.
+
+The package smoke failure is now understood: stage `1` was already listening on
+CUDA0, then stage `0` tried to allocate a `34051.88 MiB` CUDA0 buffer and
+failed with `cudaMalloc failed: out of memory`; stages `1..7` otherwise
+started cleanly. This is a smoke placement bug. It does not invalidate the
+native capture, head-only training, export, or upload gates.
+
+Current local patch for the next run: `spd-openai-smoke` accepts
+`--stage-backend-devices`; the HF planner accepts
+`--smoke-stage-backend-devices`; `bootstrap_qwen480_s8_native_job.sh` passes
+`SMOKE_STAGE_BACKEND_DEVICES`; and
+`bootstrap_qwen480_s8_smoke_existing_job.sh` can hydrate the uploaded artifact
+and run only package smoke, latency simulation, and upload.
+
+Next immediate run should be smoke-existing, not recapture/retrain:
+
+```bash
+SMOKE_STAGE_BACKEND_DEVICES=CPU,CUDA0,CPU,CUDA1,CPU,CUDA2,CPU,CUDA3
+ARTIFACT_RUN_PATH=runs/native-package-fresh
+JOB_TIMEOUT=1.5h
+```
+
+The dry run for this shape resolves `rtx-pro-6000x4`, timeout `5400s`, planned
+max `$16.49997`, package `62` layers / width `6144`, S8 boundaries
+`8,16,24,32,40,48,55,62`, and emits a package-smoke command with the explicit
+CPU/GPU map. The selected smoke-existing command groups avoid
+`AutoModelForCausalLM`, `hf_train_eval_qwen06.py`, and the old reference path.
+
 Startup attempts before the latest two-phase retry:
 
 - `meshllm/6a35304a953ed90bfb9446a8` failed in 3 seconds with exit `126`
@@ -461,7 +499,7 @@ Startup attempts before the latest two-phase retry:
   `55..62`: CUDA3 could not allocate a `30905.58 MiB` model buffer. This is a
   live-runner memory-residency issue, not another planner/reference-path issue.
 
-Latest status check on 2026-06-19: job
+Older status check on 2026-06-19: job
 `meshllm/6a3535603093dba73ce2a264` is `ERROR` with exit code `1`. It reached
 real package download and prompt construction but did not start capture rows,
 training, scoring, export, or smoke because of the fixed capture boolean
@@ -485,13 +523,11 @@ tap-stage model residency overlap. A real cached package smoke passed against
 and matching product row byte counts:
 `/tmp/spd-two-phase-smoke-report.json`.
 
-Cost status on 2026-06-20: before the latest streamed-capture retry, the two
-serious Qwen480 jobs cost about `$7.45` combined (`1189s + 1249s` at about
-`$11/hr`). Including the earlier streamed-build failure and the shorter startup
-failures kept completed GPU spend for this lane around `$8` to `$9`; the latest
-1226-second run adds about `$3.75`, putting completed GPU spend around
-`$12` to `$13`. A new `3.5h` retry would still keep aggregate planned spend
-under the original `$50` intent.
+Cost status on 2026-06-20: the latest artifact-producing observable job ran
+`1898s`, about `$5.80` at the planned `$11/hr` rate. Including the prior
+serious GPU retries puts completed Qwen480 GPU spend roughly in the mid-to-high
+`$20s`. The next smoke-existing run is timeout-capped at `1.5h`, about
+`$16.50` max on `rtx-pro-6000x4`, and avoids repeating capture/train.
 
 Prior-job inspection commands:
 
@@ -503,30 +539,25 @@ UV_DEFAULT_INDEX=https://pypi.org/simple uvx --from huggingface_hub hf jobs logs
 Latest failed-job inspection commands:
 
 ```bash
-UV_DEFAULT_INDEX=https://pypi.org/simple uvx --from huggingface_hub hf jobs inspect meshllm/6a354a2f953ed90bfb94486f
-UV_DEFAULT_INDEX=https://pypi.org/simple uvx --from huggingface_hub hf jobs logs --tail 160 meshllm/6a354a2f953ed90bfb94486f
+UV_DEFAULT_INDEX=https://pypi.org/simple uvx --from huggingface_hub hf jobs inspect meshllm/6a3575be3093dba73ce2a692
+UV_DEFAULT_INDEX=https://pypi.org/simple uvx --from huggingface_hub hf jobs logs --tail 6400 meshllm/6a3575be3093dba73ce2a692
 ```
 
 ## Remaining Risks During Run
 
-- The first HF run may expose a reference-code compatibility issue between
-  `SpeculationHeadTransformer` and the Qwen3-Coder-480B MoE config. The
-  current scripts deliberately load AutoConfig only, so this should fail early
-  without loading the full model if unsupported.
+- Smoke-existing still has to prove that the uploaded serving bundle can drive
+  the request path with the package-backed S8 split.
 - `native-package-fresh` exports a serving fixture, not a true Python/reference
   parity fixture. Do not claim Rust/Python fixture parity for this lane yet.
-- Setup/build time runs inside the timeout cap. If the job expires before
-  useful capture, the next lane should reduce the first-run scope further or
-  use prebuilt runtime artifacts before increasing spend.
-- Resident tap capture should remove the streamed per-sample stage-open churn,
-  but it must prove that all S8 tap stages fit after the phase-1 verifier has
-  been dropped. The next resubmission must report capture timing before raising
-  row counts.
-- The two-phase fix relies on `StageModel` / `StageSession` drop returning CUDA
-  buffers before phase 2 opens resident tap stages. If CUDA allocator state or
-  resident stage memory still prevents allocation, the next fix should use a
-  process boundary between verifier capture and tap replay, restore streamed
-  capture for a much smaller row count, or move to a larger-memory lane.
+- The default smoke map uses four CPU stages to avoid GPU overcommit. This is
+  acceptable for a mechanics smoke, but it may be slow and is not a measured
+  speedup shape.
+- If smoke still fails readiness, use the uploaded `openai-smoke-work` logs to
+  distinguish stage launch, package materialization, frontend bind, and request
+  timeout failures.
+- If smoke passes, the next quality gate must broaden held-out prompts before
+  treating the sidecar as useful; the current `2 / 8` top-1 and `5 / 8` top-4
+  score is only a tiny-lane signal.
 - Because the run uses an uploaded patch artifact rather than a pushed branch,
   keep the run id, upload commit, and patch SHA with every report.
 

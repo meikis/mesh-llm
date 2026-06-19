@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{cli::SpdOpenAiSmokeArgs, support::ChildGuard};
 
@@ -325,10 +325,7 @@ fn write_stage_configs(plan: StageConfigPlan<'_>) -> Result<()> {
                 ),
             })
         });
-        let selected_device = args
-            .selected_backend_device
-            .as_ref()
-            .map(|backend_device| json!({ "backend_device": backend_device }));
+        let selected_device = selected_device_for_stage(args, index);
         let model_path = stage.remote_model_path.as_deref().map_or_else(
             || args.model_path.display().to_string(),
             ToString::to_string,
@@ -369,6 +366,15 @@ fn write_stage_configs(plan: StageConfigPlan<'_>) -> Result<()> {
         .with_context(|| format!("failed to write {}", stage.config_path.display()))?;
     }
     Ok(())
+}
+
+fn selected_device_for_stage(args: &SpdOpenAiSmokeArgs, stage_index: usize) -> Option<Value> {
+    let backend_device = if args.stage_backend_devices.is_empty() {
+        args.selected_backend_device.as_ref()
+    } else {
+        args.stage_backend_devices.get(stage_index)
+    }?;
+    Some(json!({ "backend_device": backend_device }))
 }
 
 fn stage_lane_count(args: &SpdOpenAiSmokeArgs, case: SmokeCase) -> Result<u32> {

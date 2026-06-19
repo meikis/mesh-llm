@@ -764,6 +764,13 @@ Fixed retry `meshllm/6a356b6d3093dba73ce2a5da` uses input artifact
 `job-inputs/20260619T161546Z-a6dae908/` at revision
 `f57a5053d8c1ff20ca74798dd076fcb317a6038a`; its first new gate is passing the
 parity-skip step and reaching package-backed smoke/upload.
+It passed the parity-skip step and repeated capture/train/score/export, then
+failed at package-backed smoke readiness because the baseline OpenAI frontend
+did not bind before the readiness timeout. The retry after this must preserve
+the same native-package-first 32/8/1 resident profile, but include
+`upload_pre_smoke`, longer package-smoke startup/request timeouts, and
+readiness-failure stage-log tails. This makes another smoke failure actionable
+and prevents losing the exported `8.72GB` serving head before upload.
 If the local branch is not pushed, upload a patch artifact and set
 `MESH_LLM_PATCH_PATH` so the job applies it after cloning. Remaining risk for
 the first capped job is runtime compatibility with the Qwen480 MoE config and

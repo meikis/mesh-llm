@@ -201,6 +201,22 @@ artifact `job-inputs/20260619T161546Z-a6dae908/`, upload revision
 profile. Its first new gate is continuing past the parity-skip step into
 package-backed rolling smoke and artifact upload.
 
+That fixed retry is now `ERROR` after `1383s`, but it passed the parity-skip
+gate and repeated the useful native mechanics: build, full package download,
+verifier load, two-phase native target/logit capture, resident tap replay,
+head-only train/score, and BF16 serving export. The exported head was
+`8,723,214,136` bytes with SHA
+`3fcdb93eeea5d23c4ae3df3dc39e10e70f59564a2ab20820f09aa0a7a5fe3f9d`; held-out
+quality on the tiny `8`-row lane was `2 / 8` top-1 and `5 / 8` top-4. The new
+failure is package-smoke readiness: the baseline embedded OpenAI frontend did
+not become ready and `/v1/models` was connection-refused. The next patch makes
+this failure observable and artifact-safe: `spd-openai-smoke` prints bounded
+stage-log tails on readiness failure; `native-package-fresh` uploads artifacts
+before package smoke; and Qwen480 smoke uses `600s` startup/request timeouts
+with smoke work under the uploaded artifact directory. The current local 32/8/1
+dry run is still native-package-first and still avoids `AutoModelForCausalLM`,
+`hf_train_eval_qwen06.py`, `spd-live-tap-parity`, and streamed tap capture.
+
 Predigested SPD splits should be logical artifacts. A sidecar is trained for a
 canonical logical topology and tap set; Mesh may fit contiguous logical stages
 onto fewer physical nodes when hardware is scarce. That placement is only valid

@@ -292,6 +292,32 @@ was scheduling. The first new gate is passing the now-fixed
 `rust_fixture_parity` skip and reaching package-backed rolling smoke plus
 upload.
 
+Observed fixed resident-small result: the job is `ERROR` after `1383s` running,
+but it passed the parity-skip gate and repeated the important native-package
+mechanics. It completed build, full Qwen480 package download, verifier load,
+two-phase verifier target/logit capture, resident tap replay, native
+train/held-out conversion, head-only train/score, and BF16 serving export.
+Held-out score remained tiny-lane evidence only: `2 / 8` top-1 and `5 / 8`
+top-4. The exported `spd-head.safetensors` was `8,723,214,136` bytes with SHA
+`3fcdb93eeea5d23c4ae3df3dc39e10e70f59564a2ab20820f09aa0a7a5fe3f9d`. The new
+failure was package smoke readiness: the baseline OpenAI frontend did not
+become ready and `/v1/models` returned connection refused. Since upload still
+ran after smoke, that run did not preserve the exported sidecar in the output
+repo.
+
+Local fix checkpoint after that smoke failure: `spd-openai-smoke` now stops
+stages and prints bounded stage-log tails when OpenAI readiness fails, so the
+next HF failure should show whether stage 0 was still loading, crashed, or
+failed to start the embedded frontend. The `native-package-fresh` planner now
+adds an `upload_pre_smoke` group before package smoke, runs Qwen480 smoke with
+`--startup-timeout-secs 600 --request-timeout-secs 600`, and puts smoke work
+under `/workspace/spd-qualification/artifact/openai-smoke-work` so successful
+smokes upload their stage logs. The current 32/8/1 resident dry run is still
+native-package-first: `rtx-pro-6000x4`, timeout `7200s`, max cost
+`$21.99996`, no `AutoModelForCausalLM`, no `hf_train_eval_qwen06.py`, no
+`spd-live-tap-parity`, no `--stream-live-tap-stages`, and command groups ordered
+with `upload_pre_smoke` before `package_smoke`.
+
 If this Qwen480 lane clears the sidecar quality and package-backed smoke gates,
 the next HF validation spike should be a single-job meshlet: one HF Job starts
 the coordinator, stage servers, SPD sidecar, and OpenAI frontend as separate

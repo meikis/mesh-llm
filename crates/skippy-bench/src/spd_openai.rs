@@ -17,6 +17,7 @@ use skippy_runtime::spd::{
 use crate::{cli::SpdOpenAiSmokeArgs, support::ChildGuard};
 
 mod attrs;
+mod logs;
 mod preflight;
 mod remote;
 
@@ -1691,8 +1692,21 @@ fn run_case(
         .timeout(Duration::from_secs(args.request_timeout_secs))
         .build()
         .context("failed to build HTTP client")?;
-    wait_openai_ready(&client, &openai_base_url, args.startup_timeout_secs)
-        .with_context(|| format!("{} OpenAI frontend did not become ready", case.as_str()))?;
+    if let Err(error) = wait_openai_ready(&client, &openai_base_url, args.startup_timeout_secs) {
+        let cleanup_error = finish_case_stages(&deployment, &mut stage_processes).err();
+        let mut failure = error
+            .context(format!(
+                "{} OpenAI frontend did not become ready",
+                case.as_str()
+            ))
+            .context(logs::stage_log_tail_summary(&deployment, 80));
+        if let Some(cleanup_error) = cleanup_error {
+            failure = failure.context(format!(
+                "cleanup after OpenAI readiness failure also failed: {cleanup_error:#}"
+            ));
+        }
+        return Err(failure);
+    }
 
     let request_body = json!({
         "model": args.model_id,

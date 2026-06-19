@@ -22,6 +22,7 @@ DEFAULT_GROUP_ORDER = [
     "export_serving_bundle",
     "export_and_parity",
     "rust_fixture_parity",
+    "upload_pre_smoke",
     "package_smoke",
     "latency_simulation",
     "upload",

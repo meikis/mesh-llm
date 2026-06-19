@@ -930,6 +930,8 @@ def build_commands(
         f"--prompt-file {prompt_dir}/heldout-prompts.jsonl --prompt-limit {args.heldout_prompts} "
         "--repeat-count 1 --run-baseline true --run-spd true "
         "--spd-rolling-executor --max-inflight 4 "
+        "--startup-timeout-secs 600 --request-timeout-secs 600 "
+        f"--work-dir {artifact_dir}/openai-smoke-work "
         f"--output {artifact_dir}/openai-heldout-rolling.json"
     )
     latency = (
@@ -1084,6 +1086,8 @@ def build_native_package_fresh_commands(
         f"--prompt-file {prompt_dir}/heldout-prompts.jsonl --prompt-limit {args.heldout_prompts} "
         "--repeat-count 1 --run-baseline true --run-spd true "
         "--spd-rolling-executor --max-inflight 4 "
+        "--startup-timeout-secs 600 --request-timeout-secs 600 "
+        f"--work-dir {artifact_dir}/openai-smoke-work "
         f"--output {artifact_dir}/openai-heldout-rolling.json"
     )
     latency = (
@@ -1110,6 +1114,7 @@ def build_native_package_fresh_commands(
         "rust_fixture_parity": [
             "printf '%s\\n' 'native-package-fresh exports a serving fixture only; Rust fixture parity is skipped until native fixture export exists'"
         ],
+        "upload_pre_smoke": [upload],
         "package_smoke": [smoke],
         "latency_simulation": [latency],
         "upload": [upload],

@@ -372,6 +372,32 @@ The job is labeled `spd-qwen480-resident-small-fixed` and uses the same
 was scheduling. First gate: it should replay the already-proven capture path,
 then continue past `rust_fixture_parity` into package smoke and upload.
 
+Observed fixed resident-small result: the job is `ERROR` after `1383s` running,
+but it passed the prior parity-skip failure and repeated the useful native
+mechanics gates. It again completed build, full `69`-file / `276G` package
+download, Qwen480 verifier load, two-phase verifier capture plus resident tap
+replay, native train/held-out conversion, head-only training, held-out scoring,
+and BF16 serving export. Held-out score was again `2 / 8` top-1 and `5 / 8`
+top-4. The export SHA was
+`3fcdb93eeea5d23c4ae3df3dc39e10e70f59564a2ab20820f09aa0a7a5fe3f9d`.
+The new failure is package-backed smoke readiness: `baseline OpenAI frontend
+did not become ready`, with `127.0.0.1:<port>/v1/models` returning connection
+refused. Because upload was still after smoke, the expensive sidecar artifact
+was not durably uploaded by that job.
+
+Local fix checkpoint for the next retry: `spd-openai-smoke` now collects and
+prints bounded stage-log tails after OpenAI readiness failure, the
+`native-package-fresh` plan uploads artifacts in `upload_pre_smoke` before
+package smoke, and native-package smoke now uses
+`--startup-timeout-secs 600 --request-timeout-secs 600` with
+`--work-dir /workspace/spd-qualification/artifact/openai-smoke-work`. The local
+32/8/1 dry run resolves `rtx-pro-6000x4`, timeout `7200s`, max cost
+`$21.99996`, S8 boundaries `8,16,24,32,40,48,55,62`, no
+`AutoModelForCausalLM`, no `hf_train_eval_qwen06.py`, no `spd-live-tap-parity`,
+and no `--stream-live-tap-stages`. The generated smoke command includes the
+600s timeouts and artifact-owned work dir, and the command graph includes
+`upload_pre_smoke` before `package_smoke`.
+
 Startup attempts before the latest two-phase retry:
 
 - `meshllm/6a35304a953ed90bfb9446a8` failed in 3 seconds with exit `126`

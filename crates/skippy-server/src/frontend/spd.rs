@@ -359,6 +359,8 @@ impl SpdReplayProposalSource {
                 .selected_device
                 .as_ref()
                 .map(|device| device.backend_device.clone()),
+            stage_backend_devices: Vec::new(),
+            stream_stages: false,
         })
         .context("open live SPD tap replay stages")?;
         let h0_embeddings = model_source.gguf_path().and_then(|model_path| {

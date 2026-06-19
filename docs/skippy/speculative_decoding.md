@@ -106,13 +106,27 @@ Qwen480 package snapshot (`69` files, about `276G`), and generated disjoint
 UltraChat prompt-token shards (`512` train prompts, `64` held-out prompts). It
 then failed at the first capture invocation because
 `--product-native-teacher-logits` was emitted without the required `true` value.
-Resubmitted HF Job `meshllm/6a353b9d3093dba73ce2a2bf` is now running with the
-fixed artifact `job-inputs/20260619T125208Z-22663dd2/`, pinned to upload commit
-`da3c7956783e86c3e50368ddbd32c00286f263df`; latest observed logs are still in
-generated setup after apt package install and Rust toolchain download. No run
-has captured rows, trained, exported, or smoked yet. Treat this resubmission as
-native-package capture/train/smoke qualification under a spend cap, not as a
+Resubmitted HF Job `meshllm/6a353b9d3093dba73ce2a2bf` used the fixed artifact
+`job-inputs/20260619T125208Z-22663dd2/`, pinned to upload commit
+`da3c7956783e86c3e50368ddbd32c00286f263df`. It ran for `1249` seconds, costing
+about `$3.82`, and reached actual `capture[0]` startup with the fixed
+`--product-native-teacher-logits true` command. It passed CUDA/Rust release
+builds, package download, and prompt-token generation, then failed because
+topology-only package stage `55..62` could not allocate a `30905.58 MiB` CUDA3
+model buffer. The two serious Qwen480 jobs cost about `$7.45` combined; adding
+the shorter startup failures keeps this lane under about `$8`. No run has
+captured rows, trained, exported, or smoked yet. Treat the next step as a
+live-runner memory-residency fix, not another blind resubmission and not a
 distributed speedup run.
+
+The local memory-residency fix keeps verifier semantics unchanged:
+`spd-product-corpus-capture --stream-live-tap-stages` still uses the full native
+Q4 verifier session for greedy target tokens and draft-vocab teacher logits,
+but opens live-tap stage models one at a time instead of keeping the S8 tap
+stages resident. The current Qwen480 dry run emits that flag plus the capture
+CUDA map `CUDA0,CUDA0,CUDA1,CUDA1,CUDA2,CUDA2,CUDA3,CUDA3`. The remaining risk
+is stage-open churn inside the `4.5h` HF cap, not a change to teacher argmax
+definition.
 
 Predigested SPD splits should be logical artifacts. A sidecar is trained for a
 canonical logical topology and tap set; Mesh may fit contiguous logical stages

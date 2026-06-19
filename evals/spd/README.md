@@ -123,16 +123,33 @@ next resubmission should start actual capture rows unless a runtime/model issue
 appears.
 
 Resubmission checkpoint on 2026-06-19: HF Job
-`meshllm/6a353b9d3093dba73ce2a2bf` is running with the same `rtx-pro-6000x4` /
-`4.5h` cap. It uses fixed artifact
+`meshllm/6a353b9d3093dba73ce2a2bf` used the same `rtx-pro-6000x4` / `4.5h`
+cap. It used fixed artifact
 `job-inputs/20260619T125208Z-22663dd2/` from upload commit
 `da3c7956783e86c3e50368ddbd32c00286f263df`, with patch SHA256
 `450002e81f41b6adaf72c997ecad28700e29f2faf191c7c93d1aceb06e76757f` and
 dry-run plan SHA256
 `dcce197cb092662ae7048df92f65356833fcb6d60b3c4630613942deb739f78a`. HF
-registered the pinned `PATCH_REVISION` and fixed artifact paths; latest
-observed logs are still in generated setup, after apt package install and Rust
-toolchain download.
+registered the pinned `PATCH_REVISION` and fixed artifact paths. The job ran
+for `1249` seconds, costing about `$3.82` at the planned `$11/hr` rate. It
+passed CUDA/Rust release builds, package download, prompt-token generation, and
+the fixed `--product-native-teacher-logits true` command shape, then failed at
+actual `capture[0]` startup: topology-only package stage `55..62` could not
+allocate a `30905.58 MiB` CUDA3 model buffer. The two serious Qwen480 HF jobs
+cost about `$7.45` combined; including the shorter startup failures keeps total
+GPU spend for this lane under about `$8`.
+
+Local fix checkpoint after that OOM: `spd-product-corpus-capture` now has a
+`--stream-live-tap-stages` mode. In that mode the capture path keeps the
+unchanged full native Q4 verifier session for greedy target tokens and draft
+vocab teacher logits, while live-tap replay opens one logical tap-stage model,
+captures its boundary frame, drops it, and then opens the next stage. The
+Qwen480 native dry run now emits both
+`--stage-backend-devices CUDA0,CUDA0,CUDA1,CUDA1,CUDA2,CUDA2,CUDA3,CUDA3` and
+`--stream-live-tap-stages`, plus the fixed
+`--product-native-teacher-logits true`. This should reduce peak VRAM without
+changing teacher semantics. The risk to measure on the next HF run is repeated
+stage-open churn inside the `4.5h` cap.
 
 Pass criteria: train/held-out prompt-token shards have zero overlap, native
 teacher argmax matches the quant verifier target on in-scope rows, serving

@@ -366,6 +366,21 @@ def resolve_physical_stage_ms(args: argparse.Namespace, physical_groups: list[li
     return [sum(logical_values[index] for index in group) for group in physical_groups]
 
 
+def derive_cuda_stage_backend_devices(
+    args: argparse.Namespace, logical_stages: int
+) -> list[str]:
+    if not args.physical_groups.strip() and args.physical_node_count <= 0:
+        return []
+    groups = resolve_physical_groups(args, logical_stages)
+    devices = [""] * logical_stages
+    for device_index, group in enumerate(groups):
+        for stage_index in group:
+            devices[stage_index] = f"CUDA{device_index}"
+    if any(not device for device in devices):
+        raise SystemExit(f"could not derive CUDA devices for {logical_stages} stages: {devices}")
+    return devices
+
+
 def parse_float_list(value: str, label: str) -> list[float]:
     try:
         parsed = [float(part.strip()) for part in value.split(",") if part.strip()]
@@ -587,6 +602,11 @@ def build_plan(
         "physical_fit": {
             "logical_stage_groups": physical_groups,
             "physical_stage_count": len(physical_groups),
+            "capture_stage_backend_devices": derive_cuda_stage_backend_devices(
+                args, len(boundaries)
+            )
+            if args.qualification_mode == "native-package-fresh"
+            else [],
             "physical_stage_ms_for_latency_sim": physical_stage_ms,
             "hop_ms_scenarios": parse_float_list(args.hop_ms, "--hop-ms"),
             "note": (
@@ -962,6 +982,12 @@ def build_native_package_fresh_commands(
         download_package_command(args, package_dir),
     ]
     boundaries_arg = ",".join(str(item) for item in boundaries)
+    stage_backend_devices = derive_cuda_stage_backend_devices(args, len(boundaries))
+    stage_backend_arg = (
+        f"--stage-backend-devices {','.join(stage_backend_devices)} "
+        if stage_backend_devices
+        else ""
+    )
     capture_common = (
         "target/release/skippy-bench spd-product-corpus-capture "
         f"--model-path {package_dir} "
@@ -970,7 +996,9 @@ def build_native_package_fresh_commands(
         f"--draft-vocab-size {args.draft_vocab_size} "
         f"--num-spec-layers {args.num_spec_layers} "
         f"--ctx-size {args.ctx_size} --n-gpu-layers=-1 "
-        f"--top-k {args.draft_top_k} --verify-steps {args.verify_steps} "
+        + stage_backend_arg
+        + f"--top-k {args.draft_top_k} --verify-steps {args.verify_steps} "
+        "--stream-live-tap-stages "
         "--product-native-teacher-logits true"
     )
     capture_train = (
@@ -1228,6 +1256,8 @@ def emit_human_summary(plan: dict[str, Any]) -> None:
     print(f"  topology: S{topology['num_stages']} boundaries {topology['stage_layer_boundaries']}")
     print(f"  required taps: {topology['required_hf_hidden_state_indices']}")
     print(f"  physical fit: {fit['logical_stage_groups']} -> stage-ms {fit['physical_stage_ms_for_latency_sim']}")
+    if fit.get("capture_stage_backend_devices"):
+        print(f"  capture CUDA map: {fit['capture_stage_backend_devices']}")
     print(f"  data: {plan['data']['train_prompts']} train / {plan['data']['heldout_prompts']} heldout prompts")
     print(
         "  hardware: "

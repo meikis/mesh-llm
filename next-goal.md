@@ -1,4 +1,4 @@
-# Next Goal: Resubmit Qwen3-Coder-480B S8 SPD HF Run
+# Next Goal: Resubmit Qwen3-Coder-480B S8 SPD HF Run With Streamed Capture
 
 This file is disposable. Durable evidence belongs in `evals/spd/README.md` and
 `docs/skippy/speculative_decoding.md`.
@@ -6,9 +6,9 @@ This file is disposable. Durable evidence belongs in `evals/spd/README.md` and
 ## One-Line Goal
 
 Resubmit the capped Hugging Face native-package run for a Qwen3-Coder-480B S8
-SPD sidecar after fixing the capture boolean argument, using the exact MeshLLM
-Skippy layer package for teacher capture and training only the SPD predictor
-from captured taps/logits.
+SPD sidecar after checkpointing the streamed live-tap capture fix, using the
+exact MeshLLM Skippy layer package for teacher capture and training only the
+SPD predictor from captured taps/logits.
 
 ## Immediate Target
 
@@ -136,6 +136,11 @@ The generated `spd-product-corpus-capture` command now emits
 `--product-native-teacher-logits true`, matching the native capture CLI's
 `ArgAction::Set` boolean shape. The generated HF setup no longer asks pip to
 upgrade/install `torch`; the PyTorch CUDA base image supplies it.
+The current local dry run also emits
+`--stage-backend-devices CUDA0,CUDA0,CUDA1,CUDA1,CUDA2,CUDA2,CUDA3,CUDA3` and
+`--stream-live-tap-stages` for capture. Streaming preserves the existing full
+native Q4 verifier session for teacher logits and opens only one tap-stage
+model at a time, which is the planned fix for the `55..62` CUDA3 OOM.
 The setup path now installs Rust/`just`/build prerequisites, detects the CUDA
 architecture, builds the CUDA stage ABI with `just build-runtime`, and then
 builds `target/release/skippy-bench` plus `target/release/skippy-server`.
@@ -216,6 +221,13 @@ Startup attempts before the current live job:
   first `spd-product-corpus-capture` command because the planner emitted
   `--product-native-teacher-logits` without the required `true` value. Local
   dry run now emits `--product-native-teacher-logits true`.
+- `meshllm/6a353b9d3093dba73ce2a2bf` ran for 1249 seconds and cost about
+  `$3.82` at the planned `$11/hr` rate. The command graph used the fixed
+  `--product-native-teacher-logits true` argument, built CUDA/Rust release
+  binaries, downloaded the full package, generated the `512`/`64` prompt shards,
+  and reached `capture[0]`. It failed while opening topology-only package stage
+  `55..62`: CUDA3 could not allocate a `30905.58 MiB` model buffer. This is a
+  live-runner memory-residency issue, not another planner/reference-path issue.
 
 Latest status check on 2026-06-19: job
 `meshllm/6a3535603093dba73ce2a264` is `ERROR` with exit code `1`. It reached
@@ -224,11 +236,13 @@ training, scoring, export, or smoke because of the fixed capture boolean
 argument issue.
 
 Current status check on 2026-06-19: resubmitted job
-`meshllm/6a353b9d3093dba73ce2a2bf` is `RUNNING`. HF registered
-`PATCH_REVISION=da3c7956783e86c3e50368ddbd32c00286f263df` and the fixed
-artifact paths. Latest observed logs are in generated setup after apt package
-install and Rust toolchain download; it has not reached build-runtime, package
-download, capture, training, scoring, export, or smoke yet.
+`meshllm/6a353b9d3093dba73ce2a2bf` is `ERROR` with exit code `1`. It reached
+actual capture startup and failed on CUDA OOM before writing rows, training,
+scoring, export, or smoke.
+
+Cost status on 2026-06-19: the two serious Qwen480 jobs cost about `$7.45`
+combined (`1189s + 1249s` at about `$11/hr`). Including the shorter startup
+failures keeps total GPU spend for this lane under about `$8`.
 
 Prior-job inspection commands:
 
@@ -255,6 +269,10 @@ UV_DEFAULT_INDEX=https://pypi.org/simple uvx --from huggingface_hub hf jobs logs
 - Setup/build time runs inside the `4.5h` cap. If the job expires before useful
   capture, the next lane should reduce the first-run scope or use prebuilt
   runtime artifacts before increasing spend.
+- Streamed tap capture trades peak VRAM for repeated stage opens. The next
+  resubmission must report capture timing before deciding whether the reload
+  churn fits the `$50` lane or requires a prebuilt/runtime or larger-memory
+  follow-up lane.
 - Because the run uses an uploaded patch artifact rather than a pushed branch,
   keep the run id, upload commit, and patch SHA with every report.
 

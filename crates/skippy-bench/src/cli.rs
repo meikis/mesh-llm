@@ -180,6 +180,14 @@ pub struct SpdProductCorpusCaptureArgs {
     pub n_gpu_layers: i32,
     #[arg(long)]
     pub selected_backend_device: Option<String>,
+    #[arg(long, value_delimiter = ',')]
+    pub stage_backend_devices: Vec<String>,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Open live-tap stage models one at a time during capture to reduce peak VRAM."
+    )]
+    pub stream_live_tap_stages: bool,
     #[arg(long, default_value_t = 4)]
     pub top_k: usize,
     #[arg(long, default_value_t = 4)]

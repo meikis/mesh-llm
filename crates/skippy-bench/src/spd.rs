@@ -207,6 +207,8 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
                 ctx_size: args.ctx_size,
                 n_gpu_layers: args.n_gpu_layers,
                 selected_backend_device: &args.selected_backend_device,
+                stage_backend_devices: &[],
+                stream_live_tap_stages: false,
                 top_k: args.top_k,
                 verify_steps: args.verify_steps,
                 prompt_token_file: args.prompt_token_file.as_deref(),
@@ -390,6 +392,8 @@ pub fn spd_product_corpus_capture(args: SpdProductCorpusCaptureArgs) -> Result<(
             ctx_size: args.ctx_size,
             n_gpu_layers: args.n_gpu_layers,
             selected_backend_device: &args.selected_backend_device,
+            stage_backend_devices: &args.stage_backend_devices,
+            stream_live_tap_stages: args.stream_live_tap_stages,
             top_k: args.top_k,
             verify_steps: args.verify_steps,
             prompt_token_file: Some(&args.prompt_token_file),
@@ -1055,6 +1059,8 @@ fn open_capture_live_tap_runner(
             ctx_size: args.ctx_size,
             n_gpu_layers: args.n_gpu_layers,
             selected_backend_device: args.selected_backend_device.clone(),
+            stage_backend_devices: args.stage_backend_devices.clone(),
+            stream_stages: args.stream_live_tap_stages,
         })
         .context("open topology-only SPD product capture live tap runner");
     }
@@ -1067,6 +1073,8 @@ fn open_capture_live_tap_runner(
         ctx_size: args.ctx_size,
         n_gpu_layers: args.n_gpu_layers,
         selected_backend_device: args.selected_backend_device.clone(),
+        stage_backend_devices: args.stage_backend_devices.clone(),
+        stream_stages: args.stream_live_tap_stages,
     })
     .context("open topology-only SPD product capture live tap runner")
 }
@@ -1351,6 +1359,8 @@ struct ProductActivationCorpusConfig<'a> {
     ctx_size: u32,
     n_gpu_layers: i32,
     selected_backend_device: &'a Option<String>,
+    stage_backend_devices: &'a [String],
+    stream_live_tap_stages: bool,
     top_k: usize,
     verify_steps: usize,
     prompt_token_file: Option<&'a Path>,
@@ -1434,6 +1444,16 @@ impl ProductActivationCorpusWriter {
         let single_prompt_tokens = (config.prompt_token_sets.len() == 1)
             .then(|| config.prompt_token_sets.first())
             .flatten();
+        let native_teacher_logits = config.native_teacher_logits.then(|| {
+            json!({
+                "manifest_path": "native_teacher_manifest.json",
+                "logits_path": "native_teacher_logits.f32",
+                "metadata_path": "native_teacher_rows.jsonl",
+                "summary_path": "native_teacher_summary.json",
+                "teacher_source": "native_skippy_product_verifier_current_logits",
+                "logit_scope": "draft",
+            })
+        });
         let manifest = json!({
             "schema": "skippy-spd-product-activation-corpus/v1",
             "producer": config.producer,
@@ -1445,6 +1465,8 @@ impl ProductActivationCorpusWriter {
             "ctx_size": config.ctx_size,
             "n_gpu_layers": config.n_gpu_layers,
             "selected_backend_device": config.selected_backend_device,
+            "stage_backend_devices": config.stage_backend_devices,
+            "stream_live_tap_stages": config.stream_live_tap_stages,
             "top_k": config.top_k,
             "verify_steps": config.verify_steps,
             "prompt_token_file": config.prompt_token_file.map(|path| path.display().to_string()),
@@ -1489,14 +1511,7 @@ impl ProductActivationCorpusWriter {
             "label_kind": "target_greedy_top1",
             "target_logits_available": config.native_teacher_logits,
             "paper_kl_training_ready": config.native_teacher_logits,
-            "native_teacher_logits": config.native_teacher_logits.then_some(json!({
-                "manifest_path": "native_teacher_manifest.json",
-                "logits_path": "native_teacher_logits.f32",
-                "metadata_path": "native_teacher_rows.jsonl",
-                "summary_path": "native_teacher_summary.json",
-                "teacher_source": "native_skippy_product_verifier_current_logits",
-                "logit_scope": "draft",
-            })),
+            "native_teacher_logits": native_teacher_logits,
             "notes": [
                 if config.projected_cur_in_available {
                     "rows.f32 stores live Skippy/product activations after terminal final-norm alignment and sidecar input projection."
@@ -1803,6 +1818,8 @@ fn open_live_tap_runner_with_source(
         ctx_size: args.ctx_size,
         n_gpu_layers: args.n_gpu_layers,
         selected_backend_device: args.selected_backend_device.clone(),
+        stage_backend_devices: Vec::new(),
+        stream_stages: false,
     })
     .context("open live SPD tap runner")
 }

@@ -88,6 +88,11 @@ Skippy taps.
   If the planner or script emits the native-teacher option explicitly, use
   `--product-native-teacher-logits true`; this command's Clap argument uses
   `ArgAction::Set`, unlike the older `spd-live-tap-parity` bool flag.
+  For very large package captures, prefer `--stream-live-tap-stages` plus an
+  explicit `--stage-backend-devices` map. This keeps the full native verifier
+  session as the teacher while opening only one live-tap stage model at a time;
+  do not substitute terminal-stage output logits for the full verifier unless a
+  separate parity gate proves the teacher argmax is unchanged.
 - `evals/spd/train_product_activation_head_only.py` and
   `evals/spd/score_product_activation_head_only.py` train/score a fresh SPD
   head from raw product tensors while loading AutoConfig only, not full base
@@ -697,6 +702,13 @@ S8 tap topology, `rtx-pro-6000x4`, `4.5h`, and max `$49.49991`, and the
 generated command graph has no full-base train/score path. The setup path
 installs build prerequisites, detects CUDA architecture, builds the CUDA ABI
 with `just build-runtime`, and builds release `skippy-bench` / `skippy-server`.
+The current capture plan emits
+`--stage-backend-devices CUDA0,CUDA0,CUDA1,CUDA1,CUDA2,CUDA2,CUDA3,CUDA3`,
+`--stream-live-tap-stages`, and `--product-native-teacher-logits true`. The
+streamed mode is intended to fix the `55..62` CUDA3 OOM seen after full package
+download by reducing tap-stage residency while preserving the full native Q4
+verifier for teacher tokens/logits. Measure repeated stage-open time before
+deciding whether the reload churn fits the capped lane.
 If the local branch is not pushed, upload a patch artifact and set
 `MESH_LLM_PATCH_PATH` so the job applies it after cloning. Remaining risk for
 the first capped job is runtime compatibility with the Qwen480 MoE config and

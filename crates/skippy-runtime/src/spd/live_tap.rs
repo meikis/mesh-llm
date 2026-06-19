@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
 
@@ -30,11 +33,68 @@ pub struct SpdLiveTapRunnerConfig<'a> {
     pub ctx_size: u32,
     pub n_gpu_layers: i32,
     pub selected_backend_device: Option<String>,
+    pub stage_backend_devices: Vec<String>,
+    pub stream_stages: bool,
 }
 
 pub struct SpdLiveTapRunner {
     h0: SpdLiveH0Source,
-    stages: Vec<SpdLiveStage>,
+    model_source: SpdOwnedLiveTapModelSource,
+    stage_ranges: Vec<SpdStageLayerRange>,
+    layer_end: u32,
+    hidden_size: usize,
+    vocab_size: usize,
+    ctx_size: u32,
+    n_gpu_layers: i32,
+    selected_backend_device: Option<String>,
+    stage_backend_devices: Vec<String>,
+    stages: SpdLiveStageSet,
+}
+
+enum SpdOwnedLiveTapModelSource {
+    Gguf(PathBuf),
+    LayerPackage {
+        package_ref: String,
+        model_id: String,
+        topology_id: String,
+    },
+}
+
+impl SpdOwnedLiveTapModelSource {
+    fn from_borrowed(source: &SpdLiveTapModelSource<'_>) -> Self {
+        match source {
+            SpdLiveTapModelSource::Gguf(path) => Self::Gguf((*path).to_path_buf()),
+            SpdLiveTapModelSource::LayerPackage {
+                package_ref,
+                model_id,
+                topology_id,
+            } => Self::LayerPackage {
+                package_ref: (*package_ref).to_string(),
+                model_id: (*model_id).to_string(),
+                topology_id: (*topology_id).to_string(),
+            },
+        }
+    }
+
+    fn as_borrowed(&self) -> SpdLiveTapModelSource<'_> {
+        match self {
+            Self::Gguf(path) => SpdLiveTapModelSource::Gguf(path.as_path()),
+            Self::LayerPackage {
+                package_ref,
+                model_id,
+                topology_id,
+            } => SpdLiveTapModelSource::LayerPackage {
+                package_ref,
+                model_id,
+                topology_id,
+            },
+        }
+    }
+}
+
+enum SpdLiveStageSet {
+    Resident(Vec<SpdLiveStage>),
+    Streaming,
 }
 
 enum SpdLiveH0Source {
@@ -46,7 +106,6 @@ struct SpdLiveStage {
     stage_index: u32,
     layer_start: u32,
     layer_end: u32,
-    include_output: bool,
     model: StageModel,
 }
 
@@ -69,40 +128,72 @@ pub struct SpdLiveCurInRows {
 
 impl SpdLiveTapRunner {
     pub fn open(config: SpdLiveTapRunnerConfig<'_>) -> Result<Self> {
+        validate_stage_backend_devices(&config)?;
         let h0 = open_h0_source(&config)?;
-        let stages = config
-            .stage_ranges
-            .iter()
-            .map(|range| {
-                // SPD tap replay needs the final boundary hidden state too. Target
-                // logits are verified through a separate full-model session.
-                let include_output = false;
-                let model = open_live_stage_model(
-                    &config,
-                    range.stage_index,
-                    range.layer_start,
-                    range.layer_end,
-                    include_output,
-                    false,
-                )?;
-                Ok(SpdLiveStage {
-                    stage_index: range.stage_index,
-                    layer_start: range.layer_start,
-                    layer_end: range.layer_end,
-                    include_output,
-                    model,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Self { h0, stages })
+        let stages = if config.stream_stages {
+            SpdLiveStageSet::Streaming
+        } else {
+            SpdLiveStageSet::Resident(
+                config
+                    .stage_ranges
+                    .iter()
+                    .map(|range| {
+                        let model = open_live_stage_model(
+                            &config,
+                            range.stage_index,
+                            range.layer_start,
+                            range.layer_end,
+                            false,
+                            false,
+                        )?;
+                        Ok(SpdLiveStage {
+                            stage_index: range.stage_index,
+                            layer_start: range.layer_start,
+                            layer_end: range.layer_end,
+                            model,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            )
+        };
+        Ok(Self {
+            h0,
+            model_source: SpdOwnedLiveTapModelSource::from_borrowed(&config.model_source),
+            stage_ranges: config.stage_ranges.to_vec(),
+            layer_end: config.layer_end,
+            hidden_size: config.hidden_size,
+            vocab_size: config.vocab_size,
+            ctx_size: config.ctx_size,
+            n_gpu_layers: config.n_gpu_layers,
+            selected_backend_device: config.selected_backend_device.clone(),
+            stage_backend_devices: config.stage_backend_devices.clone(),
+            stages,
+        })
     }
 
     pub fn collect_taps(&self, context_tokens: &[i32]) -> Result<BTreeMap<u32, ActivationFrame>> {
         let mut taps = BTreeMap::new();
         taps.insert(0, self.collect_h0_tap(context_tokens)?);
 
+        match &self.stages {
+            SpdLiveStageSet::Resident(stages) => {
+                self.collect_resident_stage_taps(context_tokens, stages, &mut taps)?;
+            }
+            SpdLiveStageSet::Streaming => {
+                self.collect_streaming_stage_taps(context_tokens, &mut taps)?;
+            }
+        }
+        Ok(taps)
+    }
+
+    fn collect_resident_stage_taps(
+        &self,
+        context_tokens: &[i32],
+        stages: &[SpdLiveStage],
+        taps: &mut BTreeMap<u32, ActivationFrame>,
+    ) -> Result<()> {
         let mut input = None;
-        for stage in &self.stages {
+        for stage in stages {
             let output = run_live_stage_model(
                 &stage.model,
                 stage.stage_index,
@@ -117,12 +208,67 @@ impl SpdLiveTapRunner {
                     stage.stage_index, stage.layer_start, stage.layer_end
                 )
             })?;
-            if !stage.include_output {
-                taps.insert(stage.layer_end, output.clone());
-                input = Some(output);
-            }
+            taps.insert(stage.layer_end, output.clone());
+            input = Some(output);
         }
-        Ok(taps)
+        Ok(())
+    }
+
+    fn collect_streaming_stage_taps(
+        &self,
+        context_tokens: &[i32],
+        taps: &mut BTreeMap<u32, ActivationFrame>,
+    ) -> Result<()> {
+        let config = self.stage_open_config();
+        let mut input = None;
+        for range in &self.stage_ranges {
+            let model = open_live_stage_model(
+                &config,
+                range.stage_index,
+                range.layer_start,
+                range.layer_end,
+                false,
+                false,
+            )
+            .with_context(|| {
+                format!(
+                    "open streaming SPD tap stage {} {}..{}",
+                    range.stage_index, range.layer_start, range.layer_end
+                )
+            })?;
+            let output = run_live_stage_model(
+                &model,
+                range.stage_index,
+                range.layer_start,
+                range.layer_end,
+                context_tokens,
+                input.as_ref(),
+            )
+            .with_context(|| {
+                format!(
+                    "run streaming SPD tap stage {} {}..{}",
+                    range.stage_index, range.layer_start, range.layer_end
+                )
+            })?;
+            taps.insert(range.layer_end, output.clone());
+            input = Some(output);
+        }
+        Ok(())
+    }
+
+    fn stage_open_config(&self) -> SpdLiveTapRunnerConfig<'_> {
+        SpdLiveTapRunnerConfig {
+            model_source: self.model_source.as_borrowed(),
+            stage_ranges: &self.stage_ranges,
+            layer_end: self.layer_end,
+            hidden_size: self.hidden_size,
+            vocab_size: self.vocab_size,
+            ctx_size: self.ctx_size,
+            n_gpu_layers: self.n_gpu_layers,
+            selected_backend_device: self.selected_backend_device.clone(),
+            stage_backend_devices: self.stage_backend_devices.clone(),
+            stream_stages: false,
+        }
     }
 
     pub fn collect_h0_tap(&self, context_tokens: &[i32]) -> Result<ActivationFrame> {
@@ -217,7 +363,7 @@ fn open_live_stage_model(
         n_threads: None,
         n_threads_batch: None,
         n_gpu_layers: config.n_gpu_layers,
-        selected_backend_device: config.selected_backend_device.clone(),
+        selected_backend_device: selected_backend_device_for_stage(config, stage_index)?,
         cache_type_k: GGML_TYPE_F16,
         cache_type_v: GGML_TYPE_F16,
         flash_attn_type: crate::FlashAttentionType::Auto,
@@ -248,6 +394,35 @@ fn open_live_stage_model(
             runtime_config: &runtime_config,
         }),
     }
+}
+
+fn validate_stage_backend_devices(config: &SpdLiveTapRunnerConfig<'_>) -> Result<()> {
+    if !config.stage_backend_devices.is_empty()
+        && config.stage_backend_devices.len() != config.stage_ranges.len()
+    {
+        bail!(
+            "SPD live tap stage backend device count {} must match stage count {}",
+            config.stage_backend_devices.len(),
+            config.stage_ranges.len()
+        );
+    }
+    Ok(())
+}
+
+fn selected_backend_device_for_stage(
+    config: &SpdLiveTapRunnerConfig<'_>,
+    stage_index: u32,
+) -> Result<Option<String>> {
+    if config.stage_backend_devices.is_empty() {
+        return Ok(config.selected_backend_device.clone());
+    }
+    let stage_index = usize::try_from(stage_index).context("SPD stage index exceeds usize")?;
+    config
+        .stage_backend_devices
+        .get(stage_index)
+        .cloned()
+        .with_context(|| format!("missing SPD backend device for stage {stage_index}"))
+        .map(Some)
 }
 
 fn open_h0_source(config: &SpdLiveTapRunnerConfig<'_>) -> Result<SpdLiveH0Source> {

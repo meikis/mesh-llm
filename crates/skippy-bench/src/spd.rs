@@ -12,16 +12,16 @@ use skippy_runtime::{
     ActivationFrame, GGML_TYPE_F16, RuntimeConfig, RuntimeLoadMode, StageModel,
     package::{PackageStageRequest, inspect_layer_package, select_layer_package_parts},
     spd::{
-        SpdHeadManifest, SpdLiveTapModelSource, SpdLiveTapRunner, SpdLiveTapRunnerConfig,
-        SpdQwen3FixtureTopK, SpdQwen3ForwardInput, SpdQwen3ForwardTiming, SpdQwen3Head,
-        SpdSafetensorsFile, SpdStageLayerRange, SpdTapInputProjector, plan_hidden_state_taps,
-        run_qwen3_cached_fixture_parity, run_qwen3_fixture_parity,
-        run_spd_tap_input_fixture_parity, spd_fixture_row_hf_indices,
+        SpdHeadManifest, SpdHeadTopology, SpdLiveTapModelSource, SpdLiveTapRunner,
+        SpdLiveTapRunnerConfig, SpdQwen3FixtureTopK, SpdQwen3ForwardInput, SpdQwen3ForwardTiming,
+        SpdQwen3Head, SpdSafetensorsFile, SpdStageLayerRange, SpdTapInputProjector,
+        plan_hidden_state_taps, read_gguf_output_norm_weight, run_qwen3_cached_fixture_parity,
+        run_qwen3_fixture_parity, run_spd_tap_input_fixture_parity, spd_fixture_row_hf_indices,
     },
 };
 
 use crate::{
-    cli::{SpdFixtureParityArgs, SpdLiveTapParityArgs},
+    cli::{SpdFixtureParityArgs, SpdLiveTapParityArgs, SpdProductCorpusCaptureArgs},
     spd_native_teacher::{
         NativeTeacherLogitsConfig, NativeTeacherLogitsWriter, NativeTeacherSample,
     },
@@ -198,8 +198,20 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
         Some(dir) => Some(ProductActivationCorpusWriter::create(
             ProductActivationCorpusConfig {
                 dir: dir.clone(),
-                args: &args,
-                manifest: &manifest,
+                producer: "skippy-bench spd-live-tap-parity",
+                manifest_path: Some(&args.manifest),
+                fixture_path: Some(&args.fixture),
+                model_path: &args.model_path,
+                splits: &args.splits,
+                layer_end: args.layer_end,
+                ctx_size: args.ctx_size,
+                n_gpu_layers: args.n_gpu_layers,
+                selected_backend_device: &args.selected_backend_device,
+                top_k: args.top_k,
+                verify_steps: args.verify_steps,
+                prompt_token_file: args.prompt_token_file.as_deref(),
+                topology: serde_json::to_value(&manifest.topology)
+                    .context("serialize SPD topology for product corpus")?,
                 prompt_token_sets: &verified_prompt_tokens,
                 row_count,
                 row_i_stages: &row_i_stages,
@@ -207,6 +219,7 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
                 hidden_size,
                 final_norm_weight: &final_norm_weight,
                 native_teacher_logits: args.product_native_teacher_logits,
+                projected_cur_in_available: true,
             },
         )?),
         None => None,
@@ -215,8 +228,9 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
         (Some(dir), true) => Some(NativeTeacherLogitsWriter::create(
             NativeTeacherLogitsConfig {
                 dir: dir.clone(),
-                manifest: &manifest,
+                draft_token_ids: draft_token_ids_from_manifest(&manifest)?,
                 top_k: args.top_k,
+                producer: "skippy-bench spd-live-tap-parity",
             },
         )?),
         _ => None,
@@ -330,9 +344,146 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
     terminal_normed_parity_gate.ensure_passed()
 }
 
+pub fn spd_product_corpus_capture(args: SpdProductCorpusCaptureArgs) -> Result<()> {
+    if args.verify_steps == 0 {
+        bail!("--verify-steps must be greater than zero");
+    }
+    if args.hidden_size == 0 {
+        bail!("--hidden-size must be greater than zero");
+    }
+    if args.vocab_size == 0 {
+        bail!("--vocab-size must be greater than zero");
+    }
+    if args.draft_vocab_size == 0 || args.draft_vocab_size > args.vocab_size {
+        bail!(
+            "--draft-vocab-size {} must be in 1..={}",
+            args.draft_vocab_size,
+            args.vocab_size
+        );
+    }
+    let boundaries = capture_stage_boundaries(&args)?;
+    let row_hf_indices = derive_spd_topology_row_hf_indices(&boundaries);
+    let row_i_stages = derive_spd_topology_row_stage_ids(row_hf_indices.len())?;
+    let topology = capture_topology(&args, &boundaries, &row_hf_indices)?;
+    let ranges = capture_stage_ranges(&args)?;
+    let tap_plan = plan_hidden_state_taps(&topology, &ranges)?;
+    if tap_plan.requires_internal_taps() {
+        bail!(
+            "topology-only SPD capture requires boundary-aligned splits; missing hidden states {:?}",
+            tap_plan.boundary_only_missing_hf_indices
+        );
+    }
+    let prompt_token_sets = prompt_token_sets_from_file(&args.prompt_token_file)?;
+    let final_norm_weight = read_capture_final_norm_weight(&args)?;
+    let draft_token_ids = capture_draft_token_ids(&args)?;
+    let live_runner = open_capture_live_tap_runner(&args, &ranges)?;
+    let target_model = open_capture_full_target_model(&args)?;
+    let mut product_corpus =
+        ProductActivationCorpusWriter::create(ProductActivationCorpusConfig {
+            dir: args.product_corpus_dir.clone(),
+            producer: "skippy-bench spd-product-corpus-capture",
+            manifest_path: None,
+            fixture_path: None,
+            model_path: &args.model_path,
+            splits: &args.splits,
+            layer_end: args.layer_end,
+            ctx_size: args.ctx_size,
+            n_gpu_layers: args.n_gpu_layers,
+            selected_backend_device: &args.selected_backend_device,
+            top_k: args.top_k,
+            verify_steps: args.verify_steps,
+            prompt_token_file: Some(&args.prompt_token_file),
+            topology: serde_json::to_value(&topology)
+                .context("serialize topology-only SPD capture topology")?,
+            prompt_token_sets: &prompt_token_sets,
+            row_count: row_hf_indices.len(),
+            row_i_stages: &row_i_stages,
+            row_hf_indices: &row_hf_indices,
+            hidden_size: args.hidden_size,
+            final_norm_weight: &final_norm_weight,
+            native_teacher_logits: args.product_native_teacher_logits,
+            projected_cur_in_available: false,
+        })?;
+    let mut native_teacher = args
+        .product_native_teacher_logits
+        .then(|| {
+            NativeTeacherLogitsWriter::create(NativeTeacherLogitsConfig {
+                dir: args.product_corpus_dir.clone(),
+                draft_token_ids: draft_token_ids.clone(),
+                top_k: args.top_k,
+                producer: "skippy-bench spd-product-corpus-capture",
+            })
+        })
+        .transpose()?;
+    let mut reports = Vec::with_capacity(prompt_token_sets.len());
+    for (prompt_index, prompt_tokens) in prompt_token_sets.iter().enumerate() {
+        reports.push(capture_product_generation(
+            &args,
+            &live_runner,
+            ProductCaptureInputs {
+                prompt_index,
+                prompt_tokens,
+                target_model: &target_model,
+                row_i_stages: &row_i_stages,
+                row_hf_indices: &row_hf_indices,
+                final_norm_weight: &final_norm_weight,
+                row_count: row_hf_indices.len(),
+                hidden_size: args.hidden_size,
+            },
+            &mut product_corpus,
+            native_teacher.as_mut(),
+        )?);
+    }
+    let product_corpus_report = product_corpus.finish()?;
+    let native_teacher_report = native_teacher
+        .as_mut()
+        .map(NativeTeacherLogitsWriter::finish)
+        .transpose()?;
+    let report = json!({
+        "mode": "spd-product-corpus-capture",
+        "model_path": args.model_path,
+        "splits": args.splits,
+        "layer_end": args.layer_end,
+        "hidden_size": args.hidden_size,
+        "vocab_size": args.vocab_size,
+        "draft_vocab_size": args.draft_vocab_size,
+        "prompt_token_file": args.prompt_token_file,
+        "prompt_count": prompt_token_sets.len(),
+        "topology": topology,
+        "tap_plan": {
+            "required_hf_indices": tap_plan.required_hf_indices,
+            "stage_boundary_hf_indices": tap_plan.stage_boundary_hf_indices,
+            "boundary_only": tap_plan.can_use_stage_boundaries_only(),
+        },
+        "base_model_load": "skipped",
+        "reference_train": "skipped",
+        "product_activation_corpus": product_corpus_report,
+        "native_teacher_logits": native_teacher_report,
+        "captures": reports,
+    });
+    let json = serde_json::to_vec_pretty(&report)?;
+    if let Some(output) = args.output {
+        fs::write(&output, &json)
+            .with_context(|| format!("failed to write {}", output.display()))?;
+    }
+    println!("{}", String::from_utf8(json)?);
+    Ok(())
+}
+
 struct VerifiedGenerationReport {
     first_step: Option<serde_json::Value>,
     report: serde_json::Value,
+}
+
+struct ProductCaptureInputs<'a> {
+    prompt_index: usize,
+    prompt_tokens: &'a [i32],
+    target_model: &'a StageModel,
+    row_i_stages: &'a [i64],
+    row_hf_indices: &'a [Vec<u32>],
+    final_norm_weight: &'a [f32],
+    row_count: usize,
+    hidden_size: usize,
 }
 
 struct LiveTapParityGate {
@@ -631,6 +782,135 @@ fn run_verified_generation(
     Ok(VerifiedGenerationReport { first_step, report })
 }
 
+fn capture_product_generation(
+    args: &SpdProductCorpusCaptureArgs,
+    live_runner: &SpdLiveTapRunner,
+    inputs: ProductCaptureInputs<'_>,
+    product_corpus: &mut ProductActivationCorpusWriter,
+    mut native_teacher: Option<&mut NativeTeacherLogitsWriter>,
+) -> Result<serde_json::Value> {
+    if inputs.prompt_tokens.len() < inputs.row_count {
+        bail!(
+            "SPD product capture prompt length {} is shorter than row count {}",
+            inputs.prompt_tokens.len(),
+            inputs.row_count
+        );
+    }
+    let prefix = inputs
+        .prompt_tokens
+        .get(..inputs.prompt_tokens.len().saturating_sub(1))
+        .context("failed to split product-capture prompt prefix")?;
+    let mut target_session = inputs
+        .target_model
+        .create_session()
+        .context("create product capture target session")?;
+    prefill_target_prefix(&mut target_session, prefix)?;
+    let mut context_tokens = inputs.prompt_tokens.to_vec();
+    let zero_projected_cur_in = vec![0.0_f32; inputs.row_count * inputs.hidden_size];
+    let empty_topk = SpdQwen3FixtureTopK {
+        draft_indices: Vec::new(),
+        token_ids: Vec::new(),
+        logits: Vec::new(),
+    };
+    let total_timer = Instant::now();
+    let mut steps = Vec::with_capacity(args.verify_steps);
+    for step_index in 0..args.verify_steps {
+        let step_timer = Instant::now();
+        let current = *context_tokens
+            .last()
+            .context("product capture context is empty")?;
+        let row_positions = sliding_row_positions(context_tokens.len(), inputs.row_count)?;
+        let tap_timer = Instant::now();
+        let taps = live_runner.collect_taps(&context_tokens)?;
+        let tap_ms = elapsed_ms(tap_timer);
+        let assemble_timer = Instant::now();
+        let raw_tap_concat = assemble_raw_live_tap_concat_for_positions(
+            &taps,
+            DynamicLiveRowInputs {
+                row_positions: &row_positions,
+                row_i_stages: inputs.row_i_stages,
+                row_hf_indices: inputs.row_hf_indices,
+                final_norm_weight: inputs.final_norm_weight,
+                layer_end: args.layer_end,
+                hidden_size: inputs.hidden_size,
+            },
+        )?;
+        let assemble_ms = elapsed_ms(assemble_timer);
+        let decode_timer = Instant::now();
+        let target_token = target_session
+            .decode_step(current)
+            .context("target greedy decode failed during product capture")?;
+        let decode_ms = elapsed_ms(decode_timer);
+        let native_teacher_logits = match native_teacher.as_deref() {
+            Some(writer) => Some(
+                target_session
+                    .copy_current_logits_for_tokens(writer.draft_token_ids())
+                    .context("copy native target logits for topology-only SPD draft vocabulary")?,
+            ),
+            None => None,
+        };
+        product_corpus.write_step(ProductActivationSample {
+            prompt_index: inputs.prompt_index,
+            step_index,
+            context_tokens: &context_tokens,
+            row_positions: &row_positions,
+            row_stage_ids: inputs.row_i_stages,
+            row_hf_indices: inputs.row_hf_indices,
+            query_row_index: inputs.row_count.saturating_sub(1),
+            target_position: context_tokens.len(),
+            cur_in: &zero_projected_cur_in,
+            raw_tap_concat: &raw_tap_concat,
+            current_token: current,
+            proposal_topk: &empty_topk,
+            target_token,
+            accepted: false,
+            committed_token: target_token,
+            baseline_greedy_token: target_token,
+        })?;
+        if let (Some(writer), Some(logits)) = (
+            native_teacher.as_deref_mut(),
+            native_teacher_logits.as_deref(),
+        ) {
+            writer.write_step(NativeTeacherSample {
+                prompt_index: inputs.prompt_index,
+                step_index,
+                target_position: context_tokens.len(),
+                query_row_index: inputs.row_count.saturating_sub(1),
+                query_position: row_positions[inputs.row_count.saturating_sub(1)],
+                target_token,
+                logits,
+            })?;
+        }
+        context_tokens.push(target_token);
+        steps.push(json!({
+            "step_index": step_index,
+            "context_token_count_before": context_tokens.len() - 1,
+            "current_token": current,
+            "target_token": target_token,
+            "committed_tokens": [target_token],
+            "row_positions": row_positions,
+            "row_stage_ids": inputs.row_i_stages,
+            "proposal_source": "none_topology_only_capture",
+            "timing_ms": {
+                "tap_replay": tap_ms,
+                "assemble_raw_tap_concat": assemble_ms,
+                "target_greedy_decode": decode_ms,
+                "total": elapsed_ms(step_timer),
+            },
+        }));
+    }
+    Ok(json!({
+        "prompt_index": inputs.prompt_index,
+        "prompt_token_count": inputs.prompt_tokens.len(),
+        "steps_requested": args.verify_steps,
+        "steps_completed": steps.len(),
+        "generated_tokens": context_tokens[inputs.prompt_tokens.len()..].to_vec(),
+        "proposal_source": "none_topology_only_capture",
+        "total_elapsed_ms": elapsed_ms(total_timer),
+        "steps": steps,
+    }))
+}
+
 fn qwen_forward_timing_report(timing: &SpdQwen3ForwardTiming) -> serde_json::Value {
     json!({
         "fixed_stage_projection": timing.fixed_stage_projection_ms,
@@ -694,6 +974,103 @@ fn open_full_target_model(args: &SpdLiveTapParityArgs) -> Result<StageModel> {
     })
 }
 
+fn open_capture_full_target_model(args: &SpdProductCorpusCaptureArgs) -> Result<StageModel> {
+    let config = RuntimeConfig {
+        stage_index: 0,
+        layer_start: 0,
+        layer_end: args.layer_end,
+        ctx_size: args.ctx_size,
+        lane_count: 1,
+        n_batch: None,
+        n_ubatch: None,
+        n_threads: None,
+        n_threads_batch: None,
+        n_gpu_layers: args.n_gpu_layers,
+        selected_backend_device: args.selected_backend_device.clone(),
+        cache_type_k: GGML_TYPE_F16,
+        cache_type_v: GGML_TYPE_F16,
+        flash_attn_type: skippy_runtime::FlashAttentionType::Auto,
+        load_mode: live_tap_load_mode(&args.model_path),
+        projector_path: None,
+        include_embeddings: true,
+        include_output: true,
+        filter_tensors_on_load: false,
+    };
+    if live_tap_model_path_is_layer_package(&args.model_path) {
+        let package_ref = args.model_path.to_string_lossy().to_string();
+        let package_info = inspect_layer_package(&package_ref).with_context(|| {
+            format!(
+                "inspect SPD product capture package {}",
+                args.model_path.display()
+            )
+        })?;
+        let parts = select_layer_package_parts(&PackageStageRequest {
+            model_id: package_info.model_id,
+            topology_id: "spd-product-corpus-capture".to_string(),
+            package_ref,
+            stage_id: "spd-product-capture-target".to_string(),
+            layer_start: 0,
+            layer_end: args.layer_end,
+            include_embeddings: true,
+            include_output: true,
+        })
+        .context("select SPD product capture full-target package parts")?;
+        return StageModel::open_from_parts(&parts.absolute_paths, &config).with_context(|| {
+            format!(
+                "open full target layer package {} for SPD product capture",
+                args.model_path.display()
+            )
+        });
+    }
+    StageModel::open(&args.model_path, &config).with_context(|| {
+        format!(
+            "open full target model {} for SPD product capture",
+            args.model_path.display()
+        )
+    })
+}
+
+fn open_capture_live_tap_runner(
+    args: &SpdProductCorpusCaptureArgs,
+    ranges: &[SpdStageLayerRange],
+) -> Result<SpdLiveTapRunner> {
+    if live_tap_model_path_is_layer_package(&args.model_path) {
+        let package_ref = args.model_path.to_string_lossy().to_string();
+        let package_info = inspect_layer_package(&package_ref).with_context(|| {
+            format!(
+                "inspect SPD product capture package {}",
+                args.model_path.display()
+            )
+        })?;
+        return SpdLiveTapRunner::open(SpdLiveTapRunnerConfig {
+            model_source: SpdLiveTapModelSource::LayerPackage {
+                package_ref: &package_ref,
+                model_id: &package_info.model_id,
+                topology_id: "spd-product-corpus-capture",
+            },
+            stage_ranges: ranges,
+            layer_end: args.layer_end,
+            hidden_size: args.hidden_size,
+            vocab_size: args.vocab_size,
+            ctx_size: args.ctx_size,
+            n_gpu_layers: args.n_gpu_layers,
+            selected_backend_device: args.selected_backend_device.clone(),
+        })
+        .context("open topology-only SPD product capture live tap runner");
+    }
+    SpdLiveTapRunner::open(SpdLiveTapRunnerConfig {
+        model_source: SpdLiveTapModelSource::Gguf(&args.model_path),
+        stage_ranges: ranges,
+        layer_end: args.layer_end,
+        hidden_size: args.hidden_size,
+        vocab_size: args.vocab_size,
+        ctx_size: args.ctx_size,
+        n_gpu_layers: args.n_gpu_layers,
+        selected_backend_device: args.selected_backend_device.clone(),
+    })
+    .context("open topology-only SPD product capture live tap runner")
+}
+
 fn prefill_target_prefix(
     session: &mut skippy_runtime::StageSession,
     prefix_tokens: &[i32],
@@ -713,6 +1090,10 @@ fn verified_prompt_token_sets(
     let Some(path) = &args.prompt_token_file else {
         return Ok(vec![fixture_prompt_tokens.to_vec()]);
     };
+    prompt_token_sets_from_file(path)
+}
+
+fn prompt_token_sets_from_file(path: &Path) -> Result<Vec<Vec<i32>>> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("read SPD prompt token file {}", path.display()))?;
     let mut prompts = Vec::new();
@@ -737,6 +1118,180 @@ fn verified_prompt_token_sets(
         );
     }
     Ok(prompts)
+}
+
+fn capture_stage_boundaries(args: &SpdProductCorpusCaptureArgs) -> Result<Vec<u32>> {
+    if args.layer_end == 0 {
+        bail!("--layer-end must be greater than zero");
+    }
+    let mut boundaries = args.splits.clone();
+    boundaries.push(args.layer_end);
+    let mut previous = 0;
+    for boundary in &boundaries {
+        if *boundary <= previous {
+            bail!("capture stage boundaries must be strictly increasing: {boundaries:?}");
+        }
+        previous = *boundary;
+    }
+    Ok(boundaries)
+}
+
+fn capture_stage_ranges(args: &SpdProductCorpusCaptureArgs) -> Result<Vec<SpdStageLayerRange>> {
+    let mut bounds = Vec::with_capacity(args.splits.len() + 2);
+    bounds.push(0);
+    bounds.extend(args.splits.iter().copied());
+    bounds.push(args.layer_end);
+    for pair in bounds.windows(2) {
+        if pair[0] >= pair[1] {
+            bail!("--splits must partition 0..layer-end in strictly ascending order");
+        }
+    }
+    Ok(bounds
+        .windows(2)
+        .enumerate()
+        .map(|(stage_index, pair)| SpdStageLayerRange::new(stage_index as u32, pair[0], pair[1]))
+        .collect())
+}
+
+fn derive_spd_topology_row_hf_indices(boundaries: &[u32]) -> Vec<Vec<u32>> {
+    (1..=boundaries.len())
+        .rev()
+        .map(|depth| {
+            let mut row = Vec::with_capacity(depth + 1);
+            row.push(0);
+            row.extend_from_slice(&boundaries[..depth]);
+            row
+        })
+        .collect()
+}
+
+fn derive_spd_topology_row_stage_ids(row_count: usize) -> Result<Vec<i64>> {
+    (1..=row_count)
+        .rev()
+        .map(|stage_id| i64::try_from(stage_id).context("SPD row stage id exceeds i64"))
+        .collect()
+}
+
+fn capture_topology(
+    args: &SpdProductCorpusCaptureArgs,
+    boundaries: &[u32],
+    row_hf_indices: &[Vec<u32>],
+) -> Result<SpdHeadTopology> {
+    let rope_theta = (args.rope_theta > 0).then_some(args.rope_theta);
+    let rotary_dim = (args.rotary_dim > 0).then_some(args.rotary_dim);
+    if rope_theta.is_some() != rotary_dim.is_some() {
+        bail!("--rope-theta and --rotary-dim must be provided together");
+    }
+    Ok(SpdHeadTopology {
+        hidden_size: u32::try_from(args.hidden_size).context("hidden_size exceeds u32")?,
+        vocab_size: u32::try_from(args.vocab_size).context("vocab_size exceeds u32")?,
+        draft_vocab_size: u32::try_from(args.draft_vocab_size)
+            .context("draft_vocab_size exceeds u32")?,
+        num_stages: u32::try_from(boundaries.len()).context("num_stages exceeds u32")?,
+        stage_layer_boundaries: Some(boundaries.to_vec()),
+        num_spec_layers: args.num_spec_layers,
+        trained_with_use_deepest: false,
+        shallow_hidden_layer_indices: row_hf_indices.to_vec(),
+        spec_init_from_base_layers: None,
+        draft_token_ids: Some(
+            capture_draft_token_ids(args)?
+                .into_iter()
+                .map(|token| u32::try_from(token).context("draft token id is negative"))
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        rope_theta,
+        rotary_dim,
+    })
+}
+
+fn capture_draft_token_ids(args: &SpdProductCorpusCaptureArgs) -> Result<Vec<i32>> {
+    if let Some(path) = &args.draft_token_ids_file {
+        let value: serde_json::Value = serde_json::from_slice(
+            &fs::read(path).with_context(|| format!("read {}", path.display()))?,
+        )
+        .with_context(|| format!("parse draft token ids JSON {}", path.display()))?;
+        let array = value
+            .as_array()
+            .context("draft token ids JSON must be an array")?;
+        let mut out = Vec::with_capacity(array.len());
+        for (index, token) in array.iter().enumerate() {
+            let token = token
+                .as_i64()
+                .with_context(|| format!("draft token id {index} is not an integer"))?;
+            out.push(i32::try_from(token).context("draft token id exceeds i32")?);
+        }
+        if out.is_empty() {
+            bail!("draft token id file {} is empty", path.display());
+        }
+        return Ok(out);
+    }
+    (0..args.draft_vocab_size)
+        .map(|token| i32::try_from(token).context("draft token id exceeds i32"))
+        .collect()
+}
+
+fn draft_token_ids_from_manifest(manifest: &SpdHeadManifest) -> Result<Vec<i32>> {
+    manifest
+        .topology
+        .draft_token_ids
+        .as_ref()
+        .context("native teacher logits require SPD manifest draft_token_ids")?
+        .iter()
+        .map(|token| i32::try_from(*token).context("draft token id exceeds i32"))
+        .collect()
+}
+
+fn read_capture_final_norm_weight(args: &SpdProductCorpusCaptureArgs) -> Result<Vec<f32>> {
+    if let Some(path) = &args.final_norm_weight_path {
+        return read_f32_le_file(path, args.hidden_size);
+    }
+    let mut failures = Vec::new();
+    for candidate in final_norm_gguf_candidates(&args.model_path) {
+        if !candidate.is_file() {
+            continue;
+        }
+        match read_gguf_output_norm_weight(&candidate, args.hidden_size) {
+            Ok(weight) => return Ok(weight),
+            Err(error) => failures.push(format!("{}: {error:#}", candidate.display())),
+        }
+    }
+    bail!(
+        "failed to read output_norm.weight for SPD capture from {}; candidates failed: {}",
+        args.model_path.display(),
+        failures.join("; ")
+    )
+}
+
+fn final_norm_gguf_candidates(model_path: &Path) -> Vec<PathBuf> {
+    if model_path.is_dir() {
+        vec![
+            model_path.join("shared/output.gguf"),
+            model_path.join("output.gguf"),
+            model_path.join("shared/metadata.gguf"),
+        ]
+    } else {
+        vec![model_path.to_path_buf()]
+    }
+}
+
+fn read_f32_le_file(path: &Path, expected_len: usize) -> Result<Vec<f32>> {
+    let raw = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let expected_bytes = expected_len
+        .checked_mul(std::mem::size_of::<f32>())
+        .context("f32 file expected byte count overflow")?;
+    if raw.len() != expected_bytes {
+        bail!(
+            "{} has {} bytes, expected {} for {} f32 values",
+            path.display(),
+            raw.len(),
+            expected_bytes,
+            expected_len
+        );
+    }
+    Ok(raw
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("chunk size checked")))
+        .collect())
 }
 
 fn prompt_tokens_from_json_value(
@@ -787,8 +1342,19 @@ struct DynamicLiveRows {
 
 struct ProductActivationCorpusConfig<'a> {
     dir: PathBuf,
-    args: &'a SpdLiveTapParityArgs,
-    manifest: &'a SpdHeadManifest,
+    producer: &'a str,
+    manifest_path: Option<&'a Path>,
+    fixture_path: Option<&'a Path>,
+    model_path: &'a Path,
+    splits: &'a [u32],
+    layer_end: u32,
+    ctx_size: u32,
+    n_gpu_layers: i32,
+    selected_backend_device: &'a Option<String>,
+    top_k: usize,
+    verify_steps: usize,
+    prompt_token_file: Option<&'a Path>,
+    topology: serde_json::Value,
     prompt_token_sets: &'a [Vec<i32>],
     row_count: usize,
     row_i_stages: &'a [i64],
@@ -796,6 +1362,7 @@ struct ProductActivationCorpusConfig<'a> {
     hidden_size: usize,
     final_norm_weight: &'a [f32],
     native_teacher_logits: bool,
+    projected_cur_in_available: bool,
 }
 
 struct ProductActivationCorpusWriter {
@@ -869,28 +1436,33 @@ impl ProductActivationCorpusWriter {
             .flatten();
         let manifest = json!({
             "schema": "skippy-spd-product-activation-corpus/v1",
-            "producer": "skippy-bench spd-live-tap-parity",
-            "manifest_path": config.args.manifest.display().to_string(),
-            "fixture_path": config.args.fixture.display().to_string(),
-            "model_path": config.args.model_path.display().to_string(),
-            "splits": &config.args.splits,
-            "layer_end": config.args.layer_end,
-            "ctx_size": config.args.ctx_size,
-            "n_gpu_layers": config.args.n_gpu_layers,
-            "selected_backend_device": &config.args.selected_backend_device,
-            "top_k": config.args.top_k,
-            "verify_steps": config.args.verify_steps,
-            "prompt_token_file": &config.args.prompt_token_file,
+            "producer": config.producer,
+            "manifest_path": config.manifest_path.map(|path| path.display().to_string()),
+            "fixture_path": config.fixture_path.map(|path| path.display().to_string()),
+            "model_path": config.model_path.display().to_string(),
+            "splits": config.splits,
+            "layer_end": config.layer_end,
+            "ctx_size": config.ctx_size,
+            "n_gpu_layers": config.n_gpu_layers,
+            "selected_backend_device": config.selected_backend_device,
+            "top_k": config.top_k,
+            "verify_steps": config.verify_steps,
+            "prompt_token_file": config.prompt_token_file.map(|path| path.display().to_string()),
             "prompt_count": config.prompt_token_sets.len(),
             "prompt_tokens": single_prompt_tokens,
             "prompt_token_sets": config.prompt_token_sets,
-            "topology": &config.manifest.topology,
+            "topology": &config.topology,
             "row_count": config.row_count,
             "hidden_size": config.hidden_size,
             "row_stage_ids": config.row_i_stages,
             "row_hf_indices": config.row_hf_indices,
             "query_row_index": config.row_count.saturating_sub(1),
-            "cur_in_convention": "terminal_final_normed_cur_in",
+            "cur_in_convention": if config.projected_cur_in_available {
+                "terminal_final_normed_cur_in"
+            } else {
+                "not_available_zero_placeholder"
+            },
+            "projected_cur_in_available": config.projected_cur_in_available,
             "raw_tap_convention": "terminal_final_normed_tap_concat",
             "row_tensor": {
                 "path": "rows.f32",
@@ -926,7 +1498,11 @@ impl ProductActivationCorpusWriter {
                 "logit_scope": "draft",
             })),
             "notes": [
-                "rows.f32 stores live Skippy/product activations after terminal final-norm alignment and sidecar input projection.",
+                if config.projected_cur_in_available {
+                    "rows.f32 stores live Skippy/product activations after terminal final-norm alignment and sidecar input projection."
+                } else {
+                    "rows.f32 is a zero placeholder; use raw_rows.f32 for fresh topology-only training."
+                },
                 "raw_rows.f32 stores terminal-final-normed tap concatenations before sidecar input projection.",
                 "Labels are greedy target tokens from the product verifier.",
             ],
@@ -1357,6 +1933,42 @@ fn assemble_live_cur_in_for_positions(
         cur_in,
         raw_tap_concat,
     })
+}
+
+fn assemble_raw_live_tap_concat_for_positions(
+    taps: &BTreeMap<u32, ActivationFrame>,
+    inputs: DynamicLiveRowInputs<'_>,
+) -> Result<Vec<f32>> {
+    if inputs.row_positions.len() != inputs.row_i_stages.len()
+        || inputs.row_positions.len() != inputs.row_hf_indices.len()
+    {
+        bail!(
+            "dynamic SPD raw row metadata length mismatch: positions {}, stages {}, hf rows {}",
+            inputs.row_positions.len(),
+            inputs.row_i_stages.len(),
+            inputs.row_hf_indices.len()
+        );
+    }
+    let raw_width = inputs
+        .row_hf_indices
+        .iter()
+        .map(|indices| indices.len() * inputs.hidden_size)
+        .sum::<usize>();
+    let mut raw_tap_concat = Vec::with_capacity(raw_width);
+    for row_index in 0..inputs.row_positions.len() {
+        let position = inputs.row_positions[row_index];
+        let hf_indices = &inputs.row_hf_indices[row_index];
+        let concat_hidden = concat_live_hidden(taps, hf_indices, position, inputs.hidden_size)?;
+        let normed_concat = terminal_final_normed_concat(
+            &concat_hidden,
+            hf_indices,
+            inputs.hidden_size,
+            inputs.layer_end,
+            inputs.final_norm_weight,
+        )?;
+        raw_tap_concat.extend_from_slice(&normed_concat);
+    }
+    Ok(raw_tap_concat)
 }
 
 fn concat_live_hidden(

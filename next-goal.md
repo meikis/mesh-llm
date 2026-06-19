@@ -1,27 +1,31 @@
-# Next Goal: GLM-5.1 Native SPD Qualification On HF
+# Next Goal: Qwen3-Coder-480B S8 SPD HF Plan
 
 This file is disposable. Durable evidence belongs in `evals/spd/README.md` and
 `docs/skippy/speculative_decoding.md`.
 
 ## One-Line Goal
 
-Train and qualify an SPD sidecar against the exact GLM-5.1 Skippy layer package
-we would serve, using native package taps/logits on Hugging Face, then decide
-from held-out acceptance and pipeline economics whether to run a real split.
+Review and then explicitly dispatch a capped Hugging Face native-package run
+for a Qwen3-Coder-480B S8 SPD sidecar, using the exact MeshLLM Skippy layer
+package for teacher capture and training only the SPD predictor from captured
+taps/logits.
 
 ## Immediate Target
 
 - Runner: Hugging Face Jobs in the `meshllm` org.
+- Spend cap for the first submitted job: `$50` maximum.
 - No heavy local M4 training/capture loops for this target.
-- Base/checkpoint family: `zai-org/GLM-5.1`.
-- Exact first package: `meshllm/GLM-5.1-UD-Q3_K_XL-layers`.
-- Package size from HF metadata: about `341GB`.
-- Model shape from HF config: `78` layers, hidden size `6144`, MoE with `256`
-  routed experts and `8` active experts per token.
-- Logical SPD topology: S6, `stage_layer_boundaries=13,26,39,52,65,78`.
-- Required SPD taps: `[0,13,26,39,52,65,78]`.
-- Physical fit for limited nodes: colocate contiguous logical stages while
-  still returning every required tap, e.g. `[[0,1],[2,3],[4,5]]`.
+- Base/checkpoint family: `Qwen/Qwen3-Coder-480B-A35B-Instruct`.
+- Exact package: `meshllm/Qwen3-Coder-480B-A35B-Instruct-UD-Q4_K_XL-layers`.
+- Package model id: `unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF:UD-Q4_K_XL`.
+- Package size from `model-package.json`: `256.98 GiB`.
+- Package shape from `model-package.json`: `62` layers, activation width `6144`.
+- Vocab size for native capture: `151936` (`--vocab-size 151936`).
+- Logical SPD topology: S8,
+  `stage_layer_boundaries=8,16,24,32,40,48,55,62`.
+- Required SPD taps: `[0,8,16,24,32,40,48,55,62]`.
+- Approx layer-package bytes by logical stage:
+  `33.3,32.4,32.7,32.4,32.7,33.6,28.4,30.2 GiB`.
 
 ## Skippy Layers vs SPD Topology
 
@@ -31,105 +35,161 @@ of model layers.
 - Skippy physical stages own actual layer ranges and package materialization.
 - The SPD sidecar owns logical tap requirements and proposal weights.
 - Workers need only the manifest-derived tap-return allowlist.
-- The coordinator owns the SPD bundle and runs the predictor.
+- The coordinator owns the SPD bundle and runs the predictor by default.
 - If Mesh packs multiple logical SPD stages onto one physical node, that node
   must still return the internal logical-boundary taps required by the manifest.
 
-This lets us pretrain/predigest sidecars for canonical logical topologies
-instead of training every possible physical host grouping.
+This lets us predigest sidecars for canonical logical topologies such as S4,
+S6, and S8 instead of training every possible physical host grouping.
 
-## Why This Quant
+## Cost-Capped First Lane
 
-Start with `meshllm/GLM-5.1-UD-Q3_K_XL-layers` because it already exists as a
-Skippy package and is the smallest GLM-5.1 layer package checked so far:
+The first submitted lane should do as much real native-package work as possible
+under `$50`, but it must not load the full HF base model through Transformers.
+It should either produce a usable first sidecar or fail/expire with enough logs
+to identify the next bottleneck.
 
-- `meshllm/GLM-5.1-UD-Q3_K_XL-layers`: about `341GB`.
-- `meshllm/GLM-5.1-Q3_K_M-plus-layers`: about `362GB`.
-- `meshllm/GLM-5.1-UD-Q3_K_S-layers`: about `362GB`.
+Candidate HF flavors from the current Jobs hardware list:
 
-An outside public GGUF quant can work, but only after this extra phase:
+- `rtx-pro-6000x4`: `384GB` VRAM, `1024GB` RAM, about `$11/hr`; cap around
+  `4h30m` to stay under `$50`.
+- `h200x2`: `282GB` VRAM, `512GB` RAM, about `$10/hr`; cap `5h`, but this is
+  tight for a `256.98 GiB` package plus KV/runtime buffers.
+- `h200x4`: `564GB` VRAM, `1024GB` RAM, about `$20/hr`; cap `2h30m`, more
+  memory-safe but probably too short for a useful train/capture cycle.
 
-`outside GGUF repo -> Skippy layer package -> staged baseline smoke -> SPD capture/train/qualify`
+Preferred first dry-run target: `rtx-pro-6000x4`, timeout `4h30m`, max cost
+`$50`.
 
-For the first real SPD proof, avoid that extra moving part.
+## Steps
 
-## HF Machine And Cost
+1. Done: add a topology-only native-capture/bootstrap mode.
+   - Inputs: package ref, S8 boundaries, hidden size, draft vocab, prompt shard.
+   - Output: raw tap rows, native-Q4 teacher logits, row metadata, and a minimal
+     topology shape.
+   - It must not require an existing trained SPD head.
+   - Implemented as `skippy-bench spd-product-corpus-capture`.
+2. Done: add or wire a head-only trainer/scorer for captured native rows/logits.
+   - It builds the SPD predictor from topology/config only.
+   - It trains `stage_projs`, SPD layers, and draft-vocab head from raw rows.
+   - Final norm is captured from the package and fixed, matching serving.
+   - It must not instantiate `Qwen/Qwen3-Coder-480B-A35B-Instruct` with
+     Transformers.
+   - Implemented as `train_product_activation_head_only.py` and
+     `score_product_activation_head_only.py`; both load AutoConfig only.
+3. Done for serving, not parity: export and validate artifacts.
+   - Emits `skippy-spd-head.json`, `spd-head.safetensors`, and
+     `spd-serving-fixture.safetensors`.
+   - Rust request-path serving can use the serving fixture for row metadata and
+     final norm.
+   - True Rust fixture parity is skipped for `native-package-fresh` until a
+     native parity fixture exporter exists.
+4. Planned inside the capped job: run package-backed local-on-HF smoke.
+   - Use the same Qwen480 package directory and S8 split.
+   - Check content match, tap failures, accepted/proposed counts, and
+     saved/unsaved candidate-token round trips.
+5. Planned inside the capped job: emit pipeline economics.
+   - Run latency simulation for S8 clumped to 4 physical buckets and hop
+     assumptions `0.2,1,5,10ms`.
+   - Treat this as HF-side predictor/economics evidence, not LAN wall-clock
+     proof.
 
-HF Jobs rates checked on 2026-06-19:
+## First Capped Run
 
-- `h200`: `141GB` VRAM, `256GB` RAM, `3TB` disk, about `$5/hr`.
-- `h200x2`: `282GB` VRAM, `512GB` RAM, `6TB` disk, about `$10/hr`.
-- `h200x4`: `564GB` VRAM, `1TB` RAM, `12TB` disk, about `$20/hr`.
-- `h200x8`: `1128GB` VRAM, `2TB` RAM, `24TB` disk, about `$40/hr`.
+After the patch above, run a planner dry run, no submission:
 
-Realistic lanes:
+```bash
+python3 evals/spd/plan_hf_spd_qualification.py \
+  --base-model Qwen/Qwen3-Coder-480B-A35B-Instruct \
+  --package-ref meshllm/Qwen3-Coder-480B-A35B-Instruct-UD-Q4_K_XL-layers \
+  --qualification-mode native-package-fresh \
+  --num-stages 8 \
+  --stage-layer-boundaries 8,16,24,32,40,48,55,62 \
+  --num-spec-layers 4 \
+  --draft-top-k 4 \
+  --draft-vocab-size 32000 \
+  --vocab-size 151936 \
+  --dataset HuggingFaceH4/ultrachat_200k \
+  --dataset-split train_sft \
+  --train-prompts 512 \
+  --heldout-prompts 64 \
+  --max-prompt-tokens 480 \
+  --verify-steps 4 \
+  --ctx-size 1024 \
+  --physical-node-count 4 \
+  --logical-stage-ms 40 \
+  --hop-ms 0.2,1,5,10 \
+  --flavor rtx-pro-6000x4 \
+  --timeout 4.5h \
+  --max-cost-usd 50 \
+  --output-repo meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8 \
+  --out /tmp/spd-qwen480-s8-native-package-fresh-plan.json \
+  --json
+```
 
-- Metadata/planner smoke: `h200` or CPU-only, under `$20`, no quality claim.
-- Feasibility native package smoke: `h200x2`, cap `4-6h`, about `$40-$60`.
-  This may need CPU offload because the Q3 package is larger than total VRAM.
-- Serious native package qualification: `h200x4`, cap `4-8h`, about
-  `$80-$160`. This is the first realistic lane for a quality decision.
-- Reference bootstrap from full GLM-5.1 is expensive and should not be first:
-  BF16 is about `1.5TB`; FP8 is about `756GB`. If needed, expect `h200x8`,
-  about `$240-$480` for `6-12h`.
+Latest dry-run checkpoint: this command resolves the package metadata as
+`62` layers, activation width `6144`, package model id
+`unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF:UD-Q4_K_XL`, hardware
+`rtx-pro-6000x4`, timeout `16200s`, and max cost `$49.49991`. The generated
+native-package command graph contains no `AutoModelForCausalLM`, no
+`hf_train_eval_qwen06.py`, no `spd-live-tap-parity`, and no warm-start path.
+The setup path now installs Rust/`just`/build prerequisites, detects the CUDA
+architecture, builds the CUDA stage ABI with `just build-runtime`, and then
+builds `target/release/skippy-bench` plus `target/release/skippy-server`.
+Dispatch should use an HF-uploaded patch artifact via `MESH_LLM_PATCH_PATH`
+instead of requiring a GitHub push from this machine.
+`evals/spd/bootstrap_qwen480_s8_native_job.sh` is the job entrypoint for this:
+it downloads the uploaded patch, applies it to a bootstrap clone, regenerates
+the reviewed plan, then runs `run_hf_spd_qualification_plan.py`.
 
-Do not submit spend until the job prints the exact model/package, topology,
-dataset shard, prompt counts, hardware, timeout, output repo, and max cost.
+The submitted job should use the same parameters and:
 
-## Concrete HF Job Plan
+```bash
+hf jobs run \
+  --namespace meshllm \
+  --flavor rtx-pro-6000x4 \
+  --timeout 4.5h \
+  --secrets HF_TOKEN \
+  --detach \
+  <docker-image> \
+  bash run-qwen480-s8-native-spd.sh
+```
 
-The first useful job should be native-package-first, not BF16-reference-first:
+The timeout is the spending backstop. At the current checked rate for
+`rtx-pro-6000x4`, `4.5h` plans at about `$49.50`; the job should finish, fail,
+or be killed by HF at timeout.
 
-1. Build fixed train and held-out prompt-token shards.
-2. Download `meshllm/GLM-5.1-UD-Q3_K_XL-layers`.
-3. Run a staged baseline smoke to prove the package loads for the chosen S6
-   topology.
-4. Capture raw tap-concat rows at `[0,13,26,39,52,65,78]`.
-5. Capture native quant verifier logits/top-k over the SPD draft vocabulary.
-6. Train the SPD head from native rows/logits.
-7. Score held-out top-1/top-4 against native labels.
-8. Export `skippy-spd-head.json`, `spd-head.safetensors`, and
-   `spd-parity-fixture.safetensors`.
-9. Run Rust fixture parity.
-10. Run package-backed rolling `spd-openai-smoke` on broad held-out prompts.
-11. Emit latency simulation from `evals/spd/simulate_latency.py`.
+## Remaining Risks Before Dispatch
 
-If fresh native training is unstable, then add a reference/bootstrap phase using
-FP8/NVFP4/AWQ, not full BF16 by default.
+- The first HF run may expose a reference-code compatibility issue between
+  `SpeculationHeadTransformer` and the Qwen3-Coder-480B MoE config. The
+  current scripts deliberately load AutoConfig only, so this should fail early
+  without loading the full model if unsupported.
+- `native-package-fresh` exports a serving fixture, not a true Python/reference
+  parity fixture. Do not claim Rust/Python fixture parity for this lane yet.
+- The generated plan is dry-run only. Spend-bearing submit still needs explicit
+  confirmation and should keep the `4.5h` timeout as the hard cost backstop.
 
 ## Pass/Fail Gate
 
-Pass requires:
+Pass for the capped lane means:
 
-- train and held-out prompt-token shards have zero overlap;
-- native teacher argmax matches the quantized verifier target on in-scope rows;
-- exported serving bundle passes Rust fixture parity;
-- package-backed rolling smoke matches baseline content;
-- tap failures are zero;
-- saved candidate-token round trips exceed unsaved candidate-token round trips
-  with margin on broad held-out prompts;
-- latency simulation stays positive with realistic physical stage costs, link
-  latency, and measured or explicitly budgeted sidecar latency.
+- the planner resolves the exact package, layer count, activation width, and S8
+  tap topology;
+- the chosen HF flavor and timeout stay under `$50`;
+- train and held-out prompt-token shards are disjoint;
+- package-backed staged load/capture starts on the S8 split;
+- native teacher logits are captured over the SPD draft vocab;
+- sidecar training starts from captured rows/logits without full HF base-model
+  loading;
+- exported artifacts pass serving-fixture validation if the run reaches export;
+- Rust fixture parity is not expected in this lane until native parity fixture
+  export is added;
+- package-backed rolling smoke matches baseline content and has zero tap
+  failures if the run reaches smoke;
+- the report records accepted/proposed, saved/unsaved candidate-token round
+  trips, sidecar timing, and latency simulation.
 
-Fail means record the report and adjust the HF recipe once, or change package
-choice. Do not fall back to local 8B iteration.
-
-## After A Pass
-
-Run one real paired split test using the same package, same sidecar, same prompt
-shard, and same physical placement:
-
-- baseline split serving;
-- SPD split serving;
-- report acceptance, saved/unsaved candidate round trips, content equality,
-  tap failures, sidecar timing, stage timing, link latency, baseline wall time,
-  SPD wall time, and latency-simulation estimate.
-
-If only M4 + mini are available, use physical clumping but still require all
-manifest taps.
-
-## Role Of Qwen3-8B
-
-`Qwen3-8B` is harness evidence only. It proved package-backed mechanics, tap
-return, Rust sidecar loading, rolling verification, and M4/mini split wiring.
-It did not prove predictor quality and is no longer the immediate SPD target.
+Do not call this a speedup or final sidecar-quality proof unless broad held-out
+package-backed serving shows saved candidate-token round trips exceeding
+unsaved round trips with margin.

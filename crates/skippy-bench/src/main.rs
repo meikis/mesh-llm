@@ -23,7 +23,7 @@ use crate::{
     local_split::{
         local_split_binary, local_split_chain_binary, local_split_compare, local_split_inprocess,
     },
-    spd::{spd_fixture_parity, spd_live_tap_parity},
+    spd::{spd_fixture_parity, spd_live_tap_parity, spd_product_corpus_capture},
     spd_openai::spd_openai_smoke,
     spd_openai_check::spd_openai_check,
     token_lengths::token_lengths,
@@ -42,6 +42,7 @@ fn main() -> Result<()> {
         CommandKind::TokenLengths(args) => token_lengths(args),
         CommandKind::SpdFixtureParity(args) => spd_fixture_parity(args),
         CommandKind::SpdLiveTapParity(args) => spd_live_tap_parity(args),
+        CommandKind::SpdProductCorpusCapture(args) => spd_product_corpus_capture(args),
         CommandKind::SpdOpenAiSmoke(args) => spd_openai_smoke(args),
         CommandKind::SpdOpenAiCheck(args) => spd_openai_check(args),
         CommandKind::FocusedRuntime(args) => focused_runtime(args),

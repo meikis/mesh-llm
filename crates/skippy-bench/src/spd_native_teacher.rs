@@ -6,12 +6,12 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use serde_json::json;
-use skippy_runtime::spd::SpdHeadManifest;
 
 pub struct NativeTeacherLogitsConfig<'a> {
     pub dir: PathBuf,
-    pub manifest: &'a SpdHeadManifest,
+    pub draft_token_ids: Vec<i32>,
     pub top_k: usize,
+    pub producer: &'a str,
 }
 
 pub struct NativeTeacherLogitsWriter {
@@ -38,15 +38,7 @@ impl NativeTeacherLogitsWriter {
         if config.top_k == 0 {
             bail!("native teacher top_k must be greater than zero");
         }
-        let draft_token_ids = config
-            .manifest
-            .topology
-            .draft_token_ids
-            .as_ref()
-            .context("native teacher logits require SPD manifest draft_token_ids")?
-            .iter()
-            .map(|token| i32::try_from(*token).context("draft token id exceeds i32"))
-            .collect::<Result<Vec<_>>>()?;
+        let draft_token_ids = config.draft_token_ids;
         if draft_token_ids.is_empty() {
             bail!("native teacher logits require non-empty draft_token_ids");
         }
@@ -54,7 +46,7 @@ impl NativeTeacherLogitsWriter {
             .with_context(|| format!("create native teacher dir {}", config.dir.display()))?;
         let manifest = json!({
             "schema": "skippy-spd-native-teacher-logits/v1",
-            "producer": "skippy-bench spd-live-tap-parity",
+            "producer": config.producer,
             "teacher_source": "native_skippy_product_verifier_current_logits",
             "native_product_teacher_logits": true,
             "paper_kl_training_ready": true,

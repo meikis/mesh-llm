@@ -346,10 +346,12 @@ def validate_metadata(metadata: dict[str, str], schema: str, path: str) -> None:
 
 def validate_product_convention(metadata: dict[str, str], path: str) -> None:
     convention = metadata.get("cur_in_convention")
+    if convention in {"terminal_final_normed_cur_in", "not_available_zero_placeholder"}:
+        return
     if convention != "terminal_final_normed_cur_in":
         raise ValueError(
             f"{path} has cur_in_convention {convention!r}, expected "
-            "'terminal_final_normed_cur_in'"
+            "'terminal_final_normed_cur_in' or 'not_available_zero_placeholder'"
         )
 
 
@@ -379,6 +381,10 @@ def validate_input_mode(
                 "'terminal_final_normed_tap_concat'"
             )
         return
+    if metadata.get("cur_in_convention") == "not_available_zero_placeholder":
+        raise ValueError(
+            f"{path} stores zero placeholder cur_in rows; use --input-mode raw"
+        )
     if init_mode == "fresh":
         source_dir = metadata.get("source_corpus_dir", path)
         raise ValueError(

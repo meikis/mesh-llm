@@ -65,13 +65,24 @@ KV cleanup, and timing under actual node latency.
 
 The pre-LAN gate should now be explicit and repeatable, not trial-and-error.
 Hugging Face can run the expensive single-machine qualification loop: raw
-product-tap/native-Q4 capture, raw-mode sidecar adaptation, held-out scoring,
-serving export, Rust fixture parity, and package-backed `spd-openai-smoke`.
-After that, `evals/spd/simulate_latency.py --openai-report ...` converts the
-observed accepted/proposed candidate-token round trips into a latency sweep over
-assumed physical stage costs and LAN hops. This is how we decide whether a real
-split is plausible before spending M4/mini time. It is still not a measured
+product-tap/native-Q4 capture, raw-mode sidecar training, held-out scoring,
+serving export, and package-backed `spd-openai-smoke`. The current
+`native-package-fresh` lane exports a serving-only fixture for row metadata and
+final norm; it does not yet produce a true Python/reference parity fixture, so
+do not claim Rust/Python fixture parity for that lane. After smoke,
+`evals/spd/simulate_latency.py --openai-report ...` converts the observed
+accepted/proposed candidate-token round trips into a latency sweep over assumed
+physical stage costs and LAN hops. This is how we decide whether a real split
+is plausible before spending M4/mini time. It is still not a measured
 distributed speedup claim.
+
+For Qwen3-Coder-480B S8, the dry-run planner now resolves the exact
+`meshllm/Qwen3-Coder-480B-A35B-Instruct-UD-Q4_K_XL-layers` package as `62`
+layers / width `6144`, uses vocab size `151936`, emits S8 taps
+`[0,8,16,24,32,40,48,55,62]`, and plans `rtx-pro-6000x4` for `4.5h` at max
+`$49.49991`. The native command graph avoids `AutoModelForCausalLM`,
+`hf_train_eval_qwen06.py`, `spd-live-tap-parity`, and warm-start artifacts.
+The first spend-bearing run still needs explicit confirmation.
 
 Predigested SPD splits should be logical artifacts. A sidecar is trained for a
 canonical logical topology and tap set; Mesh may fit contiguous logical stages
@@ -688,29 +699,34 @@ Run these before making any speedup claim:
    - Run a local or dry-run HF job on `Qwen/Qwen3-0.6B` only when debugging the
      trainer/export path itself. It is no longer the next scaling target now
      that the Qwen3.5-4B request path has real LAN KV evidence.
-   - The immediate larger-model target is now GLM-5.1 on Hugging Face, using
-     the existing `meshllm/GLM-5.1-UD-Q3_K_XL-layers` Skippy package. Use a
-     native-package-first qualification path: staged package smoke, raw
+   - The immediate larger-model target is now Qwen3-Coder-480B S8 on Hugging
+     Face, using the existing
+     `meshllm/Qwen3-Coder-480B-A35B-Instruct-UD-Q4_K_XL-layers` Skippy package.
+     Use a native-package-first qualification path: staged package smoke, raw
      tap-concat capture, native quant verifier logits/top-k, SPD sidecar
-     training, held-out scoring, export, fixture parity, package-backed rolling
-     smoke, and latency simulation. Start with logical S6 boundaries
-     `13,26,39,52,65,78` and required taps `[0,13,26,39,52,65,78]` over the
-     normal Skippy layer package.
+     training, held-out scoring, serving export, package-backed rolling smoke,
+     and latency simulation. Start with logical S8 boundaries
+     `8,16,24,32,40,48,55,62`, vocab size `151936`, and required taps
+     `[0,8,16,24,32,40,48,55,62]` over the normal Skippy layer package.
    - SPD should not create separate model-layer artifacts. Skippy owns the
      physical layer ranges and downloads/materializes the layer package; SPD
      owns logical tap requirements and proposal weights. The coordinator runs
      the sidecar. Workers need only the manifest-derived tap-return allowlist.
      Mesh may colocate contiguous logical SPD stages onto fewer physical nodes
      only if those nodes still return all internal logical-boundary taps.
-   - Realistic GLM-5.1 HF cost is not the old sub-$50 8B lane. A metadata or
-     planner smoke can stay under `$20`; a native package feasibility smoke on
-     `h200x2` should be capped around `4-6h` (`$40-$60`) but may require CPU
-     offload because the package is about `341GB` and `h200x2` has `282GB`
-     total VRAM. The first serious quality decision should budget `h200x4` for
-     `4-8h` (`$80-$160`). Full reference bootstrap from GLM-5.1 BF16/FP8 is a
-     later fallback, likely `h200x8` class and `$240-$480` for `6-12h`.
-     Dry-run model/package ref, dataset shard, topology, row cap, hardware,
-     timeout, output repo, and max cost before submitting any spend-bearing job.
+   - The first Qwen480 S8 HF lane should be capped at `$50`: `rtx-pro-6000x4`
+     for `4.5h` plans at `$49.50`, `h200x2` can run `5h` at about `$50` but is
+     tight on VRAM for a `256.98 GiB` package, and `h200x4` is safer on memory
+     but only buys `2.5h` under the same cap. Do not use the full-HF-reference
+     trainer for this target; the job must train from native package tap rows
+     and native Q4 verifier logits without loading the full Qwen480 base model
+     through Transformers. The current `native-package-fresh` dry run uses
+     topology-only capture plus head-only train/score, exports
+     `spd-serving-fixture.safetensors`, and skips true Rust/Python fixture
+     parity until a native parity fixture exporter exists. Dry-run
+     model/package ref, dataset shard, topology, row cap, hardware, timeout,
+     output repo, max cost, and whether the command is
+     topology-only/capture-only/training-capable before submitting spend.
    - Record the sidecar manifest's required hidden-state indices alongside every
      benchmark topology. Prefer a sidecar whose required taps match the intended
      mesh stage layout; otherwise the runtime must either create extra tap

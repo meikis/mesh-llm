@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub use gguf_embedding::GgufTokenEmbeddingTable;
+pub use gguf_embedding::{GgufTokenEmbeddingTable, read_gguf_output_norm_weight};
 pub use live_tap::{
     SpdLiveCurInRequest, SpdLiveCurInRows, SpdLiveTapModelSource, SpdLiveTapRunner,
     SpdLiveTapRunnerConfig, assemble_spd_live_cur_in_for_positions, sliding_spd_row_positions,

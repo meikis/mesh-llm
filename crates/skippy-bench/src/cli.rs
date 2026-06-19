@@ -30,6 +30,8 @@ pub enum CommandKind {
     SpdFixtureParity(SpdFixtureParityArgs),
     #[command(name = "spd-live-tap-parity")]
     SpdLiveTapParity(SpdLiveTapParityArgs),
+    #[command(name = "spd-product-corpus-capture")]
+    SpdProductCorpusCapture(SpdProductCorpusCaptureArgs),
     #[command(name = "spd-openai-smoke")]
     SpdOpenAiSmoke(SpdOpenAiSmokeArgs),
     #[command(name = "spd-openai-check")]
@@ -153,6 +155,58 @@ pub struct SpdLiveTapParityArgs {
         default_value_t = false,
         help = "When --product-corpus-dir is set, also write native product-verifier logits over the SPD draft vocabulary for paper-faithful Q4 supervision."
     )]
+    pub product_native_teacher_logits: bool,
+}
+
+#[derive(Parser)]
+pub struct SpdProductCorpusCaptureArgs {
+    #[arg(long)]
+    pub model_path: PathBuf,
+    #[arg(long, value_delimiter = ',')]
+    pub splits: Vec<u32>,
+    #[arg(long)]
+    pub layer_end: u32,
+    #[arg(long)]
+    pub hidden_size: usize,
+    #[arg(long)]
+    pub vocab_size: usize,
+    #[arg(long, default_value_t = 32000)]
+    pub draft_vocab_size: usize,
+    #[arg(long, default_value_t = 4)]
+    pub num_spec_layers: u32,
+    #[arg(long, default_value_t = 1024)]
+    pub ctx_size: u32,
+    #[arg(long, default_value_t = 0)]
+    pub n_gpu_layers: i32,
+    #[arg(long)]
+    pub selected_backend_device: Option<String>,
+    #[arg(long, default_value_t = 4)]
+    pub top_k: usize,
+    #[arg(long, default_value_t = 4)]
+    pub verify_steps: usize,
+    #[arg(long)]
+    pub prompt_token_file: PathBuf,
+    #[arg(long)]
+    pub product_corpus_dir: PathBuf,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Optional f32 little-endian final RMSNorm weight. Defaults to reading output_norm.weight from the model/package output GGUF."
+    )]
+    pub final_norm_weight_path: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Optional JSON file containing draft token ids. Defaults to token ids 0..draft-vocab-size."
+    )]
+    pub draft_token_ids_file: Option<PathBuf>,
+    #[arg(long, default_value = "")]
+    pub base_model_path: String,
+    #[arg(long, default_value_t = 0)]
+    pub rope_theta: u64,
+    #[arg(long, default_value_t = 0)]
+    pub rotary_dim: u32,
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub product_native_teacher_logits: bool,
 }
 

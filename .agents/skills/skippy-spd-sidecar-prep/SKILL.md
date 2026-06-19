@@ -82,6 +82,21 @@ Skippy taps.
   `speculation_head_final.pt` on product `cur_in` safetensors plus aligned
   teacher logits. For Q4 product proofs, prefer native verifier teacher logits
   over HF BF16 teacher logits.
+- `skippy-bench spd-product-corpus-capture` captures raw product tap rows and
+  native verifier logits from a Skippy layer package using topology only; it
+  does not require an existing SPD manifest or parity fixture.
+- `evals/spd/train_product_activation_head_only.py` and
+  `evals/spd/score_product_activation_head_only.py` train/score a fresh SPD
+  head from raw product tensors while loading AutoConfig only, not full base
+  model weights. Use this for large native-package-first lanes such as
+  Qwen3-Coder-480B S8.
+- `evals/spd/export_product_serving_fixture.py` exports a serving-only fixture
+  carrying row metadata and final norm weights for Rust request-path smoke. It
+  is not a Python/reference parity fixture.
+- `evals/spd/plan_hf_spd_qualification.py --qualification-mode
+  native-package-fresh` plans the capped native package flow: package download,
+  topology-only capture, conversion, head-only train/score, serving export,
+  package-backed smoke, latency simulation, and upload.
 - `evals/spd/README.md` is the live progress log and command cookbook for the
   current SPD proof.
 
@@ -97,6 +112,12 @@ The bundle must contain:
 - `skippy-spd-head.json`
 - the manifest-declared serving checkpoint, normally `spd-head.safetensors`
 - `spd-parity-fixture.safetensors`
+
+For a `native-package-fresh` qualification run, a temporary
+`spd-serving-fixture.safetensors` is acceptable for request-path smoke because
+the server needs row metadata and final norm weights. Do not treat that file as
+a replacement for `spd-parity-fixture.safetensors` in a final bundle or parity
+claim.
 
 The base model should remain a normal Mesh/Skippy model reference or layer
 package so each node materializes its assigned stage through the existing
@@ -599,8 +620,10 @@ clears saved > unsaved candidate token round trips with margin.
 
 For larger SPD work, a Hugging Face job can be a valid pre-LAN gate: raw
 product-tap capture, native-Q4 teacher-logit conversion, raw-mode checkpoint
-adaptation, held-out scoring, export, fixture parity, and local package-backed
-multi-stage smoke can all run on one machine. It is still not a full Mesh split
+adaptation or fresh head-only training, held-out scoring, serving export, and
+local package-backed multi-stage smoke can all run on one machine. Fixture
+parity is required when a true parity fixture exists; it is not provided by the
+first `native-package-fresh` serving fixture. It is still not a full Mesh split
 speed claim. Dry-run the model/package ref, dataset shard, topology, row cap,
 hardware, timeout, output repo, and max cost before any spend-bearing submit.
 The job should also emit a deterministic pipeline-economics report using
@@ -625,20 +648,20 @@ later design explicitly chooses distributed sidecar execution.
 
 ## First Larger Training Target
 
-Use GLM-5.1 for the next larger sidecar qualification proof, not another heavy
-local Qwen3-8B loop. The first exact package target is
-`meshllm/GLM-5.1-UD-Q3_K_XL-layers`, because it already exists as a Skippy layer
-package and is the smallest GLM-5.1 package checked so far at about `341GB`.
-The model shape from HF config is `78` layers, hidden size `6144`, MoE with
-`256` routed experts and `8` active experts per token.
+Use Qwen3-Coder-480B S8 for the next larger sidecar qualification proof. The
+exact package target is
+`meshllm/Qwen3-Coder-480B-A35B-Instruct-UD-Q4_K_XL-layers`; its package
+metadata reports `62` layers, activation width `6144`, and `256.98 GiB` of
+package artifacts.
 
-Start with logical S6 topology:
+Start with logical S8 topology:
 
-- `stage_layer_boundaries=13,26,39,52,65,78`
-- required taps `[0,13,26,39,52,65,78]`
+- `stage_layer_boundaries=8,16,24,32,40,48,55,62`
+- required taps `[0,8,16,24,32,40,48,55,62]`
 - `num_spec_layers=4`
 - draft vocab capped at `32k`
-- UltraChat rows first, then broaden after export/parity and package smoke work
+- vocab size `151936` unless package metadata starts publishing `vocab_size`
+- UltraChat rows first, then broaden after serving export and package smoke work
 
 SPD must reuse the normal Skippy layer package. Skippy owns physical layer
 ranges and layer package materialization; the SPD sidecar owns logical tap
@@ -650,13 +673,32 @@ return every internal logical-boundary tap required by the manifest.
 Run this on Hugging Face, not on the local M4. Realistic lanes from 2026-06-19
 HF Jobs rates:
 
-- metadata/planner smoke: under `$20`, no quality claim
-- native package feasibility smoke: `h200x2` for `4-6h`, about `$40-$60`, but
-  may require CPU offload because `282GB` total VRAM is smaller than the
-  package
-- first serious quality decision: `h200x4` for `4-8h`, about `$80-$160`
-- reference bootstrap fallback: `h200x8` for `6-12h`, about `$240-$480`; use
-  FP8/NVFP4/AWQ before considering full BF16
+- first capped native-package lane: `rtx-pro-6000x4` for `4.5h`, planned
+  maximum `$49.50`
+- memory-tighter alternative: `h200x2` for `5h`, planned maximum `$50`, but
+  only `282GB` VRAM for a `256.98 GiB` package plus runtime/KV buffers
+- memory-safer short lane: `h200x4` for `2.5h`, planned maximum `$50`
+- longer quality decision: likely above `$50` unless setup/capture/training is
+  already optimized
+
+Do not use the existing full-HF-reference trainer as the Qwen480 path. The job
+must be native-package-first: Skippy runs the Q4 layer package to capture taps
+and native verifier logits; sidecar training must then train the head from those
+tensors without loading `Qwen/Qwen3-Coder-480B-A35B-Instruct` through
+Transformers.
+
+Current checkpoint: topology-only capture, head-only train/score, serving
+fixture export, and the `native-package-fresh` planner path are implemented and
+locally syntax/compile checked. The Qwen480 dry run resolves the package shape,
+S8 tap topology, `rtx-pro-6000x4`, `4.5h`, and max `$49.49991`, and the
+generated command graph has no full-base train/score path. The setup path
+installs build prerequisites, detects CUDA architecture, builds the CUDA ABI
+with `just build-runtime`, and builds release `skippy-bench` / `skippy-server`.
+If the local branch is not pushed, upload a patch artifact and set
+`MESH_LLM_PATCH_PATH` so the job applies it after cloning. Remaining risk for
+the first capped job is runtime compatibility with the Qwen480 MoE config and
+package-backed capture startup under the timeout. True Rust/Python fixture
+parity is still skipped until native parity fixture export exists.
 
 Do not submit spend until the dry run prints model/package ref, dataset shard,
 prompt counts, topology, hardware flavor, timeout, output repo, and max cost.

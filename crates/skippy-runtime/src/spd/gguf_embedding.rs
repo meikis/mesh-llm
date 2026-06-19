@@ -29,6 +29,8 @@ const Q8_0_BLOCK_BYTES: usize = 34;
 const Q4_K_BLOCK_BYTES: usize = 144;
 const Q6_K_BLOCK_BYTES: usize = 210;
 const TOKEN_EMBD_TENSOR: &str = "token_embd.weight";
+const OUTPUT_NORM_TENSOR_NAMES: &[&str] =
+    &["output_norm.weight", "model.norm.weight", "norm.weight"];
 
 #[derive(Debug, Clone)]
 pub struct GgufTokenEmbeddingTable {
@@ -183,6 +185,65 @@ impl GgufTokenEmbeddingTable {
             GgmlTensorType::Q4K => read_q4_k_row(file, self.hidden_size),
             GgmlTensorType::Q6K => read_q6_k_row(file, self.hidden_size),
         }
+    }
+}
+
+pub fn read_gguf_output_norm_weight(
+    path: impl AsRef<Path>,
+    expected_hidden_size: usize,
+) -> Result<Vec<f32>> {
+    read_gguf_f32_1d_tensor_any(path, OUTPUT_NORM_TENSOR_NAMES, expected_hidden_size)
+        .context("read GGUF output norm weight")
+}
+
+pub fn read_gguf_f32_1d_tensor_any(
+    path: impl AsRef<Path>,
+    tensor_names: &[&str],
+    expected_len: usize,
+) -> Result<Vec<f32>> {
+    let path = path.as_ref();
+    let mut file = File::open(path).with_context(|| format!("open GGUF {}", path.display()))?;
+    let header = read_gguf_header(&mut file)?;
+    let tensor = tensor_names
+        .iter()
+        .find_map(|name| header.tensors.iter().find(|tensor| tensor.name == *name))
+        .with_context(|| {
+            format!(
+                "GGUF {} did not contain any of tensors {:?}",
+                path.display(),
+                tensor_names
+            )
+        })?;
+    if tensor.dims.len() != 1 {
+        bail!(
+            "GGUF tensor {} has {} dims; expected 1",
+            tensor.name,
+            tensor.dims.len()
+        );
+    }
+    let len = usize::try_from(tensor.dims[0]).context("GGUF tensor length exceeds usize")?;
+    if len != expected_len {
+        bail!(
+            "GGUF tensor {} length {} does not match expected {}",
+            tensor.name,
+            len,
+            expected_len
+        );
+    }
+    let offset = header
+        .data_start
+        .checked_add(tensor.offset)
+        .context("GGUF tensor data offset overflow")?;
+    file.seek(SeekFrom::Start(offset))
+        .with_context(|| format!("seek GGUF tensor {}", tensor.name))?;
+    match GgmlTensorType::from_ggml_type(tensor.tensor_type)? {
+        GgmlTensorType::F32 => read_f32_row(&mut file, len),
+        GgmlTensorType::F16 => read_f16_row(&mut file, len),
+        other => bail!(
+            "GGUF tensor {} has unsupported type {:?}; expected F32 or F16",
+            tensor.name,
+            other
+        ),
     }
 }
 

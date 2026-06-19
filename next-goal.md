@@ -5,9 +5,9 @@ This file is disposable. Durable evidence belongs in `evals/spd/README.md` and
 
 ## One-Line Goal
 
-Plan the next capped Qwen3-Coder-480B S8 native quality lane, because the first
-package-backed smoke now proves the request path but the tiny sidecar accepted
-`0 / 32` live proposals.
+Train and qualify a larger Qwen3-Coder-480B S8 native SPD sidecar on Hugging
+Face, then only move to an HF meshlet if held-out package-backed serving shows
+real candidate-token round-trip savings under the same logical topology.
 
 ## Current Checkpoint
 
@@ -47,9 +47,27 @@ executor integration, and latency simulation path are alive. The blocker is
 sidecar quality from too little native training data, not missing taps or
 package-smoke mechanics.
 
+## Success Gate
+
+This goal is done only when a capped HF quality lane produces a larger trained
+Qwen480 S8 sidecar and the package-backed held-out smoke shows:
+
+- matched baseline/SPD content;
+- zero tap return, tap record, and ignored-tap failures;
+- nonzero accepted rolling proposals;
+- more saved than unsaved candidate-token round trips.
+
+If it clears that gate, the next goal becomes a short HF meshlet spike: run a
+coordinator, local stage servers, the SPD sidecar, and OpenAI frontend as
+separate processes inside one HF Job, optionally with artificial latency, to
+validate lifecycle and pipeline economics before spending time on multi-HF-job
+transport.
+
 ## Immediate Next Work
 
-1. Dry-run a larger native-package-fresh quality profile without spending:
+1. Submit the larger native-package-fresh quality profile only with explicit
+   spend approval:
+   - run on HF, not local M4;
    - same Qwen480 package and S8 topology;
    - train prompts at least `256`, preferably `512` if the cap still makes
      sense;
@@ -71,7 +89,7 @@ package-smoke mechanics.
    - Done for the dry run above: `rg` found no matches for
      `AutoModelForCausalLM`, `hf_train_eval_qwen06`, `spd-live-tap-parity`, or
      `from_pretrained(`.
-3. Before submitting any spend, report the planned cap and expected risk:
+3. Before submitting spend, report the planned cap and expected risk:
    - `rtx-pro-6000x4` has worked mechanically and costs about `$11/hr`;
    - a `4.5h` timeout is about `$49.50`;
    - the risk is whether the larger capture/train/smoke reaches completion

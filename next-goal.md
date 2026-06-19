@@ -458,6 +458,29 @@ max `$16.49997`, package `62` layers / width `6144`, S8 boundaries
 CPU/GPU map. The selected smoke-existing command groups avoid
 `AutoModelForCausalLM`, `hf_train_eval_qwen06.py`, and the old reference path.
 
+Submitted smoke-existing retry:
+
+```bash
+id=6a3581b9953ed90bfb944dd3
+url=https://huggingface.co/jobs/meshllm/6a3581b9953ed90bfb944dd3
+run_id=20260619T175052Z-588fe084
+local_artifact_dir=/tmp/spd-qwen480-smoke-existing-job-20260619T175052Z-588fe084
+output_repo=meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8
+input_prefix=job-inputs/20260619T175052Z-588fe084/
+upload_commit=1dce6e58644cf957e517f430ac653df6257fc455
+patch_revision=1dce6e58644cf957e517f430ac653df6257fc455
+patch_sha256=e9947039a0f2cbe0ba127793dbd0fa054bd6f1cbb23b996059ed501e422d89f1
+bootstrap_sha256=969e6005f7e9e108c2bca0ad0b50c430cc0cf7b9b78db577beee9859209c07d8
+dry_run_plan_sha256=7fba2ddb364e6ad8eab8bbd4f78ac01b4e359614cf124643a4771da1325a5012
+```
+
+This job is labeled `spd-qwen480-smoke-existing`, uses `rtx-pro-6000x4`,
+`JOB_TIMEOUT=1.5h`, `ARTIFACT_RUN_PATH=runs/native-package-fresh`, and
+`SMOKE_STAGE_BACKEND_DEVICES=CPU,CUDA0,CPU,CUDA1,CPU,CUDA2,CPU,CUDA3`. First
+poll showed it still `SCHEDULING` with the expected environment. First gates:
+bootstrap download, patch apply, selected-group setup/package download, hydrate
+the uploaded artifact, then run package smoke and latency simulation.
+
 Startup attempts before the latest two-phase retry:
 
 - `meshllm/6a35304a953ed90bfb9446a8` failed in 3 seconds with exit `126`

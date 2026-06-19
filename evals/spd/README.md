@@ -368,6 +368,24 @@ about `$16.50` on `rtx-pro-6000x4`. This is a mechanics/economics smoke, not a
 speed claim, and CPU-mapped stages may be slow. A full recapture/retrain retry
 is now lower priority unless the uploaded artifact proves unusable.
 
+Smoke-existing retry submitted on 2026-06-20 local time: HF Job
+`meshllm/6a3581b9953ed90bfb944dd3`, URL
+`https://huggingface.co/jobs/meshllm/6a3581b9953ed90bfb944dd3`, label
+`spd-qwen480-smoke-existing`. It uses `rtx-pro-6000x4`, timeout `1.5h`,
+`PATCH_REVISION=1dce6e58644cf957e517f430ac653df6257fc455`,
+`PATCH_PATH_IN_REPO=job-inputs/20260619T175052Z-588fe084/mesh-llm.patch`,
+`ARTIFACT_RUN_PATH=runs/native-package-fresh`, and
+`SMOKE_STAGE_BACKEND_DEVICES=CPU,CUDA0,CPU,CUDA1,CPU,CUDA2,CPU,CUDA3`. The
+uploaded job input patch SHA256 is
+`e9947039a0f2cbe0ba127793dbd0fa054bd6f1cbb23b996059ed501e422d89f1`; the
+bootstrap SHA256 is
+`969e6005f7e9e108c2bca0ad0b50c430cc0cf7b9b78db577beee9859209c07d8`; the
+dry-run plan SHA256 is
+`7fba2ddb364e6ad8eab8bbd4f78ac01b4e359614cf124643a4771da1325a5012`. At first
+poll, the job was still scheduling; first gates are bootstrap download, patch
+apply, selected-group setup/package download, artifact hydration, and package
+smoke with the explicit map.
+
 If this Qwen480 lane clears the sidecar quality and package-backed smoke gates,
 the next HF validation spike should be a single-job meshlet: one HF Job starts
 the coordinator, stage servers, SPD sidecar, and OpenAI frontend as separate

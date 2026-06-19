@@ -128,6 +128,13 @@ CUDA map `CUDA0,CUDA0,CUDA1,CUDA1,CUDA2,CUDA2,CUDA3,CUDA3`. The remaining risk
 is stage-open churn inside the `4.5h` HF cap, not a change to teacher argmax
 definition.
 
+Streamed-capture HF Job `meshllm/6a354843953ed90bfb944848` is now running with
+the same `rtx-pro-6000x4` / `4.5h` cap and uploaded artifact
+`job-inputs/20260619T134535Z-595b67cb/` at commit
+`9198f2468ae69dbb13c0d0a16f7b99c0e3e7dd5d`. Immediate logs show it cleared the
+inline bootstrap download/startup path and entered generated setup. It has not
+yet reached package download, capture, training, export, or smoke.
+
 Predigested SPD splits should be logical artifacts. A sidecar is trained for a
 canonical logical topology and tap set; Mesh may fit contiguous logical stages
 onto fewer physical nodes when hardware is scarce. That placement is only valid

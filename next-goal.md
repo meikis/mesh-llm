@@ -167,8 +167,8 @@ bootstrap_sha256=378a4bc91ff2c4aadeffa2a501180aafba44bedc2df377598bc0a3f3ce8ab6d
 dry_run_plan_sha256=542b9b61a118ee5a4a6a68d103ab1614bc020371129e233fe1d8e8bc93c4e7c6
 ```
 
-Current resubmission uses the same parameters through the fixed uploaded
-patch/bootstrap artifact:
+Failed capture-argument resubmission used the same parameters through the fixed
+uploaded patch/bootstrap artifact:
 
 ```bash
 id=6a353b9d3093dba73ce2a2bf
@@ -182,6 +182,23 @@ patch_revision=da3c7956783e86c3e50368ddbd32c00286f263df
 patch_sha256=450002e81f41b6adaf72c997ecad28700e29f2faf191c7c93d1aceb06e76757f
 bootstrap_sha256=378a4bc91ff2c4aadeffa2a501180aafba44bedc2df377598bc0a3f3ce8ab6d6
 dry_run_plan_sha256=dcce197cb092662ae7048df92f65356833fcb6d60b3c4630613942deb739f78a
+```
+
+Current streamed-capture resubmission uses the same `$50` capped lane with the
+streamed live-tap capture patch:
+
+```bash
+id=6a354843953ed90bfb944848
+url=https://huggingface.co/jobs/meshllm/6a354843953ed90bfb944848
+run_id=20260619T134535Z-595b67cb
+local_artifact_dir=/tmp/spd-qwen480-native-job-20260619T134535Z-595b67cb
+output_repo=meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8
+input_prefix=job-inputs/20260619T134535Z-595b67cb/
+upload_commit=9198f2468ae69dbb13c0d0a16f7b99c0e3e7dd5d
+patch_revision=9198f2468ae69dbb13c0d0a16f7b99c0e3e7dd5d
+patch_sha256=717b871d6668ad895869013f8a20168160bc46557b927ade1473258dea369c61
+bootstrap_sha256=378a4bc91ff2c4aadeffa2a501180aafba44bedc2df377598bc0a3f3ce8ab6d6
+dry_run_plan_sha256=e33d546eb7b3b3d639441fca7331f85fc0addf85d00623bb3cb7fb7b5966d9de
 ```
 
 The timeout is the spending backstop. At the current checked rate for
@@ -235,14 +252,17 @@ real package download and prompt construction but did not start capture rows,
 training, scoring, export, or smoke because of the fixed capture boolean
 argument issue.
 
-Current status check on 2026-06-19: resubmitted job
-`meshllm/6a353b9d3093dba73ce2a2bf` is `ERROR` with exit code `1`. It reached
-actual capture startup and failed on CUDA OOM before writing rows, training,
-scoring, export, or smoke.
+Current status check on 2026-06-19: streamed-capture job
+`meshllm/6a354843953ed90bfb944848` is `RUNNING`. It has cleared inline
+bootstrap download/startup and is in generated setup after apt package install
+and Rust toolchain download. It has not yet reached package download, capture,
+training, scoring, export, or smoke.
 
-Cost status on 2026-06-19: the two serious Qwen480 jobs cost about `$7.45`
-combined (`1189s + 1249s` at about `$11/hr`). Including the shorter startup
-failures keeps total GPU spend for this lane under about `$8`.
+Cost status on 2026-06-19: before the current streamed-capture run, the two
+serious Qwen480 jobs cost about `$7.45` combined (`1189s + 1249s` at about
+`$11/hr`). Including the shorter startup failures keeps completed GPU spend for
+this lane under about `$8`. The current run is capped separately by the same
+`4.5h` / about `$49.50` timeout.
 
 Prior-job inspection commands:
 
@@ -254,8 +274,8 @@ UV_DEFAULT_INDEX=https://pypi.org/simple uvx --from huggingface_hub hf jobs logs
 Current monitoring commands:
 
 ```bash
-UV_DEFAULT_INDEX=https://pypi.org/simple uvx --from huggingface_hub hf jobs inspect meshllm/6a353b9d3093dba73ce2a2bf
-UV_DEFAULT_INDEX=https://pypi.org/simple uvx --from huggingface_hub hf jobs logs meshllm/6a353b9d3093dba73ce2a2bf
+UV_DEFAULT_INDEX=https://pypi.org/simple uvx --from huggingface_hub hf jobs inspect meshllm/6a354843953ed90bfb944848
+UV_DEFAULT_INDEX=https://pypi.org/simple uvx --from huggingface_hub hf jobs logs meshllm/6a354843953ed90bfb944848
 ```
 
 ## Remaining Risks During Run

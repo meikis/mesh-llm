@@ -151,6 +151,20 @@ Qwen480 native dry run now emits both
 changing teacher semantics. The risk to measure on the next HF run is repeated
 stage-open churn inside the `4.5h` cap.
 
+Streamed-capture submission on 2026-06-19: HF Job
+`meshllm/6a354843953ed90bfb944848` is the current live job, again on
+`rtx-pro-6000x4` with the `4.5h` timeout cap. It uses input artifact
+`job-inputs/20260619T134535Z-595b67cb/` from upload commit
+`9198f2468ae69dbb13c0d0a16f7b99c0e3e7dd5d`. The patch SHA256 is
+`717b871d6668ad895869013f8a20168160bc46557b927ade1473258dea369c61`; the
+bootstrap SHA256 is
+`378a4bc91ff2c4aadeffa2a501180aafba44bedc2df377598bc0a3f3ce8ab6d6`; the
+dry-run plan SHA256 is
+`e33d546eb7b3b3d639441fca7331f85fc0addf85d00623bb3cb7fb7b5966d9de`.
+Immediate inspect/log checks show it is `RUNNING` and has cleared inline
+bootstrap download/startup into generated setup. It has not yet reached package
+download, capture, training, scoring, export, or smoke.
+
 Pass criteria: train/held-out prompt-token shards have zero overlap, native
 teacher argmax matches the quant verifier target on in-scope rows, serving
 artifacts export if training reaches export, package-backed rolling smoke

@@ -146,6 +146,12 @@ pub struct SpdLiveTapParityArgs {
         help = "Write product live-tap SPD training rows into this corpus directory. Emits rows.f32 plus rows.jsonl metadata."
     )]
     pub product_corpus_dir: Option<PathBuf>,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "When --product-corpus-dir is set, also write native product-verifier logits over the SPD draft vocabulary for paper-faithful Q4 supervision."
+    )]
+    pub product_native_teacher_logits: bool,
 }
 
 #[derive(Parser)]

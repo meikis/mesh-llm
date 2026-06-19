@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 from pathlib import Path
 from typing import Any
@@ -27,17 +28,44 @@ TEACHER_SCHEMA = "skippy-spd-product-activation-teacher-logits/v1"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Fine-tune an existing SPD speculation head on product-captured cur_in "
-            "rows with precomputed HF teacher logits."
+            "Train an SPD speculation head on product-captured cur_in rows with "
+            "precomputed teacher logits."
         )
     )
     parser.add_argument("--reference-dir", required=True, help="Reference SPD repo checkout")
-    parser.add_argument("--checkpoint", required=True, help="Input speculation_head_final.pt")
+    parser.add_argument(
+        "--checkpoint",
+        required=True,
+        help=(
+            "Input speculation_head_final.pt. In checkpoint mode the head weights are "
+            "loaded and fine-tuned; in fresh mode only the config/topology is reused."
+        ),
+    )
     parser.add_argument("--product-corpus", required=True, help="Product corpus safetensors")
     parser.add_argument("--teacher-logits", required=True, help="Teacher logits safetensors")
     parser.add_argument("--out-checkpoint", required=True, help="Output speculation head checkpoint")
     parser.add_argument("--base-model-path", help="Override checkpoint config base_model_path")
     parser.add_argument("--summary-json", help="Optional JSON summary output path")
+    parser.add_argument(
+        "--init-mode",
+        choices=("checkpoint", "fresh"),
+        default="checkpoint",
+        help=(
+            "checkpoint: load and fine-tune the input head weights. fresh: construct "
+            "the same topology from checkpoint config without loading head weights."
+        ),
+    )
+    parser.add_argument(
+        "--input-mode",
+        choices=("auto", "projected", "raw"),
+        default="auto",
+        help=(
+            "projected: train on pre-projected cur_in rows. raw: train through "
+            "stage_projs from raw terminal-normalized tap-concat rows. auto keeps "
+            "projected rows for checkpoint mode and uses raw rows for fresh mode."
+        ),
+    )
+    parser.add_argument("--seed", type=int, default=0, help="Torch/random seed")
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--max-steps", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -102,9 +130,11 @@ def main() -> None:
 
     from pipeline_inference import (  # type: ignore[import-not-found]
         _infer_pipeline_kind,
+        _pipeline_init_kwargs,
         _read_spec_config,
         build_pipeline_from_spec_ckpt,
     )
+    from pipeline_model import Qwen3SpeculativePipelineModel  # type: ignore[import-not-found]
 
     product_tensors = load_file(args.product_corpus)
     teacher_tensors = load_file(args.teacher_logits)
@@ -115,7 +145,10 @@ def main() -> None:
     validate_product_convention(product_metadata, args.product_corpus)
     validate_tensor_shapes(product_tensors, teacher_tensors)
     validate_sample_alignment(product_tensors, teacher_tensors)
+    input_mode = resolve_input_mode(args.input_mode, args.init_mode, product_tensors)
+    validate_input_mode(args.init_mode, input_mode, product_metadata, args.product_corpus)
 
+    set_torch_seed(int(args.seed), torch)
     device = resolve_device(args.device)
     model_dtype = resolve_model_dtype(args.model_torch_dtype, device)
     checkpoint_path = Path(args.checkpoint)
@@ -130,16 +163,32 @@ def main() -> None:
         model_kwargs["attn_implementation"] = args.attn_implementation
     base_model = AutoModelForCausalLM.from_pretrained(base_model_path, **model_kwargs).to(device)
     base_model.eval()
-    pipeline = build_pipeline_from_spec_ckpt(
-        base_model,
-        str(checkpoint_path),
-        spec_cfg,
-        map_location="cpu",
-    ).to(device)
+    set_torch_seed(int(args.seed), torch)
+    if args.init_mode == "checkpoint":
+        pipeline = build_pipeline_from_spec_ckpt(
+            base_model,
+            str(checkpoint_path),
+            spec_cfg,
+            map_location="cpu",
+        ).to(device)
+    else:
+        pipeline = Qwen3SpeculativePipelineModel(
+            base_model=base_model,
+            **_pipeline_init_kwargs(spec_cfg),
+        ).to(device)
     pipeline.base_model.requires_grad_(False)
     pipeline.speculation_module.train()
 
-    cur_in = product_tensors["cur_in"].to(device=device, dtype=model_dtype)
+    projected_cur_in = product_tensors["cur_in"].to(device=device, dtype=model_dtype)
+    raw_tap_concat = product_tensors.get("raw_tap_concat")
+    if raw_tap_concat is not None:
+        raw_tap_concat = raw_tap_concat.to(device=device, dtype=model_dtype)
+    raw_tap_offsets = product_tensors.get("raw_tap_offsets")
+    raw_row_stage_ids = product_tensors.get("row_i_stages")
+    if raw_tap_offsets is not None:
+        raw_tap_offsets = raw_tap_offsets.cpu().tolist()
+    if raw_row_stage_ids is not None:
+        raw_row_stage_ids = raw_row_stage_ids.cpu().tolist()
     position_ids = product_tensors["position_ids"].to(device=device)
     teacher_logits = teacher_tensors["teacher_logits"].to(device=device, dtype=torch.float32)
     teacher_argmax = teacher_logits.argmax(dim=-1)
@@ -156,14 +205,22 @@ def main() -> None:
         weight_decay=float(args.weight_decay),
     )
 
-    sample_count = int(cur_in.shape[0])
+    sample_count = int(projected_cur_in.shape[0])
     losses: list[float] = []
     accs: list[float] = []
     hard_label_accs: list[float] = []
     steps = 0
     for _epoch in range(int(args.epochs)):
         for batch_idx in batch_indices(sample_count, int(args.batch_size)):
-            batch_cur_in = cur_in[batch_idx]
+            batch_cur_in = batch_product_cur_in(
+                pipeline,
+                input_mode,
+                projected_cur_in,
+                raw_tap_concat,
+                raw_tap_offsets,
+                raw_row_stage_ids,
+                batch_idx,
+            )
             batch_position_ids = position_ids[batch_idx]
             batch_teacher = teacher_logits[batch_idx]
             proc = pipeline.speculation_module.forward_inference_g1_only_with_rotary(
@@ -230,6 +287,9 @@ def main() -> None:
     summary = {
         "schema": "skippy-spd-product-activation-train-summary/v1",
         "input_checkpoint": str(checkpoint_path),
+        "init_mode": str(args.init_mode),
+        "input_mode": input_mode,
+        "seed": int(args.seed),
         "out_checkpoint": str(out_checkpoint),
         "product_corpus": str(args.product_corpus),
         "teacher_logits": str(args.teacher_logits),
@@ -244,6 +304,7 @@ def main() -> None:
         "epochs_requested": int(args.epochs),
         "steps_completed": steps,
         "learning_rate": float(args.learning_rate),
+        "weight_decay": float(args.weight_decay),
         "temperature": float(args.temperature),
         "kl_weight": float(args.kl_weight),
         "hard_label_weight": float(args.hard_label_weight),
@@ -292,6 +353,44 @@ def validate_product_convention(metadata: dict[str, str], path: str) -> None:
         )
 
 
+def resolve_input_mode(
+    requested: str,
+    init_mode: str,
+    product_tensors: dict[str, Any],
+) -> str:
+    if requested != "auto":
+        return requested
+    if init_mode == "fresh" and "raw_tap_concat" in product_tensors:
+        return "raw"
+    return "projected"
+
+
+def validate_input_mode(
+    init_mode: str,
+    input_mode: str,
+    metadata: dict[str, str],
+    path: str,
+) -> None:
+    if input_mode == "raw":
+        convention = metadata.get("raw_tap_convention")
+        if convention != "terminal_final_normed_tap_concat":
+            raise ValueError(
+                f"{path} has raw_tap_convention {convention!r}, expected "
+                "'terminal_final_normed_tap_concat'"
+            )
+        return
+    if init_mode == "fresh":
+        source_dir = metadata.get("source_corpus_dir", path)
+        raise ValueError(
+            "--init-mode fresh is not valid for projected product corpora. "
+            f"{path} was converted from {source_dir} and stores rows after the "
+            "manifest's SPD input projection. Use --init-mode checkpoint with the "
+            "same projection basis, or add a raw terminal-normalized tap-concat "
+            "corpus/trainer path so fresh stage_projs are trained and used "
+            "consistently."
+        )
+
+
 def validate_tensor_shapes(product: dict[str, Any], teacher: dict[str, Any]) -> None:
     required_product = {"cur_in", "position_ids"}
     required_teacher = {"teacher_logits"}
@@ -307,6 +406,13 @@ def validate_tensor_shapes(product: dict[str, Any], teacher: dict[str, Any]) -> 
         )
     if int(product["cur_in"].shape[0]) == 0:
         raise ValueError("product corpus is empty")
+    if "raw_tap_concat" in product:
+        raw_required = {"raw_tap_offsets", "row_i_stages"}
+        missing_raw = sorted(raw_required.difference(product))
+        if missing_raw:
+            raise ValueError(f"raw product corpus missing tensors: {missing_raw}")
+        if int(product["raw_tap_concat"].shape[0]) != int(product["cur_in"].shape[0]):
+            raise ValueError("raw_tap_concat sample count does not match cur_in")
 
 
 def validate_sample_alignment(product: dict[str, Any], teacher: dict[str, Any]) -> None:
@@ -362,6 +468,67 @@ def torch_dtype(value: str) -> Any:
         "float16": torch.float16,
         "bfloat16": torch.bfloat16,
     }[value]
+
+
+def set_torch_seed(seed: int, torch_module: Any) -> None:
+    random.seed(seed)
+    torch_module.manual_seed(seed)
+    if torch_module.cuda.is_available():
+        torch_module.cuda.manual_seed_all(seed)
+    mps = getattr(torch_module, "mps", None)
+    manual_seed = getattr(mps, "manual_seed", None)
+    if callable(manual_seed):
+        manual_seed(seed)
+
+
+def batch_product_cur_in(
+    pipeline: Any,
+    input_mode: str,
+    projected_cur_in: Any,
+    raw_tap_concat: Any | None,
+    raw_tap_offsets: list[int] | None,
+    raw_row_stage_ids: list[int] | None,
+    batch_idx: slice,
+) -> Any:
+    if input_mode == "projected":
+        return projected_cur_in[batch_idx]
+    if raw_tap_concat is None or raw_tap_offsets is None or raw_row_stage_ids is None:
+        raise ValueError("--input-mode raw requires raw_tap_concat/raw_tap_offsets")
+    return project_raw_tap_concat(
+        pipeline,
+        raw_tap_concat[batch_idx],
+        raw_tap_offsets,
+        raw_row_stage_ids,
+    )
+
+
+def project_raw_tap_concat(
+    pipeline: Any,
+    raw_batch: Any,
+    raw_tap_offsets: list[int],
+    row_stage_ids: list[int],
+) -> Any:
+    if len(raw_tap_offsets) != len(row_stage_ids) + 1:
+        raise ValueError("raw_tap_offsets must have row_stage_ids + 1 entries")
+    rows = []
+    num_stages = len(pipeline.speculation_module.stage_projs)
+    for row_index, stage_id in enumerate(row_stage_ids):
+        start = int(raw_tap_offsets[row_index])
+        end = int(raw_tap_offsets[row_index + 1])
+        row = raw_batch[:, start:end]
+        if int(stage_id) == 0:
+            projected = pipeline.speculation_module.g0_proj(row)
+        else:
+            block = num_stages - int(stage_id)
+            if block < 0 or block >= num_stages:
+                raise ValueError(
+                    f"row {row_index} stage_id {stage_id} is outside num_stages={num_stages}"
+                )
+            projected = pipeline.speculation_module.stage_projs[block](row)
+        rows.append(projected.unsqueeze(1))
+    import torch
+
+    return torch.cat(rows, dim=1)
 
 
 def batch_indices(sample_count: int, batch_size: int) -> list[slice]:

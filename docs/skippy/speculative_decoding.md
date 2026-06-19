@@ -26,7 +26,7 @@ Current policy:
 
 ### SPD Sidecar
 
-Status as of 2026-06-18: SPD is a real native request-path proof, but not a
+Status as of 2026-06-19: SPD is a real native request-path proof, but not a
 speedup proof yet.
 
 For the current `Qwen/Qwen3-8B` product target, use the exact two-stage
@@ -41,7 +41,7 @@ tokens reported aggregate acceptance `0.7013`, equivalent accept length
 parity passed.
 
 That reference score did not transfer into enough native Q4 top-1 acceptance
-for speed. Strict live-tap parity against the HF BF16 fixture fails because the
+for pipeline-fill economics. Strict live-tap parity against the HF BF16 fixture fails because the
 native package hidden states differ from HF BF16 rows, but the request path is
 mechanically clean: required taps are present, verifier greedy output matches
 baseline, local package-backed rolling OpenAI smoke matches content on
@@ -63,6 +63,33 @@ accepted proposals and saved candidate token round trips. The real two-node
 worker run then validates distributed transport, endpoint placement, per-stage
 KV cleanup, and timing under actual node latency.
 
+The pre-LAN gate should now be explicit and repeatable, not trial-and-error.
+Hugging Face can run the expensive single-machine qualification loop: raw
+product-tap/native-Q4 capture, raw-mode sidecar adaptation, held-out scoring,
+serving export, Rust fixture parity, and package-backed `spd-openai-smoke`.
+After that, `evals/spd/simulate_latency.py --openai-report ...` converts the
+observed accepted/proposed candidate-token round trips into a latency sweep over
+assumed physical stage costs and LAN hops. This is how we decide whether a real
+split is plausible before spending M4/mini time. It is still not a measured
+distributed speedup claim.
+
+Predigested SPD splits should be logical artifacts. A sidecar is trained for a
+canonical logical topology and tap set; Mesh may fit contiguous logical stages
+onto fewer physical nodes when hardware is scarce. That placement is only valid
+if every manifest-required internal tap is still returned. Speed estimates and
+wall-clock claims must use the fitted physical placement, not the logical split
+count: colocating ten logical stages on three nodes preserves sidecar
+compatibility but only gives three physical compute buckets.
+
+The download model should stay close to existing Skippy split serving. Base
+model layers are still resolved as layer-package parts on the physical stage
+nodes. The SPD predictor bundle is coordinator-owned by default, because the
+sidecar consumes gathered taps and proposes the next token for target
+verification. Workers should only need the `spd_tap_return_hf_indices` allowlist
+derived from the manifest. Running the sidecar on every node is not required for
+the current design; it would be a separate optimization if tap transport became
+the bottleneck.
+
 A later no-spend max120 product-corpus check confirmed that simply fitting the
 small HF-teacher bridge harder is not enough. The
 `/tmp/spd-qwen3-8b-product-prompts-paper3-train32-heldout16-max120` split
@@ -72,9 +99,37 @@ live-tap `n_batch=128` assertion. HF teacher alignment stayed high
 5-epoch HF-KL head accepted only `91 / 256` held-out proposals and the native
 hard-label variant only `95 / 256`; both were fixture-parity clean and
 content-exact. Do not run release/request-path timing for those heads. The next
-grounded step is a larger disjoint short-prompt product corpus plus
-less-overfit training; if that still fails, expose native Q4_K_M verifier
-top-k/logits rather than spending on larger generic HF-teacher KL.
+grounded step is native Q4_K_M verifier logits, not larger generic HF-teacher
+KL.
+
+That native verifier-logit path is now implemented. `skippy-bench
+spd-live-tap-parity --product-native-teacher-logits` captures Q4 product
+verifier logits over the SPD draft vocabulary beside product tap rows, and
+`evals/spd/prepare_native_product_teacher_logits.py` converts them to the
+teacher safetensors consumed by the product-row trainer. The larger current
+gate captured `548` native-Q4 train rows and `64` held-out rows for the same
+`23,36` topology. Native teacher quality is coherent (`545 / 545` train labels
+and `61 / 61` held-out labels match Q4 target argmax in scope). A conservative
+warm start from the 16k checkpoint improved held-out from `5 / 61` to `20 / 61`
+top-1 and from `14 / 61` to `33 / 61` top-4. A short regularization sweep moved
+the best held-out top-1 to `22 / 61`; the best held-out top-4 was `34 / 61`.
+Treat this as proof that quant-specific supervision is wired and learnable, but
+still not enough quality for serving or speed claims. The next sidecar gate is
+broader native-Q4 product data, and then regularization tuning against the same
+held-out split.
+
+That broader reference-pool gate has now been run without changing the frozen
+held-out split. The prompt-token builder can exclude the held-out token file
+while raising context limits, and
+`/tmp/spd-native-teacher-train224-v8` captured `1792` native-Q4 rows from `224`
+train prompts with exact native-logit bytes. Native teacher argmax matched the
+Q4 target on `1763 / 1763` in-scope labels. The broadened corpus improved train
+fit, but not held-out quality: the conservative warm start scored `21 / 61`
+held-out top-1 and `33 / 61` top-4, while the prior top-4 recipe tied
+`22 / 61` held-out top-1 but regressed top-4 to `32 / 61`. This means the
+small reference-eval prompt pool is saturated; the next valid quality step is a
+broader UltraChat/product prompt-token shard with native Q4 verifier logits,
+still scored against the same frozen held-out tensor.
 
 What is working:
 
@@ -333,10 +388,13 @@ Paper fidelity:
 
 ## Outstanding Work
 
-### SPD Speedup Validation
+### SPD Pipeline-Fill Validation
 
-The next SPD milestone is not more unit coverage; it is an end-to-end speedup
-run with enough instrumentation to explain the result.
+The next SPD milestone is not more unit coverage; it is an acceptance and
+candidate-round-trip savings run with enough instrumentation to explain whether
+the split pipeline can stay full. Wall-clock speedup is a later claim, and only
+valid after the same report shows enough accepted proposals to remove target
+stage round trips on the critical path.
 
 Open items:
 
@@ -355,7 +413,10 @@ Open items:
   decoder-layer timing, accept rate, rolling gaps, and content equality.
 - Treat any speedup claim as invalid unless the report includes the command,
   commit SHA, model identity, sidecar artifact identity, topology, hardware, and
-  raw JSON report path.
+  raw JSON report path. For the current two-node product proof, lead with
+  accepted/proposed, saved/unsaved candidate token round trips, max in flight,
+  tap failures, and content equality; do not present `paper_pipeline_estimate`
+  or `paper_like_speedup_vs_serial_split` as measured speedup.
 
 ### SPD Runtime Cost Reduction
 
@@ -558,11 +619,98 @@ Run these before making any speedup claim:
      `39 / 96`; held-out all-local OpenAI rolling acceptance is `30 / 82` with
      exact content and `0` tap failures. This is a real generalization signal,
      but it is still below two-stage break-even: `paper_pipeline_estimate` is
-     `0.73x`. The next gate is more same-topology product data and/or native
-     Q4_K_M verifier logits, not a speed run.
+     `0.73x`.
+   - Native Q4_K_M verifier-logit capture is now available for the same
+     product rows with `--product-native-teacher-logits`. The current
+     warm-start gate from the 16k checkpoint learned `548` train rows and
+     improved held-out to `22 / 61` top-1 in the best regularized sweep, with
+     held-out top-4 at `33 / 61` to `34 / 61`. That is a material quality
+     signal, but still below a speed-candidate threshold, so the next gate is
+     broader same-topology native-Q4 data plus regularization tuning with
+     held-out prompts kept separate, not a speed run.
+   - The serving-shaped UltraChat-native gate is now larger and more useful
+     than the earlier `61`-row reference held-out set. The prompt shard
+     `/private/tmp/spd-qwen3-8b-ultrachat-serving-v1-max480` uses
+     `HuggingFaceH4/ultrachat_200k` `train_sft`, Qwen no-thinking rendering,
+     seed `23`, `1024` train prompts, and `256` held-out prompts. Held-out
+     native-Q4 capture wrote `1024` samples with `983 / 1024` labels in draft
+     scope. On this gate the original 16k head scored `106 / 983` top-1 and
+     `208 / 983` top-4, while the current best scaled UltraChat-native
+     warm-start
+     `/tmp/spd-native-q4-adapt-ultrachat-serving-v1-train1024-v4-ctx1024-e5-lr2e6-hard01/`
+     scored `383 / 983` top-1 and `574 / 983` top-4. This is a real
+     quant-specific improvement, but still needs request-path accepted/proposed
+     and paper-estimate evidence before any speed claim. The exported serving
+     bundle has SHA
+     `cab69fd4a9405819dc1a51afe058f1617995d0858702a2510313d600158349fe`
+     and passes Rust fixture parity. A bounded local package-backed rolling
+     smoke on the first `16` UltraChat held-out prompts matched content on
+     `16 / 16`, had `0` tap failures, proposed `41`, accepted `19`, rejected
+     `22`, and reported `paper_like_speedup_vs_serial_split=0.9268x`. This is
+     a near-miss pipeline-fill quality gate, not measured speed evidence. The
+     direct native-Q4 path needs raw tap-concat rows before any `stage_projs`
+     projection plus training through `stage_projs`; the current projected
+     product rows are only valid for warm-start adaptation from the same
+     checkpoint projection basis, not merely the same logical topology.
+     The raw path is now implemented and smoke-tested at the
+     corpus/trainer/scorer level: product captures can include `raw_rows.f32`,
+     the converter emits `raw_tap_concat` plus offsets, and the trainer/scorer
+     support `--input-mode raw`. The live smoke at
+     `/tmp/spd-raw-corpus-smoke-20260619` captured `3` samples with exact raw
+     byte counts and native Q4 teacher logits; a tiny fresh raw overfit reached
+     `1 / 3` top-1 and `3 / 3` top-4. Treat that as direct-training plumbing
+     evidence only. The first disjoint raw gate at
+     `/tmp/spd-raw-gate-20260619` has train16 and heldout16 corpora with `64`
+     rows each; fresh raw training scored only `4 / 59` held-out top-1 and
+     `5 / 59` top-4 in scope, while the existing current-best checkpoint scores
+     the same held-out raw gate at `24 / 59` top-1 and `41 / 59` top-4. The
+     train64 raw adaptation from the current-best checkpoint then improved
+     heldout top-1 to `28 / 59` and passed local package-backed rolling smoke:
+     content matched `16 / 16`, tap failures were `0`, proposals were
+     `22 / 39` accepted, and the pipeline-fill estimate crossed break-even at
+     `22` saved versus `17` unsaved candidate token round trips
+     (`paper_like_speedup_vs_serial_split=1.1282x`). This is acceptance and
+     round-trip-savings evidence, not local wall-clock speed evidence; measured
+     local decode remains slower because of same-machine contention and
+     sidecar/rolling overhead.
+     The broader heldout64 gate is stricter and is now the promotion gate:
+     `256` rows from `64` UltraChat held-out prompts with `241` in-scope labels
+     and no overlap with train shards. Train128 improved offline heldout64 to
+     `101 / 241` top-1 and `146 / 241` top-4, exported cleanly, and passed Rust
+     fixture parity, but local package-backed rolling smoke on all `64` prompts
+     accepted only `62 / 168` proposals. That is `62` saved versus `106`
+     unsaved candidate token round trips
+     (`paper_like_speedup_vs_serial_split=0.7381x`), despite exact content and
+     `0` tap failures. Train256 improves offline heldout64 to `107 / 241`
+     top-1 and `148 / 241` top-4, but this is still below the broad acceptance
+     level needed for a real-node timing run. Do not use the old heldout16 win
+     as promotion evidence.
    - Run a local or dry-run HF job on `Qwen/Qwen3-0.6B` only when debugging the
      trainer/export path itself. It is no longer the next scaling target now
      that the Qwen3.5-4B request path has real LAN KV evidence.
+   - The immediate larger-model target is now GLM-5.1 on Hugging Face, using
+     the existing `meshllm/GLM-5.1-UD-Q3_K_XL-layers` Skippy package. Use a
+     native-package-first qualification path: staged package smoke, raw
+     tap-concat capture, native quant verifier logits/top-k, SPD sidecar
+     training, held-out scoring, export, fixture parity, package-backed rolling
+     smoke, and latency simulation. Start with logical S6 boundaries
+     `13,26,39,52,65,78` and required taps `[0,13,26,39,52,65,78]` over the
+     normal Skippy layer package.
+   - SPD should not create separate model-layer artifacts. Skippy owns the
+     physical layer ranges and downloads/materializes the layer package; SPD
+     owns logical tap requirements and proposal weights. The coordinator runs
+     the sidecar. Workers need only the manifest-derived tap-return allowlist.
+     Mesh may colocate contiguous logical SPD stages onto fewer physical nodes
+     only if those nodes still return all internal logical-boundary taps.
+   - Realistic GLM-5.1 HF cost is not the old sub-$50 8B lane. A metadata or
+     planner smoke can stay under `$20`; a native package feasibility smoke on
+     `h200x2` should be capped around `4-6h` (`$40-$60`) but may require CPU
+     offload because the package is about `341GB` and `h200x2` has `282GB`
+     total VRAM. The first serious quality decision should budget `h200x4` for
+     `4-8h` (`$80-$160`). Full reference bootstrap from GLM-5.1 BF16/FP8 is a
+     later fallback, likely `h200x8` class and `$240-$480` for `6-12h`.
+     Dry-run model/package ref, dataset shard, topology, row cap, hardware,
+     timeout, output repo, and max cost before submitting any spend-bearing job.
    - Record the sidecar manifest's required hidden-state indices alongside every
      benchmark topology. Prefer a sidecar whose required taps match the intended
      mesh stage layout; otherwise the runtime must either create extra tap

@@ -9,14 +9,63 @@ accepted token. The work in this directory proves the training/evaluation path
 and records the artifact contract Skippy needs before serving the head from
 Rust.
 
-## Current Handoff: Qwen3-8B `23,36`
+## Current Immediate Goal: GLM-5.1 Native Package Qualification
 
-The immediate product target is `Qwen/Qwen3-8B` against the immutable
-`meshllm/Qwen3-8B-Q4_K_M-layers` package with logical SPD boundaries `23,36`.
-The topology dry run is clean: `physical_split_boundaries=[23]`,
+The immediate target is now a larger GLM-5.1 SPD qualification run on Hugging
+Face, not more local Qwen3-8B iteration. The first package target is
+`meshllm/GLM-5.1-UD-Q3_K_XL-layers` because it is already a Skippy layer
+package and is the smallest GLM-5.1 package checked so far at about `341GB`.
+The model config reports `78` layers, hidden size `6144`, MoE with `256`
+routed experts, and `8` active experts per token.
+
+The first logical SPD topology is S6:
+`stage_layer_boundaries=13,26,39,52,65,78`, with required taps
+`[0,13,26,39,52,65,78]`. SPD should reuse the ordinary Skippy layer package:
+Skippy owns the physical layer ranges and package materialization, while the
+sidecar owns the logical tap requirements and proposal weights. The coordinator
+runs the SPD predictor; workers need only the manifest-derived tap-return
+allowlist. If Mesh colocates multiple logical SPD stages on one physical node,
+that node must still return every internal logical-boundary tap required by the
+manifest.
+
+The first useful HF job should be native-package-first: build disjoint
+train/held-out prompt shards, download
+`meshllm/GLM-5.1-UD-Q3_K_XL-layers`, run a staged baseline smoke, capture raw
+tap-concat rows and native quant verifier logits/top-k over the SPD draft
+vocab, train the sidecar from those rows, score held-out top-1/top-4, export
+the serving bundle, run Rust fixture parity, run package-backed rolling
+`spd-openai-smoke`, and emit latency simulation JSON from
+`evals/spd/simulate_latency.py`.
+
+Realistic HF cost is larger than the Qwen proof. HF Jobs rates checked on
+2026-06-19 put `h200` at about `$5/hr`, `h200x2` at about `$10/hr`, `h200x4`
+at about `$20/hr`, and `h200x8` at about `$40/hr`. A metadata/planner smoke can
+stay under `$20`. A native package feasibility smoke should use `h200x2` for
+`4-6h` (`$40-$60`), but that lane may need CPU offload because the `341GB`
+package exceeds `282GB` total VRAM. The first realistic quality decision should
+budget `h200x4` for `4-8h` (`$80-$160`). Full reference bootstrap is not the
+first choice: BF16 `zai-org/GLM-5.1` is about `1.5TB`, and FP8 is about
+`756GB`; if reference bootstrap becomes necessary, expect an `h200x8` class
+run in the `$240-$480` range for `6-12h`.
+
+Pass criteria: train/held-out prompt-token shards have zero overlap, native
+teacher argmax matches the quant verifier target on in-scope rows, Rust fixture
+parity passes, package-backed rolling smoke matches baseline content with zero
+tap failures, broad held-out saved candidate-token round trips exceed unsaved
+round trips with margin, and latency simulation stays positive under realistic
+stage costs, link latency, and sidecar latency. If it fails, record the report
+and adjust the HF recipe or package choice; do not fall back to local 8B
+fiddling.
+
+## Prior Handoff: Qwen3-8B `23,36`
+
+`Qwen/Qwen3-8B` against the immutable
+`meshllm/Qwen3-8B-Q4_K_M-layers` package with logical SPD boundaries `23,36`
+is now harness evidence, not the immediate target. The topology dry run is
+clean: `physical_split_boundaries=[23]`,
 `layer_end=36`, tap rows `0,23,36;0,23`, and product tap-return allowlist
-`[23,36]`. Keep this as a hard constraint for every training artifact and speed
-claim.
+`[23,36]`. Keep this as a hard constraint for any future Qwen3-8B training
+artifact or speed claim.
 
 Current evidence still points to train/serve activation-distribution mismatch,
 but the latest product sidecar is the first checkpoint that clears the local
@@ -74,8 +123,327 @@ request-path speed smoke. The grounded next no-spend step is a larger disjoint
 short-prompt product corpus (for example the generated
 `/tmp/spd-qwen3-8b-product-prompts-paper3-train56-heldout8-max120`, `137`
 train prompts / `16` held-out prompts) plus less-overfit training and the same
-held-out attribution. If that still fails, the next tooling gap is native
-Q4_K_M verifier top-k/logit capture for paper-faithful supervision.
+held-out attribution. The native Q4_K_M verifier-logit tooling gap is now
+closed enough for the next training gate.
+
+2026-06-19 native-Q4 verifier-logit checkpoint: the llama.cpp ABI now exposes
+`skippy_session_copy_current_logits`, Rust can copy current verifier logits over
+the SPD draft vocabulary, and `skippy-bench spd-live-tap-parity
+--product-native-teacher-logits` writes native product verifier logits alongside
+product tap rows. `evals/spd/prepare_native_product_teacher_logits.py` converts
+those rows into the teacher safetensors consumed by
+`train_product_activation_head.py`. A two-prompt reuse smoke at
+`/tmp/spd-native-teacher-reuse-smoke` passed after moving the full Q4 target
+model load out of the per-prompt loop; it wrote `2` product rows and `2` native
+teacher-logit rows with exact byte counts.
+
+The first native-Q4 train/held-out adaptation gate used the 16k UltraChat
+checkpoint at
+`/private/tmp/skippy-spd-qwen3-8b-s2-23-16k-hf/runs/20260618-122936/train/speculation_head_final.pt`.
+Held-out capture `/tmp/spd-native-teacher-smoke` wrote `16` rows, draft logit
+width `32000`, exact byte counts, and `15 / 16` labels in draft scope; the
+native teacher argmax matched the in-scope Q4 target on `15 / 15`. Train capture
+`/tmp/spd-native-teacher-train16-v4` wrote `64` rows from the first `16` train
+prompts with `4` verify steps, exact byte counts, and `64 / 64` labels in draft
+scope with native teacher argmax matching the Q4 target on `64 / 64`.
+Converted tensors are:
+
+- train product corpus:
+  `/tmp/spd-native-teacher-train16-v4-corpus.safetensors`
+- train native teacher logits:
+  `/tmp/spd-native-teacher-train16-v4-teacher.safetensors`
+- held-out product corpus:
+  `/tmp/spd-native-teacher-smoke-corpus.safetensors`
+- held-out native teacher logits:
+  `/tmp/spd-native-teacher-smoke-teacher.safetensors`
+
+Before adaptation, the 16k head scored `7 / 64` train top-1 and `12 / 64`
+train top-4 against native labels, but `0 / 15` held-out top-1 and `0 / 15`
+held-out top-4 in scope. A conservative native-Q4 warm start at
+`/tmp/spd-native-q4-adapt-train16-v4-e3-lr1e5-hard025/` trained for `3` epochs,
+batch `8`, LR `1e-5`, weight decay `1e-2`, KL weight `1.0`, and hard-label
+weight `0.25`. It overfit the tiny native train set (`49 / 64` train top-1,
+`55 / 64` train top-4), while held-out improved only to `2 / 15` top-1 and
+`4 / 15` top-4 in scope. Treat this as proof that native quant-specific
+supervision is wired and learnable, not as enough quality to scale speed tests.
+
+The larger native-Q4 gate reused the same target-logit path on the full
+short-prompt train file. `/tmp/spd-native-teacher-train137-v4` captured `548`
+rows from `137` train prompts with `4` verify steps; byte counts were exact,
+`545 / 548` labels were inside the draft logit scope, and native teacher argmax
+matched the in-scope Q4 target on `545 / 545`. The matching held-out capture
+`/tmp/spd-native-teacher-heldout16-v4` captured `64` rows from the `16` held-out
+prompts; `61 / 64` labels were in scope and native teacher argmax matched the
+Q4 target on `61 / 61`. Converted tensors are:
+
+- train product corpus:
+  `/tmp/spd-native-teacher-train137-v4-corpus.safetensors`
+- train native teacher logits:
+  `/tmp/spd-native-teacher-train137-v4-teacher.safetensors`
+- held-out product corpus:
+  `/tmp/spd-native-teacher-heldout16-v4-corpus.safetensors`
+- held-out native teacher logits:
+  `/tmp/spd-native-teacher-heldout16-v4-teacher.safetensors`
+
+On this larger gate, the original 16k head scored `51 / 545` train top-1 and
+`98 / 545` train top-4, with held-out `5 / 61` top-1 and `14 / 61` top-4. The
+native-Q4 warm start at
+`/tmp/spd-native-q4-adapt-train137-v4-e3-lr1e5-hard025/` used the same recipe
+as the small gate (`3` epochs, batch `8`, LR `1e-5`, weight decay `1e-2`, KL
+weight `1.0`, hard-label weight `0.25`). It reached `401 / 545` train top-1 and
+`496 / 545` train top-4, while held-out improved materially to `20 / 61` top-1
+and `33 / 61` top-4. This confirms that quant-specific native supervision is
+the right direction, but `32.8%` held-out top-1 is still below a speed-candidate
+threshold. Do not export or run request-path speed with this checkpoint yet;
+next quality work should broaden native-Q4 train rows and tune regularization
+against the same held-out gate.
+
+A short regularization sweep on the same native-Q4 tensors found a slightly
+better local recipe. The best held-out top-1 run was
+`/tmp/spd-native-q4-adapt-train137-v4-e5-lr2e6-hard01/`: `5` epochs, batch `8`,
+LR `2e-6`, weight decay `1e-2`, KL weight `1.0`, hard-label weight `0.1`. It
+scored `311 / 545` train top-1, `400 / 545` train top-4, `22 / 61` held-out
+top-1, and `33 / 61` held-out top-4. The top-4-best sweep candidate was
+`/tmp/spd-native-q4-adapt-train137-v4-e3-lr5e6-hard01/`: `344 / 545` train
+top-1, `459 / 545` train top-4, `20 / 61` held-out top-1, and `34 / 61`
+held-out top-4. KL-only/high-temperature and heavier weight decay did not
+improve the held-out gate. The conclusion stays the same: native-Q4 adaptation
+is materially better than the original 16k head, but the current data/recipe
+still does not justify export or speed testing.
+
+The next scale attempt broadened the reference-prompt pool without changing the
+frozen held-out gate. `build_product_prompt_tokens.py` now accepts
+`--exclude-prompt-token-file`, so
+`/private/tmp/spd-qwen3-8b-product-prompts-paper3-train-all-heldout16-frozen-max512`
+contains `224` train prompts under `512` tokens while explicitly excluding the
+same `16` held-out prompts. Release `skippy-bench spd-live-tap-parity` captured
+`/tmp/spd-native-teacher-train224-v8`: `1792` rows from `224` prompts with `8`
+verify steps, exact `229376000` native-logit bytes, `1763 / 1792` labels inside
+the draft scope, and native teacher argmax matching the Q4 target on
+`1763 / 1763` in-scope labels. Converted tensors are:
+
+- train product corpus:
+  `/tmp/spd-native-teacher-train224-v8-corpus.safetensors`
+- train native teacher logits:
+  `/tmp/spd-native-teacher-train224-v8-teacher.safetensors`
+
+The unadapted 16k head scored `253 / 1763` train top-1 and `583 / 1763` train
+top-4 on this broadened corpus. The conservative broad-corpus warm start at
+`/tmp/spd-native-q4-adapt-train224-v8-e5-lr2e6-hard01/` reached
+`1013 / 1763` train top-1 and `1287 / 1763` train top-4, but scored only
+`21 / 61` held-out top-1 and `33 / 61` held-out top-4 on the frozen held-out
+gate. The prior top-4 recipe rerun at
+`/tmp/spd-native-q4-adapt-train224-v8-e3-lr5e6-hard01/` tied the old best
+held-out top-1 at `22 / 61`, but regressed held-out top-4 to `32 / 61`. This
+means more rows from the small reference-eval prompt pool do not lift the
+candidate-set ceiling. The next useful scale step is a genuinely broader
+product-token shard, starting with UltraChat prompts rendered through the same
+Qwen no-thinking template, not more sweeps on these `224` examples.
+
+The broader UltraChat-native gate changes the interpretation. The reproducible
+builder `evals/spd/build_hf_prompt_tokens.py` now creates HF prompt-token
+shards with fixed train/held-out splits, source indices, and Qwen
+`enable_thinking=false` chat-template rendering. The first serving-shaped shard
+is `/private/tmp/spd-qwen3-8b-ultrachat-serving-v1-max480`: `1024` train
+prompts and `256` held-out prompts from `HuggingFaceH4/ultrachat_200k`
+`train_sft`, shuffled with seed `23`, capped at `480` prompt tokens. The
+held-out capture
+`/tmp/spd-native-teacher-ultrachat-serving-v1-heldout256-v4-ctx1024` wrote
+`1024` product rows and `1024` native-teacher rows with exact byte counts;
+`983 / 1024` labels are inside the 32k draft scope and native teacher argmax
+matches the in-scope Q4 target on `983 / 983`. Converted tensors are:
+
+- held-out product corpus:
+  `/tmp/spd-native-teacher-ultrachat-serving-v1-heldout256-v4-ctx1024-corpus.safetensors`
+- held-out native teacher logits:
+  `/tmp/spd-native-teacher-ultrachat-serving-v1-heldout256-v4-ctx1024-teacher.safetensors`
+
+On this larger UltraChat held-out gate, the original 16k head scored
+`106 / 983` top-1 and `208 / 983` top-4. The reference-pool best
+`/tmp/spd-native-q4-adapt-train137-v4-e5-lr2e6-hard01/` only scored
+`147 / 983` top-1 and `284 / 983` top-4, confirming that the earlier
+`61`-row reference held-out gate was too narrow and distribution-specific for
+serving-shaped decisions. The UltraChat-only native-Q4 warm start trained from
+`512` prompts at
+`/tmp/spd-native-q4-adapt-ultrachat512-v4-ctx1024-e5-lr2e6-hard01/` scored
+`346 / 983` top-1 and `541 / 983` top-4 on the same held-out gate. The mixed
+reference+UltraChat warm start
+`/tmp/spd-native-q4-adapt-mix-ref224-ultra512-v1-e3-lr2e6-hard01/` scored
+`332 / 983` top-1 and `540 / 983` top-4. Treat this as evidence that
+distribution-matched native-Q4 rows matter more than more reference-pool
+sweeps.
+
+The scaled UltraChat-native train capture
+`/tmp/spd-native-teacher-ultrachat-serving-v1-train1024-v4-ctx1024` wrote
+`4096` product rows and `4096` native-teacher rows with exact byte counts;
+`3934 / 4096` labels are in the 32k draft scope and native teacher argmax
+matches the in-scope Q4 target on `3934 / 3934`. Converted tensors are:
+
+- train product corpus:
+  `/tmp/spd-native-teacher-ultrachat-serving-v1-train1024-v4-ctx1024-corpus.safetensors`
+- train native teacher logits:
+  `/tmp/spd-native-teacher-ultrachat-serving-v1-train1024-v4-ctx1024-teacher.safetensors`
+
+The 3-epoch scaled warm start
+`/tmp/spd-native-q4-adapt-ultrachat-serving-v1-train1024-v4-ctx1024-e3-lr2e6-hard01/`
+scored `360 / 983` top-1 and `543 / 983` top-4 on the larger UltraChat
+held-out gate. The 5-epoch variant
+`/tmp/spd-native-q4-adapt-ultrachat-serving-v1-train1024-v4-ctx1024-e5-lr2e6-hard01/`
+is the current best native-Q4 adaptation: `383 / 983` top-1 and `574 / 983`
+top-4 held-out, with train `1347 / 3934` top-1 and `2132 / 3934` top-4. This
+materially improves over the original 16k head (`106 / 983`, `208 / 983`) and
+the earlier 512-prompt UltraChat adaptation (`346 / 983`, `541 / 983`). It is
+still not enough to claim speedup. Treat the request-path number as an
+acceptance/round-trip-savings gate for whether SPD can keep the split pipeline
+full, not as measured wall-clock speed evidence for this small local/two-node
+shape.
+
+A direct fresh native-Q4 control on the existing safetensors corpus is not a
+valid serving comparison: these product rows already contain the sidecar input
+after the manifest's `stage_projs` projection, so the rows are tied to the
+checkpoint projection basis that captured them. Offline scoring of a fresh head
+against those projected rows can look better, but serving will project live taps
+with the fresh head's different projection weights. A same-recipe fresh control
+confirmed that failure mode: offline held-out scored `413 / 983` top-1 and
+`523 / 983` top-4, but local serving accepted `0 / 48` proposals with clean tap
+counters. The current projected-corpus path is therefore valid for warm-start
+adaptation from the same checkpoint `stage_projs` basis, not merely the same
+logical topology, and not for direct sidecar training from scratch. Proper
+direct native-Q4 training needs raw terminal-normalized tap-concat rows before
+any `stage_projs` projection, plus a trainer path that applies and trains
+`stage_projs`.
+
+2026-06-19 raw-corpus training-path checkpoint: the product corpus writer now
+emits `raw_rows.f32` beside the existing projected `rows.f32`. `raw_rows.f32`
+stores terminal-final-normed tap concatenations before any sidecar
+`stage_projs` projection, with per-row widths and offsets recorded in
+`manifest.json`. `prepare_product_activation_corpus.py` preserves those rows as
+`raw_tap_concat`, `raw_tap_offsets`, and `raw_tap_widths` in safetensors.
+`train_product_activation_head.py` now supports `--input-mode raw`, which
+projects each packed row through `g0_proj` / `stage_projs` inside the training
+graph, so direct/fresh training updates the projection weights consistently.
+`--input-mode auto` keeps checkpoint-mode warm starts on projected rows and
+uses raw rows for `--init-mode fresh` when available; projected fresh training
+remains rejected. `score_product_activation_head.py` also supports
+`--input-mode raw` so offline scoring cannot silently reuse the old projection
+basis. Validation now includes a live raw smoke, not just code-level checks.
+The smoke at `/tmp/spd-raw-corpus-smoke-20260619` wrote `3` samples, `2` SPD
+rows, raw row width `16384` with widths `[12288,4096]`, exact raw/projected
+byte counts, and native Q4 teacher logits over the `32000`-token draft scope.
+Conversion wrote `/tmp/spd-raw-corpus-smoke-20260619-corpus.safetensors` and
+`/tmp/spd-raw-corpus-smoke-20260619-teacher.safetensors`. A one-step fresh raw
+train completed, and a hard-label overfit smoke at
+`/tmp/spd-raw-direct-overfit3-20260619/` reduced loss from `19.19` to `1.52`;
+raw scoring reached `1 / 3` top-1 and `3 / 3` top-4 against native Q4 targets.
+Treat this as live-data plumbing evidence that direct raw training can learn
+through `stage_projs`, not as a sidecar-quality result. The next real gate is a
+larger disjoint raw native-Q4 train/held-out corpus for the same `23,36`
+topology.
+
+The first disjoint raw gate is
+`/tmp/spd-raw-gate-20260619`: train16 and heldout16 prompt-token subsets from
+the UltraChat serving-shaped shard, each captured with `4` verify steps. The
+train conversion wrote
+`/tmp/spd-raw-gate-20260619/train16-v4-corpus.safetensors` and
+`/tmp/spd-raw-gate-20260619/train16-v4-teacher.safetensors`, with `64` rows and
+`60 / 64` labels in draft scope. The held-out conversion wrote
+`/tmp/spd-raw-gate-20260619/heldout16-v4-corpus.safetensors` and
+`/tmp/spd-raw-gate-20260619/heldout16-v4-teacher.safetensors`, with `64` rows
+and `59 / 64` labels in draft scope. Native teacher argmax matches the Q4
+target on every in-scope row in both sets.
+
+Fresh raw training on only `64` rows is too weak to use as the production path:
+`/tmp/spd-raw-direct-train16-v4-hardonly-e10-lr5e4-20260619/` scored
+`4 / 59` held-out top-1 and `5 / 59` top-4 in scope. The existing current-best
+checkpoint scores the same held-out raw gate at `24 / 59` top-1 and `41 / 59`
+top-4 in scope, proving the raw path is consistent with the checkpoint
+projection basis. A small raw-mode checkpoint adaptation from that current-best
+checkpoint,
+`/tmp/spd-raw-checkpoint-adapt-train16-v4-e5-lr2e6-hard01-20260619/`, left the
+held-out gate unchanged at `24 / 59` top-1 and `41 / 59` top-4. The next
+production-oriented move is scaled raw-mode checkpoint adaptation on more
+UltraChat serving-shaped raw rows, not more tiny fresh-from-random training.
+
+The scaled train64 raw gate then crossed the local package-backed
+pipeline-fill threshold. Release `skippy-bench` captured
+`/tmp/spd-raw-gate-20260619/train64-v4-corpus`: `256` rows from `64` train
+prompts, exact raw/projected byte counts, native Q4 teacher logits, and
+`247 / 256` labels in draft scope. Conversion wrote
+`/tmp/spd-raw-gate-20260619/train64-v4-corpus.safetensors` and
+`/tmp/spd-raw-gate-20260619/train64-v4-teacher.safetensors`. The original 16k
+checkpoint scored `11 / 59` top-1 and `15 / 59` top-4 on frozen heldout16; raw
+adaptation from the original 16k checkpoint improved that to `15 / 59` top-1
+and `24 / 59` top-4. The stronger raw-mode adaptation from the current-best
+checkpoint,
+`/tmp/spd-raw-checkpoint-adapt-train64-v4-e3-lr5e6-hard01-20260619/`, scored
+`28 / 59` heldout top-1 and `40 / 59` top-4.
+
+That train64 candidate exported as a BF16 serving bundle at
+`/tmp/spd-raw-checkpoint-adapt-train64-v4-e3-lr5e6-hard01-20260619/bundle/`
+with serving checkpoint SHA
+`69166291b4b9d433d73564d8035908cb9db9d3638dd7238136afa79a525d5a96`, and
+`target/release/skippy-bench spd-fixture-parity` passed. Local package-backed
+rolling smoke wrote
+`/tmp/spd-raw-checkpoint-adapt-train64-v4-e3-lr5e6-hard01-20260619/openai-heldout16-local-rolling.json`:
+content matched `16 / 16`, tap return/record/ignored failures were all `0`,
+SPD proposed `39`, accepted `22`, rejected `17`, and committed `21`
+optimistic tokens. The pipeline-fill estimate is now above break-even:
+`22` saved versus `17` unsaved candidate token round trips, save rate `56.4%`,
+and `paper_like_speedup_vs_serial_split=1.1282x`. Measured local decode remains
+slower (`0.171x`) due same-machine contention and sidecar/rolling overhead; do
+not report that as distributed speedup.
+
+The broader heldout64 gate invalidated the narrow heldout16 promotion signal.
+The heldout64 corpus at `/tmp/spd-raw-gate-20260619/heldout64-v4-corpus` uses
+the first `64` UltraChat held-out prompts, has `256` rows, `241 / 256` labels
+in draft scope, and has zero overlap with the train shards. Native teacher
+argmax matches the Q4 target on all in-scope rows. Offline heldout64 scores:
+original 16k `23 / 241` top-1 and `49 / 241` top-4; current-best warm start
+`89 / 241` and `140 / 241`; train64 stronger raw adaptation `92 / 241` and
+`138 / 241`; train128 stronger raw adaptation `101 / 241` and `146 / 241`;
+train256 stronger raw adaptation `107 / 241` and `148 / 241`.
+
+The train128 candidate exported and passed Rust fixture parity, but the full
+heldout64 package-backed rolling smoke failed the pipeline-fill gate:
+`/tmp/spd-raw-checkpoint-adapt-train128-v4-e3-lr5e6-hard01-20260619/openai-heldout64-local-rolling.json`
+matched content on `64 / 64`, had `0` tap failures, proposed `168`, accepted
+`62`, rejected `106`, and reported `62` saved versus `106` unsaved candidate
+token round trips (`paper_like_speedup_vs_serial_split=0.7381x`). The first
+`16` prompts were barely positive (`21` saved / `18` unsaved), so heldout16 is
+now only a quick smoke/debug subset. Do not promote train128 to a real-node run.
+
+The current best offline raw candidate is train256:
+`/tmp/spd-raw-checkpoint-adapt-train256-v4-e3-lr5e6-hard01-20260619/`. Its
+train corpus has `1024` rows and `986 / 1024` labels in draft scope. It scores
+`107 / 241` heldout64 top-1 and `148 / 241` top-4, which is a real improvement
+over train128 but still below the rough >50% acceptance level needed for a
+two-stage round-trip ledger to clear break-even with margin. The next quality
+step is more raw native-Q4 rows and/or a better recipe, not real-node timing.
+
+The current best warm start exports cleanly for Rust serving:
+
+- manifest:
+  `/tmp/spd-native-q4-adapt-ultrachat-serving-v1-train1024-v4-ctx1024-e5-lr2e6-hard01/skippy-spd-head.json`
+- serving checkpoint:
+  `/tmp/spd-native-q4-adapt-ultrachat-serving-v1-train1024-v4-ctx1024-e5-lr2e6-hard01/spd-head.safetensors`
+- serving checkpoint SHA:
+  `cab69fd4a9405819dc1a51afe058f1617995d0858702a2510313d600158349fe`
+- parity fixture:
+  `/tmp/spd-native-q4-adapt-ultrachat-serving-v1-train1024-v4-ctx1024-e5-lr2e6-hard01/spd-parity-fixture.safetensors`
+
+`target/release/skippy-bench spd-fixture-parity` exits successfully for that
+bundle. Cached fixture parity is exact; direct fixture parity has a close-logit
+rank swap in the tail of top-8 but passes the harness gate. The bounded local
+package-backed rolling smoke on the first `16` UltraChat held-out prompts wrote
+`/tmp/spd-native-q4-adapt-ultrachat-serving-v1-train1024-v4-ctx1024-e5-lr2e6-hard01/openai-heldout16-local-rolling.json`.
+It matched baseline/SPD content on `16 / 16`, recorded `0` tap return failures,
+`0` tap record failures, and `0` ignored taps, proposed `41`, accepted `19`,
+and rejected `22`. The paper-style estimate is still below break-even:
+`19` saved versus `22` unsaved candidate token round trips, save rate
+`46.3%`, and `paper_like_speedup_vs_serial_split=0.9268x`. Measured all-local
+decode remains slower (`0.173x`) because stage work and the sidecar contend on
+one machine. Treat this as request-path correctness plus a near-miss
+pipeline-fill quality gate, not measured SPD speed evidence.
 
 The held-out live-tap check at
 `/tmp/spd-qwen3-8b-product-finetune-paper3-train16-e5-lr2e5/live-tap-heldout8.json`
@@ -1570,19 +1938,20 @@ diagnostics as well as normal pre-target inline probes.
 `summary.paper_pipeline_estimate` projects the
 observed accept rate onto the paper/reference rolling pipeline schedule using
 the manifest's logical SPD stage count, while still reporting the physical
-tap-aligned Skippy stage count. For speed interpretation, treat the accepted
-token count as the first-order count of future split-stage verifier trips that
-can be removed from the critical path only if the rolling executor overlaps
-those verifier trips. The simple benchmark math is: count baseline emitted
-tokens and split-stage trips, count accepted speculative tokens/windows from
-the same prompt set, derive the paper-style critical-path reduction from the
-rolling trace or `paper_pipeline_estimate`, then compare that upper bound with
-the measured `decode_speedup_spd_vs_baseline`. Sidecar forward/head time,
-tap-collection time, transport latency, rejected windows, and rollback drains
-come directly out of the same report and explain the gap between the paper
-estimate and measured wall/decode speed. If accepted proposals are zero, the
-round-trip savings are zero and the only valid expectation is slowdown from
-SPD overhead. `summary.rolling_trace_replay` replays observed
+tap-aligned Skippy stage count. For the current product proof, interpret this as
+pipeline-fill economics, not measured speedup: accepted speculative tokens are
+the first-order count of future split-stage verifier trips that can be removed
+from the critical path only if the rolling executor overlaps those verifier
+trips. The simple benchmark math is: count baseline emitted tokens and
+split-stage trips, count accepted speculative tokens/windows from the same
+prompt set, derive the paper-style critical-path reduction from the rolling
+trace or `paper_pipeline_estimate`, then compare that upper bound with the
+measured `decode_speedup_spd_vs_baseline` only as an overhead diagnostic.
+Sidecar forward/head time, tap-collection time, transport latency, rejected
+windows, and rollback drains come directly out of the same report and explain
+the gap between the pipeline-fill estimate and measured wall/decode speed. If
+accepted proposals are zero, the round-trip savings are zero and the only valid
+expectation is slowdown from SPD overhead. `summary.rolling_trace_replay` replays observed
 pre-target and diagnostic `optimistic_commit` proposals through
 `SpdRollingScheduler` when token/proposal traces exist, and otherwise falls
 back to final live `cases[].decode.rolling` telemetry for primary-verify-only
@@ -2122,9 +2491,94 @@ a speed candidate yet. Native Q4 top-1 acceptance is only about `18%`, so the
 sidecar saves some token round trips but not enough to beat added sidecar and
 rolling-executor overhead.
 
+## HF Pre-LAN Split-Economics Gate
+
+Larger SPD work should move off the M4 into a Hugging Face qualification job
+before another real-node speed attempt. The HF job can run raw product-tap
+capture, native-Q4 teacher-logit conversion, raw-mode adaptation, held-out
+scoring, serving export, Rust fixture parity, and a single-machine
+package-backed `spd-openai-smoke`. That is enough to prove predictor quality,
+artifact correctness, and request-path mechanics. It is not a distributed
+wall-clock speed claim.
+
+Use `evals/spd/simulate_latency.py` as the deterministic bridge from HF/local
+smoke evidence to LAN plausibility. For a Skippy OpenAI smoke report, it reads
+observed accepted/proposed candidate-token round trips and sweeps assumed
+physical stage costs and inter-node hop latencies:
+
+```bash
+python3 evals/spd/simulate_latency.py \
+  --openai-report /path/to/spd-openai-smoke.json \
+  --stage-ms 40,40 \
+  --hop-ms 0.2,1,5,10
+```
+
+Pass `--sidecar-ms 0` to model the paper's ideal hidden-sidecar condition; omit
+it to use the report's measured `probe_head_total_ms` when present. The gate is
+intentionally strict: broad held-out content must match, tap failures must be
+zero, sidecar latency must fit under the slowest physical pipeline slot or be
+explicitly accounted for, and estimated `spd_vs_serial_saved_tokens` must clear
+`1.0` with margin over realistic LAN assumptions.
+
+This also defines how predigested SPD splits should work. Sidecars are trained
+for canonical logical topologies and required tap boundaries. Mesh can fit those
+logical stages onto fewer physical nodes by colocating contiguous logical
+stages, but the runtime still has to return every manifest-required tap. The
+economics model must use the fitted physical placement, not the raw logical
+stage count: ten logical SPD stages colocated on three nodes may be functional,
+but the speed estimate has only three physical compute buckets.
+
+Artifact distribution should stay modular. The base model remains a normal
+Mesh/Skippy layer package, so each physical stage node downloads or materializes
+only the layer parts it owns. The SPD predictor bundle is coordinator-owned by
+default: the coordinator needs `skippy-spd-head.json`, `spd-head.safetensors`,
+and the parity fixture; worker nodes only need the derived tap-return allowlist
+and must return the hidden states requested by the manifest. Running the SPD
+predictor on every node should be treated as a future optimization/design
+change, not a requirement for the current proof.
+
+The dry-run helper for this flow is:
+
+```bash
+python3 evals/spd/plan_hf_spd_qualification.py --json
+```
+
+For the current GLM-5.1 target, the dry-run/planner path should resolve
+`meshllm/GLM-5.1-UD-Q3_K_XL-layers`, keep S6 logical boundaries
+`13,26,39,52,65,78`, require taps `[0,13,26,39,52,65,78]`, and model
+contiguous physical clumping such as `[[0,1],[2,3],[4,5]]` for three physical
+buckets. The first serious native package qualification should budget HF
+`h200x4` for `4-8h` (`$80-$160`) because the package is about `341GB`;
+`h200x2` is a cheaper feasibility lane (`$40-$60` for `4-6h`) but may need CPU
+offload because `282GB` total VRAM is smaller than the package. Do not submit a
+spend-bearing GLM job until the plan prints model/package ref, dataset shard,
+prompt counts, topology, hardware, timeout, output repo, and max cost.
+
+The older `Qwen3-8B` raw-Q4 path remains useful as harness evidence: it proves
+package-backed mechanics, tap return, Rust sidecar loading, rolling
+verification, and the M4/mini split path. It is no longer the immediate scaling
+target because predictor quality was not proven on broad held-out prompts.
+
+The current local reports demonstrate why this gate matters. The train128 raw
+candidate on broad heldout64 matches content and has zero tap failures, but
+accepts only `62 / 168` proposals (`62` saved versus `106` unsaved), so it
+fails even under ideal hidden-sidecar assumptions. The earlier train64
+heldout16 report is only a narrow debug win (`22` saved versus `17` unsaved);
+with the measured local sidecar latency around `64ms`, it is still negative
+unless the real target pipeline slot is at least that slow or the sidecar is
+optimized/offloaded.
+
 ## Next Engineering Steps
 
-1. Do not run the current Qwen3-8B S2/23 HF-scale head as a speed proof yet.
+1. Move the immediate larger-model SPD goal to GLM-5.1 on HF. Use
+   `meshllm/GLM-5.1-UD-Q3_K_XL-layers`, logical S6 boundaries
+   `13,26,39,52,65,78`, and native package taps/logits as the distillation
+   source. Reuse the normal Skippy layer package for physical stage material;
+   the SPD sidecar owns logical tap requirements and proposal weights only.
+   Start with a dry-run/planner update, then a feasibility smoke on `h200x2`
+   only if it explicitly allows CPU offload, otherwise use `h200x4` for the
+   first quality decision.
+2. Do not run the current Qwen3-8B S2/23 HF-scale head as a speed proof yet.
    The terminal h36 semantic mismatch is understood: Skippy's terminal boundary
    is pre-final-norm and the HF fixture/training row is post-final-norm, so
    serving now applies the Qwen final RMSNorm before projecting unflagged
@@ -2135,17 +2589,14 @@ rolling-executor overhead.
    exact `23,36` product split until the package-backed paper estimate clears
    `1.0` with margin.
 
-   The concrete quality path is to expand product-captured rows beyond the
-   current `384` train / `192` held-out samples, keep held-out prompts separate,
-   and dry-run any HF/CUDA BF16 job before spending. Paper-faithful KL training
-   from product execution still needs either target logits exposed from the
-   native Q4_K_M runtime or an explicit decision that HF `Qwen/Qwen3-8B` teacher
-   logits aligned to captured product rows are sufficient for the next scale
-   run. Also keep a build provenance check in every speed run: after llama.cpp
-   patch changes, rebuild the native stage ABI before relinking release
-   `skippy-server` / `skippy-bench`.
+   The concrete quality path is now native-Q4 product-row training: expand the
+   captured rows beyond the first `64` train / `16` held-out native-logit gate,
+   keep held-out prompts separate, fine-tune from the 16k checkpoint, and score
+   train plus held-out rows before export. Also keep a build provenance check in
+   every speed run: after llama.cpp patch changes, rebuild the native stage ABI
+   before relinking release `skippy-server` / `skippy-bench`.
 
-2. Train or fetch a topology-matched sidecar for each real two-stage product
+3. Train or fetch a topology-matched sidecar for each real two-stage product
    split before making any speed claim. For Qwen3.5-4B that means
    `num_stages=2`, `stage_layer_boundaries=16,32`, and tap rows
    `0,16,32;0,16`; the current pretrained S4/L4 sidecar is intentionally
@@ -2154,18 +2605,19 @@ rolling-executor overhead.
    `stage_layer_boundaries=23,36`. The current 16k UltraChat head is a real
    trained checkpoint and proves the topology end to end, but native Q4 top-1
    acceptance is still too low for a speed claim.
-3. Run a larger product-row training gate on the same `23,36` topology before
-   speed testing: more product-captured rows, held-out prompts kept separate,
-   BF16 on CUDA/HF if local MPS is too slow, and no spend-bearing job without a
-   dry-run plan and approval.
-4. Only after held-out package-backed serving clears a `1.0` paper estimate,
+4. Run the larger native-Q4 product-row training gate on HF, not by thrashing
+   the M4. The dry run must print model/package ref, dataset shard, logical
+   topology, row cap, hardware, timeout, output repo, and maximum cost. The job
+   should emit held-out scores, the serving bundle, fixture parity, package
+   smoke, and latency-simulation JSON.
+5. Only after held-out package-backed serving clears a `1.0` paper estimate,
    rerun `spd-openai-smoke` with explicit `--stage-hosts`,
    pre-materialized package directories or Mesh-resolved package artifacts, and
    ordinary split baseline/SPD pairs to test real wall-clock speed. Stage 0 plus
    the sidecar should stay on the coordinator; stage 1 should be on the worker.
-5. Use injected downstream delay only as a bounded diagnostic; do not report it
+6. Use injected downstream delay only as a bounded diagnostic; do not report it
    as distributed speedup.
-6. Add an SPD sidecar package workflow around the Python reference trainer:
+7. Add an SPD sidecar package workflow around the Python reference trainer:
    plan logical tap topology, train, eval `L'_acc`, export safetensors/manifest,
    validate Rust parity, then publish sidecar metadata alongside Skippy model
    artifacts.

@@ -6,6 +6,7 @@ mod local_single;
 mod local_split;
 mod model_identity;
 mod spd;
+mod spd_native_teacher;
 mod spd_openai;
 mod spd_openai_check;
 mod support;

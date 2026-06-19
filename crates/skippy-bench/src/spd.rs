@@ -20,7 +20,12 @@ use skippy_runtime::{
     },
 };
 
-use crate::cli::{SpdFixtureParityArgs, SpdLiveTapParityArgs};
+use crate::{
+    cli::{SpdFixtureParityArgs, SpdLiveTapParityArgs},
+    spd_native_teacher::{
+        NativeTeacherLogitsConfig, NativeTeacherLogitsWriter, NativeTeacherSample,
+    },
+};
 
 pub fn spd_fixture_parity(args: SpdFixtureParityArgs) -> Result<()> {
     let tap_input = run_spd_tap_input_fixture_parity(&args.manifest, &args.fixture)
@@ -132,6 +137,9 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
     if args.verify_steps == 0 {
         bail!("--verify-steps must be greater than zero");
     }
+    if args.product_native_teacher_logits && args.product_corpus_dir.is_none() {
+        bail!("--product-native-teacher-logits requires --product-corpus-dir");
+    }
 
     let hidden_size =
         usize::try_from(manifest.topology.hidden_size).context("SPD hidden_size exceeds usize")?;
@@ -198,10 +206,22 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
                 row_hf_indices: &row_hf_indices,
                 hidden_size,
                 final_norm_weight: &final_norm_weight,
+                native_teacher_logits: args.product_native_teacher_logits,
             },
         )?),
         None => None,
     };
+    let mut native_teacher = match (&args.product_corpus_dir, args.product_native_teacher_logits) {
+        (Some(dir), true) => Some(NativeTeacherLogitsWriter::create(
+            NativeTeacherLogitsConfig {
+                dir: dir.clone(),
+                manifest: &manifest,
+                top_k: args.top_k,
+            },
+        )?),
+        _ => None,
+    };
+    let target_model = open_full_target_model(&args)?;
     let mut verified_generations = Vec::with_capacity(verified_prompt_tokens.len());
     for (prompt_index, prompt_tokens) in verified_prompt_tokens.iter().enumerate() {
         verified_generations.push(
@@ -213,6 +233,7 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
                 VerifiedGenerationInputs {
                     prompt_index,
                     prompt_tokens,
+                    target_model: &target_model,
                     row_i_stages: &row_i_stages,
                     row_hf_indices: &row_hf_indices,
                     final_norm_weight: &final_norm_weight,
@@ -220,6 +241,7 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
                     hidden_size,
                 },
                 product_corpus.as_mut(),
+                native_teacher.as_mut(),
             )
             .with_context(|| {
                 format!("run live SPD target verification for prompt_index={prompt_index}")
@@ -229,6 +251,10 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
     let product_corpus_report = product_corpus
         .as_mut()
         .map(ProductActivationCorpusWriter::finish)
+        .transpose()?;
+    let native_teacher_report = native_teacher
+        .as_mut()
+        .map(NativeTeacherLogitsWriter::finish)
         .transpose()?;
     let first_verified_generation = verified_generations
         .first()
@@ -293,6 +319,7 @@ pub fn spd_live_tap_parity(args: SpdLiveTapParityArgs) -> Result<()> {
             .map(|generation| generation.report.clone())
             .collect::<Vec<_>>(),
         "product_activation_corpus": product_corpus_report,
+        "native_teacher_logits": native_teacher_report,
     });
     let json = serde_json::to_vec_pretty(&report)?;
     if let Some(output) = args.output {
@@ -371,6 +398,7 @@ fn evaluate_live_tap_parity_gate(
 struct VerifiedGenerationInputs<'a> {
     prompt_index: usize,
     prompt_tokens: &'a [i32],
+    target_model: &'a StageModel,
     row_i_stages: &'a [i64],
     row_hf_indices: &'a [Vec<u32>],
     final_norm_weight: &'a [f32],
@@ -385,6 +413,7 @@ fn run_verified_generation(
     tap_projector: &SpdTapInputProjector,
     inputs: VerifiedGenerationInputs<'_>,
     mut product_corpus: Option<&mut ProductActivationCorpusWriter>,
+    mut native_teacher: Option<&mut NativeTeacherLogitsWriter>,
 ) -> Result<VerifiedGenerationReport> {
     if inputs.prompt_tokens.len() < inputs.row_count {
         bail!(
@@ -397,8 +426,8 @@ fn run_verified_generation(
         .prompt_tokens
         .get(..inputs.prompt_tokens.len().saturating_sub(1))
         .context("failed to split prompt prefix")?;
-    let target = open_full_target_model(args)?;
-    let mut target_session = target
+    let mut target_session = inputs
+        .target_model
         .create_session()
         .context("create target verification session")?;
     prefill_target_prefix(&mut target_session, prefix)?;
@@ -483,6 +512,14 @@ fn run_verified_generation(
             .context("target greedy baseline decode failed")?;
         let decode_ms = elapsed_ms(decode_timer);
         let baseline_token_count_after = target_session.token_count();
+        let native_teacher_logits = match native_teacher.as_deref() {
+            Some(writer) => Some(
+                target_session
+                    .copy_current_logits_for_tokens(writer.draft_token_ids())
+                    .context("copy native target logits for SPD draft vocabulary")?,
+            ),
+            None => None,
+        };
         if let Some(writer) = product_corpus.as_deref_mut() {
             writer.write_step(ProductActivationSample {
                 prompt_index: inputs.prompt_index,
@@ -494,12 +531,27 @@ fn run_verified_generation(
                 query_row_index: inputs.row_count.saturating_sub(1),
                 target_position: context_tokens.len(),
                 cur_in: &cur_in,
+                raw_tap_concat: &live_rows.raw_tap_concat,
                 current_token: current,
                 proposal_topk: &live_topk,
                 target_token,
                 accepted,
                 committed_token,
                 baseline_greedy_token: baseline_token,
+            })?;
+        }
+        if let (Some(writer), Some(logits)) = (
+            native_teacher.as_deref_mut(),
+            native_teacher_logits.as_deref(),
+        ) {
+            writer.write_step(NativeTeacherSample {
+                prompt_index: inputs.prompt_index,
+                step_index,
+                target_position: context_tokens.len(),
+                query_row_index: inputs.row_count.saturating_sub(1),
+                query_position: row_positions[inputs.row_count.saturating_sub(1)],
+                target_token,
+                logits,
             })?;
         }
         context_tokens.push(committed_token);
@@ -730,6 +782,7 @@ struct LiveRows {
 
 struct DynamicLiveRows {
     cur_in: Vec<f32>,
+    raw_tap_concat: Vec<f32>,
 }
 
 struct ProductActivationCorpusConfig<'a> {
@@ -742,14 +795,19 @@ struct ProductActivationCorpusConfig<'a> {
     row_hf_indices: &'a [Vec<u32>],
     hidden_size: usize,
     final_norm_weight: &'a [f32],
+    native_teacher_logits: bool,
 }
 
 struct ProductActivationCorpusWriter {
     dir: PathBuf,
     rows_f32: BufWriter<File>,
+    raw_rows_f32: BufWriter<File>,
     rows_jsonl: BufWriter<File>,
     row_count: usize,
     hidden_size: usize,
+    raw_row_widths: Vec<usize>,
+    raw_row_offsets: Vec<usize>,
+    raw_width: usize,
     sample_count: usize,
 }
 
@@ -763,6 +821,7 @@ struct ProductActivationSample<'a> {
     query_row_index: usize,
     target_position: usize,
     cur_in: &'a [f32],
+    raw_tap_concat: &'a [f32],
     current_token: i32,
     proposal_topk: &'a SpdQwen3FixtureTopK,
     target_token: i32,
@@ -800,6 +859,11 @@ impl ProductActivationCorpusWriter {
             &config.dir.join("final_norm_weight.f32"),
             config.final_norm_weight,
         )?;
+        let raw_row_widths = raw_row_widths(config.row_hf_indices, config.hidden_size)?;
+        let raw_row_offsets = cumulative_offsets(&raw_row_widths)?;
+        let raw_width = *raw_row_offsets
+            .last()
+            .context("SPD raw row offsets should include final width")?;
         let single_prompt_tokens = (config.prompt_token_sets.len() == 1)
             .then(|| config.prompt_token_sets.first())
             .flatten();
@@ -827,10 +891,19 @@ impl ProductActivationCorpusWriter {
             "row_hf_indices": config.row_hf_indices,
             "query_row_index": config.row_count.saturating_sub(1),
             "cur_in_convention": "terminal_final_normed_cur_in",
+            "raw_tap_convention": "terminal_final_normed_tap_concat",
             "row_tensor": {
                 "path": "rows.f32",
                 "dtype": "f32_le",
                 "shape": ["sample_count", config.row_count, config.hidden_size],
+            },
+            "raw_row_tensor": {
+                "path": "raw_rows.f32",
+                "dtype": "f32_le",
+                "shape": ["sample_count", raw_width],
+                "row_widths": &raw_row_widths,
+                "row_offsets": &raw_row_offsets,
+                "notes": "Packed terminal-final-normed tap concatenations before stage_projs projection.",
             },
             "metadata_rows": {
                 "path": "rows.jsonl",
@@ -842,11 +915,20 @@ impl ProductActivationCorpusWriter {
                 "shape": [config.hidden_size],
             },
             "label_kind": "target_greedy_top1",
-            "target_logits_available": false,
-            "paper_kl_training_ready": false,
+            "target_logits_available": config.native_teacher_logits,
+            "paper_kl_training_ready": config.native_teacher_logits,
+            "native_teacher_logits": config.native_teacher_logits.then_some(json!({
+                "manifest_path": "native_teacher_manifest.json",
+                "logits_path": "native_teacher_logits.f32",
+                "metadata_path": "native_teacher_rows.jsonl",
+                "summary_path": "native_teacher_summary.json",
+                "teacher_source": "native_skippy_product_verifier_current_logits",
+                "logit_scope": "draft",
+            })),
             "notes": [
-                "Rows are captured from live Skippy/product activations after terminal final-norm alignment.",
-                "Labels are greedy target tokens from the product verifier; full teacher logits are not exposed by the current native runtime ABI.",
+                "rows.f32 stores live Skippy/product activations after terminal final-norm alignment and sidecar input projection.",
+                "raw_rows.f32 stores terminal-final-normed tap concatenations before sidecar input projection.",
+                "Labels are greedy target tokens from the product verifier.",
             ],
         });
         fs::write(
@@ -858,6 +940,10 @@ impl ProductActivationCorpusWriter {
             File::create(config.dir.join("rows.f32"))
                 .with_context(|| format!("create {}", config.dir.join("rows.f32").display()))?,
         );
+        let raw_rows_f32 = BufWriter::new(
+            File::create(config.dir.join("raw_rows.f32"))
+                .with_context(|| format!("create {}", config.dir.join("raw_rows.f32").display()))?,
+        );
         let rows_jsonl = BufWriter::new(
             File::create(config.dir.join("rows.jsonl"))
                 .with_context(|| format!("create {}", config.dir.join("rows.jsonl").display()))?,
@@ -865,9 +951,13 @@ impl ProductActivationCorpusWriter {
         Ok(Self {
             dir: config.dir,
             rows_f32,
+            raw_rows_f32,
             rows_jsonl,
             row_count: config.row_count,
             hidden_size: config.hidden_size,
+            raw_row_widths,
+            raw_row_offsets,
+            raw_width,
             sample_count: 0,
         })
     }
@@ -885,13 +975,23 @@ impl ProductActivationCorpusWriter {
                 self.hidden_size
             );
         }
+        if sample.raw_tap_concat.len() != self.raw_width {
+            bail!(
+                "SPD product corpus raw_tap_concat length {} does not match raw_width {}",
+                sample.raw_tap_concat.len(),
+                self.raw_width
+            );
+        }
         write_f32_slice(&mut self.rows_f32, sample.cur_in)?;
+        write_f32_slice(&mut self.raw_rows_f32, sample.raw_tap_concat)?;
         let row = json!({
             "schema": "skippy-spd-product-activation-row/v1",
             "sample_index": self.sample_count,
             "prompt_index": sample.prompt_index,
             "row_f32_offset": self.sample_count * expected_len,
             "row_f32_count": expected_len,
+            "raw_row_f32_offset": self.sample_count * self.raw_width,
+            "raw_row_f32_count": self.raw_width,
             "step_index": sample.step_index,
             "context_token_count_before": sample.context_tokens.len(),
             "context_tokens": sample.context_tokens,
@@ -927,11 +1027,17 @@ impl ProductActivationCorpusWriter {
         self.rows_f32
             .flush()
             .context("flush SPD product corpus rows.f32")?;
+        self.raw_rows_f32
+            .flush()
+            .context("flush SPD product corpus raw_rows.f32")?;
         self.rows_jsonl
             .flush()
             .context("flush SPD product corpus rows.jsonl")?;
         let rows_bytes = fs::metadata(self.dir.join("rows.f32"))
             .with_context(|| format!("stat {}", self.dir.join("rows.f32").display()))?
+            .len();
+        let raw_rows_bytes = fs::metadata(self.dir.join("raw_rows.f32"))
+            .with_context(|| format!("stat {}", self.dir.join("raw_rows.f32").display()))?
             .len();
         let summary = json!({
             "schema": "skippy-spd-product-activation-corpus-summary/v1",
@@ -941,7 +1047,13 @@ impl ProductActivationCorpusWriter {
             "hidden_size": self.hidden_size,
             "rows_f32_bytes": rows_bytes,
             "rows_f32_expected_bytes": self.sample_count * self.row_count * self.hidden_size * std::mem::size_of::<f32>(),
+            "raw_rows_f32_bytes": raw_rows_bytes,
+            "raw_rows_f32_expected_bytes": self.sample_count * self.raw_width * std::mem::size_of::<f32>(),
             "rows_path": "rows.f32",
+            "raw_rows_path": "raw_rows.f32",
+            "raw_row_width": self.raw_width,
+            "raw_row_widths": &self.raw_row_widths,
+            "raw_row_offsets": &self.raw_row_offsets,
             "metadata_path": "rows.jsonl",
             "manifest_path": "manifest.json",
         });
@@ -952,6 +1064,31 @@ impl ProductActivationCorpusWriter {
         .with_context(|| format!("write {}", self.dir.join("summary.json").display()))?;
         Ok(summary)
     }
+}
+
+fn raw_row_widths(row_hf_indices: &[Vec<u32>], hidden_size: usize) -> Result<Vec<usize>> {
+    row_hf_indices
+        .iter()
+        .map(|indices| {
+            indices
+                .len()
+                .checked_mul(hidden_size)
+                .context("SPD raw row width overflow")
+        })
+        .collect()
+}
+
+fn cumulative_offsets(widths: &[usize]) -> Result<Vec<usize>> {
+    let mut offsets = Vec::with_capacity(widths.len() + 1);
+    let mut next = 0usize;
+    offsets.push(next);
+    for width in widths {
+        next = next
+            .checked_add(*width)
+            .context("SPD raw row offset overflow")?;
+        offsets.push(next);
+    }
+    Ok(offsets)
 }
 
 fn write_f32_file(path: &Path, values: &[f32]) -> Result<()> {
@@ -1193,6 +1330,12 @@ fn assemble_live_cur_in_for_positions(
         );
     }
     let mut cur_in = Vec::with_capacity(inputs.row_positions.len() * inputs.hidden_size);
+    let raw_width = inputs
+        .row_hf_indices
+        .iter()
+        .map(|indices| indices.len() * inputs.hidden_size)
+        .sum::<usize>();
+    let mut raw_tap_concat = Vec::with_capacity(raw_width);
     for row_index in 0..inputs.row_positions.len() {
         let position = inputs.row_positions[row_index];
         let stage_id = u32::try_from(inputs.row_i_stages[row_index])
@@ -1206,10 +1349,14 @@ fn assemble_live_cur_in_for_positions(
             inputs.layer_end,
             inputs.final_norm_weight,
         )?;
+        raw_tap_concat.extend_from_slice(&normed_concat);
         let projection = tap_projector.project(stage_id, hf_indices, &normed_concat)?;
         cur_in.extend_from_slice(&projection.projected);
     }
-    Ok(DynamicLiveRows { cur_in })
+    Ok(DynamicLiveRows {
+        cur_in,
+        raw_tap_concat,
+    })
 }
 
 fn concat_live_hidden(

@@ -55,6 +55,11 @@ def main() -> None:
     row_count = int(manifest["row_count"])
     hidden_size = int(manifest["hidden_size"])
     cur_in = read_cur_in(corpus_dir / "rows.f32", len(rows), row_count, hidden_size)
+    raw_tap_concat, raw_tap_offsets, raw_tap_widths = read_raw_tap_concat(
+        corpus_dir,
+        manifest,
+        len(rows),
+    )
     final_norm_weight = read_f32_vector(
         corpus_dir / "final_norm_weight.f32",
         hidden_size,
@@ -64,6 +69,9 @@ def main() -> None:
     tensors, summary = build_tensors(
         rows=rows,
         cur_in=cur_in,
+        raw_tap_concat=raw_tap_concat,
+        raw_tap_offsets=raw_tap_offsets,
+        raw_tap_widths=raw_tap_widths,
         final_norm_weight=final_norm_weight,
         row_count=row_count,
         hidden_size=hidden_size,
@@ -75,6 +83,9 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     from safetensors.torch import save_file
 
+    target_logits_available = bool(manifest.get("target_logits_available"))
+    paper_kl_training_ready = bool(manifest.get("paper_kl_training_ready"))
+    native_product_teacher_logits = bool(manifest.get("native_teacher_logits"))
     metadata = {
         "schema": OUT_SCHEMA,
         "source_schema": CORPUS_SCHEMA,
@@ -83,11 +94,17 @@ def main() -> None:
         "row_count": str(row_count),
         "hidden_size": str(hidden_size),
         "cur_in_convention": str(manifest.get("cur_in_convention", "")),
+        "raw_tap_convention": str(manifest.get("raw_tap_convention", "")),
         "label_kind": str(manifest.get("label_kind", "")),
-        "target_logits_available": str(bool(manifest.get("target_logits_available"))).lower(),
-        "paper_kl_training_ready": "false",
+        "target_logits_available": str(target_logits_available).lower(),
+        "paper_kl_training_ready": str(paper_kl_training_ready).lower(),
+        "native_product_teacher_logits": str(native_product_teacher_logits).lower(),
+        "raw_tap_concat_available": str(raw_tap_concat is not None).lower(),
     }
     save_file(tensors, out_path, metadata=metadata)
+    summary["target_logits_available"] = target_logits_available
+    summary["paper_kl_training_ready"] = paper_kl_training_ready
+    summary["native_product_teacher_logits"] = native_product_teacher_logits
     summary.update(
         {
             "schema": OUT_SCHEMA,
@@ -146,6 +163,42 @@ def read_cur_in(path: Path, sample_count: int, row_count: int, hidden_size: int)
     )
 
 
+def read_raw_tap_concat(
+    corpus_dir: Path,
+    manifest: dict[str, Any],
+    sample_count: int,
+) -> tuple[Any | None, list[int], list[int]]:
+    raw_tensor = manifest.get("raw_row_tensor")
+    if raw_tensor is None:
+        return None, [], []
+    if not isinstance(raw_tensor, dict):
+        raise ValueError("manifest raw_row_tensor must be an object")
+    path = corpus_dir / str(raw_tensor.get("path", "raw_rows.f32"))
+    offsets = [int(value) for value in raw_tensor.get("row_offsets", [])]
+    widths = [int(value) for value in raw_tensor.get("row_widths", [])]
+    if len(offsets) != len(widths) + 1:
+        raise ValueError("raw_row_tensor row_offsets must have row_widths + 1 entries")
+    if not offsets or offsets[0] != 0:
+        raise ValueError("raw_row_tensor row_offsets must start at 0")
+    raw_width = int(offsets[-1])
+    if raw_width <= 0:
+        raise ValueError("raw_row_tensor raw width must be positive")
+    expected_bytes = sample_count * raw_width * 4
+    raw = path.read_bytes()
+    if len(raw) != expected_bytes:
+        raise ValueError(
+            f"{path} has {len(raw)} bytes, expected {expected_bytes} "
+            f"for [{sample_count}, {raw_width}] f32"
+        )
+    import torch
+
+    tensor = torch.frombuffer(bytearray(raw), dtype=torch.float32).clone().reshape(
+        sample_count,
+        raw_width,
+    )
+    return tensor, offsets, widths
+
+
 def read_f32_vector(path: Path, length: int, name: str) -> Any:
     import torch
 
@@ -170,6 +223,9 @@ def build_tensors(
     *,
     rows: list[dict[str, Any]],
     cur_in: Any,
+    raw_tap_concat: Any | None,
+    raw_tap_offsets: list[int],
+    raw_tap_widths: list[int],
     final_norm_weight: Any,
     row_count: int,
     hidden_size: int,
@@ -274,10 +330,24 @@ def build_tensors(
         "proposal_topk_logits": torch.tensor(proposal_logits, dtype=torch.float32),
         "proposal_topk_mask": torch.tensor(proposal_mask, dtype=torch.long),
     }
+    if raw_tap_concat is not None:
+        if len(raw_tap_widths) != row_count:
+            raise ValueError(
+                f"raw_tap_widths has {len(raw_tap_widths)} rows, expected {row_count}"
+            )
+        tensors.update(
+            {
+                "raw_tap_concat": raw_tap_concat.contiguous(),
+                "raw_tap_offsets": torch.tensor(raw_tap_offsets, dtype=torch.long),
+                "raw_tap_widths": torch.tensor(raw_tap_widths, dtype=torch.long),
+            }
+        )
     summary = {
         "sample_count": len(rows),
         "row_count": row_count,
         "hidden_size": hidden_size,
+        "raw_tap_concat_available": raw_tap_concat is not None,
+        "raw_tap_width": raw_tap_offsets[-1] if raw_tap_offsets else None,
         "draft_vocab_size": len(draft_token_ids),
         "labels_in_draft_vocab": len(rows) - missing_labels,
         "labels_missing_from_draft_vocab": missing_labels,

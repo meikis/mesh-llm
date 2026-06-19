@@ -20,11 +20,14 @@ from typing import Any
 from train_product_activation_head import (
     PRODUCT_SCHEMA,
     TEACHER_SCHEMA,
+    batch_product_cur_in,
     batch_indices,
     patch_reference_checkout,
     read_safetensors_metadata,
     resolve_device,
     resolve_model_dtype,
+    resolve_input_mode,
+    validate_input_mode,
     validate_metadata,
     validate_product_convention,
     validate_sample_alignment,
@@ -44,8 +47,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--teacher-logits", help="Optional teacher logits safetensors")
     parser.add_argument("--base-model-path", help="Override checkpoint config base_model_path")
     parser.add_argument("--summary-json", help="Optional JSON summary output path")
+    parser.add_argument(
+        "--input-mode",
+        choices=("auto", "projected", "raw"),
+        default="projected",
+        help=(
+            "projected: score pre-projected cur_in rows. raw: project raw "
+            "terminal-normalized tap-concat rows through this checkpoint's "
+            "stage_projs. auto uses raw when available."
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--top-k", type=int, default=4)
+    parser.add_argument(
+        "--row-start",
+        type=int,
+        default=0,
+        help="First product row to score, inclusive.",
+    )
+    parser.add_argument(
+        "--row-limit",
+        type=int,
+        default=0,
+        help="Maximum number of product rows to score. Zero scores all rows.",
+    )
     parser.add_argument(
         "--device",
         choices=("auto", "cuda", "mps", "cpu"),
@@ -71,6 +96,10 @@ def main() -> None:
         raise ValueError("--batch-size must be positive")
     if args.top_k <= 0:
         raise ValueError("--top-k must be positive")
+    if args.row_start < 0:
+        raise ValueError("--row-start must be non-negative")
+    if args.row_limit < 0:
+        raise ValueError("--row-limit must be non-negative")
 
     patch_reference_checkout(Path(args.reference_dir))
     sys.path.insert(0, str(Path(args.reference_dir)))
@@ -91,6 +120,8 @@ def main() -> None:
     validate_metadata(product_metadata, PRODUCT_SCHEMA, args.product_corpus)
     validate_product_convention(product_metadata, args.product_corpus)
     validate_product_tensors(product_tensors, args.product_corpus)
+    input_mode = resolve_score_input_mode(args.input_mode, product_tensors)
+    validate_input_mode("checkpoint", input_mode, product_metadata, args.product_corpus)
 
     teacher_tensors: dict[str, Any] | None = None
     teacher_metadata: dict[str, str] | None = None
@@ -100,6 +131,13 @@ def main() -> None:
         validate_metadata(teacher_metadata, TEACHER_SCHEMA, args.teacher_logits)
         validate_teacher_tensors(product_tensors, teacher_tensors, args.teacher_logits)
         validate_sample_alignment(product_tensors, teacher_tensors)
+
+    product_tensors, teacher_tensors, row_selection = select_rows(
+        product_tensors,
+        teacher_tensors,
+        row_start=int(args.row_start),
+        row_limit=int(args.row_limit),
+    )
 
     device = resolve_device(args.device)
     model_dtype = resolve_model_dtype(args.model_torch_dtype, device)
@@ -132,6 +170,7 @@ def main() -> None:
         teacher_tensors,
         device,
         model_dtype,
+        input_mode,
         torch,
         F,
     )
@@ -148,8 +187,12 @@ def main() -> None:
         "base_model_path": base_model_path,
         "device": str(device),
         "model_torch_dtype": str(model_dtype).replace("torch.", ""),
+        "input_mode": input_mode,
         "batch_size": int(args.batch_size),
         "top_k": int(args.top_k),
+        "row_start": row_selection["row_start"],
+        "row_limit": row_selection["row_limit"],
+        "row_end_exclusive": row_selection["row_end_exclusive"],
         **metrics,
     }
     if args.summary_json:
@@ -172,6 +215,19 @@ def validate_product_tensors(product: dict[str, Any], path: str) -> None:
         raise ValueError("position_ids sample count does not match cur_in")
     if int(product["label_draft_indices"].shape[0]) != sample_count:
         raise ValueError("label_draft_indices sample count does not match cur_in")
+    if "raw_tap_concat" in product:
+        raw_required = {"raw_tap_offsets", "row_i_stages"}
+        missing_raw = sorted(raw_required.difference(product))
+        if missing_raw:
+            raise ValueError(f"{path} missing raw tensors: {missing_raw}")
+        if int(product["raw_tap_concat"].shape[0]) != sample_count:
+            raise ValueError("raw_tap_concat sample count does not match cur_in")
+
+
+def resolve_score_input_mode(requested: str, product_tensors: dict[str, Any]) -> str:
+    if requested == "auto":
+        return resolve_input_mode("auto", "fresh", product_tensors)
+    return requested
 
 
 def validate_teacher_tensors(
@@ -187,6 +243,49 @@ def validate_teacher_tensors(
         raise ValueError("teacher logits sample count does not match cur_in")
 
 
+def select_rows(
+    product_tensors: dict[str, Any],
+    teacher_tensors: dict[str, Any] | None,
+    *,
+    row_start: int,
+    row_limit: int,
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, int | None]]:
+    sample_count = int(product_tensors["cur_in"].shape[0])
+    if row_start > sample_count:
+        raise ValueError(f"--row-start {row_start} exceeds sample count {sample_count}")
+    row_end = sample_count if row_limit == 0 else min(sample_count, row_start + row_limit)
+    row_slice = slice(row_start, row_end)
+    selected_product = slice_sample_tensors(product_tensors, row_slice, sample_count)
+    selected_teacher = (
+        slice_sample_tensors(teacher_tensors, row_slice, sample_count)
+        if teacher_tensors is not None
+        else None
+    )
+    return (
+        selected_product,
+        selected_teacher,
+        {
+            "row_start": int(row_start),
+            "row_limit": int(row_limit),
+            "row_end_exclusive": int(row_end),
+        },
+    )
+
+
+def slice_sample_tensors(
+    tensors: dict[str, Any],
+    row_slice: slice,
+    sample_count: int,
+) -> dict[str, Any]:
+    selected: dict[str, Any] = {}
+    for name, tensor in tensors.items():
+        if hasattr(tensor, "shape") and tensor.shape and int(tensor.shape[0]) == sample_count:
+            selected[name] = tensor[row_slice]
+        else:
+            selected[name] = tensor
+    return selected
+
+
 def score_product_rows(
     args: argparse.Namespace,
     pipeline: Any,
@@ -194,10 +293,20 @@ def score_product_rows(
     teacher_tensors: dict[str, Any] | None,
     device: Any,
     model_dtype: Any,
+    input_mode: str,
     torch: Any,
     F: Any,
 ) -> dict[str, Any]:
-    cur_in = product_tensors["cur_in"].to(device=device, dtype=model_dtype)
+    projected_cur_in = product_tensors["cur_in"].to(device=device, dtype=model_dtype)
+    raw_tap_concat = product_tensors.get("raw_tap_concat")
+    if raw_tap_concat is not None:
+        raw_tap_concat = raw_tap_concat.to(device=device, dtype=model_dtype)
+    raw_tap_offsets = product_tensors.get("raw_tap_offsets")
+    raw_row_stage_ids = product_tensors.get("row_i_stages")
+    if raw_tap_offsets is not None:
+        raw_tap_offsets = raw_tap_offsets.cpu().tolist()
+    if raw_row_stage_ids is not None:
+        raw_row_stage_ids = raw_row_stage_ids.cpu().tolist()
     position_ids = product_tensors["position_ids"].to(device=device)
     labels = product_tensors["label_draft_indices"].to(device=device, dtype=torch.long)
     teacher_logits = None
@@ -206,12 +315,21 @@ def score_product_rows(
         teacher_logits = teacher_tensors["teacher_logits"].to(device=device, dtype=torch.float32)
         teacher_argmax = teacher_tensors["teacher_argmax_indices"].to(device=device)
 
-    sample_count = int(cur_in.shape[0])
+    sample_count = int(projected_cur_in.shape[0])
     top_k = min(int(args.top_k), int(pipeline.speculation_module.lm_head.out_features))
     totals = ScoreTotals()
     with torch.inference_mode():
         for batch_idx in batch_indices(sample_count, int(args.batch_size)):
-            logits = score_batch(pipeline, cur_in[batch_idx], position_ids[batch_idx])
+            batch_cur_in = batch_product_cur_in(
+                pipeline,
+                input_mode,
+                projected_cur_in,
+                raw_tap_concat,
+                raw_tap_offsets,
+                raw_row_stage_ids,
+                batch_idx,
+            )
+            logits = score_batch(pipeline, batch_cur_in, position_ids[batch_idx])
             batch_labels = labels[batch_idx]
             totals.add_native(logits, batch_labels, top_k, torch, F)
             if teacher_logits is not None and teacher_argmax is not None:

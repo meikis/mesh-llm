@@ -46,6 +46,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shuffle", action="store_true")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
+        "--exclude-prompt-token-file",
+        action="append",
+        default=[],
+        type=Path,
+        help=(
+            "JSONL prompt-token file whose dataset/source_index/question_id rows "
+            "must be excluded from both train and held-out outputs."
+        ),
+    )
+    parser.add_argument(
         "--include-second-turn",
         action="store_true",
         help="Use every turn from each reference row instead of only the first user turn.",
@@ -66,9 +76,11 @@ def main() -> None:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    excluded_keys = load_excluded_prompt_keys(args.exclude_prompt_token_file)
     train_rows: list[dict[str, Any]] = []
     heldout_rows: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
 
     rng = random.Random(args.seed)
     for dataset, rel_path in SOURCE_FILES.items():
@@ -80,6 +92,9 @@ def main() -> None:
         for row in rows:
             tokens = render_prompt_tokens(tokenizer, row["messages"])
             row = {**row, "prompt_token_ids": tokens, "prompt_token_count": len(tokens)}
+            if prompt_key(row) in excluded_keys:
+                excluded.append(row)
+                continue
             if args.max_prompt_tokens > 0 and len(tokens) > args.max_prompt_tokens:
                 skipped.append(row)
                 continue
@@ -112,10 +127,14 @@ def main() -> None:
         "shuffle": bool(args.shuffle),
         "seed": args.seed,
         "include_second_turn": bool(args.include_second_turn),
+        "excluded_prompt_count": len(excluded),
+        "exclude_prompt_token_files": [str(path) for path in args.exclude_prompt_token_file],
         "train_token_stats": token_stats(train_rows),
         "heldout_token_stats": token_stats(heldout_rows),
         "skipped_token_stats": token_stats(skipped),
+        "excluded_token_stats": token_stats(excluded),
         "sources": source_counts(train_rows, heldout_rows, skipped),
+        "excluded_sources": source_counts(excluded),
     }
     summary.write_text(json.dumps(summary_obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(json.dumps(summary_obj, indent=2, ensure_ascii=False))
@@ -175,6 +194,31 @@ def render_prompt_tokens(tokenizer: Any, messages: list[dict[str, str]]) -> list
     if not isinstance(ids, list):
         raise TypeError(f"unexpected chat-template token output: {type(ids).__name__}")
     return [int(token) for token in ids]
+
+
+def load_excluded_prompt_keys(paths: list[Path]) -> set[tuple[str, str, str]]:
+    keys: set[tuple[str, str, str]] = set()
+    for path in paths:
+        with path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                if not isinstance(obj, dict):
+                    raise ValueError(
+                        f"{path}:{line_number}: exclude rows must be JSON objects"
+                    )
+                keys.add(prompt_key(obj))
+    return keys
+
+
+def prompt_key(row: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(row.get("dataset")),
+        str(row.get("source_index")),
+        str(row.get("question_id")),
+    )
 
 
 def token_row(row: dict[str, Any]) -> dict[str, Any]:

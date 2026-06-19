@@ -3265,6 +3265,35 @@ impl StageSession {
         Ok(predicted)
     }
 
+    pub fn copy_current_logits_for_tokens(&mut self, token_ids: &[i32]) -> Result<Vec<f32>> {
+        if token_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let features = unsafe { skippy_ffi::skippy_abi_features() };
+        if features & skippy_ffi::FEATURE_CURRENT_LOGITS == 0 {
+            return Err(anyhow!(
+                "native runtime does not support current-logit copying"
+            ));
+        }
+        let mut logits = vec![0.0_f32; token_ids.len()];
+        let mut output_count = 0usize;
+        let mut error = ptr::null_mut();
+        let status = unsafe {
+            skippy_ffi::skippy_session_copy_current_logits(
+                self.raw,
+                token_ids.as_ptr(),
+                token_ids.len(),
+                logits.as_mut_ptr(),
+                logits.len(),
+                &mut output_count,
+                &mut error,
+            )
+        };
+        ensure_ok(status, error)?;
+        logits.truncate(output_count);
+        Ok(logits)
+    }
+
     pub fn export_state(&mut self, layer_start: i32, layer_end: i32) -> Result<Vec<u8>> {
         let mut bytes = 0usize;
         let mut error = ptr::null_mut();

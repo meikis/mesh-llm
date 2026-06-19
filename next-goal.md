@@ -212,7 +212,7 @@ It failed after 209 seconds, before model work, because
 `f23e28ba` made the job timeout configurable so the retry could run shorter
 than the original `4.5h` lane.
 
-Current streamed-capture retry uses the fixed server config and a shorter
+Failed streamed-capture retry used the fixed server config and a shorter
 timeout:
 
 ```bash
@@ -229,9 +229,33 @@ bootstrap_sha256=30d27fa808c08df2f3ca1613381de1ca0a828694e66448f3bc03e55b2610cb0
 dry_run_plan_sha256=61ffa3a560948536e9fc4df7e7dd4c178f36ab4309dbe340e37c63de02d5a9d5
 ```
 
+It failed after reaching `capture[0]` because CUDA0 could not open streamed
+tap stage `0..8` while the full verifier was still resident. Commit `3d1442f8`
+changed `spd-product-corpus-capture` to a two-phase flow: record verifier
+targets/native draft-vocab logits first, drop the verifier, then replay
+contexts through streamed tap stages.
+
+Current two-phase retry uses the `3d1442f8` patch artifact and the same shorter
+timeout:
+
+```bash
+id=6a35536b3093dba73ce2a377
+url=https://huggingface.co/jobs/meshllm/6a35536b3093dba73ce2a377
+run_id=20260619T143116Z-3d1442f8
+local_artifact_dir=/tmp/spd-qwen480-native-job-20260619T143116Z-3d1442f8
+output_repo=meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8
+input_prefix=job-inputs/20260619T143116Z-3d1442f8/
+upload_commit=abaefe222379e5bd6f949ebec7ca37de79faf715
+patch_revision=abaefe222379e5bd6f949ebec7ca37de79faf715
+patch_sha256=9f623c5d3f6d5f9aa34b10e72b9849a435794634faecc497d363c3e05bd0afe1
+bootstrap_sha256=30d27fa808c08df2f3ca1613381de1ca0a828694e66448f3bc03e55b2610cb05
+dry_run_plan_sha256=61ffa3a560948536e9fc4df7e7dd4c178f36ab4309dbe340e37c63de02d5a9d5
+```
+
 The timeout is the spending backstop. At the current checked rate for
 `rtx-pro-6000x4`, `3.5h` plans at about `$38.50`; the job should finish, fail,
-or be killed by HF at timeout.
+or be killed by HF at timeout. The first gate to watch is whether phase 2 can
+open streamed tap stage `0..8` after the phase-1 verifier drop.
 
 Startup attempts before the current live job:
 

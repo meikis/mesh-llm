@@ -161,6 +161,13 @@ and matching product row byte counts. The remaining risk is whether native CUDA
 allocator state fully frees the Qwen480 verifier buffers before phase 2; if not,
 the next fix should use a process boundary or CPU tap replay.
 
+Current two-phase HF retry: `meshllm/6a35536b3093dba73ce2a377`, using uploaded
+artifact `job-inputs/20260619T143116Z-3d1442f8/` at revision
+`abaefe222379e5bd6f949ebec7ca37de79faf715`, is the live gate for that
+allocator/residency fix. It keeps the same `rtx-pro-6000x4` / `3.5h` timeout
+cap; the first useful signal is whether streamed tap stage `0..8` opens after
+the verifier phase exits.
+
 Predigested SPD splits should be logical artifacts. A sidecar is trained for a
 canonical logical topology and tap set; Mesh may fit contiguous logical stages
 onto fewer physical nodes when hardware is scarce. That placement is only valid

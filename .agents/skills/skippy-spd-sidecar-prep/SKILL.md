@@ -716,6 +716,11 @@ contexts to write product rows. This is required because the first streamed
 retry reached capture but still OOMed opening stage `0..8` while the full
 verifier was resident. A small cached Qwen3-0.6B package smoke passed this
 two-phase path with streamed taps and native teacher logits.
+Current two-phase HF retry: `meshllm/6a35536b3093dba73ce2a377`, artifact
+`job-inputs/20260619T143116Z-3d1442f8/`, upload revision
+`abaefe222379e5bd6f949ebec7ca37de79faf715`, `rtx-pro-6000x4`, `3.5h` timeout.
+Watch whether phase 2 can open streamed tap stage `0..8` after the phase-1
+verifier drop.
 If the local branch is not pushed, upload a patch artifact and set
 `MESH_LLM_PATCH_PATH` so the job applies it after cloning. Remaining risk for
 the first capped job is runtime compatibility with the Qwen480 MoE config and

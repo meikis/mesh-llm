@@ -201,6 +201,19 @@ package smoke passed with
 and matching product row byte counts; report:
 `/tmp/spd-two-phase-smoke-report.json`.
 
+Current two-phase retry on 2026-06-20 local time: HF Job
+`meshllm/6a35536b3093dba73ce2a377` is running on `rtx-pro-6000x4` with a
+`3.5h` timeout cap. It uses input artifact
+`job-inputs/20260619T143116Z-3d1442f8/` from upload commit
+`abaefe222379e5bd6f949ebec7ca37de79faf715`. The patch SHA256 is
+`9f623c5d3f6d5f9aa34b10e72b9849a435794634faecc497d363c3e05bd0afe1`; the
+bootstrap SHA256 is
+`30d27fa808c08df2f3ca1613381de1ca0a828694e66448f3bc03e55b2610cb05`; the
+dry-run plan SHA256 is
+`61ffa3a560948536e9fc4df7e7dd4c178f36ab4309dbe340e37c63de02d5a9d5`. The first
+important gate is whether phase 2 can open streamed tap stage `0..8` after the
+phase-1 verifier model/session is dropped.
+
 If this Qwen480 lane clears the sidecar quality and package-backed smoke gates,
 the next HF validation spike should be a single-job meshlet: one HF Job starts
 the coordinator, stage servers, SPD sidecar, and OpenAI frontend as separate

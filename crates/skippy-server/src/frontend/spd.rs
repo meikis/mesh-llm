@@ -29,7 +29,7 @@ mod timing;
 use self::{
     cache::{
         SpdInlineTapCache, SpdInlineTapLifecycle, SpdTapRecordOutcome, inline_required_hf_indices,
-        retained_tap_prefix_len_for_context_update,
+        retained_tap_prefix_len_for_context_update, retained_tap_prefix_len_for_source_reset,
     },
     telemetry::{
         insert_proposal_stats_attrs, insert_rolling_attrs, insert_rolling_speculation_rows_attrs,
@@ -1083,7 +1083,7 @@ impl SpeculativeProposalSource for SpdReplayProposalSource {
 
     fn reset_to_context(&mut self, context_tokens: &[i32]) -> Result<()> {
         let retained_prefix_len =
-            retained_tap_prefix_len_for_context_update(&self.context_tokens, context_tokens, false);
+            retained_tap_prefix_len_for_source_reset(&self.context_tokens, context_tokens);
         self.context_tokens = context_tokens.to_vec();
         self.rolling = SpdRollingObserver::new(self.logical_stage_count);
         self.last_proposal_stats = SpdProposalSourceStats::default();

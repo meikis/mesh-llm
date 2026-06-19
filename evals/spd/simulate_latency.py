@@ -288,17 +288,14 @@ def simulate_openai_report(
     totals: OpenAiReportTotals,
     scenario: LatencyScenario,
 ) -> dict[str, Any]:
-    if scenario.stages != totals.physical_stage_count:
-        raise SystemExit(
-            f"--stage-ms has {scenario.stages} physical stages but report has "
-            f"{totals.physical_stage_count} physical stages"
-        )
     effective_slot_ms = max(scenario.pipeline_slot_ms, totals.sidecar_ms)
     serial_ms_for_saved_tokens = totals.saved_round_trips * scenario.serial_step_ms
     spd_ms_for_candidate_cycles = totals.candidate_round_trips * effective_slot_ms
     break_even_accept_rate = safe_ratio(effective_slot_ms, scenario.serial_step_ms)
     return {
         "stage_ms": list(scenario.stage_ms),
+        "modeled_physical_stage_count": scenario.stages,
+        "report_physical_stage_count": totals.physical_stage_count,
         "hop_ms": scenario.hop_ms,
         "serial_step_ms": scenario.serial_step_ms,
         "pipeline_slot_ms": scenario.pipeline_slot_ms,
@@ -381,7 +378,7 @@ def emit_openai_table(totals: OpenAiReportTotals, results: list[dict[str, Any]])
     print("OpenAI smoke report")
     print(f"  prompt pairs: {totals.matching_content}/{totals.prompt_pairs} content matched")
     print(f"  logical SPD stages: {totals.logical_stage_count}")
-    print(f"  physical stages: {totals.physical_stage_count}")
+    print(f"  report physical stages: {totals.physical_stage_count}")
     print(
         "  candidate round trips: "
         f"{totals.candidate_round_trips} "
@@ -397,6 +394,7 @@ def emit_openai_table(totals: OpenAiReportTotals, results: list[dict[str, Any]])
     writer.writerow(
         [
             "hop_ms",
+            "modeled_physical_stages",
             "slot_ms",
             "sidecar_ms",
             "sidecar_hidden",
@@ -411,6 +409,7 @@ def emit_openai_table(totals: OpenAiReportTotals, results: list[dict[str, Any]])
         writer.writerow(
             [
                 f"{result['hop_ms']:.3f}",
+                result["modeled_physical_stage_count"],
                 f"{result['pipeline_slot_ms']:.3f}",
                 f"{result['sidecar_ms']:.3f}",
                 str(result["sidecar_hidden"]).lower(),

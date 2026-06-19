@@ -559,6 +559,13 @@ pub(super) fn retained_tap_prefix_len_for_context_update(
     }
 }
 
+pub(super) fn retained_tap_prefix_len_for_source_reset(previous: &[i32], next: &[i32]) -> usize {
+    if previous.is_empty() && !next.is_empty() {
+        return next.len();
+    }
+    retained_tap_prefix_len_for_context_update(previous, next, false)
+}
+
 #[derive(Clone)]
 struct SpdCachedTapFrame {
     desc: skippy_runtime::ActivationDesc,

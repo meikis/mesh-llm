@@ -774,21 +774,43 @@ Package smoke failed because stage `1` was already resident on CUDA0 and stage
 `0` then failed allocating a `34051.88 MiB` CUDA0 buffer. This is a smoke
 placement failure, not a capture/train/export failure.
 
-Next Qwen480 spend step: use
+The first smoke-existing retry `meshllm/6a3581b9953ed90bfb944dd3` hydrated the
+uploaded artifact, but failed before model launch because the second generated
+script ran from the bootstrap checkout and could not resolve
+`target/release/skippy-bench`. The bootstrap now re-enters
+`$WORK_DIR/mesh-llm` before package smoke and checks for the release binaries
+and `physical-stage-ms.txt`.
+
+Current Qwen480 spend step: use
 `evals/spd/bootstrap_qwen480_s8_smoke_existing_job.sh` to hydrate the uploaded
 artifact, regenerate prompts, download the same package, and run only
 package-smoke, latency simulation, and upload. Default smoke map:
 `CPU,CUDA0,CPU,CUDA1,CPU,CUDA2,CPU,CUDA3`; default timeout `1.5h`, about
 `$16.50` max on `rtx-pro-6000x4`. Use
 `SMOKE_STAGE_BACKEND_DEVICES` with either bootstrap if changing the placement.
-Do not repeat capture/train unless the uploaded artifact is unusable or the
-smoke-only path proves invalid.
-If the local branch is not pushed, upload a patch artifact and set
-`MESH_LLM_PATCH_PATH` so the job applies it after cloning. Remaining risk is
-package-backed smoke placement/runtime behavior for the uploaded bundle, plus
-sidecar quality on broader held-out prompts after smoke works. True
-Rust/Python fixture parity is still skipped until native parity fixture export
-exists.
+Fixed retry `meshllm/6a35894f953ed90bfb944e49` ran with uploaded input
+`job-inputs/20260619T182322Z-bf682379/` at revision
+`ea52905865b07ad17a5fdd7519d27a07ad4f689c`.
+It ended `ERROR` after reaching package-backed smoke. The cwd/bootstrap fix was
+proved: release build, package download, prompt rebuild, artifact hydration, and
+stage launch all ran. Package smoke returned downstream taps for
+`16,24,32,40,48,55,62` and local stage-0 hf `8` tap records with `0` tap
+return failures, `0` tap record failures, and `0` ignored taps. The remaining
+request-path failure was `0` proposed tokens because prompt-window hf `8` rows
+were missing from the proposal cache. Root cause: the initial
+`reset_to_context(prompt)` after prefill retained zero tap rows while the SPD
+source context was empty; downstream stages can recover via first-decode
+context sideband replay, but stage 0 does not re-run the whole prompt. The
+runtime now preserves prefill tap rows on that initial source reset. The same
+job also exposed a latency-simulation bug: the report had eight stage processes
+while the what-if model used four clumped physical buckets. `simulate_latency.py`
+now accepts that clumped shape and records both counts.
+Do not repeat capture/train unless the uploaded artifact is unusable. Next
+retry is smoke-existing only with the current patch uploaded via
+`MESH_LLM_PATCH_PATH`: hydrate the existing artifact, rerun package smoke, then
+latency simulation. Remaining risk is proposal quality on broader held-out
+prompts after request-path proposal generation works. True Rust/Python fixture
+parity is still skipped until native parity fixture export exists.
 
 Do not submit spend until the dry run prints model/package ref, dataset shard,
 prompt counts, topology, hardware flavor, timeout, output repo, and max cost.

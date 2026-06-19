@@ -1,19 +1,19 @@
-# Next Goal: Resubmit Qwen3-Coder-480B S8 SPD HF Run With Two-Phase Capture
+# Next Goal: Resubmit Qwen480 S8 SPD Smoke-Existing With Prefill Tap Fix
 
 This file is disposable. Durable evidence belongs in `evals/spd/README.md` and
 `docs/skippy/speculative_decoding.md`.
 
 ## One-Line Goal
 
-Resubmit the capped Hugging Face native-package run for a Qwen3-Coder-480B S8
-SPD sidecar with two-phase full-verifier target/logit capture plus resident
-tap-stage replay, using the exact MeshLLM Skippy layer package for teacher
-capture and training only the SPD predictor from captured taps/logits.
+Resubmit the capped Hugging Face smoke-existing run for the already-uploaded
+Qwen3-Coder-480B S8 SPD sidecar artifact, using the patched Skippy request path
+that preserves stage-0 prefill taps through initial SPD source reset.
 
 ## Immediate Target
 
 - Runner: Hugging Face Jobs in the `meshllm` org.
-- Spend cap for the first submitted job: `$50` maximum.
+- Spend cap for the next submitted job: timeout `1.5h` on `rtx-pro-6000x4`,
+  about `$16.50` maximum.
 - No heavy local M4 training/capture loops for this target.
 - Base/checkpoint family: `Qwen/Qwen3-Coder-480B-A35B-Instruct`.
 - Exact package: `meshllm/Qwen3-Coder-480B-A35B-Instruct-UD-Q4_K_XL-layers`.
@@ -26,6 +26,10 @@ capture and training only the SPD predictor from captured taps/logits.
 - Required SPD taps: `[0,8,16,24,32,40,48,55,62]`.
 - Approx layer-package bytes by logical stage:
   `33.3,32.4,32.7,32.4,32.7,33.6,28.4,30.2 GiB`.
+- Existing sidecar artifact:
+  `meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8/runs/native-package-fresh`.
+- Smoke map: `CPU,CUDA0,CPU,CUDA1,CPU,CUDA2,CPU,CUDA3`.
+- Do not recapture/retrain unless the uploaded artifact is unusable.
 
 ## Skippy Layers vs SPD Topology
 
@@ -58,11 +62,10 @@ Candidate HF flavors from the current Jobs hardware list:
 - `h200x4`: `564GB` VRAM, `1024GB` RAM, about `$20/hr`; cap `2h30m`, more
   memory-safe but probably too short for a useful train/capture cycle.
 
-First submitted target: `rtx-pro-6000x4`, timeout `4h30m`, max cost `$50`.
-Latest failed retry target: `rtx-pro-6000x4`, timeout `3h30m`, max cost about
-`$38.50`, chosen to keep aggregate spend for this lane under the original
-`$50` intent after earlier failures. The next retry should use the same cap
-unless a dry run changes the planned cost.
+First submitted target was `rtx-pro-6000x4`, timeout `4h30m`, max cost `$50`.
+The next retry is narrower: `rtx-pro-6000x4`, timeout `1.5h`, max cost about
+`$16.50`, because capture/train/export already completed and the uploaded
+artifact should be reused.
 
 ## Steps
 
@@ -87,11 +90,13 @@ unless a dry run changes the planned cost.
      final norm.
    - True Rust fixture parity is skipped for `native-package-fresh` until a
      native parity fixture exporter exists.
-4. Planned inside the capped job: run package-backed local-on-HF smoke.
+4. Next inside the capped job: rerun package-backed local-on-HF smoke.
    - Use the same Qwen480 package directory and S8 split.
+   - Verify stage-0 hf `8` prompt-window rows are no longer missing after the
+     initial SPD source reset.
    - Check content match, tap failures, accepted/proposed counts, and
      saved/unsaved candidate-token round trips.
-5. Planned inside the capped job: emit pipeline economics.
+5. Next inside the capped job: emit pipeline economics.
    - Run latency simulation for S8 clumped to 4 physical buckets and hop
      assumptions `0.2,1,5,10ms`.
    - Treat this as HF-side predictor/economics evidence, not LAN wall-clock
@@ -474,12 +479,53 @@ bootstrap_sha256=969e6005f7e9e108c2bca0ad0b50c430cc0cf7b9b78db577beee9859209c07d
 dry_run_plan_sha256=7fba2ddb364e6ad8eab8bbd4f78ac01b4e359614cf124643a4771da1325a5012
 ```
 
+This job failed after `1169s` running, but it reached the important
+smoke-existing preflight gates: release build, full package download,
+deterministic prompt rebuild, and hydration of the uploaded
+`runs/native-package-fresh` artifact all completed. It failed before launching
+models because `package_smoke` ran as a second generated script from the
+bootstrap checkout, where `target/release/skippy-bench` did not exist. This is
+a split-script cwd bug, not a package, sidecar, or Qwen480 runtime failure.
+
+Fixed in local commit `bf682379`: after hydrating the artifact,
+`bootstrap_qwen480_s8_smoke_existing_job.sh` now `cd`s into
+`$WORK_DIR/mesh-llm`, where setup built the release binaries and wrote
+`physical-stage-ms.txt`, and fails fast if those files are missing.
+
+Submitted fixed smoke-existing retry:
+
+```bash
+id=6a35894f953ed90bfb944e49
+url=https://huggingface.co/jobs/meshllm/6a35894f953ed90bfb944e49
+run_id=20260619T182322Z-bf682379
+local_artifact_dir=/tmp/spd-qwen480-smoke-existing-job-20260619T182322Z-bf682379
+output_repo=meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8
+input_prefix=job-inputs/20260619T182322Z-bf682379/
+upload_commit=ea52905865b07ad17a5fdd7519d27a07ad4f689c
+patch_revision=ea52905865b07ad17a5fdd7519d27a07ad4f689c
+patch_sha256=af3c6353916a96b9a6568004c11ad32b0b788d06cf31182458b8a3cdee29799d
+bootstrap_sha256=173a370c1f7b9f0b2bac501d866fd835e26c397be39024817a717d7ba3c325e7
+dry_run_plan_sha256=7fba2ddb364e6ad8eab8bbd4f78ac01b4e359614cf124643a4771da1325a5012
+```
+
 This job is labeled `spd-qwen480-smoke-existing`, uses `rtx-pro-6000x4`,
 `JOB_TIMEOUT=1.5h`, `ARTIFACT_RUN_PATH=runs/native-package-fresh`, and
 `SMOKE_STAGE_BACKEND_DEVICES=CPU,CUDA0,CPU,CUDA1,CPU,CUDA2,CPU,CUDA3`. First
-poll showed it still `SCHEDULING` with the expected environment. First gates:
-bootstrap download, patch apply, selected-group setup/package download, hydrate
-the uploaded artifact, then run package smoke and latency simulation.
+poll showed it past bootstrap download and into generated setup. First gates
+remain: patch apply, selected-group setup/package download, artifact hydration,
+then package smoke and latency simulation.
+
+Result: `ERROR` after `1621s`, but the cwd fix and package-smoke launch were
+proved. The job completed release build, full package download, prompt rebuild,
+artifact hydration, and package-backed baseline/SPD smoke. Tap transport was
+clean (`0` return failures, `0` record failures, `0` ignored taps), and
+downstream taps returned for `16,24,32,40,48,55,62`; stage 0 recorded hf `8`.
+The request-path bug was that every SPD case proposed `0` tokens because hf `8`
+prompt-window rows such as `40..45` / `58..63` were missing from the proposal
+cache. Root cause is fixed locally: initial `reset_to_context(prompt)` now
+preserves prefilled tap rows when the source context was empty. The latency
+simulator also now accepts the intended four-physical-bucket clumped model
+against an eight-stage smoke report.
 
 Startup attempts before the latest two-phase retry:
 

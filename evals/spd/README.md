@@ -386,6 +386,56 @@ poll, the job was still scheduling; first gates are bootstrap download, patch
 apply, selected-group setup/package download, artifact hydration, and package
 smoke with the explicit map.
 
+That retry failed after `1169s` running, but not on model launch or sidecar
+quality. It completed release build, full `276G` package download, deterministic
+prompt rebuild, and hydrated the uploaded `runs/native-package-fresh` artifact.
+The failure was a split-script cwd bug: `package_smoke` ran as a second
+generated script from the bootstrap checkout, where
+`target/release/skippy-bench` did not exist. Commit `bf682379` fixes the
+smoke-existing bootstrap by re-entering `$WORK_DIR/mesh-llm` before
+`package_smoke`, `latency_simulation`, and `upload`, and by failing fast if the
+release binaries or `physical-stage-ms.txt` are missing.
+
+Fixed smoke-existing retry submitted on 2026-06-20 local time: HF Job
+`meshllm/6a35894f953ed90bfb944e49`, URL
+`https://huggingface.co/jobs/meshllm/6a35894f953ed90bfb944e49`, label
+`spd-qwen480-smoke-existing`. It uses the same `rtx-pro-6000x4` / `1.5h` cap
+and CPU/GPU smoke map, with
+`PATCH_REVISION=ea52905865b07ad17a5fdd7519d27a07ad4f689c`,
+`PATCH_PATH_IN_REPO=job-inputs/20260619T182322Z-bf682379/mesh-llm.patch`, and
+`ARTIFACT_RUN_PATH=runs/native-package-fresh`. The uploaded job input patch
+SHA256 is
+`af3c6353916a96b9a6568004c11ad32b0b788d06cf31182458b8a3cdee29799d`; the
+bootstrap SHA256 is
+`173a370c1f7b9f0b2bac501d866fd835e26c397be39024817a717d7ba3c325e7`; the
+dry-run plan SHA256 remains
+`7fba2ddb364e6ad8eab8bbd4f78ac01b4e359614cf124643a4771da1325a5012`. First poll
+showed bootstrap download complete and generated setup running.
+
+That fixed retry ended `ERROR` after `1621s` running, but it proved the cwd fix
+and reached package-backed baseline/SPD smoke. It completed release build, full
+package download, deterministic prompt rebuild, artifact hydration, and stage
+launch with the CPU/GPU smoke map. The smoke cases recorded downstream taps
+for hf indices `16,24,32,40,48,55,62` and local stage-0 hf `8` tap records
+with `0` tap return failures, `0` tap record failures, and `0` ignored taps.
+However every SPD case reported `spd_proposal_total_proposed=0` after
+`38` or `44` proposal attempts because the proposal cache was missing hf `8`
+rows for prompt-window positions such as `40..45` and `58..63`. Root cause:
+the initial SPD `reset_to_context(prompt)` ran after prefill and retained zero
+tap rows when the source context was still empty; downstream stages could
+recover prompt rows through first-decode context sideband replay, but stage 0
+does not re-run the whole prompt during decode. The local patch now preserves
+prefill tap rows on that initial source reset. The same job then failed in
+latency simulation because the report had eight stage processes while
+`physical-stage-ms.txt` modeled four clumped physical buckets; `simulate_latency.py`
+now accepts that clumped what-if shape and records both modeled and report
+physical stage counts.
+
+Next retry remains smoke-existing only: upload the current patch, hydrate
+`runs/native-package-fresh`, reuse the same prompt shard and Qwen480 package,
+and rerun package smoke plus latency simulation. Do not recapture or retrain
+unless the uploaded artifact itself becomes unusable.
+
 If this Qwen480 lane clears the sidecar quality and package-backed smoke gates,
 the next HF validation spike should be a single-job meshlet: one HF Job starts
 the coordinator, stage servers, SPD sidecar, and OpenAI frontend as separate

@@ -1,6 +1,6 @@
 use super::cache::{
     SpdInlineTapCache, SpdInlineTapLifecycle, SpdInlineTapRecord, common_token_prefix_len,
-    retained_tap_prefix_len_for_context_update,
+    retained_tap_prefix_len_for_context_update, retained_tap_prefix_len_for_source_reset,
 };
 use super::timing::SpdHeadForwardTiming;
 use super::*;
@@ -214,6 +214,19 @@ fn accepted_extension_retains_tap_rows_for_new_context() {
     assert_eq!(
         retained_tap_prefix_len_for_context_update(&[1, 2], &[1, 2, 3, 4], false),
         2
+    );
+}
+
+#[test]
+fn initial_source_reset_preserves_prefill_tap_rows() {
+    assert_eq!(retained_tap_prefix_len_for_source_reset(&[], &[1, 2, 3]), 3);
+    assert_eq!(
+        retained_tap_prefix_len_for_source_reset(&[1, 2], &[1, 2, 3]),
+        2
+    );
+    assert_eq!(
+        retained_tap_prefix_len_for_source_reset(&[1, 2], &[9, 2, 3]),
+        0
     );
 }
 

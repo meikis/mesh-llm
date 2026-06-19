@@ -240,6 +240,31 @@ instead of repeating capture/train. The first single-job HF meshlet remains a
 follow-on only after package-backed smoke produces matched content, zero tap
 failures, and useful saved/unsaved candidate-token round-trip counts.
 
+Smoke-existing retry `meshllm/6a3581b9953ed90bfb944dd3` proved the hydration
+path but failed before model launch because the second generated script ran from
+the bootstrap checkout and could not resolve `target/release/skippy-bench`.
+Commit `bf682379` fixes that by re-entering `$WORK_DIR/mesh-llm` before
+package smoke and checking for the release binaries plus `physical-stage-ms.txt`.
+Fixed retry `meshllm/6a35894f953ed90bfb944e49` reached package-backed smoke
+with the same `rtx-pro-6000x4` / `1.5h` cap, artifact path, and CPU/GPU smoke
+map, then ended `ERROR` after `1621s`. This run proved the cwd fix and stage
+launch: package smoke ran baseline/SPD cases with downstream tap returns for
+hf `16,24,32,40,48,55,62`, local stage-0 hf `8` tap records, and `0` tap
+return/record/ignored failures. It did not prove proposal quality: every SPD
+case produced `0` proposals because prompt-window hf `8` rows were missing from
+the proposal cache. Root cause was initial source reset cleanup after prefill:
+`reset_to_context(prompt)` retained zero tap rows while the SPD source context
+was still empty. Stage 0 cannot recover those prompt rows through first-decode
+sideband replay the way downstream stages can. The runtime now preserves
+prefill tap rows on that initial source reset. The latency simulator also now
+accepts the intended clumped four-physical-bucket what-if model for an
+eight-stage smoke report instead of aborting on stage-count mismatch.
+
+The next Qwen480 run should still be smoke-existing only: upload the current
+patch, hydrate `runs/native-package-fresh`, reuse the same package/prompt shard,
+and rerun package smoke plus latency simulation. Do not repeat capture/train
+unless the uploaded artifact is unusable.
+
 Predigested SPD splits should be logical artifacts. A sidecar is trained for a
 canonical logical topology and tap set; Mesh may fit contiguous logical stages
 onto fewer physical nodes when hardware is scarce. That placement is only valid

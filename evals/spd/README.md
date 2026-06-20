@@ -9,6 +9,25 @@ accepted token. The work in this directory proves the training/evaluation path
 and records the artifact contract Skippy needs before serving the head from
 Rust.
 
+## Paper And Reference Sources
+
+The SPD paper is available at `https://arxiv.org/pdf/2605.30852`; the reference
+implementation is `https://github.com/yuyijiong/speculative_pipeline_decoding`.
+Local notes may mention `~/Downloads/spd.pdf`, but reproduction should use the
+public paper URL and reference repository instead of assuming that local file
+exists.
+
+The paper describes the SPD sidecar as a Speculation Module: a small
+Transformer decoder plus LM head that consumes multi-depth hidden states from
+the frozen target pipeline and is trained with KL distillation against target
+logits. The paper does not require the sidecar's weight dtype to match the
+target model's serving quantization. For Skippy product proof, the important
+match is the target distribution: capture taps and teacher logits from the
+exact native quantized layer package that will serve, then train/export a
+sidecar that predicts that distribution. BF16/F32 sidecar weights are therefore
+acceptable proof dtypes; sidecar quantization should be treated as a later
+latency/size optimization after package-backed acceptance works.
+
 ## Current Immediate Goal: Qwen3-Coder-480B S8 Native Package Qualification
 
 The immediate target is now Qwen3-Coder-480B S8 on Hugging Face. The package is
@@ -68,10 +87,21 @@ per-stage backend placement. This lets Qwen480 replay the selected fixture
 context through live taps and compare reconstructed `cur_in` without loading
 the full verifier alongside resident tap stages. Dry-run plan:
 `/tmp/spd-qwen480-s8-quality-8k-native-package-fresh-mixed-balanced-live-row-gate-plan.json`.
-The already-running retry `meshllm/6a36251f3093dba73ce2ab39` does not include
-that new live-row gate. As of 2026-06-20 05:42 UTC it was in `setup[23]`
+The then-running retry `meshllm/6a36251f3093dba73ce2ab39` did not include that
+new live-row gate. As of 2026-06-20 05:42 UTC it was in `setup[23]`
 downloading the Qwen480 package snapshot, with no capture/train/parity/smoke
-result yet.
+result yet; it was later canceled.
+
+Update at 2026-06-20 local: `meshllm/6a36251f3093dba73ce2ab39` was canceled
+and `hf jobs ps --namespace meshllm` returned `No jobs found`. The next
+spend-bearing action should be the Qwen480 S8 overfit-to-serving-prompts
+alignment proof, not a larger quality lane. Heavy `16k`/`64k`/paper-scale
+training is justified only after the overfit proof accepts served proposals,
+fixed-row Python/Rust parity passes, live-row reconstruction matches saved
+product rows, and package-backed smoke reports nonzero accepted proposals plus
+saved candidate-token round trips. If compute is truly sunk cost, a heavy lane
+may run in the background with strict caps, but its results should not steer the
+plan until those alignment gates are green.
 
 HF Jobs rates checked on 2026-06-19 put `rtx-pro-6000x4` at about `$11/hr`,
 `h200x2` at about `$10/hr`, `h200x4` at about `$20/hr`, and

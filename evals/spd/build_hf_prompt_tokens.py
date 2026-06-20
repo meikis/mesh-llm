@@ -59,6 +59,16 @@ def parse_args() -> argparse.Namespace:
             "to the requested size when needed."
         ),
     )
+    parser.add_argument(
+        "--draft-vocab-source",
+        choices=("train", "heldout", "train+heldout"),
+        default="train",
+        help=(
+            "Rows used to build draft-token-ids.json. Use heldout for overfit "
+            "serving-prompt diagnostics that intentionally train on held-out "
+            "product rows."
+        ),
+    )
     parser.add_argument("--shuffle", action="store_true")
     parser.add_argument(
         "--balance-datasets",
@@ -443,7 +453,8 @@ def write_outputs(
     write_jsonl(heldout_tokens, [token_row(row) for row in heldout_rows])
     write_jsonl(train_prompts, [prompt_row(row) for row in train_rows])
     write_jsonl(heldout_prompts, [prompt_row(row) for row in heldout_rows])
-    draft_vocab = build_draft_token_ids(train_rows, args.draft_vocab_size)
+    draft_vocab_rows = draft_vocab_source_rows(args, train_rows, heldout_rows)
+    draft_vocab = build_draft_token_ids(draft_vocab_rows, args.draft_vocab_size)
     if args.draft_vocab_size > 0:
         draft_token_ids.write_text(
             json.dumps(draft_vocab, ensure_ascii=False) + "\n",
@@ -465,7 +476,16 @@ def write_outputs(
         "heldout_prompt_token_file": str(heldout_tokens),
         "draft_token_ids_file": str(draft_token_ids) if args.draft_vocab_size > 0 else None,
         "draft_vocab_size": args.draft_vocab_size if args.draft_vocab_size > 0 else None,
-        "draft_vocab_unique_train_tokens": len(set(token for row in train_rows for token in row["draft_vocab_token_ids"])),
+        "draft_vocab_source": args.draft_vocab_source,
+        "draft_vocab_unique_source_tokens": len(
+            set(token for row in draft_vocab_rows for token in row["draft_vocab_token_ids"])
+        ),
+        "draft_vocab_unique_train_tokens": len(
+            set(token for row in train_rows for token in row["draft_vocab_token_ids"])
+        ),
+        "draft_vocab_unique_heldout_tokens": len(
+            set(token for row in heldout_rows for token in row["draft_vocab_token_ids"])
+        ),
         "train_prompt_count": len(train_rows),
         "heldout_prompt_count": len(heldout_rows),
         "skipped_prompt_count": len(skipped),
@@ -520,6 +540,18 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def draft_vocab_source_rows(
+    args: argparse.Namespace,
+    train_rows: list[dict[str, Any]],
+    heldout_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if args.draft_vocab_source == "train":
+        return train_rows
+    if args.draft_vocab_source == "heldout":
+        return heldout_rows
+    return [*train_rows, *heldout_rows]
 
 
 def token_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:

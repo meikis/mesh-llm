@@ -5,6 +5,22 @@ serving. Broader staged-serving design lives in [`../SKIPPY.md`](../SKIPPY.md),
 and benchmark command/report guidance lives in
 [`../../crates/skippy-bench/README.md`](../../crates/skippy-bench/README.md).
 
+## Paper And Reference Sources
+
+The SPD paper is `https://arxiv.org/pdf/2605.30852`, and the reference
+implementation is `https://github.com/yuyijiong/speculative_pipeline_decoding`.
+The local `~/Downloads/spd.pdf` copy is useful for this machine, but it is not
+a reproducibility dependency.
+
+The paper freezes the target model and trains only the Speculation Module with
+KD against target logits from multi-depth target hidden states. That binds a
+sidecar to the target model, tokenizer/template, logical tap topology, and
+teacher distribution. It does not say the sidecar weight dtype must equal the
+target serving quant. For Skippy, the paper-faithful product path is native
+quant teacher data from the exact Q4/Q8 layer package plus a BF16/F32 sidecar
+first; quantizing the sidecar is a later size/latency optimization after served
+acceptance is proven.
+
 ## Current State
 
 ### N-Gram
@@ -104,6 +120,16 @@ alignment pass, run the prepared overfit-to-serving-prompts existence proof to
 separate data scale from row/projection/live-tap alignment and underfit recipe
 failure.
 
+Heavy Qwen480 training should be gated, not used as the primary diagnostic.
+Run `16k`, `64k`, or paper-scale training as the main path only after the
+overfit-to-serving-prompts proof accepts served proposals, fixed-row Python/Rust
+parity passes, live-row reconstruction matches saved product rows, and
+package-backed smoke reports real accepted proposals and saved candidate-token
+round trips. If a sunk-cost GPU window exists, a larger lane may run in the
+background with strict caps, but do not interpret it as proof until the
+alignment gates are green; otherwise it can produce a better offline curve while
+the served path still accepts `0`.
+
 The capped Qwen480 S8 diagnostic retry ran as HF Job
 `meshllm/6a3611dd953ed90bfb945575`, created 2026-06-20 04:06:53 UTC, label
 `spd-qwen480-quality-8k-diagnostic`, on `rtx-pro-6000x4` with a `3.9h` timeout
@@ -161,11 +187,10 @@ real selected context tokens into `prompt_input_ids`, and
 The regenerated dry-run plan
 `/tmp/spd-qwen480-s8-quality-8k-native-package-fresh-mixed-balanced-live-row-gate-plan.json`
 adds `live_row_parity` between `rust_fixture_parity` and package smoke while
-keeping the same `rtx-pro-6000x4`, `3.9h`, `$42.899922` cap. The already
-running HF job `meshllm/6a36251f3093dba73ce2ab39` does not include this new
-gate; `hf jobs logs --tail 120` at 2026-06-20 05:38 UTC still showed release
-compilation, and by 2026-06-20 05:42 UTC it had reached `setup[23]` package
-download. No capture/train/parity/smoke result had appeared yet.
+keeping the same `rtx-pro-6000x4`, `3.9h`, `$42.899922` cap. The then-running
+HF job `meshllm/6a36251f3093dba73ce2ab39` did not include this new gate; by
+2026-06-20 05:42 UTC it had reached package download, had not produced
+capture/train/parity/smoke evidence, and was later canceled.
 
 The local memory-residency fix keeps verifier semantics unchanged:
 `spd-product-corpus-capture --stream-live-tap-stages` still uses the full native

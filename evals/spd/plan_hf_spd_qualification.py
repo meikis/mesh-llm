@@ -293,6 +293,15 @@ def resolve_vocab_size(args: argparse.Namespace, package_metadata: dict[str, Any
     return 0
 
 
+def draft_vocab_description(args: argparse.Namespace) -> str:
+    source = (
+        "held-out serving conversations"
+        if args.overfit_serving_prompts
+        else "training conversations"
+    )
+    return f"frequency-built from selected {source} by build_hf_prompt_tokens.py"
+
+
 def resolve_boundaries(args: argparse.Namespace, layer_count: int) -> list[int]:
     raw = args.stage_layer_boundaries.strip()
     if raw:
@@ -704,10 +713,7 @@ def build_plan(
             "balance_datasets": bool(args.balance_datasets),
             "verify_steps": args.verify_steps,
             "ctx_size": args.ctx_size,
-            "draft_vocab": (
-                "frequency-built from selected training conversations by "
-                "build_hf_prompt_tokens.py"
-            ),
+            "draft_vocab": draft_vocab_description(args),
         },
         "training": {
             "warm_start_repo": args.warm_start_repo if args.qualification_mode == "raw-q4-adapt" else None,
@@ -881,6 +887,7 @@ def build_commands(
         f"--max-prompt-tokens {args.max_prompt_tokens} "
         f"--max-source-rows {args.max_source_rows} "
         f"--draft-vocab-size {args.draft_vocab_size} "
+        f"--draft-vocab-source {'heldout' if args.overfit_serving_prompts else 'train'} "
         "--shuffle --seed 23"
     )
     if args.balance_datasets:

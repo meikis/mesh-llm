@@ -377,6 +377,12 @@ samples. The next evidence should first close fixed-row Rust/Python proposal
 parity, then run the prepared mixed `8k` native-Q4 lane, then scale the same
 recipe to `16k`, `64k`, and paper-scale only if package-backed held-out
 acceptance and saved candidate-token round trips improve.
+If the mixed `8k` lane still serves `0` accepted proposals, the next step is
+not a blind data increase. First run a tiny overfit-to-serving-prompts Qwen480
+S8 proof on the exact package topology. Nonzero served acceptance from an
+intentionally overfit head proves the path is aligned and data scale is the
+likely lever; `0` served acceptance from an overfit head proves the blocker is
+row/projection/live-tap alignment or Rust/Python forward parity.
 
 Predigested SPD splits should be logical artifacts. A sidecar is trained for a
 canonical logical topology and tap set; Mesh may fit contiguous logical stages

@@ -920,6 +920,13 @@ Logs show `Job started at 2026-06-20 02:33:01`; next checks are bootstrap
 fetch, pinned checkout, patch apply, CUDA build, bounded prompt build, native
 capture, product parity fixture export, `spd-fixture-parity`, then
 package-backed acceptance/economics.
+If this bounded 8k lane still serves `0` accepted proposals, do not jump
+directly to `16k`/`64k`/paper-scale data. First run a tiny deliberately overfit
+Qwen480 S8 head on the exact package-backed serving prompts. Nonzero served
+acceptance from an overfit head proves the Qwen480 request path is aligned and
+data scale is the likely lever; `0` served acceptance even from an overfit head
+means fix row/projection/live-tap alignment or Rust/Python forward parity before
+buying more data.
 
 ## Local Proof Flow
 

@@ -585,6 +585,14 @@ zero, the next structural gate is live-row reconstruction, comparing
 request-time tap-projected `cur_in` against the saved native corpus row for the
 same context.
 
+If the bounded 8k Qwen480 lane still serves `0` accepted proposals, do not
+spend directly on `16k`, `64k`, or paper-scale data. First prove the real
+package topology can accept anything by training a tiny deliberately overfit
+Qwen480 S8 head on the exact serving prompts. Nonzero served acceptance from an
+overfit head would make data scale the likely lever; `0` served acceptance even
+from an overfit head would isolate the blocker to row/projection/live-tap
+alignment or Rust/Python forward parity.
+
 Prepared no-spend paper-aligned dry run for the next quality lane:
 `/tmp/spd-qwen480-s8-quality-8k-native-package-fresh-mixed-balanced-paperlike-plan.json`,
 SHA256 `24e9d55378acc68f82f098dab0c954d23b68c0acda0e6bfdd4e804dfbd5ecc0c`.

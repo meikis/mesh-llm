@@ -127,6 +127,14 @@ If `serving_target_top1` looks good on fixed rows but serving still accepts
 zero, the missing piece is native Rust/Python fixture parity or live-row
 alignment, not training data.
 
+Second-opinion acceptance gate: if this bounded 8k lane still serves `0`
+accepted proposals, do not jump directly to `16k`/`64k`/paper-scale data. First
+run a tiny Qwen480 S8 overfit-to-serving-prompts proof on the exact package
+topology. If an intentionally overfit head accepts nonzero proposals in
+package-backed serving, the request path is aligned and data scale is the next
+lever. If even the overfit head accepts `0`, the blocker is row/projection/live
+tap alignment or Rust/Python forward parity, not insufficient data.
+
 ## Success Gate
 
 This goal is done only when a capped HF quality lane produces a larger trained
@@ -183,11 +191,12 @@ transport.
    `skippy-bench spd-fixture-parity`, then package-backed smoke.
 4. If the 8k run has clean mechanics and low but nonzero acceptance, scale the
    same recipe to `16k`, then `64k`, and only then toward the paper's mixed-data
-   scale. The paper's reported run is about `1M` selected conversations,
-   `1.2M` filtered samples, max length `2048`, one epoch, LR `1e-4`, linear
-   decay, and KL against the frozen target. Our current Qwen480 run is only
-   `2048` native-Q4 samples, so it cannot answer whether SPD quality works at
-   paper scale.
+   scale. If the 8k run still has `0` served acceptance, first run the tiny
+   Qwen480 overfit existence proof above. The paper's reported run is about
+   `1M` selected conversations, `1.2M` filtered samples, max length `2048`, one
+   epoch, LR `1e-4`, linear decay, and KL against the frozen target. Our
+   current Qwen480 run is only `2048` native-Q4 samples, so it cannot answer
+   whether SPD quality works at paper scale.
 5. Acceptance is the gate. A run is useful only if it reports all of:
    `full_vocab_target_in_draft_scope`, `serving_target_top1/top4`,
    package-backed accepted/proposed proposals, saved/unsaved candidate-token

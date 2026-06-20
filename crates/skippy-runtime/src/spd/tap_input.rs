@@ -149,8 +149,25 @@ fn cache_tap_projection(
     if projections.contains_key(&key) {
         return Ok(());
     }
-    let spec = tap_projection_spec(topology, stage_id, hf_indices)?;
-    let weight = serving_file.read_tensor_f32(&spec.name)?;
+    let spec = tap_projection_spec(topology, stage_id, hf_indices).with_context(|| {
+        format!("resolve SPD tap projection spec for stage {stage_id} hf_indices {hf_indices:?}")
+    })?;
+    let weight_shape = serving_file
+        .index
+        .tensor(&spec.name)
+        .map(|tensor| tensor.shape.clone())
+        .with_context(|| {
+            format!(
+                "inspect SPD tap projection tensor {} for stage {stage_id} hf_indices {:?}",
+                spec.name, spec.hf_indices
+            )
+        })?;
+    let weight = serving_file.read_tensor_f32(&spec.name).with_context(|| {
+        format!(
+            "read SPD tap projection tensor {} shape {:?} for stage {stage_id} hf_indices {:?}",
+            spec.name, weight_shape, spec.hf_indices
+        )
+    })?;
     projections.insert(
         key,
         CachedTapProjection {
@@ -170,8 +187,25 @@ pub fn project_spd_tap_input_row(
     hf_indices: &[u32],
     concat_hidden: &[f32],
 ) -> Result<SpdTapInputProjection> {
-    let spec = tap_projection_spec(topology, stage_id, hf_indices)?;
-    let weight = serving_file.read_tensor_f32(&spec.name)?;
+    let spec = tap_projection_spec(topology, stage_id, hf_indices).with_context(|| {
+        format!("resolve SPD tap projection spec for stage {stage_id} hf_indices {hf_indices:?}")
+    })?;
+    let weight_shape = serving_file
+        .index
+        .tensor(&spec.name)
+        .map(|tensor| tensor.shape.clone())
+        .with_context(|| {
+            format!(
+                "inspect SPD tap projection tensor {} for stage {stage_id} hf_indices {:?}",
+                spec.name, spec.hf_indices
+            )
+        })?;
+    let weight = serving_file.read_tensor_f32(&spec.name).with_context(|| {
+        format!(
+            "read SPD tap projection tensor {} shape {:?} for stage {stage_id} hf_indices {:?}",
+            spec.name, weight_shape, spec.hf_indices
+        )
+    })?;
     let hidden_size = usize::try_from(topology.hidden_size).context("SPD hidden_size too large")?;
     let cached = CachedTapProjection {
         name: spec.name,
@@ -179,7 +213,17 @@ pub fn project_spd_tap_input_row(
         input_width: spec.input_width,
         weight,
     };
-    project_cached_tap_input(stage_id, hidden_size, &cached, concat_hidden)
+    project_cached_tap_input(stage_id, hidden_size, &cached, concat_hidden).with_context(|| {
+        format!(
+            "apply SPD tap projection {} for stage {stage_id} hf_indices {:?}: input_width {}, input_len {}, weight_shape {:?}, hidden_size {}",
+            cached.name,
+            cached.hf_indices,
+            cached.input_width,
+            concat_hidden.len(),
+            weight_shape,
+            hidden_size
+        )
+    })
 }
 
 fn project_cached_tap_input(
@@ -241,21 +285,53 @@ pub fn run_spd_tap_input_fixture_parity(
     for row_index in 0..row_count {
         let stage_id = u32::try_from(row_i_stages[row_index])
             .with_context(|| format!("SPD fixture row {row_index} has negative stage id"))?;
-        let hf_indices = read_row_hf_indices(&fixture_file, row_index)?;
-        let concat_hidden = fixture_file.read_tensor_f32(&format!("tap_row_{row_index}_concat"))?;
+        let position_id = row_positions[row_index];
+        let hf_indices = read_row_hf_indices(&fixture_file, row_index)
+            .with_context(|| format!("read SPD fixture row {row_index} hf indices"))?;
+        let concat_name = format!("tap_row_{row_index}_concat");
+        let concat_shape = fixture_file
+            .index
+            .tensor(&concat_name)
+            .map(|tensor| tensor.shape.clone())
+            .with_context(|| {
+                format!(
+                    "inspect SPD fixture row {row_index} concat tensor {concat_name}: position {position_id}, stage_id {stage_id}, hf_indices {hf_indices:?}"
+                )
+            })?;
+        let concat_hidden = fixture_file.read_tensor_f32(&concat_name).with_context(|| {
+            format!(
+                "read SPD fixture row {row_index} concat tensor {concat_name} shape {:?}: position {position_id}, stage_id {stage_id}, hf_indices {hf_indices:?}",
+                concat_shape
+            )
+        })?;
         let projection = project_spd_tap_input_row(
             &manifest.topology,
             &serving_file,
             stage_id,
             &hf_indices,
             &concat_hidden,
-        )?;
+        )
+        .with_context(|| {
+            format!(
+                "project SPD fixture row {row_index}: position {position_id}, stage_id {stage_id}, hf_indices {hf_indices:?}, concat_shape {:?}, concat_len {}, hidden_size {}, num_stages {}, stage_layer_boundaries {:?}",
+                concat_shape,
+                concat_hidden.len(),
+                hidden_size,
+                manifest.topology.num_stages,
+                manifest.topology.stage_layer_boundaries
+            )
+        })?;
         let expected = row(&cur_in, row_index, hidden_size);
-        let row_diff = max_abs_diff(&projection.projected, expected)?;
+        let row_diff = max_abs_diff(&projection.projected, expected).with_context(|| {
+            format!(
+                "compare SPD fixture row {row_index}: projection {}, position {position_id}, stage_id {stage_id}, hf_indices {:?}",
+                projection.projection_name, projection.hf_indices
+            )
+        })?;
         max_diff = max_diff.max(row_diff);
         rows.push(SpdTapInputFixtureRowParity {
             row_index,
-            position_id: row_positions[row_index],
+            position_id,
             stage_id,
             projection_name: projection.projection_name,
             hf_indices: projection.hf_indices,
@@ -644,6 +720,55 @@ mod tests {
         assert_eq!(parity.rows.len(), 3);
         assert_eq!(parity.rows[0].projection_name, "stage_projs.0.weight");
         assert_eq!(parity.rows[2].projection_name, "g0_proj.weight");
+    }
+
+    #[test]
+    fn fixture_parity_width_error_names_row_projection_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let serving_path = temp.path().join("spd-head.safetensors");
+        write_safetensors(
+            &serving_path,
+            &[
+                tensor_f32(
+                    "stage_projs.0.weight",
+                    &[2, 4],
+                    &[1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0],
+                ),
+                tensor_f32("stage_projs.1.weight", &[2, 2], &[2.0, 0.0, 0.0, 3.0]),
+                tensor_f32("g0_proj.weight", &[2, 2], &[1.0, 1.0, 1.0, -1.0]),
+                tensor_f32("lm_head.weight", &[2, 2], &[0.0, 0.0, 0.0, 0.0]),
+                tensor_f32("spec_layers.0.input_layernorm.weight", &[2], &[1.0, 1.0]),
+                tensor_f32(
+                    "spec_layers.0.post_attention_layernorm.weight",
+                    &[2],
+                    &[1.0, 1.0],
+                ),
+            ],
+        );
+        let manifest_path = write_manifest(temp.path(), &serving_path);
+        let fixture_path = temp.path().join("fixture.safetensors");
+        write_safetensors(
+            &fixture_path,
+            &[
+                tensor_f32("cur_in", &[1, 1, 2], &[4.0, 6.0]),
+                tensor_i64("row_i_stages", &[1], &[2]),
+                tensor_i64("row_positions", &[1], &[10]),
+                tensor_f32("tap_row_0_concat", &[1, 1, 3], &[1.0, 2.0, 3.0]),
+                tensor_i64("tap_row_0_hf_indices", &[2], &[0, 1]),
+            ],
+        );
+
+        let err = run_spd_tap_input_fixture_parity(manifest_path, fixture_path)
+            .expect_err("wrong tap width should fail");
+        let rendered = format!("{err:#}");
+
+        assert!(rendered.contains("project SPD fixture row 0"), "{rendered}");
+        assert!(rendered.contains("stage_id 2"), "{rendered}");
+        assert!(rendered.contains("hf_indices [0, 1]"), "{rendered}");
+        assert!(rendered.contains("stage_projs.0.weight"), "{rendered}");
+        assert!(rendered.contains("input_width 4"), "{rendered}");
+        assert!(rendered.contains("input_len 3"), "{rendered}");
+        assert!(rendered.contains("expected 4, got 3"), "{rendered}");
     }
 
     fn test_topology() -> SpdHeadTopology {

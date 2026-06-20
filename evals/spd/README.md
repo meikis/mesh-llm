@@ -585,13 +585,13 @@ zero, the next structural gate is live-row reconstruction, comparing
 request-time tap-projected `cur_in` against the saved native corpus row for the
 same context.
 
-If the bounded 8k Qwen480 lane still serves `0` accepted proposals, do not
-spend directly on `16k`, `64k`, or paper-scale data. First prove the real
-package topology can accept anything by training a tiny deliberately overfit
-Qwen480 S8 head on the exact serving prompts. Nonzero served acceptance from an
-overfit head would make data scale the likely lever; `0` served acceptance even
-from an overfit head would isolate the blocker to row/projection/live-tap
-alignment or Rust/Python forward parity.
+If a fixed-row-parity-clean Qwen480 lane reaches package smoke and still serves
+`0` accepted proposals, do not spend directly on `16k`, `64k`, or paper-scale
+data. First prove the real package topology can accept anything by training a
+tiny deliberately overfit Qwen480 S8 head on the exact serving prompts.
+Nonzero served acceptance from an overfit head would make data scale the likely
+lever; `0` served acceptance even from an overfit head would isolate the
+blocker to row/projection/live-tap alignment or Rust/Python forward parity.
 That fallback is now a first-class no-spend plan shape:
 `plan_hf_spd_qualification.py --qualification-mode native-package-fresh
 --overfit-serving-prompts` trains on the same held-out product rows used by
@@ -626,7 +626,7 @@ tokenizing all rows from million-row source datasets before selecting the
 requested prompts. This was not a capture, training, parity, or request-path
 failure. Estimated running cost at cancellation was about `$6.64`.
 
-The bounded replacement is HF Job `meshllm/6a35fb70953ed90bfb94547c`, created
+The bounded replacement was HF Job `meshllm/6a35fb70953ed90bfb94547c`, created
 2026-06-20 02:31:12 UTC, label `spd-qwen480-quality-8k-bounded`, run
 `20260620T023047Z-594c0d00`. The input bundle is
 `job-inputs/20260620T023047Z-594c0d00/` in
@@ -645,9 +645,9 @@ spend envelope stays under the original `$50` intent. Patch base/head are
 `d20f6eb5235a4f549356417459f541b284cab990740d3bfb070514f24d9dde02`;
 submitted pinned-plan SHA256
 `c5692cc64cf753ae8091a89cefd95ec8879c89fe059ba9f79a9e6f7d30e8e5b7`.
-Logs show `Job started at 2026-06-20 02:33:01`; next checks are bootstrap
-fetch, pinned checkout, patch apply, CUDA build, bounded prompt build, native
-capture, product fixture parity, and package-backed acceptance/economics.
+At submission, the planned gates after job start were bootstrap fetch, pinned
+checkout, patch apply, CUDA build, bounded prompt build, native capture, product
+fixture parity, and package-backed acceptance/economics.
 Observed update at 2026-06-20 02:53:44 UTC: the bounded replacement was still
 `RUNNING`, `runningSecs=1084`, estimated running cost about `$3.31`. It passed
 bootstrap, pinned checkout, patch apply, CUDA/Rust release build, full Qwen480
@@ -662,6 +662,65 @@ Observed update at 2026-06-20 03:29:22 UTC: the bounded replacement was still
 `$33.05` maximum remaining before the HF timeout. The log tail was still native
 CUDA capture chatter, not conversion, training, parity, smoke, upload, or
 failure output.
+
+Final bounded-replacement result: HF Job `meshllm/6a35fb70953ed90bfb94547c`
+ended `ERROR` after about `3975s` running, with estimated spend about `$12.15`
+on `rtx-pro-6000x4`, under the planned cap. It passed the expensive native
+package path: bootstrap, pinned checkout, patch apply, CUDA/Rust release build,
+full Qwen480 package download, bounded mixed-data prompt build, native capture,
+train/held-out conversion, head-only training, held-out scoring, serving export,
+product parity fixture export, and serving fixture export. It failed at
+`rust_fixture_parity[0]` before package-backed smoke with
+`failed to reconstruct SPD fixture cur_in from tap inputs`. No accepted/proposed
+serving result exists for this 8k head yet.
+
+The failed 8k run still produced a useful quality signal. Train conversion had
+`8192` samples and `7979` labels in the draft vocabulary; held-out conversion
+had `512` samples and `493` labels in the draft vocabulary. Head-only training
+reported final hard-label train accuracy `0.25`. Held-out scoring reported
+native-teacher top-1/top-4 `168 / 512` and `249 / 512`; the full-vocab serving
+target, restricted to rows whose target was in the draft vocabulary, scored
+`167 / 493` top-1 and `247 / 493` top-4. That is materially better offline
+signal than the first `2048`-sample lane, but it is not a qualified sidecar
+until fixed-row parity and package-backed served acceptance clear.
+
+Immediate conclusion: do not dispatch a meshlet or scale directly to
+`16k`/`64k`/paper-scale data until the parity failure is diagnosed. The local
+diagnostic patch now makes `skippy-bench spd-fixture-parity` report the failed
+row, position, stage id, HF tap indices, concat tensor shape/length, projection
+tensor, input width, weight shape, hidden size, and topology context when
+reconstructing `cur_in` fails. If parity passes on retry but package smoke
+still accepts zero proposals, run the prepared overfit-to-serving-prompts
+existence proof before buying more data. Nonzero served acceptance from the
+overfit head would isolate data scale/recipe as the lever; zero served
+acceptance would isolate row/projection/live-tap alignment.
+
+The refreshed no-spend diagnostic retry plan is
+`/tmp/spd-qwen480-s8-quality-8k-native-package-fresh-mixed-balanced-bounded-diagnostic-plan.json`,
+SHA256 `44a92e8c759af9304f790a72bb02f196443b0ab1ebe112dc0b6589ca8f0db244`.
+The no-compute input bundle is uploaded at
+`meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8/job-inputs/20260620T040137Z-diagnostic/`
+from Hub commit `9683bc4cf28df5b8dbb5b14ffa8428aaded664dd`. The uploaded
+manifest was downloaded back and verified: plan SHA256
+`44a92e8c759af9304f790a72bb02f196443b0ab1ebe112dc0b6589ca8f0db244`, patch
+SHA256 `62a3d29e0c4793c629e77a7a50d8156b8bbf1f4bfa97ce5d5001585c7126724f`,
+and bootstrap SHA256
+`89c389d02b4c10a9932b07fd4782a518e4a0bb4341c24894beaa0c7a81dc5946`.
+`evals/spd/bootstrap_qwen480_s8_native_job.sh` now accepts
+`PLAN_PATH_IN_REPO`, so a retry can download the exact mixed/balanced plan
+instead of regenerating the older UltraChat-only default inside HF. Local checks
+passed for the focused tap-input tests, `cargo check -p skippy-runtime`,
+`cargo clippy -p skippy-runtime --all-targets -- -D warnings`, Qwen480
+bootstrap `bash -n`, `git diff --check`, and patch-apply from
+`origin/codex/skippy-spd-proof`. The capped diagnostic retry was submitted as
+HF Job `meshllm/6a3611dd953ed90bfb945575`, created
+2026-06-20 04:06:53 UTC, label `spd-qwen480-quality-8k-diagnostic`. It uses
+`rtx-pro-6000x4`, timeout `3.9h`, and max planned cost `$42.899922`; it was
+last observed `RUNNING` at 2026-06-20 04:50 UTC. It has passed setup/release
+build, downloaded the full `69`-file / `276G` Qwen480 package, and entered
+`build_prompts[0]` for the mixed dataset plan. No capture, fixed-row parity,
+package-smoke, or acceptance result has appeared yet. Do not submit a duplicate
+while this job is active.
 
 The mixed prompt sources in that dry run are
 `HuggingFaceH4/ultrachat_200k:train_sft`,

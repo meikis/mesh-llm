@@ -904,43 +904,69 @@ all rows from million-row source datasets before selecting the requested prompt
 counts. This was not a capture, training, parity, or request-path failure.
 Estimated running cost at cancellation was about `$6.64`.
 
-The bounded replacement is HF Job `meshllm/6a35fb70953ed90bfb94547c`, created
+The bounded replacement HF Job `meshllm/6a35fb70953ed90bfb94547c`, created
 2026-06-20 02:31:12 UTC, label `spd-qwen480-quality-8k-bounded`, run
-`20260620T023047Z-594c0d00`. Inputs:
+`20260620T023047Z-594c0d00`, ended `ERROR` after about `3975s` on
+`rtx-pro-6000x4`, with estimated spend about `$12.15`, under its
+`$42.899922` cap. Inputs:
 `job-inputs/20260620T023047Z-594c0d00/` in
 `meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8`, uploaded at Hub
 commit `8d5cd9141a88ac12b300b26c55a2dd5a2680aeba`. The bounded plan is
 `/tmp/spd-qwen480-s8-quality-8k-native-package-fresh-mixed-balanced-bounded-plan.json`,
 SHA256 `91d09809c79ddd0db0a126c659cc2de124cbdeaa21f8fa26e0495b95071fa426`;
-it keeps the same Qwen480 S8 topology and 8k native-Q4 sample target, adds
-`--max-source-rows 12000`, reduces timeout to `3.9h`, and caps planned cost at
-`$42.899922`. With the canceled run, the combined envelope stays under the
-original `$50` intent. The replacement plan is pinned to base
-`f87e69bf9daf88a0b48040c32fd0a06fffea4029` before applying patch head
-`d4c12243db1fab71b38716979a4ba2d04563130d`. Patch SHA256:
-`d20f6eb5235a4f549356417459f541b284cab990740d3bfb070514f24d9dde02`.
-Submitted pinned-plan SHA256:
+patch SHA256 is
+`d20f6eb5235a4f549356417459f541b284cab990740d3bfb070514f24d9dde02`, and the
+submitted pinned-plan SHA256 is
 `c5692cc64cf753ae8091a89cefd95ec8879c89fe059ba9f79a9e6f7d30e8e5b7`.
-Logs show `Job started at 2026-06-20 02:33:01`; next checks are bootstrap
-fetch, pinned checkout, patch apply, CUDA build, bounded prompt build, native
-capture, product parity fixture export, `spd-fixture-parity`, then
-package-backed acceptance/economics.
-Observed update at 2026-06-20 02:53:44 UTC: the bounded replacement was still
-`RUNNING`, `runningSecs=1084`, estimated running cost about `$3.31`. It passed
-bootstrap, pinned checkout, patch apply, CUDA/Rust release build, full Qwen480
-package download (`69 / 69` files in about `3.5min`), and bounded prompt build,
-then entered native CUDA capture logs. This proves the `--max-source-rows
-12000` retry got past the prompt-preprocessing point where the unbounded job
-was canceled. Next checks are train/held-out capture completion, conversion,
-head-only train/score, product parity fixture export, `spd-fixture-parity`, and
-package-backed acceptance/economics.
-If this bounded 8k lane still serves `0` accepted proposals, do not jump
-directly to `16k`/`64k`/paper-scale data. First run a tiny deliberately overfit
-Qwen480 S8 head on the exact package-backed serving prompts. Nonzero served
-acceptance from an overfit head proves the Qwen480 request path is aligned and
-data scale is the likely lever; `0` served acceptance even from an overfit head
-means fix row/projection/live-tap alignment or Rust/Python forward parity before
-buying more data.
+
+The job passed bootstrap, pinned checkout, patch apply, CUDA/Rust release
+build, full Qwen480 package download, bounded mixed prompt build, native
+capture, train/held-out conversion, head-only training, held-out scoring,
+serving export, product parity fixture export, and serving fixture export. It
+failed before package-backed smoke at `rust_fixture_parity[0]` with
+`failed to reconstruct SPD fixture cur_in from tap inputs`. This is not a
+served-acceptance result for the 8k head.
+
+The failed 8k run still produced a useful offline quality signal: `8192`
+native-Q4 train samples, `512` held-out samples, `7979 / 8192` train labels in
+draft-vocab scope, `493 / 512` held-out labels in scope, final train hard-label
+accuracy `0.25`, native-teacher held-out top-1/top-4 `168 / 512` and
+`249 / 512`, and serving-target top-1/top-4 `167 / 493` and `247 / 493` for
+in-scope full-vocab targets. Treat this as evidence that the paper-aligned data
+lane is improving offline signal, not as a qualified sidecar.
+
+Before spending on `16k`, `64k`, or paper-scale data, fix the
+`spd-fixture-parity` tap-input reconstruction diagnostic. It must identify the
+row, stage id, expected HF tap indices, raw tap widths/offsets, projection
+tensor, and underlying source error or max reconstruction diff. If the improved
+8k head later reaches package-backed smoke and still serves `0` accepted
+proposals, run the deliberately overfit Qwen480 S8 serving-prompts proof before
+buying more rows. Nonzero served acceptance from the overfit head proves the
+request path is aligned and data scale is the likely lever; `0` served
+acceptance even from an overfit head means fix row/projection/live-tap alignment
+or Rust/Python forward parity before buying more data.
+
+Current diagnostic state: the tap-input reconstruction diagnostic patch is
+implemented and locally validated. It reports row, position, stage id, HF tap
+indices, concat shape/length, projection tensor, input width, weight shape,
+hidden size, and topology context. The refreshed no-spend retry plan is
+`/tmp/spd-qwen480-s8-quality-8k-native-package-fresh-mixed-balanced-bounded-diagnostic-plan.json`,
+SHA256 `44a92e8c759af9304f790a72bb02f196443b0ab1ebe112dc0b6589ca8f0db244`;
+the no-compute input bundle is uploaded at
+`meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8/job-inputs/20260620T040137Z-diagnostic/`
+from Hub commit `9683bc4cf28df5b8dbb5b14ffa8428aaded664dd`. Uploaded hashes:
+plan `44a92e8c759af9304f790a72bb02f196443b0ab1ebe112dc0b6589ca8f0db244`,
+patch `62a3d29e0c4793c629e77a7a50d8156b8bbf1f4bfa97ce5d5001585c7126724f`,
+bootstrap `89c389d02b4c10a9932b07fd4782a518e4a0bb4341c24894beaa0c7a81dc5946`.
+The native Qwen480 bootstrap accepts `PLAN_PATH_IN_REPO` so the next HF retry
+can run the exact mixed/balanced plan. The capped retry was submitted as HF Job
+`meshllm/6a3611dd953ed90bfb945575`, created 2026-06-20 04:06:53 UTC, label
+`spd-qwen480-quality-8k-diagnostic`, on `rtx-pro-6000x4` with a `3.9h` timeout
+and max planned cost `$42.899922`. It was last observed `RUNNING` at
+2026-06-20 04:50 UTC. It has passed setup/release build, downloaded the full
+`69`-file / `276G` Qwen480 package, and entered `build_prompts[0]` for the
+mixed dataset plan. No capture, fixed-row parity, package-smoke, or acceptance
+result has appeared yet. Do not submit a duplicate while this job is active.
 
 ## Local Proof Flow
 

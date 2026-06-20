@@ -11,6 +11,21 @@ real candidate-token round-trip savings under the same logical topology.
 
 ## Current Checkpoint
 
+- Active HF Job: `meshllm/6a35f141953ed90bfb945409`, submitted
+  2026-06-20 01:47:45 UTC, status last checked as `SCHEDULING`.
+  It is the mixed-data 8k native-Q4 quality lane on `rtx-pro-6000x4`,
+  timeout `4.5h`, planned max cost `$49.49991`.
+- Active job input bundle:
+  `meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8/job-inputs/20260620T014653Z-724af833/`,
+  uploaded at Hub commit `a297f50747afa0c15e5840b8e88d7410a1346fb7`.
+- Patch base/head: base `f87e69bf9daf88a0b48040c32fd0a06fffea4029`,
+  head `2fa9668e0bd4b560b65c92b0ce2bacb0d98d5c44`.
+  Patch SHA256:
+  `55d002d14f77aab050edc0d13da3a08a84c8df5055ae3c0c860b5a50fb6c6704`.
+- Submitted pinned plan SHA256:
+  `bb7ab5c3816857df9bd97fd2ecc7ccc5e616bd70c4f904d03dbb9acd876e3b32`.
+  It is the same Qwen480 S8 plan as the local no-spend dry run, with setup
+  pinned to the exact patch base before applying the uploaded patch.
 - Latest completed HF Job: `meshllm/6a35cdc03093dba73ce2a9ad`.
 - Artifact repo/path:
   `meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8/runs/native-package-fresh`.
@@ -143,8 +158,9 @@ transport.
      not yet been run on Qwen480 artifacts because the previous local download
      retained only final JSONs and the serving bundle, not held-out corpus and
      teacher tensors.
-3. The next spend-bearing candidate is the prepared mixed-data 8k native-Q4
-   quality run, only after explicit spend approval:
+3. The next spend-bearing candidate has been submitted as HF Job
+   `meshllm/6a35f141953ed90bfb945409` after the spend-capped goal was resumed.
+   The original no-spend plan remains:
    `/tmp/spd-qwen480-s8-quality-8k-native-package-fresh-mixed-balanced-paperlike-plan.json`,
    SHA256
    `24e9d55378acc68f82f098dab0c954d23b68c0acda0e6bfdd4e804dfbd5ecc0c`.
@@ -152,7 +168,12 @@ transport.
    samples and `128` held-out prompts, builds a corpus-frequency `32k` draft
    vocabulary from selected training conversations, trains KL-only against
    captured native verifier logits, and keeps the planned cap at `$49.49991`
-   on `rtx-pro-6000x4`.
+   on `rtx-pro-6000x4`. The submitted plan is a pinned copy with SHA256
+   `bb7ab5c3816857df9bd97fd2ecc7ccc5e616bd70c4f904d03dbb9acd876e3b32`.
+   First checks when it starts: bootstrap script fetch, checkout of patch base
+   `f87e69bf9daf88a0b48040c32fd0a06fffea4029`, patch apply, CUDA build,
+   package capture, `export_product_parity_fixture.py`,
+   `skippy-bench spd-fixture-parity`, then package-backed smoke.
 4. If the 8k run has clean mechanics and low but nonzero acceptance, scale the
    same recipe to `16k`, then `64k`, and only then toward the paper's mixed-data
    scale. The paper's reported run is about `1M` selected conversations,
@@ -275,6 +296,26 @@ transport.
    `spd-live-tap-parity`, or `from_pretrained(` in the plan. Do not submit it
    until spend is explicitly approved and the native parity/serving-target
    checks above are acknowledged.
+
+7. Mixed-data 8k lane submitted after the spend-capped goal resumed:
+   HF Job `meshllm/6a35f141953ed90bfb945409`, created
+   2026-06-20 01:47:45 UTC, label `spd-qwen480-quality-8k`, run
+   `20260620T014653Z-724af833`.
+   Input bundle:
+   `job-inputs/20260620T014653Z-724af833/`, upload commit
+   `a297f50747afa0c15e5840b8e88d7410a1346fb7`.
+   Local bundle:
+   `/tmp/spd-qwen480-native-job-20260620T014653Z-724af833`.
+   Patch SHA256:
+   `55d002d14f77aab050edc0d13da3a08a84c8df5055ae3c0c860b5a50fb6c6704`;
+   bootstrap SHA256:
+   `39a62b2dfed65b3885d5e716b9e4b2316542e8ce0f42b671a13db73800e7b9ae`;
+   submitted pinned plan SHA256:
+   `bb7ab5c3816857df9bd97fd2ecc7ccc5e616bd70c4f904d03dbb9acd876e3b32`.
+   The input bundle was token-fetch verified before submit, and the patch was
+   checked locally with `git apply --check` against the exact pinned base
+   `f87e69bf9daf88a0b48040c32fd0a06fffea4029`. First status check after submit
+   showed `SCHEDULING`; no runtime logs had appeared yet.
 
 ## Why Not Meshlet Yet
 

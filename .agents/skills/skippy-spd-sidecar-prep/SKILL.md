@@ -887,11 +887,27 @@ selected training conversations, and native capture passes it with
 `--draft-token-ids-file`; do not use the old arbitrary `0..31999` draft-token
 range for Qwen480 quality work. The plan now also exports
 `spd-product-parity-fixture.safetensors` and runs
-`skippy-bench spd-fixture-parity` before package smoke. It is not submitted;
-spend still requires explicit confirmation.
+`skippy-bench spd-fixture-parity` before package smoke.
 
-Do not submit spend until the dry run prints model/package ref, dataset shard,
-prompt counts, topology, hardware flavor, timeout, output repo, and max cost.
+That mixed 8k lane was submitted as HF Job
+`meshllm/6a35f141953ed90bfb945409`, created 2026-06-20 01:47:45 UTC, label
+`spd-qwen480-quality-8k`, run `20260620T014653Z-724af833`. The first
+post-submit status check showed `SCHEDULING` with no runtime logs yet. Inputs:
+`job-inputs/20260620T014653Z-724af833/` in
+`meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8`, uploaded at Hub
+commit `a297f50747afa0c15e5840b8e88d7410a1346fb7`. The submitted plan is
+pinned to base `f87e69bf9daf88a0b48040c32fd0a06fffea4029` before applying
+patch head `2fa9668e0bd4b560b65c92b0ce2bacb0d98d5c44`. Patch SHA256:
+`55d002d14f77aab050edc0d13da3a08a84c8df5055ae3c0c860b5a50fb6c6704`.
+Bootstrap SHA256:
+`39a62b2dfed65b3885d5e716b9e4b2316542e8ce0f42b671a13db73800e7b9ae`.
+Submitted pinned-plan SHA256:
+`bb7ab5c3816857df9bd97fd2ecc7ccc5e616bd70c4f904d03dbb9acd876e3b32`.
+The uploaded script, plan, and patch were token-fetch verified before submit,
+and the patch was checked locally with `git apply --check` against the pinned
+base. Next checks are bootstrap fetch, pinned checkout, patch apply, CUDA
+build, native capture, product parity fixture export, `spd-fixture-parity`,
+then package-backed acceptance/economics.
 
 ## Local Proof Flow
 

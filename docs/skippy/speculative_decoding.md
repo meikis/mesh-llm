@@ -320,14 +320,14 @@ evidence.
 A larger no-spend paper-aligned plan is now saved at
 `/tmp/spd-qwen480-s8-quality-8k-native-package-fresh-mixed-balanced-paperlike-plan.json`
 with SHA256 `24e9d55378acc68f82f098dab0c954d23b68c0acda0e6bfdd4e804dfbd5ecc0c`.
-It is not submitted. It keeps Qwen480 S8 native package-first capture, raises
-training to `8192` native-Q4 samples (`2048` prompts x `4` verify steps), uses
-`128` held-out prompts and `ctx_size=2048`, keeps the proven resident capture
-map `CUDA0,CUDA0,CUDA1,CUDA1,CUDA2,CUDA2,CUDA3,CUDA3` and CPU-interleaved
-smoke map `CPU,CUDA0,CPU,CUDA1,CPU,CUDA2,CPU,CUDA3`, and moves closer to the
-paper recipe with one epoch, LR `1e-4`, KL-only native teacher training, and a
-balanced mixed prompt source. The selected datasets are UltraChat-200k,
-SmolTalk, SmolTalk-Chinese, and a ShareGPT-like WizardLM Evol-Instruct shard.
+It keeps Qwen480 S8 native package-first capture, raises training to `8192`
+native-Q4 samples (`2048` prompts x `4` verify steps), uses `128` held-out
+prompts and `ctx_size=2048`, keeps the proven resident capture map
+`CUDA0,CUDA0,CUDA1,CUDA1,CUDA2,CUDA2,CUDA3,CUDA3` and CPU-interleaved smoke map
+`CPU,CUDA0,CPU,CUDA1,CPU,CUDA2,CPU,CUDA3`, and moves closer to the paper recipe
+with one epoch, LR `1e-4`, KL-only native teacher training, and a balanced
+mixed prompt source. The selected datasets are UltraChat-200k, SmolTalk,
+SmolTalk-Chinese, and a ShareGPT-like WizardLM Evol-Instruct shard.
 Prompt-token generation now writes a corpus-frequency `draft-token-ids.json`
 from selected training conversations, and native capture passes it with
 `--draft-token-ids-file`; do not fall back to the old arbitrary `0..31999`
@@ -338,6 +338,23 @@ It also now exports `spd-product-parity-fixture.safetensors` from held-out
 native product rows and runs `skippy-bench spd-fixture-parity` before package
 smoke; `spd-serving-fixture.safetensors` remains the separate request-path
 fixture for `spd-openai-smoke`.
+
+This mixed 8k lane was submitted as HF Job
+`meshllm/6a35f141953ed90bfb945409` on 2026-06-20 01:47:45 UTC, label
+`spd-qwen480-quality-8k`, run `20260620T014653Z-724af833`. The first
+post-submit status check showed `SCHEDULING` and no runtime logs yet. Inputs
+were uploaded under
+`meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8/job-inputs/20260620T014653Z-724af833/`
+at Hub commit `a297f50747afa0c15e5840b8e88d7410a1346fb7`. The submitted plan
+is pinned to base `f87e69bf9daf88a0b48040c32fd0a06fffea4029` before applying
+patch head `2fa9668e0bd4b560b65c92b0ce2bacb0d98d5c44`; patch SHA256
+`55d002d14f77aab050edc0d13da3a08a84c8df5055ae3c0c860b5a50fb6c6704`,
+bootstrap SHA256
+`39a62b2dfed65b3885d5e716b9e4b2316542e8ce0f42b671a13db73800e7b9ae`, and
+submitted pinned-plan SHA256
+`bb7ab5c3816857df9bd97fd2ecc7ccc5e616bd70c4f904d03dbb9acd876e3b32`. The
+uploaded script, plan, and patch were token-fetch verified before submit, and
+the patch was locally checked with `git apply --check` against the pinned base.
 
 Acceptance rate is now the primary Qwen480 research loop. The paper's recipe is
 far larger than our completed Qwen480 lane: frozen target, KL-only speculation

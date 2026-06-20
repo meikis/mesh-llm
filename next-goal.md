@@ -11,7 +11,7 @@ real candidate-token round-trip savings under the same logical topology.
 
 ## Current Checkpoint
 
-- Completed HF Job: `meshllm/6a3593cf3093dba73ce2a78f`.
+- Latest completed HF Job: `meshllm/6a35cdc03093dba73ce2a9ad`.
 - Artifact repo/path:
   `meshllm/skippy-spd-qwen3-coder-480b-a35b-ud-q4-k-xl-s8/runs/native-package-fresh`.
 - Exact package:
@@ -20,10 +20,35 @@ real candidate-token round-trip savings under the same logical topology.
   `stage_layer_boundaries=8,16,24,32,40,48,55,62`.
 - Required taps: `[0,8,16,24,32,40,48,55,62]`.
 - Smoke map used: `CPU,CUDA0,CPU,CUDA1,CPU,CUDA2,CPU,CUDA3`.
-- Downloaded reports:
-  `/private/tmp/spd-qwen480-smoke-existing-completed/runs/native-package-fresh/`.
+- Downloaded final reports:
+  `/private/tmp/spd-qwen480-quality-final-json/`.
+- Training scale: `512` train prompts x `4` verify steps = `2048` native-Q4
+  train samples; `64` held-out prompts = `256` held-out samples.
+- Held-out offline score: native-teacher top-1 `96 / 256`, top-4 `129 / 256`.
+- Serving head: `8,723,214,136` bytes, SHA256
+  `5cf3c15c54919414809cf409d252c5c4b0fa2b5ec084d91d4966e54976e75936`.
 
-## Evidence From The Completed Smoke
+## Evidence From The Latest Broad Smoke
+
+- Baseline/SPD content matched on `64 / 64` prompts.
+- Tap return failures: `0`.
+- Tap record failures: `0`.
+- Ignored taps: `0`.
+- Rolling proposals: `256` proposed, `0` accepted, `256` rejected.
+- Optimistic tokens committed: `0`.
+- Pipeline/economics: `0` saved versus `256` unsaved candidate-token round
+  trips; latency simulation reports `paper_like_speedup_vs_serial_split=0.0`.
+- Mean sidecar cost used by the latency simulator: about `395.8ms`.
+
+Conclusion: the Qwen480 S8 request path, tap transport, package source, rolling
+executor integration, and latency simulation path work at broad held-out scale.
+The blocker remains sidecar quality from insufficient or insufficiently aligned
+native-Q4 training data. Do not dispatch a meshlet for this sidecar.
+
+## Prior Tiny Smoke Evidence
+
+Previous HF Job: `meshllm/6a3593cf3093dba73ce2a78f`. Downloaded reports:
+`/private/tmp/spd-qwen480-smoke-existing-completed/runs/native-package-fresh/`.
 
 - Baseline/SPD content matched on `8 / 8` prompts.
 - Tap return failures: `0`.
@@ -42,25 +67,19 @@ real candidate-token round-trip savings under the same logical topology.
 - Mean sidecar head time for pre-target probes: about `399.9ms`.
 - Mean normal downstream wait in the smoke: about `1515.6ms`.
 
-Conclusion: the Qwen480 S8 request path, tap transport, package source, rolling
-executor integration, and latency simulation path are alive. The blocker is
-sidecar quality from too little native training data, not missing taps or
-package-smoke mechanics.
-
 ## Acceptance-Rate Focus
 
 Do not spend the next iteration re-proving taps, package loading, or meshlet
-lifecycle unless the current quality lane exposes a new request-path failure.
+lifecycle unless a new request-path failure appears.
 The paper trains the frozen-target SPD speculation module with KL distillation
 over about `1.2M` filtered samples from ShareGPT, UltraChat, SmolTalk, and
 SmolTalk-Chinese, with max length `2048`, LR `1e-4`, linear decay, and one
-epoch. The current Qwen480 quality lane is only `2048` native-Q4 train samples,
+epoch. The completed Qwen480 quality lane is only `2048` native-Q4 train samples,
 so it is a first production-path quality signal, not sufficient paper-scale
 evidence.
 
-If the current package-backed smoke does not clear saved-versus-unsaved round
-trips, the next goal remains the same topology but with a larger native-Q4
-KD/data lane: broaden beyond UltraChat-only where practical, preserve a frozen
+The next goal remains the same topology but with a larger native-Q4 KD/data
+lane: broaden beyond UltraChat-only where practical, preserve a frozen
 token-line-disjoint held-out gate, train from native verifier logits rather
 than BF16 full-model teachers, and judge readiness by broad held-out
 package-backed acceptance/economics before any HF meshlet.
@@ -127,9 +146,23 @@ transport.
    package-backed held-out serving saves more candidate-token round trips than
    it wastes, with matched content and zero tap failures.
 
-5. If `meshllm/6a35cdc03093dba73ce2a9ad` fails the acceptance/economics gate
-   while mechanics remain clean, plan the next spend as a data/recipe scale-up,
-   not another smoke-existing rerun:
+5. `meshllm/6a35cdc03093dba73ce2a9ad` completed and failed the
+   acceptance/economics gate while mechanics stayed clean. Final downloaded
+   reports:
+   `/private/tmp/spd-qwen480-quality-final-json/openai-heldout-rolling.json`
+   and
+   `/private/tmp/spd-qwen480-quality-final-json/latency-simulation.json`.
+   Evidence:
+   - baseline/SPD content matched on `64 / 64` prompts;
+   - tap return failures `0`, tap record failures `0`, ignored taps `0`;
+   - rolling windows proposed `256`, accepted `0`, rejected `256`;
+   - optimistic requests `64`, accepted `0`, committed `0`;
+   - saved candidate-token round trips `0`, unsaved `256`;
+   - latency simulation totals report `paper_like_speedup_vs_serial_split=0`;
+   - mean measured sidecar cost used by the simulator was about `395.8ms`.
+   Conclusion: this proves package-backed request mechanics at broad held-out
+   scale, but the sidecar is still not qualified. Next spend must be a
+   data/recipe scale-up, not a smoke-existing rerun or meshlet:
    - first larger target: at least `8k` to `16k` native-Q4 train samples if it
      fits a capped lane, with `64` to `256` held-out prompts;
    - longer target: move toward paper-scale mixed data if early scaling improves
@@ -149,8 +182,7 @@ transport.
      KL-only (`hard_label_weight=0`), `rtx-pro-6000x4`, `4.5h`, and planned
      max cost `$49.49991`. `rg` found no `AutoModelForCausalLM`,
      `hf_train_eval_qwen06`, `spd-live-tap-parity`, or `from_pretrained(` in
-     the plan. Do not submit it until the active job outcome is known and spend
-     is explicitly approved.
+     the plan. Do not submit it until spend is explicitly approved.
 
 ## Why Not Meshlet Yet
 

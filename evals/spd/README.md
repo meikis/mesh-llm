@@ -504,25 +504,39 @@ The job runs the same native-package-fresh plan on `rtx-pro-6000x4` with
 explicitly sets
 `SMOKE_STAGE_BACKEND_DEVICES=CPU,CUDA0,CPU,CUDA1,CPU,CUDA2,CPU,CUDA3` so the
 package-smoke phase uses the CPU-interleaved map that cleared the earlier
-Qwen480 stage-placement OOM. Initial `hf jobs inspect` showed the job accepted
-and in `SCHEDULING`; continue by watching bootstrap logs for patch download,
+Qwen480 stage-placement OOM. The job completed the full graph: patch download,
 `git apply`, plan generation, CUDA build, full package download, native capture,
 head-only train/score, export, package-backed rolling smoke, latency
-simulation, and upload.
+simulation, and final upload.
 
-In-flight quality checkpoint from the same job: setup/build, full `276G`
-package download, prompt-token build, native train/held-out capture, conversion,
-head-only training, held-out scoring, serving export, and pre-smoke upload all
-completed. The first larger Qwen480 lane captured `512` train prompts with
-`4` verify steps (`2048` train samples; `1817` labels in draft-vocab scope) and
-`64` held-out prompts (`256` held-out samples; `224` labels in scope). The
-fresh raw head overfit train (`final_argmax_acc=1.0`, `steps_completed=768`,
+Final quality checkpoint from the same job: setup/build, full `276G` package
+download, prompt-token build, native train/held-out capture, conversion,
+head-only training, held-out scoring, serving export, pre-smoke upload,
+package-backed rolling smoke, latency simulation, and final upload all
+completed. HF reports the job as `COMPLETED` with `6325s` running time. Final
+JSON reports were downloaded to
+`/private/tmp/spd-qwen480-quality-final-json/`.
+
+The first larger Qwen480 lane captured `512` train prompts with `4` verify
+steps (`2048` train samples; `1817` labels in draft-vocab scope) and `64`
+held-out prompts (`256` held-out samples; `224` labels in scope). The fresh
+raw head overfit train (`final_argmax_acc=1.0`, `steps_completed=768`,
 `base_model_load=skipped`) but improved held-out quality versus the tiny lane:
 native-teacher top-1 `96 / 256`, native-teacher top-4 `129 / 256`, hard-label
 top-1 `94 / 224`, hard-label top-4 `123 / 224`. The exported BF16 serving
 head is `8,723,214,136` bytes, `86` tensors, SHA256
 `5cf3c15c54919414809cf409d252c5c4b0fa2b5ec084d91d4966e54976e75936`.
-Package-backed rolling smoke is still the active gate at this checkpoint.
+
+The broad package-backed rolling smoke failed the quality/economics gate while
+keeping request mechanics clean: baseline/SPD content matched on `64 / 64`
+prompts, tap return failures were `0`, tap record failures were `0`, ignored
+taps were `0`, and all proposals used inline taps with no missing-tap reason.
+But the sidecar proposed `256`, accepted `0`, rejected `256`, committed `0`
+optimistic tokens, saved `0` candidate-token round trips, and left `256`
+unsaved. The latency simulation reports
+`paper_like_speedup_vs_serial_split=0.0`, `sidecar_ms=395.8294`, `0` saved
+round trips, and `256` unsaved. Treat this as broad package-path correctness
+evidence and a sidecar-quality failure, not a speedup or readiness signal.
 
 Paper-scale context: `~/Downloads/spd.pdf` says the authors freeze the target
 LLM and train only the Speculation Module with KL distillation against frozen
@@ -536,19 +550,17 @@ paper-scale sidecar-quality run. If package smoke does not clear the
 saved-versus-unsaved gate, the next spend should scale native Q4/S8 KD data and
 recipe quality rather than repeat mechanics.
 
-The acceptance-rate work should now be treated as the primary research loop.
-Mechanics have already reached the package-backed proposal path for Qwen480
-S8, so another meshlet or smoke-existing retry is useful only if this job
-reveals a new request-path failure. Otherwise the next capped lane should keep
-the same logical topology and native package-first capture, but raise the
-number and diversity of training rows, keep held-out token lines frozen and
-disjoint, and optimize for broad package-backed accepted/proposed plus
-saved-versus-unsaved candidate-token round trips. A narrow held-out subset can
-remain a debug smoke, but readiness for an HF meshlet needs a broad held-out
-package-backed gate with margin.
+The acceptance-rate work is now the primary research loop. Mechanics have
+reached the broad package-backed proposal path for Qwen480 S8, so another
+meshlet or smoke-existing retry would only re-measure a known quality failure.
+The next capped lane should keep the same logical topology and native
+package-first capture, but raise the number and diversity of training rows,
+keep held-out token lines frozen and disjoint, and optimize for broad
+package-backed accepted/proposed plus saved-versus-unsaved candidate-token
+round trips. A narrow held-out subset can remain a debug smoke, but readiness
+for an HF meshlet needs a broad held-out package-backed gate with margin.
 
-Prepared no-spend fallback if the active package smoke fails the
-acceptance/economics gate cleanly:
+Prepared no-spend fallback for the next quality lane:
 `/tmp/spd-qwen480-s8-quality-8k-native-package-fresh-paperlike-plan.json`,
 SHA256 `981d7a95c314b14a7544250e6a6167a7fe42d64689fa4c08df4e98dfe453b646`.
 It keeps the same Qwen480 S8 package/topology but raises training to `2048`

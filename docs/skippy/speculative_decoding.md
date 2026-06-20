@@ -297,6 +297,19 @@ A no-spend dry run for that larger lane is saved at
 `rtx-pro-6000x4`, timeout `4.5h`, and max cost `$49.49991`, and still avoids
 the old full-reference path strings: no `AutoModelForCausalLM`, no
 `hf_train_eval_qwen06.py`, no `spd-live-tap-parity`, and no `from_pretrained(`.
+That lane was submitted as HF Job `meshllm/6a35cdc03093dba73ce2a9ad` and
+completed in `6325s` of running time. It produced a stronger offline score than
+the tiny lane (`96 / 256` native-teacher top-1 and `129 / 256` top-4) and
+exported an `8,723,214,136` byte BF16 serving head with SHA256
+`5cf3c15c54919414809cf409d252c5c4b0fa2b5ec084d91d4966e54976e75936`. The
+broad package-backed rolling smoke matched baseline/SPD content on `64 / 64`
+prompts with `0` tap return failures, `0` tap record failures, and `0` ignored
+taps, but failed sidecar quality: `256` proposed, `0` accepted, `256`
+rejected, `0` optimistic tokens committed, `0` saved candidate-token round
+trips, and `256` unsaved. The latency simulation therefore reports
+`paper_like_speedup_vs_serial_split=0.0` with measured sidecar cost about
+`395.8ms`. This confirms broad request-path mechanics and rejects the current
+sidecar as a speed candidate.
 
 A larger no-spend fallback plan is now also saved at
 `/tmp/spd-qwen480-s8-quality-8k-native-package-fresh-paperlike-plan.json` with
@@ -308,7 +321,7 @@ training to `8192` native-Q4 samples (`2048` prompts x `4` verify steps), uses
 map `CPU,CUDA0,CPU,CUDA1,CPU,CUDA2,CPU,CUDA3`, and moves closer to the paper
 recipe with one epoch, LR `1e-4`, and KL-only native teacher training. It
 still has the same `$49.49991` planned cap on `rtx-pro-6000x4` and still avoids
-the old full-reference path strings. If the active job fails the broad
+the old full-reference path strings. Since the active job failed the broad
 acceptance/economics gate cleanly, this is the first prepared follow-up; mixed
 ShareGPT/UltraChat/SmolTalk prompt support remains the next data-quality gap
 relative to the paper.

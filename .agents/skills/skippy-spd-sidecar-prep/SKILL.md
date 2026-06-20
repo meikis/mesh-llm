@@ -842,6 +842,36 @@ The no-spend dry run for that larger lane is
 `AutoModelForCausalLM`, `hf_train_eval_qwen06.py`, `spd-live-tap-parity`, or
 `from_pretrained(` matches.
 
+Completed larger quality lane `meshllm/6a35cdc03093dba73ce2a9ad`:
+`rtx-pro-6000x4`, `4.5h` cap, `6325s` running time, `512` train prompts,
+`64` held-out prompts, and `4` verify steps. It completed capture, conversion,
+head-only train/score, serving export, package-backed rolling smoke, latency
+simulation, and upload. Offline held-out improved to `96 / 256`
+native-teacher top-1 and `129 / 256` top-4; hard-label scores were
+`94 / 224` top-1 and `123 / 224` top-4. The BF16 serving head is
+`8,723,214,136` bytes with SHA256
+`5cf3c15c54919414809cf409d252c5c4b0fa2b5ec084d91d4966e54976e75936`.
+Broad package-backed rolling smoke matched content on `64 / 64`, had
+`0` tap return failures, `0` tap record failures, and `0` ignored taps, but
+failed sidecar quality: `256` proposed, `0` accepted, `256` rejected,
+`0` optimistic tokens committed, `0` saved versus `256` unsaved candidate-token
+round trips, and latency simulation reported
+`paper_like_speedup_vs_serial_split=0.0` with measured sidecar cost about
+`395.8ms`. Do not dispatch a meshlet for this sidecar. Treat the next Qwen480
+step as data/recipe scale-up.
+
+Prepared no-spend fallback plan:
+`/tmp/spd-qwen480-s8-quality-8k-native-package-fresh-paperlike-plan.json`,
+SHA256 `981d7a95c314b14a7544250e6a6167a7fe42d64689fa4c08df4e98dfe453b646`.
+It keeps the same Qwen480 S8 native package-first topology, raises training to
+`8192` native-Q4 samples (`2048` train prompts x `4` verify steps), uses
+`128` held-out prompts, `physical-node-count=4`, capture map
+`CUDA0,CUDA0,CUDA1,CUDA1,CUDA2,CUDA2,CUDA3,CUDA3`, smoke map
+`CPU,CUDA0,CPU,CUDA1,CPU,CUDA2,CPU,CUDA3`, one epoch, LR `1e-4`, and KL-only
+native teacher training. It is not submitted; spend still requires explicit
+confirmation. Mixed ShareGPT/UltraChat/SmolTalk prompt support remains the next
+paper-alignment gap if UltraChat-only scaling is insufficient.
+
 Do not submit spend until the dry run prints model/package ref, dataset shard,
 prompt counts, topology, hardware flavor, timeout, output repo, and max cost.
 

@@ -80,6 +80,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--heldout-prompts", type=int, default=256)
     parser.add_argument("--max-prompt-tokens", type=int, default=480)
     parser.add_argument(
+        "--max-source-rows",
+        type=int,
+        default=0,
+        help=(
+            "Maximum source rows to read from each dataset before tokenization. "
+            "Use this for capped mixed-data HF quality lanes so prompt prep does "
+            "not tokenize entire million-row corpora before selecting a small "
+            "train/held-out shard. Zero leaves each source unbounded."
+        ),
+    )
+    parser.add_argument(
         "--balance-datasets",
         action="store_true",
         help=(
@@ -675,6 +686,7 @@ def build_plan(
             "train_prompts": args.train_prompts,
             "heldout_prompts": args.heldout_prompts,
             "max_prompt_tokens": args.max_prompt_tokens,
+            "max_source_rows": args.max_source_rows,
             "balance_datasets": bool(args.balance_datasets),
             "verify_steps": args.verify_steps,
             "ctx_size": args.ctx_size,
@@ -846,6 +858,7 @@ def build_commands(
         f"--train-prompts {args.train_prompts} "
         f"--heldout-prompts {args.heldout_prompts} "
         f"--max-prompt-tokens {args.max_prompt_tokens} "
+        f"--max-source-rows {args.max_source_rows} "
         f"--draft-vocab-size {args.draft_vocab_size} "
         "--shuffle --seed 23"
     )
@@ -1351,7 +1364,8 @@ def emit_human_summary(plan: dict[str, Any]) -> None:
     data = plan["data"]
     print(
         f"  data: {data['train_prompts']} train / {data['heldout_prompts']} heldout "
-        f"prompts, max tokens {data['max_prompt_tokens']}"
+        f"prompts, max tokens {data['max_prompt_tokens']}, "
+        f"max source rows {data['max_source_rows'] or 'unbounded'}"
     )
     print(f"  dataset: {data['dataset']} [{data['dataset_split']}]")
     if data.get("dataset_config"):

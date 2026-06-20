@@ -334,6 +334,15 @@ draft-token range for Qwen480 quality work. The plan still has the same
 `$49.49991` planned cap on `rtx-pro-6000x4` and still avoids the old
 full-reference path strings.
 
+Acceptance rate is now the primary Qwen480 research loop. The paper's recipe is
+far larger than our completed Qwen480 lane: frozen target, KL-only speculation
+module training, mixed ShareGPT/UltraChat/SmolTalk/SmolTalk-Chinese data, max
+length `2048`, one epoch, LR `1e-4`, linear decay, and about `1.2M` filtered
+samples. The next evidence should first close fixed-row Rust/Python proposal
+parity, then run the prepared mixed `8k` native-Q4 lane, then scale the same
+recipe to `16k`, `64k`, and paper-scale only if package-backed held-out
+acceptance and saved candidate-token round trips improve.
+
 Predigested SPD splits should be logical artifacts. A sidecar is trained for a
 canonical logical topology and tap set; Mesh may fit contiguous logical stages
 onto fewer physical nodes when hardware is scarce. That placement is only valid

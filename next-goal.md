@@ -121,6 +121,41 @@ transport.
 
 ## Immediate Next Work
 
+1. Do not dispatch an HF meshlet or another smoke-existing retry. The mechanics
+   are already clean; the current blocker is the Qwen480 S8 sidecar acceptance
+   rate.
+2. Before spending again, add or run a fixed-row native parity gate for the
+   Qwen480 native-package-fresh lane:
+   - compare Python head-only top-k on saved native rows with Rust serving
+     proposals for the same rows;
+   - report `teacher_top1`, `serving_target_top1`, draft-vocab target coverage,
+     and actual served accepted/proposed separately;
+   - if fixed-row Python predicts the served target but Rust rejects all rows,
+     fix row alignment/forward parity before buying more training data.
+3. The next spend-bearing candidate is the prepared mixed-data 8k native-Q4
+   quality run, only after explicit spend approval:
+   `/tmp/spd-qwen480-s8-quality-8k-native-package-fresh-mixed-balanced-paperlike-plan.json`,
+   SHA256
+   `57abf9ff3146d40a3d5f0338820d3955816ce2490e73b26a220fe794e1d62088`.
+   It keeps the same Qwen480 S8 package/topology, uses `8192` native-Q4 train
+   samples and `128` held-out prompts, builds a corpus-frequency `32k` draft
+   vocabulary from selected training conversations, trains KL-only against
+   captured native verifier logits, and keeps the planned cap at `$49.49991`
+   on `rtx-pro-6000x4`.
+4. If the 8k run has clean mechanics and low but nonzero acceptance, scale the
+   same recipe to `16k`, then `64k`, and only then toward the paper's mixed-data
+   scale. The paper's reported run is about `1M` selected conversations,
+   `1.2M` filtered samples, max length `2048`, one epoch, LR `1e-4`, linear
+   decay, and KL against the frozen target. Our current Qwen480 run is only
+   `2048` native-Q4 samples, so it cannot answer whether SPD quality works at
+   paper scale.
+5. Acceptance is the gate. A run is useful only if it reports all of:
+   `full_vocab_target_in_draft_scope`, `serving_target_top1/top4`,
+   package-backed accepted/proposed proposals, saved/unsaved candidate-token
+   round trips, and a latency simulation using measured sidecar cost.
+
+## Historical Work Log
+
 1. Submit the larger native-package-fresh quality profile only with explicit
    spend approval:
    - run on HF, not local M4;

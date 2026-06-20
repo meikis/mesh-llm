@@ -550,6 +550,14 @@ paper-scale sidecar-quality run. If package smoke does not clear the
 saved-versus-unsaved gate, the next spend should scale native Q4/S8 KD data and
 recipe quality rather than repeat mechanics.
 
+The reference repo's shipped draft vocabularies are also corpus-frequency
+subsets built from the same training-corpus family, not arbitrary contiguous
+token-id ranges. For Qwen480 quality work, the practical ladder is therefore:
+prove fixed-row Rust/Python proposal parity, run the prepared balanced mixed
+`8k` native-Q4 lane with a corpus-derived `32k` draft vocab, then scale the
+same recipe to `16k`, `64k`, and eventually paper-scale only if held-out
+package-backed acceptance and saved candidate-token round trips improve.
+
 The acceptance-rate work is now the primary research loop, but the next spend
 should not blindly buy more rows. The current broad lane has an unexplained
 quality gap: offline held-out scoring had native-teacher top-1 `96 / 256` and

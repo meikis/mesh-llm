@@ -16,14 +16,38 @@ export const MODEL_FAMILY_COLOR_KEYS: readonly ModelFamilyColorKey[] = [
 export function findModel(modelId: string, models: ConfigModel[] = CFG_CATALOG): ConfigModel | undefined {
   return models.find((model) => model.id === modelId)
 }
+
+function finiteNumber(value: number | undefined, fallback = 0): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+export function modelWeightsGB(model: ConfigModel): number {
+  const explicitSizeGB = finiteNumber(model.sizeGB)
+  return explicitSizeGB > 0 ? explicitSizeGB : finiteNumber(model.diskGB)
+}
+
+function gpuSystemTotalGB(gpu: ConfigNode['gpus'][number]): number {
+  const systemTotal = finiteNumber(gpu.systemTotalGB)
+  return systemTotal > 0 ? systemTotal : finiteNumber(gpu.totalGB)
+}
+
+function gpuAllocatableGB(gpu: ConfigNode['gpus'][number]): number {
+  const explicit = finiteNumber(gpu.allocatableGB)
+  if (explicit > 0) return explicit
+  return Math.max(0, gpuSystemTotalGB(gpu) - finiteNumber(gpu.reservedGB))
+}
+
 export function nodeTotalGB(node: ConfigNode): number {
   return node.gpus.reduce((total, gpu) => total + gpu.totalGB, 0)
+}
+export function nodeSystemTotalGB(node: ConfigNode): number {
+  return node.gpus.reduce((total, gpu) => total + gpuSystemTotalGB(gpu), 0)
 }
 export function nodeReservedGB(node: ConfigNode): number {
   return node.gpus.reduce((total, gpu) => total + (gpu.reservedGB ?? 0), 0)
 }
 export function nodeUsableGB(node: ConfigNode): number {
-  return Math.max(0, nodeTotalGB(node) - nodeReservedGB(node))
+  return node.gpus.reduce((total, gpu) => total + gpuAllocatableGB(gpu), 0)
 }
 export function contextGBPerK(model: ConfigModel): number {
   return model.ctxPerGB ?? model.paramsB / 120
@@ -49,12 +73,18 @@ export function containerUsedGB(
   }, 0)
 }
 export function containerTotalGB(node: ConfigNode, containerIdx: number): number {
-  if (node.placement === 'pooled') return nodeTotalGB(node)
-  return node.gpus.find((gpu) => gpu.idx === containerIdx)?.totalGB ?? 0
+  if (node.placement === 'pooled') return nodeSystemTotalGB(node)
+  const gpu = node.gpus.find((candidate) => candidate.idx === containerIdx)
+  return gpu ? gpuSystemTotalGB(gpu) : 0
 }
 export function containerReservedGB(node: ConfigNode, containerIdx: number): number {
   if (node.placement === 'pooled') return node.gpus.reduce((sum, gpu) => sum + (gpu.reservedGB ?? 0), 0)
   return node.gpus.find((gpu) => gpu.idx === containerIdx)?.reservedGB ?? 0
+}
+export function containerAllocatableGB(node: ConfigNode, containerIdx: number): number {
+  if (node.placement === 'pooled') return nodeUsableGB(node)
+  const gpu = node.gpus.find((candidate) => candidate.idx === containerIdx)
+  return gpu ? gpuAllocatableGB(gpu) : 0
 }
 export function modelNeedGB(model: ConfigModel, ctx = 4096): number {
   return model.sizeGB + contextGB(model, ctx)

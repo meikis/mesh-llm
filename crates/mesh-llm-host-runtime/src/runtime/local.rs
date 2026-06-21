@@ -328,7 +328,7 @@ fn resolve_runtime_skippy_config(
 ) -> Result<skippy::ResolvedSkippyConfig> {
     let allocatable_memory_bytes = spec
         .capacity_budget_bytes
-        .or_else(|| spec.pinned_gpu.map(|gpu| gpu.vram_bytes));
+        .or_else(|| spec.pinned_gpu.map(|gpu| gpu.allocatable_vram_bytes()));
     let mut resolved = skippy::resolve_skippy_config(skippy::SkippyConfigResolveRequest {
         mesh_config: spec.mesh_config,
         model_id: spec.config_model_id.unwrap_or(model_name),
@@ -572,7 +572,7 @@ pub(super) async fn start_runtime_local_model(
         .unwrap_or_else(|| election::total_model_bytes(spec.model_path));
     let my_vram = spec
         .capacity_budget_bytes
-        .or_else(|| spec.pinned_gpu.map(|gpu| gpu.vram_bytes))
+        .or_else(|| spec.pinned_gpu.map(|gpu| gpu.allocatable_vram_bytes()))
         .unwrap_or_else(|| spec.node.vram_bytes());
 
     // For split/layer-package models, compute the local share of model weights
@@ -842,7 +842,7 @@ async fn prepare_split_runtime_start(
         model_ref,
         model_ref,
         &package,
-        spec.pinned_gpu.map(|gpu| gpu.vram_bytes),
+        spec.pinned_gpu.map(|gpu| gpu.allocatable_vram_bytes()),
         timeout,
     )
     .await?;
@@ -1537,7 +1537,7 @@ fn split_generation_load_settings<'a>(
         model_id: spec.model_ref,
         model_path: spec.model_path,
         model_bytes: spec.package.source_model_bytes,
-        allocatable_memory_bytes: spec.pinned_gpu.map(|gpu| gpu.vram_bytes),
+        allocatable_memory_bytes: spec.pinned_gpu.map(|gpu| gpu.allocatable_vram_bytes()),
         request_defaults: None,
     })?;
     resolved.model_fit.ctx_size = spec.ctx_size;
@@ -1950,7 +1950,9 @@ impl SplitTopologyCoordinator {
             &self.model_name,
             &self.model_ref,
             &self.package,
-            self.pinned_gpu.as_ref().map(|gpu| gpu.vram_bytes),
+            self.pinned_gpu
+                .as_ref()
+                .map(|gpu| gpu.allocatable_vram_bytes()),
         )
         .await;
         self.node
@@ -2326,7 +2328,7 @@ impl SplitTopologyCoordinator {
         let local_capacity = self
             .pinned_gpu
             .as_ref()
-            .map(|gpu| gpu.vram_bytes)
+            .map(|gpu| gpu.allocatable_vram_bytes())
             .unwrap_or_else(|| self.node.vram_bytes());
         // Use the package's source model bytes when available — layer-package
         // refs use `hf://` pseudo-paths that `total_model_bytes` cannot stat.

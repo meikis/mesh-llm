@@ -252,6 +252,11 @@ pub struct RunArgs {
     pub remote_root_map: Option<String>,
     #[arg(long)]
     pub remote_shared_root_map: Option<String>,
+    #[arg(
+        long,
+        help = "Comma-separated host=/path map for runtime-slice model paths when lab hosts mount shared storage at different roots."
+    )]
+    pub remote_model_path_map: Option<String>,
     #[arg(long)]
     pub endpoint_host_map: Option<String>,
     #[arg(long, default_value = "0.0.0.0")]

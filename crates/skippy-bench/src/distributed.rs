@@ -185,6 +185,7 @@ struct DeploymentPlan {
     remote_root: String,
     remote_roots: BTreeMap<String, String>,
     remote_shared_roots: BTreeMap<String, PathBuf>,
+    remote_model_paths: BTreeMap<String, PathBuf>,
     endpoint_hosts: BTreeMap<String, String>,
     work_dir: PathBuf,
     metrics_http: String,
@@ -973,6 +974,9 @@ fn validate_topology_plan(args: &RunArgs, hosts: &[String], ranges: &[(u32, u32)
 }
 
 fn validate_driver_args(args: &RunArgs) -> Result<()> {
+    if args.remote_model_path_map.is_some() && args.stage_load_mode != "runtime-slice" {
+        bail!("--remote-model-path-map is only supported with --stage-load-mode runtime-slice");
+    }
     if args.openai_ngram_speculative && args.openai_speculative_window == 0 {
         bail!("--openai-ngram-speculative requires --openai-speculative-window > 0");
     }
@@ -1006,6 +1010,7 @@ fn build_deployment_plan(
     let metrics_otlp = metrics_otlp_grpc_url(args);
     let remote_root_map = parse_remote_root_map(args.remote_root_map.as_deref())?;
     let remote_shared_root_map = parse_path_map(args.remote_shared_root_map.as_deref())?;
+    let remote_model_path_map = parse_path_map(args.remote_model_path_map.as_deref())?;
     let endpoint_host_map = parse_remote_root_map(args.endpoint_host_map.as_deref())?;
     let package_manifest = if args.stage_load_mode == "layer-package" {
         args.stage_model
@@ -1071,12 +1076,19 @@ fn build_deployment_plan(
                 .join(key)
                 .join("stage.gguf")
         });
-        let remote_model_path = stage_cache_key.as_ref().map(|key| {
-            format!(
-                "{host_remote_root}/model-cache/{}/stage.gguf",
-                key.display()
-            )
-        });
+        let remote_model_path = stage_cache_key
+            .as_ref()
+            .map(|key| {
+                format!(
+                    "{host_remote_root}/model-cache/{}/stage.gguf",
+                    key.display()
+                )
+            })
+            .or_else(|| {
+                remote_model_path_map
+                    .get(&host)
+                    .map(|path| path_string(path))
+            });
         let local_shared_model_path = if let Some(key) = stage_cache_key.as_ref() {
             remote_shared_root_map
                 .get(&host)
@@ -1120,6 +1132,7 @@ fn build_deployment_plan(
         remote_root: args.remote_root.clone(),
         remote_roots: remote_root_map,
         remote_shared_roots: remote_shared_root_map,
+        remote_model_paths: remote_model_path_map,
         endpoint_hosts: endpoint_host_map,
         work_dir: args.work_dir.clone(),
         metrics_http,
@@ -2934,6 +2947,7 @@ mod tests {
             remote_root: "/tmp/remote".to_string(),
             remote_root_map: None,
             remote_shared_root_map: None,
+            remote_model_path_map: None,
             endpoint_host_map: None,
             remote_bind_host: "0.0.0.0".to_string(),
             first_stage_port: 19031,
@@ -3392,6 +3406,69 @@ mod tests {
     }
 
     #[test]
+    fn runtime_slice_model_path_map_writes_host_specific_stage_configs() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "skippy-bench-model-path-map-{}",
+            generate_bench_run_id()
+        ));
+        let _ = fs::remove_dir_all(&config_dir);
+        fs::create_dir_all(&config_dir).unwrap();
+        let mut args = test_run_args();
+        args.hosts = "studio54,micstudio".to_string();
+        args.splits = "22".to_string();
+        args.layer_end = 48;
+        args.execute_remote = true;
+        args.remote_model_path_map = Some(
+            "studio54=/Volumes/External/models/huggingface/model.gguf,\
+             micstudio=/Volumes/models/huggingface/model.gguf"
+                .to_string(),
+        );
+        let hosts = parse_hosts(&args.hosts).unwrap();
+        let ranges = parse_stage_ranges(&args.splits, args.layer_end).unwrap();
+        let model_identity = ModelIdentity::from_model_id(&args.model_id);
+
+        let plan = build_deployment_plan(
+            &args,
+            "run-1",
+            &hosts,
+            &ranges,
+            &config_dir,
+            "fallback.gguf",
+            model_identity,
+        )
+        .unwrap();
+        write_stage_configs(&args, &plan, "fallback.gguf").unwrap();
+
+        let stage0: Value =
+            serde_json::from_slice(&fs::read(config_dir.join("stage-0.json")).unwrap()).unwrap();
+        let stage1: Value =
+            serde_json::from_slice(&fs::read(config_dir.join("stage-1.json")).unwrap()).unwrap();
+
+        assert_eq!(
+            stage0["model_path"],
+            "/Volumes/External/models/huggingface/model.gguf"
+        );
+        assert_eq!(stage0["load_mode"], "runtime-slice");
+        assert_eq!(
+            stage1["model_path"],
+            "/Volumes/models/huggingface/model.gguf"
+        );
+        assert_eq!(stage1["load_mode"], "runtime-slice");
+        fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn model_path_map_is_runtime_slice_only() {
+        let mut args = test_run_args();
+        args.stage_load_mode = "layer-package".to_string();
+        args.remote_model_path_map = Some("host.local=/model.gguf".to_string());
+
+        let err = validate_driver_args(&args).unwrap_err();
+
+        assert!(err.to_string().contains("runtime-slice"));
+    }
+
+    #[test]
     fn remote_start_command_records_exit_code() {
         let args = RunArgs {
             metrics_server_bin: PathBuf::from("metrics-server"),
@@ -3428,6 +3505,7 @@ mod tests {
             remote_root: "/tmp/remote".to_string(),
             remote_root_map: None,
             remote_shared_root_map: None,
+            remote_model_path_map: None,
             endpoint_host_map: None,
             remote_bind_host: "0.0.0.0".to_string(),
             first_stage_port: 19031,
@@ -3463,6 +3541,7 @@ mod tests {
             remote_root: "/tmp/remote".to_string(),
             remote_roots: BTreeMap::new(),
             remote_shared_roots: BTreeMap::new(),
+            remote_model_paths: BTreeMap::new(),
             endpoint_hosts: BTreeMap::new(),
             work_dir: PathBuf::from("/tmp/work"),
             metrics_http: "http://127.0.0.1:18080".to_string(),
@@ -3533,6 +3612,7 @@ mod tests {
             remote_root: "/tmp/remote".to_string(),
             remote_roots: BTreeMap::new(),
             remote_shared_roots: BTreeMap::new(),
+            remote_model_paths: BTreeMap::new(),
             endpoint_hosts: BTreeMap::new(),
             work_dir: PathBuf::from("/tmp/work"),
             metrics_http: "http://127.0.0.1:18080".to_string(),
@@ -3616,6 +3696,7 @@ mod tests {
             remote_root: "/tmp/remote".to_string(),
             remote_root_map: None,
             remote_shared_root_map: None,
+            remote_model_path_map: None,
             endpoint_host_map: None,
             remote_bind_host: "0.0.0.0".to_string(),
             first_stage_port: 19031,

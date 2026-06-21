@@ -68,8 +68,9 @@ export function gpuReservedVramGB(gpu: VramGpuInput): number {
 }
 
 export function gpuAllocatableVramGB(gpu: VramGpuInput): number | null {
-  const explicit = decimalVramGBFromBytes(gpu.allocatable_vram_bytes)
-  if (explicit != null) return explicit
+  if (gpu.allocatable_vram_bytes != null && Number.isFinite(gpu.allocatable_vram_bytes)) {
+    return Math.max(0, gpu.allocatable_vram_bytes / DECIMAL_GB_BYTES)
+  }
   const allocatable = allocatableVramBytes(gpu.vram_bytes, gpu.reserved_bytes)
   return decimalVramGBFromBytes(allocatable)
 }

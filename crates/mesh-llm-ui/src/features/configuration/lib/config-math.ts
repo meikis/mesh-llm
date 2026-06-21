@@ -32,8 +32,9 @@ function gpuSystemTotalGB(gpu: ConfigNode['gpus'][number]): number {
 }
 
 function gpuAllocatableGB(gpu: ConfigNode['gpus'][number]): number {
-  const explicit = finiteNumber(gpu.allocatableGB)
-  if (explicit > 0) return explicit
+  if (gpu.allocatableGB !== undefined && Number.isFinite(gpu.allocatableGB)) {
+    return Math.max(0, gpu.allocatableGB)
+  }
   return Math.max(0, gpuSystemTotalGB(gpu) - finiteNumber(gpu.reservedGB))
 }
 
@@ -97,11 +98,7 @@ export function containerAvailableGB(
   models: ConfigModel[] = CFG_CATALOG
 ): number {
   const scopedAssigns = ignoredAssignId ? assigns.filter((assign) => assign.id !== ignoredAssignId) : assigns
-  return (
-    containerTotalGB(node, containerIdx) -
-    containerReservedGB(node, containerIdx) -
-    containerUsedGB(scopedAssigns, node.id, containerIdx, models)
-  )
+  return containerAllocatableGB(node, containerIdx) - containerUsedGB(scopedAssigns, node.id, containerIdx, models)
 }
 export function canFitModelInContainer(
   model: ConfigModel,

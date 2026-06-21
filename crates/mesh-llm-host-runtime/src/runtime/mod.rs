@@ -10367,7 +10367,7 @@ mod tests {
             flash_attention: FlashAttentionType::Auto,
         }];
         let gpus = vec![
-            synthetic_gpu(0, Some("pci:0000:65:00.0"), Some("CUDA0")),
+            GpuFacts { reserved_bytes: Some(2_000_000_000), ..synthetic_gpu(0, Some("pci:0000:65:00.0"), Some("CUDA0")) },
             synthetic_gpu(1, Some("pci:0000:b3:00.0"), Some("CUDA1")),
         ];
 
@@ -10382,7 +10382,7 @@ mod tests {
                 stable_id: "pci:0000:65:00.0".into(),
                 backend_device: "CUDA0".into(),
                 vram_bytes: 24_000_000_000,
-                reserved_bytes: None,
+                reserved_bytes: Some(2_000_000_000),
             })
         );
     }

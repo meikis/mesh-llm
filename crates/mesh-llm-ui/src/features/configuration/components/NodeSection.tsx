@@ -82,7 +82,7 @@ export function NodeSection({
     node.placement === 'pooled'
       ? node.gpus.reduce((sum, gpu) => sum + (gpu.reservedGB ?? 0), 0)
       : (selectedGpu?.reservedGB ?? 0)
-  const selectedTotalGB = node.placement === 'pooled' ? totalNodeGB : (selectedGpu?.totalGB ?? 0)
+  const selectedTotalGB = node.placement === 'pooled' ? systemTotalNodeGB : (selectedGpu?.systemTotalGB ?? selectedGpu?.totalGB ?? 0)
   const containerFreeGB = selectedAssign
     ? selectedTotalGB -
       selectedReservedGB -

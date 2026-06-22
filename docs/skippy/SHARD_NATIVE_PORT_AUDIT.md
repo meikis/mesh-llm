@@ -56,6 +56,8 @@ the latency-hiding margin further.
 | Multi-node WAN adversarial rollback proof | `/tmp/wan-proof-adv/results/summary.json`: same two-machine WAN split, 3B target + 1.5B draft, natural prompts, `temperature = 0`, with forced faults (`SKIPPY_SPEC_DRAFT_FAULT_EVERY=3`) and return-channel churn (`SKIPPY_SPEC_RETURN_RECONNECT_EVERY=4`). Pipelined output stayed token-identical to target-only on every prompt while exercising the full Shard recovery machinery: 5-13 rejections, 26-44 stale windows discarded, 5-13 KV recovery restores per prompt, with `pipelined_stale_kv_recovery_observed`, `post_reject_draft_recovery_observed`, `direct_return_reconnect_observed`, and `pipelined_identity_match` all true. Only `pipelined_speedup_vs_sync_ok` was false, which is expected for a forced-fault correctness pass (intentionally wasted work is not a fair speedup measurement). This proves rollback, stale-window discard, re-prime, and return-channel reconnect under WAN churn. All owned HF jobs cancelled; no orphaned spend. |
 | Multi-node WAN mechanism proof | `/tmp/wan-proof-out2/results/summary.json`: same two-machine split with the weaker Qwen2.5-0.5B draft and adversarial "return exactly" prompts, `temperature = 0`. Sync-draft and pipelined-draft were token-identical to target-only and pipelined beat serial sync-draft (1.355 vs 1.305 tok/s, ~1.04x; `pipelined_speedup_vs_sync_ok = true`) by holding up to 4 in-flight windows and cutting coordinator downstream wait across the WAN. Both speculative modes were below target-only here (0.85x / 0.82x) because that pairing/prompt shape accepts too few drafts; this isolates that the absolute baseline win is gated on acceptance, not the scheduler. All owned HF jobs cancelled; no orphaned spend. |
 | Single-GPU depth sweep | `/tmp/shard-sweep-out/sweep.json`: local single-Metal-GPU split, K=6, self-draft (~100% accept), 300 ms delay, depths 2/4/6. Output token-identical to target at every depth. Pipelined/sync degraded with depth (0.811x, 0.720x, 0.660x), confirming that on one shared GPU deeper pipelining only adds verify-window contention. This is the expected single-device inverse of the multi-node result (pipelined 1.16x over sync at depth 6), and isolates depth-scaling as a multi-accelerator property. |
+| Draft acceptance gate (local, free) | `/tmp/accept-15b-3b.json`: `llama-spec-bench`, Qwen2.5-1.5B draft -> Qwen2.5-3B target, K=6, measured on Metal. Acceptance is latency-independent, so this is the cheap gate for "can drafting keep the pipeline full". Overall accept rate 0.75, mean accepted tokens/window 4.42/6. Per prompt: enumeration 0.958 (5.75/6), bubble sort 0.895 (5.22/6), palindrome 0.763, license boilerplate 0.682, fibonacci 0.562. Confirms a same-family draft reaches 0.85-0.96 on structured/predictable content - high enough to keep a deep pipeline full - and that the earlier "negligible speedup" was adversarial-prompt starvation, not a scheduler fault. |
+| Multi-node HF depth sweep (the headline) | `/tmp/hf-depth-sweep3/sweep.json`: real two-machine WAN split (local Metal stage-0 + HF t4-small CUDA stage-1, ~240 ms RTT), 3B target + 1.5B draft, high-acceptance enumeration prompts (acceptance ~0.9-1.0, mean 5.35/6 accepted), K=6, no synthetic delay, streaming requests, depths 2/4/6/8. Total HF spend ~$0.40. Pipelined output token-identical to target at every depth, with max in-flight windows reaching the full configured depth (2/4/6/8) - the pipeline stays full. Pipelined-vs-sync rises monotonically with depth: 1.450x (d2) -> 1.781x (d4) -> 1.911x (d6) -> 1.959x (d8). Pipelined-vs-target climbs throughout: 3.948x -> 4.827x -> 5.204x -> 5.307x. Pipelined absolute throughput 13.3 -> 16.1 -> 17.3 -> 17.8 tok/s vs a flat ~9.1 tok/s sync and ~3.3 tok/s target baseline. This is the clean Shard reproduction: with a real same-family draft held in its high-acceptance regime, deeper pipelining hides more WAN latency and pipelined-over-sync rises across the whole 2->8 depth range. (An earlier mixed-prompt run, `/tmp/hf-depth-sweep2/sweep.json`, plateaued at depth 4 because one prompt sat at 0.39-0.58 acceptance and dragged mean accepted/window to ~4-5; tightening to >=0.9-acceptance content removed the plateau, confirming acceptance - not the scheduler - sets the useful-depth ceiling.) |
 | Latency-bound pipelined mechanism proof | `/tmp/selfdraft-proof-out/results/summary.json`: same two-stage Metal split with 300 ms synthetic downstream wire delay and self-draft (draft == target) to drive near-full acceptance and isolate wire-wait hiding. Pipelined direct return hid the wire round-trip (`primary_verify_downstream_wait_ms` dropped from sync's 581 ms to 12 ms on the long prompt) while matching target token IDs and passing all mechanism gates. Wall-clock still favored sync-draft because stale/in-flight verify windows contend for the single shared Metal GPU; `pipelined_speedup_vs_sync_ok = false`. This proves the latency-hiding mechanism, not a single-node throughput win. |
 
 Known noise: some local proof runs exposed a Metal backend shutdown assert after
@@ -114,12 +116,25 @@ pipelined throughput *degrades* as depth rises (pipelined/sync 0.811x at depth 2
 ahead-of-acceptance verify windows that all contend for the one shared Metal GPU.
 Output stayed token-identical to target at every depth. This is the inverse of
 the latency-hiding signature the validation skill looks for, and it is expected:
-on a single device, depth cannot help. The real two-machine WAN run shows the
-opposite direction at depth 6 (pipelined 1.16x *over* sync), because the
-in-flight verify windows execute on the peer's GPU concurrently. The depth-scaling
-improvement curve is therefore a genuinely multi-accelerator property; capturing
-the rising pipelined-vs-sync curve across depths would require a multi-node
-(HF-worker) sweep, not the local single-GPU one.
+on a single device, depth cannot help.
+
+The multi-node HF sweep (`/tmp/hf-depth-sweep3/sweep.json`, real ~240 ms WAN,
+3B target + 1.5B draft, high-acceptance enumeration prompts at ~0.9-1.0
+acceptance, streaming requests, no synthetic delay) shows the expected
+direction cleanly: pipelined-vs-sync *rises monotonically* with depth - 1.450x
+(d2) -> 1.781x (d4) -> 1.911x (d6) -> 1.959x (d8) - while pipelined-vs-target
+climbs throughout (3.948x -> 4.827x -> 5.204x -> 5.307x) and the in-flight
+window count reaches the full configured depth at every setting. The rising
+curve is therefore confirmed as a genuinely multi-accelerator property: deeper
+pipelining only helps when in-flight verify windows execute on the peer's GPU
+concurrently, and it keeps helping as long as the draft sustains high
+acceptance. An earlier mixed-prompt run (`/tmp/hf-depth-sweep2/sweep.json`)
+plateaued at depth 4 because one prompt sat at 0.39-0.58 acceptance, dragging
+mean accepted tokens per K=6 window to ~4-5; that plateau was the acceptance
+ceiling, not a scheduler limit. Holding acceptance at ~0.9-1.0 removed the
+plateau and the curve rises through depth 8. The remaining headroom toward the
+theoretical RTT/compute ceiling (~5x) is set by draft acceptance, which is the
+GLM-class regime (a stronger same-family or EAGLE/MTP-class draft).
 
 ### Single-GPU throughput limitation
 

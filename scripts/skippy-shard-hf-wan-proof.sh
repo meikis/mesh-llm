@@ -920,6 +920,11 @@ def completion_token_ids(events):
 
 results = []
 for prompt in prompts:
+    # Stream the request: a long non-streaming speculative decode across the
+    # WAN can exceed an intermediate HTTP read timeout and surface as 502 even
+    # while decode is still producing tokens. Streaming keeps the connection
+    # active with incremental SSE chunks and reconstructs the final content and
+    # usage from the deltas.
     body = {
         "model": model_id,
         "messages": [
@@ -928,7 +933,8 @@ for prompt in prompts:
         ],
         "temperature": 0,
         "max_tokens": int(max_tokens),
-        "stream": False,
+        "stream": True,
+        "stream_options": {"include_usage": True},
     }
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/v1/chat/completions",
@@ -938,9 +944,34 @@ for prompt in prompts:
     )
     offset = log_size(seed_log_path)
     started = time.time()
+    content_parts = []
+    usage = {}
     with urllib.request.urlopen(request, timeout=900) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+        for raw_line in response:
+            line = raw_line.decode("utf-8", errors="ignore").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            data = line[len("data:"):].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            choices = chunk.get("choices") or []
+            if choices:
+                delta = choices[0].get("delta") or {}
+                piece = delta.get("content")
+                if isinstance(piece, str):
+                    content_parts.append(piece)
+            chunk_usage = chunk.get("usage")
+            if isinstance(chunk_usage, dict):
+                usage = chunk_usage
     elapsed = time.time() - started
+    payload = {
+        "choices": [{"message": {"content": "".join(content_parts)}}],
+        "usage": usage,
+    }
     time.sleep(0.2)
     telemetry = telemetry_since(seed_log_path, offset)
     decodes = [event for event in telemetry if event.get("event") == "stage.openai_decode"]

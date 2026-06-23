@@ -30,7 +30,6 @@ mod records;
 mod residency;
 mod splits;
 mod tensor_map;
-mod tensor_recipe;
 mod tokenizer_metadata;
 mod tool_paths;
 mod type_catalog;
@@ -933,10 +932,7 @@ fn quant_manifest_from_args(args: &InitQuantArgs) -> Result<Manifest> {
         quant: Some(args.quant.base_quant().as_llama_name().to_string()),
         output_type: None,
         tensor_type_file: args.tensor_type_file.clone(),
-        tensor_type_recipe: args
-            .quant
-            .builtin_tensor_recipe_label()
-            .map(ToString::to_string),
+        tensor_type_recipe: None,
     };
     Ok(manifest)
 }

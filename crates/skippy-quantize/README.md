@@ -406,12 +406,10 @@ Important quantization flags:
 ## Recipes
 
 Top-level quantization modes intentionally mirror the pinned llama.cpp quant
-table. Custom profile labels such as `UD-Q3_K_S` and `Q4_K_XL` are accepted as
-recipe aliases when paired with `--tensor-type-file`. Built-in recipe labels
-such as `Q2_K-MTP-Q8` and `UD-Q3_K_S-MTP-Q8` expand to GLM-DSA/MTP tensor
-overrides automatically. All recipe labels resolve to the corresponding base
-llama quant for backend execution while preserving the recipe label in default
-output and sidecar names.
+table. Custom profile names such as `Q2_K-MTP-Q8`, `UD-Q3_K_S`, or `Q4_K_XL`
+belong in artifact names such as `--target-prefix` and `--output-basename`, not
+in `--quant`. Pass the base llama quant with `--quant` and express any
+per-tensor policy with `--tensor-type-file` or repeated `--tensor-type`.
 
 The tensor recipe format is one override per line:
 
@@ -450,7 +448,8 @@ skippy-quantize quantize-layer-package \
   --spool-dir /Users/lab/glm52-work/work/q2-k-mtp-q8-package/spool \
   --record-dir /Users/lab/glm52-work/work/q2-k-mtp-q8-package/records \
   --json-event-file /Users/lab/glm52-work/work/q2-k-mtp-q8-package/status.json \
-  --quant Q2_K-MTP-Q8 \
+  --quant Q2_K \
+  --tensor-type-file /Users/lab/glm52-work/recipes/glm-5.2-q2-k-mtp-q8.tensor-types.txt \
   --output-basename GLM-5.2-Q2_K-MTP-Q8 \
   --stages 2 \
   --replace-package \

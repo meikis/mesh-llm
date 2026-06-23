@@ -82,40 +82,14 @@ pub enum QuantType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuantSpec {
     base_quant: QuantType,
-    recipe_label: Option<&'static str>,
-    builtin_tensor_recipe_label: Option<&'static str>,
 }
 
 impl FromStr for QuantSpec {
     type Err = String;
 
     fn from_str(raw: &str) -> std::result::Result<Self, Self::Err> {
-        if let Ok(base_quant) = raw.parse::<QuantType>() {
-            return Ok(Self {
-                base_quant,
-                recipe_label: None,
-                builtin_tensor_recipe_label: None,
-            });
-        }
-        let normalized = normalize_type_name(raw);
-        let (base_quant, recipe_label, builtin_tensor_recipe_label) = match normalized.as_str() {
-            "UDQ3KS" => (QuantType::Q3KS, "UD-Q3_K_S", None),
-            "Q4KXL" => (QuantType::Q4KM, "Q4_K_XL", None),
-            "Q2KMTPQ8" | "GLMDSAQ2KMTPQ8" => {
-                (QuantType::Q2K, "Q2_K-MTP-Q8", Some("glm-dsa-q2-k-mtp-q8"))
-            }
-            "UDQ3KSMTPQ8" | "GLMDSAUDQ3KSMTPQ8" => (
-                QuantType::Q3KS,
-                "UD-Q3_K_S-MTP-Q8",
-                Some("glm-dsa-ud-q3-k-s-mtp-q8"),
-            ),
-            _ => return Err(unsupported_quant_type_error(raw, &normalized)),
-        };
-        Ok(Self {
-            base_quant,
-            recipe_label: Some(recipe_label),
-            builtin_tensor_recipe_label,
-        })
+        let base_quant = raw.parse::<QuantType>()?;
+        Ok(Self { base_quant })
     }
 }
 
@@ -125,37 +99,20 @@ impl QuantSpec {
     }
 
     pub fn output_name(&self) -> &'static str {
-        self.recipe_label
-            .unwrap_or_else(|| self.base_quant.as_llama_name())
-    }
-
-    pub fn builtin_tensor_recipe_label(&self) -> Option<&'static str> {
-        self.builtin_tensor_recipe_label
+        self.base_quant.as_llama_name()
     }
 
     pub fn validate_recipe_requirements(
         &self,
-        has_tensor_type_file: bool,
+        _has_tensor_type_file: bool,
     ) -> std::result::Result<(), String> {
-        if let Some(label) = self.recipe_label
-            && self.builtin_tensor_recipe_label.is_none()
-            && !has_tensor_type_file
-        {
-            return Err(format!(
-                "{label} is a tensor-type recipe label; pass --tensor-type-file with the recipe"
-            ));
-        }
         Ok(())
     }
 }
 
 impl From<QuantType> for QuantSpec {
     fn from(base_quant: QuantType) -> Self {
-        Self {
-            base_quant,
-            recipe_label: None,
-            builtin_tensor_recipe_label: None,
-        }
+        Self { base_quant }
     }
 }
 
@@ -600,8 +557,9 @@ fn unsupported_quant_type_error(raw: &str, normalized: &str) -> String {
     }
     if normalized.ends_with("MTPQ8") {
         return format!(
-            "unsupported quant type {raw:?}: supported MTP-Q8 recipe labels are \
-             \"Q2_K-MTP-Q8\" and \"UD-Q3_K_S-MTP-Q8\""
+            "unsupported quant type {raw:?}: MTP-Q8 is a custom artifact profile, \
+             not a whole-model quant mode; pass the base quant with --quant and \
+             the tensor policy with --tensor-type-file"
         );
     }
     format!("unsupported quant type {raw:?}")
@@ -674,35 +632,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_recipe_quant_specs() {
-        let ud = "UD-Q3_K_S".parse::<QuantSpec>().unwrap();
-        assert_eq!(ud.base_quant(), QuantType::Q3KS);
-        assert_eq!(ud.output_name(), "UD-Q3_K_S");
-        assert!(ud.validate_recipe_requirements(true).is_ok());
-        assert!(ud.validate_recipe_requirements(false).is_err());
-        assert_eq!(ud.builtin_tensor_recipe_label(), None);
-
-        let xl = "Q4_K_XL".parse::<QuantSpec>().unwrap();
-        assert_eq!(xl.base_quant(), QuantType::Q4KM);
-        assert_eq!(xl.output_name(), "Q4_K_XL");
-
-        let q2_mtp = "Q2_K-MTP-Q8".parse::<QuantSpec>().unwrap();
-        assert_eq!(q2_mtp.base_quant(), QuantType::Q2K);
-        assert_eq!(q2_mtp.output_name(), "Q2_K-MTP-Q8");
-        assert_eq!(
-            q2_mtp.builtin_tensor_recipe_label(),
-            Some("glm-dsa-q2-k-mtp-q8")
-        );
-        assert!(q2_mtp.validate_recipe_requirements(false).is_ok());
-
-        let ud_mtp = "GLM-DSA-UD-Q3_K_S-MTP-Q8".parse::<QuantSpec>().unwrap();
-        assert_eq!(ud_mtp.base_quant(), QuantType::Q3KS);
-        assert_eq!(ud_mtp.output_name(), "UD-Q3_K_S-MTP-Q8");
-        assert_eq!(
-            ud_mtp.builtin_tensor_recipe_label(),
-            Some("glm-dsa-ud-q3-k-s-mtp-q8")
-        );
-
+    fn parses_quant_specs_from_llama_quant_names() {
+        assert!("UD-Q3_K_S".parse::<QuantSpec>().is_err());
+        assert!("Q4_K_XL".parse::<QuantSpec>().is_err());
+        assert!("Q2_K-MTP-Q8".parse::<QuantSpec>().is_err());
         let regular = "Q4_K_M".parse::<QuantSpec>().unwrap();
         assert_eq!(regular.base_quant(), QuantType::Q4KM);
         assert_eq!(regular.output_name(), "Q4_K_M");

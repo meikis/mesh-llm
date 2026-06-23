@@ -10,6 +10,7 @@ use crate::imatrix::NativeImatrix;
 use crate::manifest::Manifest;
 use crate::quantize::normalize_tensor_type_entry;
 use crate::splits::SplitWindow;
+use crate::tensor_recipe::BuiltinTensorRecipe;
 use crate::types::{QuantType, TensorType};
 
 const KV_QUANTIZE_IMATRIX_FILE: &str = "quantize.imatrix.file";
@@ -77,6 +78,10 @@ pub(crate) fn build_native_quantize_command(
     if let Some(tensor_type_file) = manifest.tensor_type_file.as_deref() {
         command.push("--tensor-type-file".to_string());
         command.push(tensor_type_file.display().to_string());
+    }
+    for entry in built_in_tensor_recipe_entries(manifest)? {
+        command.push("--tensor-type".to_string());
+        command.push(entry);
     }
     if let Some(prune_layers) = args.prune_layers.as_deref() {
         command.push("--prune-layers".to_string());
@@ -250,6 +255,7 @@ fn tensor_overrides(
             .with_context(|| format!("read tensor type file {}", path.display()))?;
         entries.extend(text.split_whitespace().map(ToString::to_string));
     }
+    entries.extend(built_in_tensor_recipe_entries(manifest)?);
     if entries.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -281,6 +287,13 @@ fn tensor_overrides(
         tensor_type: llama_quant_ffi::GgmlType::Count,
     });
     Ok((patterns, overrides))
+}
+
+fn built_in_tensor_recipe_entries(manifest: &Manifest) -> Result<Vec<String>> {
+    let Some(label) = manifest.tensor_type_recipe.as_deref() else {
+        return Ok(Vec::new());
+    };
+    BuiltinTensorRecipe::parse(label)?.normalized_entries()
 }
 
 fn prune_layers(raw: Option<&str>) -> Result<Vec<i32>> {
@@ -491,6 +504,34 @@ mod tests {
     }
 
     #[test]
+    fn expands_built_in_tensor_recipe_in_command() {
+        let args = native_args();
+        let mut manifest = manifest(None);
+        manifest.tensor_type_recipe = Some("glm-dsa-q2-k-mtp-q8".to_string());
+
+        let command = build_native_quantize_command(
+            &args,
+            &manifest,
+            Path::new("/tmp/in/model-00001-of-00002.gguf"),
+            Path::new("/tmp/out/model-q2-mtp-q8"),
+            SplitWindow {
+                first_split: 1,
+                last_split: 2,
+            },
+        )
+        .unwrap();
+
+        assert!(command.contains(&"--tensor-type".to_string()));
+        assert!(command.contains(&"(^|\\.)nextn\\.=Q8_0".to_string()));
+        assert!(command.contains(&"\\.attn_(q_a|q_b|kv_a_mqa|kv_b)\\.weight$=Q8_0".to_string()));
+        assert!(
+            command
+                .contains(&"\\.indexer\\.(k_norm|proj|attn_k|attn_q_b)\\.weight$=Q8_0".to_string())
+        );
+        assert!(command.contains(&"\\.indexer\\.k_norm\\.bias$=F32".to_string()));
+    }
+
+    #[test]
     fn builds_skippy_abi_quantize_command_label() {
         let mut args = native_args();
         args.backend = BackendKind::SkippyAbi;
@@ -586,6 +627,26 @@ mod tests {
     }
 
     #[test]
+    fn appends_built_in_tensor_recipe_after_explicit_overrides() {
+        let mut args = native_args();
+        args.tensor_type = vec!["nextn\\.pre_projection\\.weight=F16".to_string()];
+        let mut manifest = manifest(None);
+        manifest.tensor_type_recipe = Some("glm-dsa-q2-k-mtp-q8".to_string());
+
+        let inputs = NativeQuantizeInputs::build(&args, &manifest).unwrap();
+
+        assert_eq!(inputs.tensor_overrides.len(), 12);
+        assert_eq!(
+            inputs._tensor_patterns[0].to_str().unwrap(),
+            "nextn\\.pre_projection\\.weight"
+        );
+        assert_eq!(
+            inputs._tensor_patterns[1].to_str().unwrap(),
+            "^token_embd\\.weight$"
+        );
+    }
+
+    #[test]
     fn loads_legacy_imatrix_with_include_filter() {
         let root = unique_temp_dir();
         fs::create_dir_all(&root).unwrap();
@@ -677,6 +738,7 @@ mod tests {
             quant: Some("Q2_K".to_string()),
             output_type: None,
             tensor_type_file,
+            tensor_type_recipe: None,
         }
     }
 

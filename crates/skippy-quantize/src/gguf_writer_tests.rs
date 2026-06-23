@@ -376,6 +376,72 @@ fn validates_qwen_dense_native_conversion_fixture() {
 }
 
 #[test]
+fn writes_glm_dsa_indexer_tensors_with_hf_name_mapping() {
+    let root = unique_temp_dir();
+    fs::create_dir_all(&root).unwrap();
+    write_safetensor(
+        &root.join("model.safetensors"),
+        &[
+            (
+                "model.layers.0.self_attn.indexer.k_norm.weight",
+                "F32",
+                &[1],
+                &[1, 0, 0, 0],
+            ),
+            (
+                "model.layers.0.self_attn.indexer.k_norm.bias",
+                "F32",
+                &[1],
+                &[2, 0, 0, 0],
+            ),
+            (
+                "model.layers.0.self_attn.indexer.weights_proj.weight",
+                "F32",
+                &[1],
+                &[3, 0, 0, 0],
+            ),
+            (
+                "model.layers.0.self_attn.indexer.wk.weight",
+                "F32",
+                &[1],
+                &[4, 0, 0, 0],
+            ),
+            (
+                "model.layers.0.self_attn.indexer.wq_b.weight",
+                "F32",
+                &[1],
+                &[5, 0, 0, 0],
+            ),
+        ],
+    );
+
+    let output = root.join("glm-dsa-indexer.gguf");
+    write_raw_safetensors_gguf(
+        &root,
+        &output,
+        RawGgufWriteOptions {
+            buffer_size: 4,
+            metadata: None,
+            tensor_name_map: TensorNameMap::HfToGguf,
+            split: None,
+            output_type: Some(ConvertOutputType::Bf16),
+            tensor_selection: TensorSelection::All,
+        },
+    )
+    .unwrap();
+
+    let bytes = fs::read(&output).unwrap();
+    let parsed = parse_test_gguf(&bytes);
+    assert_eq!(parsed.tensor_count, 5);
+    parsed.tensor("blk.0.indexer.k_norm.weight");
+    parsed.tensor("blk.0.indexer.k_norm.bias");
+    parsed.tensor("blk.0.indexer.proj.weight");
+    parsed.tensor("blk.0.indexer.attn_k.weight");
+    parsed.tensor("blk.0.indexer.attn_q_b.weight");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn validates_qwen2_moe_native_conversion_fixture() {
     let root = unique_temp_dir();
     fs::create_dir_all(&root).unwrap();

@@ -407,9 +407,11 @@ Important quantization flags:
 
 Top-level quantization modes intentionally mirror the pinned llama.cpp quant
 table. Custom profile labels such as `UD-Q3_K_S` and `Q4_K_XL` are accepted as
-recipe aliases when paired with `--tensor-type-file`. They resolve to the
-corresponding base llama quant for backend execution while preserving the recipe
-label in default output and sidecar names.
+recipe aliases when paired with `--tensor-type-file`. Built-in recipe labels
+such as `Q2_K-MTP-Q8` and `UD-Q3_K_S-MTP-Q8` expand to GLM-DSA/MTP tensor
+overrides automatically. All recipe labels resolve to the corresponding base
+llama quant for backend execution while preserving the recipe label in default
+output and sidecar names.
 
 The tensor recipe format is one override per line:
 
@@ -425,6 +427,41 @@ Inspect supported modes and raw tensor override types:
 skippy-quantize list-quants --json
 skippy-quantize list-tensor-types --json
 ```
+
+## BF16 to layer package
+
+For lab workflows, keep one reusable split BF16 GGUF artifact as the durable
+source of truth, then build quantized layer packages from it. The quantized
+GGUF shards can be treated as disposable staging once the package preflight
+passes:
+
+```bash
+scripts/skippy-bf16-to-quant-layer-package.sh \
+  --bf16-root /Users/lab/glm52-work/bf16-gguf \
+  --bf16-prefix BF16 \
+  --quant-root /Users/lab/glm52-work/quantized \
+  --package-dir /Users/lab/glm52-work/packages/GLM-5.2-Q2_K-MTP-Q8-layers \
+  --work-dir /Users/lab/glm52-work/work/q2-k-mtp-q8-package \
+  --quant Q2_K-MTP-Q8 \
+  --quant-prefix Q2_K-MTP-Q8 \
+  --output-basename GLM-5.2-Q2_K-MTP-Q8 \
+  --model-id meshllm/GLM-5.2-Q2_K-MTP-Q8-GGUF:Q2_K-MTP-Q8 \
+  --source-repo meshllm/GLM-5.2-Q2_K-MTP-Q8-GGUF \
+  --source-revision local \
+  --stages 2 \
+  --watchdog-seconds 120
+```
+
+Build prerequisites:
+
+```bash
+just skippy-quantize-standalone-release-build
+cargo build --release --locked -p skippy-model-package
+```
+
+The wrapper runs `init-quant`, `run-quant`, `verify-job`, `write-package`, and
+`preflight` in order. It does not pass `--max-memory` to quantization because
+the unpatched llama API quant backend does not expose a memory-budget knob.
 
 ## Validation
 

@@ -68,6 +68,16 @@ fn known_recipe_labels() -> Vec<KnownRecipeLabel> {
             base_quant: "Q4_K_M",
             note: "custom high-quality tensor-type recipe; pass the recipe with --tensor-type-file",
         },
+        KnownRecipeLabel {
+            label: "Q2_K-MTP-Q8",
+            base_quant: "Q2_K",
+            note: "built-in GLM-DSA recipe; keeps MTP/DSA/router tensors at higher quality",
+        },
+        KnownRecipeLabel {
+            label: "UD-Q3_K_S-MTP-Q8",
+            base_quant: "Q3_K_S",
+            note: "built-in GLM-DSA recipe; keeps MTP/DSA/router tensors at higher quality",
+        },
     ]
 }
 

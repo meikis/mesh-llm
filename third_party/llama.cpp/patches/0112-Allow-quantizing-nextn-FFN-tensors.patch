@@ -1,0 +1,25 @@
+From 92de7b0a9d863a6eeef0e8512cf7fe01f5db943c Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Wed, 24 Jun 2026 09:28:38 +1000
+Subject: [PATCH] Allow quantizing nextn FFN tensors
+
+---
+ src/llama-quant.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/llama-quant.cpp b/src/llama-quant.cpp
+index d4e7738a..0fe62d6b 100644
+--- a/src/llama-quant.cpp
++++ b/src/llama-quant.cpp
+@@ -847,7 +847,7 @@ static void init_quantize_state_counters(quantize_state_impl & qs, std::vector<t
+             qs.has_tied_embeddings = false;
+         }
+     }
+-    qs.n_ffn_down = qs.n_ffn_gate = qs.n_ffn_up = (int)qs.model.hparams.n_layer();
++    qs.n_ffn_down = qs.n_ffn_gate = qs.n_ffn_up = (int)qs.model.hparams.n_layer_all;
+ }
+ 
+ //
+-- 
+2.54.0 (Apple Git-156)
+

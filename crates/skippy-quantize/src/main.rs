@@ -695,13 +695,18 @@ fn quantize_layer_package(args: QuantizeLayerPackageArgs) -> Result<()> {
         args.skippy_model_package_bin.display()
     );
     if args.package_dir.exists() {
-        ensure!(
-            args.replace_package,
-            "package dir already exists: {}; pass --replace-package to overwrite it",
-            args.package_dir.display()
-        );
-        fs::remove_dir_all(&args.package_dir)
-            .with_context(|| format!("remove package dir {}", args.package_dir.display()))?;
+        if args.replace_package {
+            fs::remove_dir_all(&args.package_dir)
+                .with_context(|| format!("remove package dir {}", args.package_dir.display()))?;
+        } else {
+            let manifest_path = args.package_dir.join("model-package.json");
+            ensure!(
+                !manifest_path.exists(),
+                "package dir already contains {}; pass --replace-package to overwrite it",
+                manifest_path.display()
+            );
+            print_path_event("↻", "Resuming incomplete package", &args.package_dir);
+        }
     }
 
     let manifest = quant_manifest_from_args(&args.init)?;

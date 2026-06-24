@@ -4,9 +4,9 @@ Date: Tue, 5 May 2026 06:10:28 +1000
 Subject: [PATCH 036/108] Expose tool-aware chat template ABI
 
 ---
- common/stage-chat.cpp | 230 ++++++++++++++++++++++++++++++++++++++++++
+ common/stage-chat.cpp | 231 ++++++++++++++++++++++++++++++++++++++++++
  include/skippy.h      |  29 +++++-
- 2 files changed, 258 insertions(+), 1 deletion(-)
+ 2 files changed, 259 insertions(+), 1 deletion(-)
 
 diff --git a/common/stage-chat.cpp b/common/stage-chat.cpp
 index 60d53fc4..bde9feda 100644
@@ -116,7 +116,7 @@ index 60d53fc4..bde9feda 100644
  enum skippy_status skippy_apply_chat_template(
          struct skippy_model * model,
          const struct llama_chat_message * messages,
-@@ -135,3 +220,148 @@ enum skippy_status skippy_apply_chat_template(
+@@ -135,3 +220,149 @@ enum skippy_status skippy_apply_chat_template(
      }
      return skippy_common_success(out_error);
  }
@@ -168,6 +168,7 @@ index 60d53fc4..bde9feda 100644
 +        inputs.tool_choice           = common_chat_tool_choice_parse_oaicompat(skippy_common_tool_choice_string(tool_choice_json));
 +        inputs.add_generation_prompt = add_assistant;
 +        inputs.use_jinja             = true;
++        inputs.reasoning_format      = COMMON_REASONING_FORMAT_AUTO;
 +        inputs.parallel_tool_calls   = parallel_tool_calls;
 +        if (override_enable_thinking) {
 +            const char * value = enable_thinking ? "true" : "false";
@@ -321,4 +322,3 @@ index 2b95ccc8..384c7e40 100644
          struct skippy_model_info ** out_info,
 -- 
 2.50.1 (Apple Git-155)
-

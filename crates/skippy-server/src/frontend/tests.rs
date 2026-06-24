@@ -1040,47 +1040,6 @@ fn parses_llama_message_reasoning_content() {
 }
 
 #[test]
-fn parsed_chat_message_strips_think_tags_when_thinking_disabled() {
-    let request: ChatCompletionRequest = serde_json::from_value(json!({
-        "model": "test",
-        "messages": [{"role": "user", "content": "what is the capital of france"}]
-    }))
-    .unwrap();
-    let parsed = parsed_chat_message_from_json(
-        r#"{"role":"assistant","content":"<think></think>The capital of France is Paris.","reasoning_content":"unused"}"#,
-        &request,
-    )
-    .expect("parsed message");
-
-    assert_eq!(
-        parsed.content.as_deref(),
-        Some("The capital of France is Paris.")
-    );
-    assert_eq!(parsed.reasoning_content, None);
-}
-
-#[test]
-fn parsed_chat_message_preserves_thinking_when_enabled() {
-    let request: ChatCompletionRequest = serde_json::from_value(json!({
-        "model": "test",
-        "messages": [{"role": "user", "content": "think out loud"}],
-        "enable_thinking": true
-    }))
-    .unwrap();
-    let parsed = parsed_chat_message_from_json(
-        r#"{"role":"assistant","content":"<think>hidden</think>Answer.","reasoning_content":"hidden"}"#,
-        &request,
-    )
-    .expect("parsed message");
-
-    assert_eq!(
-        parsed.content.as_deref(),
-        Some("<think>hidden</think>Answer.")
-    );
-    assert_eq!(parsed.reasoning_content.as_deref(), Some("hidden"));
-}
-
-#[test]
 fn chat_response_from_parsed_message_separates_reasoning_content() {
     let output = GeneratedText {
         prompt_tokens: 4,

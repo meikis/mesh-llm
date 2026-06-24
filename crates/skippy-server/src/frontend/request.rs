@@ -257,9 +257,17 @@ pub(super) fn completion_sampling_config(
 }
 
 pub(super) fn chat_template_options(
-    _request: &ChatCompletionRequest,
+    request: &ChatCompletionRequest,
 ) -> OpenAiResult<ChatTemplateOptions> {
-    Ok(ChatTemplateOptions::default())
+    let reasoning_options = normalize_reasoning_template_options(
+        request.reasoning.as_ref(),
+        request.reasoning_effort,
+        &request.extra,
+    )?;
+    Ok(ChatTemplateOptions {
+        enable_thinking: Some(reasoning_options.enable_thinking.unwrap_or(false)),
+        ..ChatTemplateOptions::default()
+    })
 }
 
 pub(super) fn ensure_chat_runtime_features_supported(

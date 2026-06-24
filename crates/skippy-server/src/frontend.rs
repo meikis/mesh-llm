@@ -30,6 +30,7 @@ use openai_frontend::{
     MessageContentPart, ModelId, ModelObject, OpenAiBackend, OpenAiError, OpenAiErrorKind,
     OpenAiHookPolicy, OpenAiRequestContext, OpenAiResult, PrefillHookSignals, ReasoningEffort,
     StreamingGuardrailMode, Usage, apply_chat_hook_outcome, chat_mesh_hooks_enabled,
+    normalize_reasoning_template_options,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -1520,9 +1521,9 @@ fn tool_calls_requested(request: &ChatCompletionRequest) -> bool {
 
 fn chat_output_parser_required(
     request: &ChatCompletionRequest,
-    _template_options: &ChatTemplateOptions,
+    template_options: &ChatTemplateOptions,
 ) -> bool {
-    tool_calls_requested(request)
+    tool_calls_requested(request) || template_options.enable_thinking.is_some()
 }
 
 fn chat_response_from_generated_text(
@@ -1571,11 +1572,53 @@ fn parsed_chat_message_from_json(
     let value = serde_json::from_str::<Value>(message_json).ok()?;
     let tool_calls =
         parsed_tool_calls_from_message_value(&value, request).map(|parsed| parsed.tool_calls);
+    let suppress_thinking = chat_template_options(request)
+        .ok()
+        .and_then(|options| options.enable_thinking)
+        == Some(false);
     Some(ParsedChatMessage {
-        content: string_field(&value, "content"),
-        reasoning_content: string_field(&value, "reasoning_content"),
+        content: parsed_message_content(&value, suppress_thinking),
+        reasoning_content: if suppress_thinking {
+            None
+        } else {
+            string_field(&value, "reasoning_content")
+        },
         tool_calls,
     })
+}
+
+fn parsed_message_content(value: &Value, suppress_thinking: bool) -> Option<String> {
+    let content = string_field(value, "content")?;
+    if !suppress_thinking {
+        return Some(content);
+    }
+    let stripped = strip_thinking_blocks(&content);
+    (!stripped.is_empty()).then_some(stripped)
+}
+
+fn strip_thinking_blocks(text: &str) -> String {
+    let mut remaining = text;
+    let mut stripped = String::new();
+    let mut removed_initial_block = false;
+    while let Some(start) = remaining.find("<think>") {
+        if stripped.is_empty() && remaining[..start].trim().is_empty() {
+            removed_initial_block = true;
+        }
+        stripped.push_str(&remaining[..start]);
+        let after_start = &remaining[start + "<think>".len()..];
+        let Some(end) = after_start.find("</think>") else {
+            remaining = "";
+            break;
+        };
+        remaining = &after_start[end + "</think>".len()..];
+    }
+    stripped.push_str(remaining);
+    let stripped = stripped.replace("</think>", "");
+    if removed_initial_block {
+        stripped.trim_start().to_string()
+    } else {
+        stripped
+    }
 }
 
 #[cfg(test)]

@@ -981,6 +981,19 @@ fn plain_chat_does_not_require_chat_output_parser() {
 }
 
 #[test]
+fn silent_chat_defaults_to_no_thinking_and_uses_parser() {
+    let request: ChatCompletionRequest = serde_json::from_value(json!({
+        "model": "test",
+        "messages": [{"role": "user", "content": "hi"}]
+    }))
+    .unwrap();
+
+    let options = chat_template_options(&request).unwrap();
+    assert_eq!(options.enable_thinking, Some(false));
+    assert!(chat_output_parser_required(&request, &options));
+}
+
+#[test]
 fn tools_require_chat_output_parser() {
     assert!(chat_output_parser_required(
         &tool_request(),
@@ -1012,6 +1025,7 @@ fn parses_llama_message_reasoning_content() {
         r#"{"role":"assistant","reasoning_content":"Checked facts first.","content":"Final answer."}"#,
         &ChatCompletionRequest {
             tools: None,
+            extra: BTreeMap::from([("enable_thinking".to_string(), json!(true))]),
             ..tool_request()
         },
     )
@@ -1023,6 +1037,47 @@ fn parses_llama_message_reasoning_content() {
         Some("Checked facts first.")
     );
     assert_eq!(parsed.tool_calls, None);
+}
+
+#[test]
+fn parsed_chat_message_strips_think_tags_when_thinking_disabled() {
+    let request: ChatCompletionRequest = serde_json::from_value(json!({
+        "model": "test",
+        "messages": [{"role": "user", "content": "what is the capital of france"}]
+    }))
+    .unwrap();
+    let parsed = parsed_chat_message_from_json(
+        r#"{"role":"assistant","content":"<think></think>The capital of France is Paris.","reasoning_content":"unused"}"#,
+        &request,
+    )
+    .expect("parsed message");
+
+    assert_eq!(
+        parsed.content.as_deref(),
+        Some("The capital of France is Paris.")
+    );
+    assert_eq!(parsed.reasoning_content, None);
+}
+
+#[test]
+fn parsed_chat_message_preserves_thinking_when_enabled() {
+    let request: ChatCompletionRequest = serde_json::from_value(json!({
+        "model": "test",
+        "messages": [{"role": "user", "content": "think out loud"}],
+        "enable_thinking": true
+    }))
+    .unwrap();
+    let parsed = parsed_chat_message_from_json(
+        r#"{"role":"assistant","content":"<think>hidden</think>Answer.","reasoning_content":"hidden"}"#,
+        &request,
+    )
+    .expect("parsed message");
+
+    assert_eq!(
+        parsed.content.as_deref(),
+        Some("<think>hidden</think>Answer.")
+    );
+    assert_eq!(parsed.reasoning_content.as_deref(), Some("hidden"));
 }
 
 #[test]
@@ -1893,7 +1948,7 @@ fn request_defaults_fill_omitted_chat_fields_only() {
     assert_eq!(sampling.logit_bias.len(), 2);
     assert_eq!(
         chat_template_options(&request).unwrap().enable_thinking,
-        None
+        Some(false)
     );
     assert_eq!(request.reasoning, None);
     assert_eq!(
@@ -1983,7 +2038,7 @@ fn explicit_chat_request_values_override_request_defaults() {
     assert_eq!(sampling.logit_bias.len(), 1);
     assert_eq!(
         chat_template_options(&request).unwrap().enable_thinking,
-        None
+        Some(false)
     );
     assert_eq!(
         GenerationTokenLimit::from_request(request.effective_max_tokens(), 64),
@@ -2052,7 +2107,7 @@ fn request_defaults_do_not_make_structured_output_or_logprobs_executable() {
 }
 
 #[test]
-fn canonical_reasoning_does_not_override_chat_template_thinking() {
+fn canonical_reasoning_disables_chat_template_thinking() {
     let request: ChatCompletionRequest = serde_json::from_value(json!({
         "model": "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M",
         "messages": [{"role": "user", "content": "hello"}],
@@ -2061,11 +2116,11 @@ fn canonical_reasoning_does_not_override_chat_template_thinking() {
     .unwrap();
 
     let options = chat_template_options(&request).unwrap();
-    assert_eq!(options.enable_thinking, None);
+    assert_eq!(options.enable_thinking, Some(false));
 }
 
 #[test]
-fn reasoning_effort_does_not_override_chat_template_thinking() {
+fn reasoning_effort_none_disables_chat_template_thinking() {
     let request: ChatCompletionRequest = serde_json::from_value(json!({
         "model": "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M",
         "messages": [{"role": "user", "content": "hello"}],
@@ -2074,11 +2129,11 @@ fn reasoning_effort_does_not_override_chat_template_thinking() {
     .unwrap();
 
     let options = chat_template_options(&request).unwrap();
-    assert_eq!(options.enable_thinking, None);
+    assert_eq!(options.enable_thinking, Some(false));
 }
 
 #[test]
-fn top_level_reasoning_effort_does_not_override_chat_template_thinking() {
+fn top_level_reasoning_effort_none_disables_chat_template_thinking() {
     let request: ChatCompletionRequest = serde_json::from_value(json!({
         "model": "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M",
         "messages": [{"role": "user", "content": "hello"}],
@@ -2087,11 +2142,11 @@ fn top_level_reasoning_effort_does_not_override_chat_template_thinking() {
     .unwrap();
 
     let options = chat_template_options(&request).unwrap();
-    assert_eq!(options.enable_thinking, None);
+    assert_eq!(options.enable_thinking, Some(false));
 }
 
 #[test]
-fn provider_enable_thinking_does_not_override_chat_template_thinking() {
+fn provider_enable_thinking_overrides_chat_template_thinking() {
     let request: ChatCompletionRequest = serde_json::from_value(json!({
         "model": "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M",
         "messages": [{"role": "user", "content": "hello"}],
@@ -2101,11 +2156,11 @@ fn provider_enable_thinking_does_not_override_chat_template_thinking() {
     .unwrap();
 
     let options = chat_template_options(&request).unwrap();
-    assert_eq!(options.enable_thinking, None);
+    assert_eq!(options.enable_thinking, Some(true));
 }
 
 #[test]
-fn chat_template_kwargs_enable_thinking_does_not_override_template() {
+fn chat_template_kwargs_enable_thinking_overrides_template() {
     let request: ChatCompletionRequest = serde_json::from_value(json!({
         "model": "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M",
         "messages": [{"role": "user", "content": "hello"}],
@@ -2114,11 +2169,11 @@ fn chat_template_kwargs_enable_thinking_does_not_override_template() {
     .unwrap();
 
     let options = chat_template_options(&request).unwrap();
-    assert_eq!(options.enable_thinking, None);
+    assert_eq!(options.enable_thinking, Some(false));
 }
 
 #[test]
-fn thinking_boolean_aliases_do_not_override_chat_template_thinking() {
+fn thinking_boolean_aliases_override_chat_template_thinking() {
     for field in openai_frontend::THINKING_BOOLEAN_ALIASES {
         let request: ChatCompletionRequest = serde_json::from_value(json!({
             "model": "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M",
@@ -2128,7 +2183,7 @@ fn thinking_boolean_aliases_do_not_override_chat_template_thinking() {
         .unwrap();
         assert_eq!(
             chat_template_options(&request).unwrap().enable_thinking,
-            None,
+            Some(false),
             "top-level alias {field}"
         );
 
@@ -2140,14 +2195,14 @@ fn thinking_boolean_aliases_do_not_override_chat_template_thinking() {
         .unwrap();
         assert_eq!(
             chat_template_options(&request).unwrap().enable_thinking,
-            None,
+            Some(false),
             "chat_template_kwargs alias {field}"
         );
     }
 }
 
 #[test]
-fn reasoning_budget_does_not_override_chat_template_thinking() {
+fn reasoning_budget_controls_chat_template_thinking() {
     let request: ChatCompletionRequest = serde_json::from_value(json!({
         "model": "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M",
         "messages": [{"role": "user", "content": "hello"}],
@@ -2156,7 +2211,7 @@ fn reasoning_budget_does_not_override_chat_template_thinking() {
     .unwrap();
     assert_eq!(
         chat_template_options(&request).unwrap().enable_thinking,
-        None
+        Some(true)
     );
 
     let request: ChatCompletionRequest = serde_json::from_value(json!({
@@ -2168,7 +2223,7 @@ fn reasoning_budget_does_not_override_chat_template_thinking() {
     .unwrap();
     assert_eq!(
         chat_template_options(&request).unwrap().enable_thinking,
-        None
+        Some(false)
     );
 }
 

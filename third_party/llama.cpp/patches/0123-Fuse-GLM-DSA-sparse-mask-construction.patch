@@ -1,24 +1,25 @@
-From 352ec9ae28d6149dffbabb254fb777d4bf6b93d4 Mon Sep 17 00:00:00 2001
+From b994af00eddb86d563ac581d61b4a6fe4246bdc2 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Thu, 25 Jun 2026 23:25:06 +1000
 Subject: [PATCH] Fuse GLM-DSA sparse mask construction
 
 ---
- ggml/include/ggml-rpc.h                   |  4 +-
- ggml/include/ggml.h                       |  6 +++
- ggml/src/ggml-cpu/ggml-cpu.c              |  5 ++
- ggml/src/ggml-cpu/ops.cpp                 | 66 +++++++++++++++++++++++
- ggml/src/ggml-cpu/ops.h                   |  1 +
- ggml/src/ggml-metal/ggml-metal-device.cpp | 24 +++++++++
- ggml/src/ggml-metal/ggml-metal-device.h   |  2 +
- ggml/src/ggml-metal/ggml-metal-device.m   | 12 +++++
- ggml/src/ggml-metal/ggml-metal-impl.h     | 21 ++++++++
- ggml/src/ggml-metal/ggml-metal-ops.cpp    | 60 +++++++++++++++++++++
- ggml/src/ggml-metal/ggml-metal-ops.h      |  1 +
- ggml/src/ggml-metal/ggml-metal.metal      | 54 +++++++++++++++++++
- ggml/src/ggml.c                           | 30 ++++++++++-
- src/llama-graph.cpp                       | 46 +++++++++-------
- 14 files changed, 310 insertions(+), 22 deletions(-)
+ ggml/include/ggml-rpc.h                   |   4 +-
+ ggml/include/ggml.h                       |   6 +
+ ggml/src/ggml-cpu/ggml-cpu.c              |   5 +
+ ggml/src/ggml-cpu/ops.cpp                 |  66 ++++++++++
+ ggml/src/ggml-cpu/ops.h                   |   1 +
+ ggml/src/ggml-metal/ggml-metal-device.cpp |  24 ++++
+ ggml/src/ggml-metal/ggml-metal-device.h   |   2 +
+ ggml/src/ggml-metal/ggml-metal-device.m   |  12 ++
+ ggml/src/ggml-metal/ggml-metal-impl.h     |  21 ++++
+ ggml/src/ggml-metal/ggml-metal-ops.cpp    |  62 ++++++++++
+ ggml/src/ggml-metal/ggml-metal-ops.h      |   1 +
+ ggml/src/ggml-metal/ggml-metal.metal      |  54 +++++++++
+ ggml/src/ggml.c                           |  30 ++++-
+ src/llama-graph.cpp                       |  46 ++++---
+ tests/test-backend-ops.cpp                | 140 ++++++++++++++++++++++
+ 15 files changed, 452 insertions(+), 22 deletions(-)
 
 diff --git a/ggml/include/ggml-rpc.h b/ggml/include/ggml-rpc.h
 index efa5420a6..9089c1575 100644
@@ -277,7 +278,7 @@ index d77336cb3..ac3ca761b 100644
      int32_t  ne00;
      int32_t  ne01;
 diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
-index d558cd018..0e07e018e 100644
+index d558cd018..f11ecf2bb 100644
 --- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
 @@ -341,6 +341,10 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
@@ -291,7 +292,7 @@ index d558cd018..0e07e018e 100644
          case GGML_OP_SOLVE_TRI:
              {
                  n_fuse = ggml_metal_op_solve_tri(ctx, idx);
-@@ -4410,6 +4414,62 @@ int ggml_metal_op_lightning_indexer(ggml_metal_op_t ctx, int idx) {
+@@ -4410,6 +4414,64 @@ int ggml_metal_op_lightning_indexer(ggml_metal_op_t ctx, int idx) {
      return 1;
  }
  
@@ -338,6 +339,8 @@ index d558cd018..0e07e018e 100644
 +
 +    const int nth_fill = std::min(256, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline_fill));
 +    ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nth_fill - 1)/nth_fill, ne02, ne03, nth_fill, 1, 1);
++
++    ggml_metal_op_concurrency_reset(ctx);
 +
 +    ggml_metal_encoder_set_pipeline(enc, pipeline_set);
 +    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args),                  0);
@@ -501,7 +504,7 @@ index 68a759e88..aa72ad1cd 100644
  
  struct ggml_hash_set ggml_hash_set_new(size_t size) {
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 54f3213ca..fe5538f78 100644
+index 54f3213ca..eef53f1a3 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -25,6 +25,11 @@ static thread_local skippy_activation_rwkv7_v_first g_skippy_rwkv7_v_first;
@@ -546,7 +549,7 @@ index 54f3213ca..fe5538f78 100644
 -    ggml_tensor * kq_mask_top_k = ggml_set_rows(ctx0, kq_mask_all, kq_mask_top_k_values, top_k_3d);
 -    cb(kq_mask_top_k, "dsa_sparse_mask_topk", il);
 +    // reshape top_k indices: [n_top_k, n_batch, 1, n_stream] -> [n_top_k, n_batch, n_stream, 1]
-+    ggml_tensor * top_k_3d = ggml_view_4d(ctx0, top_k, top_k->ne[0], top_k->ne[1], top_k->ne[3], 1, top_k->nb[1], top_k->nb[2], top_k->ne[3]*top_k->nb[3], 0);
++    ggml_tensor * top_k_3d = ggml_view_4d(ctx0, top_k, top_k->ne[0], top_k->ne[1], top_k->ne[3], 1, top_k->nb[1], top_k->nb[3], top_k->nb[2], 0);
 +
 +    ggml_tensor * kq_mask_top_k = nullptr;
 +    if (skippy_glm_dsa_fused_sparse_mask_enabled()) {
@@ -571,6 +574,164 @@ index 54f3213ca..fe5538f78 100644
  
      // reshape to restore the original shape of KQ mask:
      // [1, n_kv, n_batch, n_stream] -> [n_kv, n_batch, 1, n_stream]
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index 9fa363be0..95a38a751 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -3974,6 +3974,143 @@ struct test_lightning_indexer : public test_case {
+     }
+ };
+ 
++// GGML_OP_DSA_SPARSE_MASK
++struct test_dsa_sparse_mask : public test_case {
++    const ggml_type type;
++
++    const int64_t n_kv;
++    const int64_t n_batch;
++    const int64_t n_stream;
++    const int64_t n_top_k;
++    const int64_t n_top_stream;
++
++    std::string vars() override {
++        return VARS_TO_STR6(type, n_kv, n_batch, n_stream, n_top_k, n_top_stream);
++    }
++
++    test_dsa_sparse_mask(ggml_type type = GGML_TYPE_F16,
++            int64_t n_kv = 33, int64_t n_batch = 2, int64_t n_stream = 1,
++            int64_t n_top_k = 4, int64_t n_top_stream = 1)
++        : type(type), n_kv(n_kv), n_batch(n_batch), n_stream(n_stream),
++          n_top_k(n_top_k), n_top_stream(n_top_stream) {}
++
++    ggml_tensor * build_graph(ggml_context * ctx) override {
++        ggml_tensor * kq_mask = ggml_new_tensor_4d(ctx, type, 1, n_kv, n_batch, n_stream);
++        ggml_tensor * top_k   = ggml_new_tensor_4d(ctx, GGML_TYPE_I32, n_top_k, n_batch, n_top_stream, 1);
++
++        ggml_set_name(kq_mask, "kq_mask");
++        ggml_set_name(top_k,   "top_k");
++
++        ggml_tensor * out = ggml_dsa_sparse_mask(ctx, kq_mask, top_k);
++        ggml_set_name(out, "out");
++        return out;
++    }
++
++    void initialize_tensors(ggml_context * ctx) override {
++        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
++            if (strcmp(t->name, "kq_mask") == 0) {
++                init_kq_mask(t);
++            } else if (strcmp(t->name, "top_k") == 0) {
++                init_top_k(t);
++            } else if (!ggml_is_view_op(t->op)) {
++                init_tensor_uniform(t);
++            }
++        }
++    }
++
++    double err(const float * a, const float * b, size_t n) override {
++        if (n != (size_t) (n_kv * n_batch * n_stream)) {
++            return 1.0;
++        }
++
++        double err = 0.0;
++        for (int64_t i_stream = 0; i_stream < n_stream; ++i_stream) {
++            for (int64_t i_batch = 0; i_batch < n_batch; ++i_batch) {
++                for (int64_t i_kv = 0; i_kv < n_kv; ++i_kv) {
++                    const size_t idx = (i_stream*n_batch + i_batch)*n_kv + i_kv;
++                    const float expected = expected_value(i_kv, i_batch, i_stream);
++
++                    err = std::max(err, value_err(a[idx], expected));
++                    err = std::max(err, value_err(b[idx], expected));
++                }
++            }
++        }
++        return err;
++    }
++
++    double max_err(ggml_backend_t backend) override {
++        (void) backend;
++        return type == GGML_TYPE_F16 ? 1e-3 : 0.0;
++    }
++
++    bool run_whole_graph() override {
++        return true;
++    }
++
++private:
++    void init_kq_mask(ggml_tensor * t) const {
++        std::vector<float> data(ggml_nelements(t));
++        for (int64_t i_stream = 0; i_stream < n_stream; ++i_stream) {
++            for (int64_t i_batch = 0; i_batch < n_batch; ++i_batch) {
++                for (int64_t i_kv = 0; i_kv < n_kv; ++i_kv) {
++                    const size_t idx = (i_stream*n_batch + i_batch)*n_kv + i_kv;
++                    data[idx] = mask_value(i_kv, i_batch, i_stream);
++                }
++            }
++        }
++
++        if (type == GGML_TYPE_F16) {
++            std::vector<ggml_fp16_t> data_f16(data.size());
++            ggml_fp32_to_fp16_row(data.data(), data_f16.data(), data.size());
++            ggml_backend_tensor_set(t, data_f16.data(), 0, data_f16.size()*sizeof(ggml_fp16_t));
++        } else {
++            ggml_backend_tensor_set(t, data.data(), 0, data.size()*sizeof(float));
++        }
++    }
++
++    void init_top_k(ggml_tensor * t) const {
++        std::vector<int32_t> data(ggml_nelements(t));
++        for (int64_t i_stream = 0; i_stream < n_top_stream; ++i_stream) {
++            for (int64_t i_batch = 0; i_batch < n_batch; ++i_batch) {
++                for (int64_t i_top = 0; i_top < n_top_k; ++i_top) {
++                    const size_t idx = (i_stream*n_batch + i_batch)*n_top_k + i_top;
++                    data[idx] = top_k_index(i_top, i_batch, i_stream);
++                }
++            }
++        }
++        ggml_backend_tensor_set(t, data.data(), 0, data.size()*sizeof(int32_t));
++    }
++
++    int32_t top_k_index(int64_t i_top, int64_t i_batch, int64_t i_stream) const {
++        return (int32_t) ((i_top*7 + i_batch*3 + i_stream*5) % n_kv);
++    }
++
++    bool is_selected(int64_t i_kv, int64_t i_batch, int64_t i_stream) const {
++        const int64_t i_top_stream = i_stream % n_top_stream;
++        for (int64_t i_top = 0; i_top < n_top_k; ++i_top) {
++            if (top_k_index(i_top, i_batch, i_top_stream) == i_kv) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    float mask_value(int64_t i_kv, int64_t i_batch, int64_t i_stream) const {
++        return 0.01f*(float) (1 + i_kv + 10*i_batch + 100*i_stream);
++    }
++
++    float expected_value(int64_t i_kv, int64_t i_batch, int64_t i_stream) const {
++        return is_selected(i_kv, i_batch, i_stream) ? mask_value(i_kv, i_batch, i_stream) : -INFINITY;
++    }
++
++    static double value_err(float actual, float expected) {
++        if (std::isinf(expected)) {
++            return std::isinf(actual) && std::signbit(actual) == std::signbit(expected) ? 0.0 : 1.0;
++        }
++        return actual == expected ? 0.0 : std::abs((double) actual - (double) expected);
++    }
++};
++
+ // GGML_OP_GATED_LINEAR_ATTN
+ struct test_gla : public test_case {
+     const ggml_type type;
+@@ -9218,6 +9355,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_F32, 4, 16, 2, 33, 1));
+     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_F16, 4, 16, 2, 33, 1));
+     test_cases.emplace_back(new test_lightning_indexer(GGML_TYPE_F16, 8, 32, 4, 65, 2));
++    test_cases.emplace_back(new test_dsa_sparse_mask(GGML_TYPE_F32, 33, 2, 1, 4, 1));
++    test_cases.emplace_back(new test_dsa_sparse_mask(GGML_TYPE_F16, 33, 2, 1, 4, 1));
++    test_cases.emplace_back(new test_dsa_sparse_mask(GGML_TYPE_F16, 65, 4, 2, 8, 2));
+ 
+     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 128, 1, 1));
+     test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 16, 1, 1));
 -- 
 2.54.0 (Apple Git-157)
 

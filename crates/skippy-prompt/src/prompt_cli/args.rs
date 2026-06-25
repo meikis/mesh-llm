@@ -163,6 +163,11 @@ pub struct PromptArgs {
     pub native_logs: bool,
     #[arg(
         long,
+        help = "Print generated token ids after each prompt for deterministic correctness tracing."
+    )]
+    pub trace_token_ids: bool,
+    #[arg(
+        long,
         help = "Send REPL input to the model as raw completion text instead of rendering a user chat turn."
     )]
     pub raw_prompt: bool,
@@ -250,6 +255,11 @@ pub struct BinaryReplArgs {
     pub ngram_pool_uds_path: Option<PathBuf>,
     #[arg(long)]
     pub native_logs: bool,
+    #[arg(
+        long,
+        help = "Print generated token ids after each prompt for deterministic correctness tracing."
+    )]
+    pub trace_token_ids: bool,
     #[arg(
         long,
         help = "Send REPL input to the model as raw completion text instead of rendering a user chat turn."

@@ -512,6 +512,9 @@ fn run_prompt(run: PromptRun<'_>) -> Result<()> {
         }
     }
     println!();
+    if args.trace_token_ids {
+        eprintln!("token_ids: {generated:?}");
+    }
 
     if !saw_visible_output {
         eprintln!(

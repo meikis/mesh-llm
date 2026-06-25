@@ -379,6 +379,7 @@ fn prompt_repl_launch(args: PromptArgs) -> Result<()> {
         session_id: args.session_id,
         ngram_pool_uds_path,
         native_logs: args.native_logs,
+        trace_token_ids: args.trace_token_ids,
         raw_prompt: args.raw_prompt,
         no_think: args.no_think,
         thinking_token_budget: args.thinking_token_budget,

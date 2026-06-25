@@ -28,6 +28,8 @@ pub enum CommandKind {
     TokenLengths(TokenLengthsArgs),
     #[command(name = "focused-runtime")]
     FocusedRuntime(FocusedRuntimeArgs),
+    #[command(name = "glm-dsa-op-report")]
+    GlmDsaOpReport(GlmDsaOpReportArgs),
     Run(RunArgs),
 }
 
@@ -88,6 +90,19 @@ pub struct TokenLengthsArgs {
     pub output_tsv: PathBuf,
     #[arg(long)]
     pub summary_json: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+pub struct GlmDsaOpReportArgs {
+    #[arg(long, required = true)]
+    pub log: Vec<PathBuf>,
+    #[arg(
+        long,
+        help = "Only include the first N timing records from each log. Use this for one request when a REPL log contains follow-up prompts."
+    )]
+    pub first_records: Option<usize>,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Parser)]

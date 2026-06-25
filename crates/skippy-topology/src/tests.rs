@@ -825,6 +825,37 @@ fn gemma4_e4b_rejects_known_bad_shared_kv_boundaries() {
 }
 
 #[test]
+fn glm_dsa_allows_indexshare_consumer_boundaries_with_top_k_sideband() {
+    let request = TopologyPlanRequest {
+        topology_id: "glm-dsa-indexshare".to_string(),
+        model_id: "meshllm/GLM-5.2-Q2_K-MTP-Q8-layers".to_string(),
+        layers: dense_attention_layers(79, 10),
+        nodes: nodes(4),
+        family: Some(glm_dsa_capability(79, 6144)),
+        policy: PlannerPolicy::default(),
+    };
+
+    let plan = plan_even_contiguous(&request).expect("plan");
+
+    assert_eq!(
+        plan.boundaries
+            .iter()
+            .map(|boundary| (boundary.layer_boundary, boundary.decision))
+            .collect::<Vec<_>>(),
+        vec![
+            (20, BoundaryDecision::Accepted),
+            (40, BoundaryDecision::Accepted),
+            (60, BoundaryDecision::Accepted)
+        ]
+    );
+    assert!(plan.boundaries.iter().all(|boundary| {
+        boundary
+            .reason_codes
+            .contains(&PlanReasonCode::ActivationSidebandRequired)
+    }));
+}
+
+#[test]
 fn gemma3n_requires_altup_sideband_and_reviewed_kv_boundary() {
     let request = TopologyPlanRequest {
         topology_id: "gemma3n".to_string(),
@@ -1317,6 +1348,12 @@ fn infers_known_family_capabilities_from_model_identity() {
             .family_id,
         "glm4"
     );
+    let glm52 =
+        infer_family_capability("meshllm/GLM-5.2-Q2_K-MTP-Q8-layers", 79, 6144).expect("glm_dsa");
+    assert_eq!(glm52.family_id, "glm_dsa");
+    assert!(glm52.split_constraints.is_empty());
+    assert_eq!(glm52.sidebands.len(), 1);
+    assert_eq!(glm52.sidebands[0].kind, SidebandKind::GlmDsaTopK);
     assert_eq!(
         infer_family_capability("bartowski/gemma-2-2b-it", 26, 2304)
             .expect("gemma2")
@@ -1567,9 +1604,9 @@ fn reviewed_supported_families_smoke_plan_with_expected_policy_signals() {
                 .iter()
                 .map(|sideband| match sideband.kind {
                     SidebandKind::TokenIds => PlanReasonCode::TokenSidebandRequired,
-                    SidebandKind::Rwkv7VFirst | SidebandKind::Gemma3nAltup => {
-                        PlanReasonCode::ActivationSidebandRequired
-                    }
+                    SidebandKind::Rwkv7VFirst
+                    | SidebandKind::Gemma3nAltup
+                    | SidebandKind::GlmDsaTopK => PlanReasonCode::ActivationSidebandRequired,
                 })
                 .collect();
             assert!(

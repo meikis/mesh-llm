@@ -267,6 +267,7 @@ pub enum SidebandKind {
     TokenIds,
     Rwkv7VFirst,
     Gemma3nAltup,
+    GlmDsaTopK,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -1381,15 +1382,25 @@ fn apply_family_boundary_rules(
     }
 
     for sideband in &family.sidebands {
-        if layer_boundary <= sideband.first_required_layer {
+        if sideband_required_for_boundary(sideband, layer_boundary) {
             reason_codes.push(match sideband.kind {
                 SidebandKind::TokenIds => PlanReasonCode::TokenSidebandRequired,
-                SidebandKind::Rwkv7VFirst | SidebandKind::Gemma3nAltup => {
-                    PlanReasonCode::ActivationSidebandRequired
-                }
+                SidebandKind::Rwkv7VFirst
+                | SidebandKind::Gemma3nAltup
+                | SidebandKind::GlmDsaTopK => PlanReasonCode::ActivationSidebandRequired,
             });
             messages.push(sideband.reason.clone());
         }
+    }
+}
+
+fn sideband_required_for_boundary(sideband: &SidebandRequirement, layer_boundary: u32) -> bool {
+    if layer_boundary > sideband.first_required_layer {
+        return false;
+    }
+    match sideband.kind {
+        SidebandKind::GlmDsaTopK => !glm_dsa_boundary_starts_at_indexer_layer(layer_boundary),
+        SidebandKind::TokenIds | SidebandKind::Rwkv7VFirst | SidebandKind::Gemma3nAltup => true,
     }
 }
 
@@ -1407,9 +1418,17 @@ fn activation_payload_multiplier_for_boundary(
 
     let has_rwkv7_v_first_sideband = family.sidebands.iter().any(|sideband| {
         sideband.kind == SidebandKind::Rwkv7VFirst
-            && layer_boundary <= sideband.first_required_layer
+            && sideband_required_for_boundary(sideband, layer_boundary)
     });
-    if has_rwkv7_v_first_sideband { 2 } else { 1 }
+    if has_rwkv7_v_first_sideband {
+        return 2;
+    }
+
+    let has_glm_dsa_top_k_sideband = family.sidebands.iter().any(|sideband| {
+        sideband.kind == SidebandKind::GlmDsaTopK
+            && sideband_required_for_boundary(sideband, layer_boundary)
+    });
+    if has_glm_dsa_top_k_sideband { 2 } else { 1 }
 }
 
 pub fn wire_payload_bytes_per_token(activation_width: u32, dtype: WireDType) -> u64 {
@@ -1635,6 +1654,28 @@ pub fn glm4_capability(layer_count: u32, activation_width: u32) -> FamilyCapabil
         WireValidation::Rejected,
         ExactStateMobility::Accepted,
     )
+}
+
+pub fn glm_dsa_capability(layer_count: u32, activation_width: u32) -> FamilyCapabilityRecord {
+    FamilyCapabilityRecord {
+        family_id: "glm_dsa".to_string(),
+        layer_count,
+        activation_width,
+        default_wire_dtype: WireDType::F16,
+        q8_wire_validation: WireValidation::Untested,
+        exact_state_mobility: ExactStateMobility::Untested,
+        recurrent_ranges: Vec::new(),
+        split_constraints: Vec::new(),
+        sidebands: vec![SidebandRequirement {
+            kind: SidebandKind::GlmDsaTopK,
+            first_required_layer: layer_count,
+            reason: "GLM-DSA IndexShare consumer boundaries require the producer stage to transfer the previous indexer layer's top-k indices as an activation sideband".to_string(),
+        }],
+    }
+}
+
+fn glm_dsa_boundary_starts_at_indexer_layer(layer_boundary: u32) -> bool {
+    layer_boundary <= 2 || layer_boundary >= 6 && (layer_boundary - 2).is_multiple_of(4)
 }
 
 pub fn gemma2_capability(layer_count: u32, activation_width: u32) -> FamilyCapabilityRecord {
@@ -1958,6 +1999,9 @@ pub fn infer_family_capability(
     }
     if compact.contains("glm47flash") || compact.contains("glm4.7flash") {
         return Some(glm47_flash_capability(layer_count, activation_width));
+    }
+    if compact.contains("glmdsa") || compact.contains("glm5") {
+        return Some(glm_dsa_capability(layer_count, activation_width));
     }
     if compact.contains("glm4moe") {
         return Some(dense_family_capability(

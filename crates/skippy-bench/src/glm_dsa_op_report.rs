@@ -29,6 +29,10 @@ struct PhaseSummary {
     avg_total_us_per_record: Option<f64>,
     avg_total_us_per_token: Option<f64>,
     indexer_topk: OpBucket,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    indexer: Option<OpBucket>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_k: Option<OpBucket>,
     sparse_mask: OpBucket,
     #[serde(skip_serializing_if = "Option::is_none")]
     sparse_mask_fill: Option<OpBucket>,
@@ -63,6 +67,10 @@ struct TimingRecord {
     total_us: u64,
     indexer_topk_nodes: u64,
     indexer_topk_us: u64,
+    indexer_nodes: Option<u64>,
+    indexer_us: Option<u64>,
+    top_k_nodes: Option<u64>,
+    top_k_us: Option<u64>,
     sparse_mask_nodes: u64,
     sparse_mask_us: u64,
     sparse_mask_fill_nodes: Option<u64>,
@@ -160,6 +168,8 @@ fn parse_timing_record(line: &str) -> Result<TimingRecord> {
         .split_whitespace()
         .filter_map(|field| field.split_once('='))
         .collect::<BTreeMap<_, _>>();
+    let indexer = parse_optional_bucket(&fields, "indexer")?;
+    let top_k = parse_optional_bucket(&fields, "top_k")?;
     let sparse_mask_fill = parse_optional_bucket(&fields, "sparse_mask_fill")?;
     let sparse_mask_topk = parse_optional_bucket(&fields, "sparse_mask_topk")?;
     let sparse_mask_add = parse_optional_bucket(&fields, "sparse_mask_add")?;
@@ -170,6 +180,10 @@ fn parse_timing_record(line: &str) -> Result<TimingRecord> {
         total_us: parse_field(&fields, "total_us")?,
         indexer_topk_nodes: parse_field(&fields, "indexer_topk_nodes")?,
         indexer_topk_us: parse_field(&fields, "indexer_topk_us")?,
+        indexer_nodes: indexer.nodes,
+        indexer_us: indexer.elapsed_us,
+        top_k_nodes: top_k.nodes,
+        top_k_us: top_k.elapsed_us,
         sparse_mask_nodes: parse_field(&fields, "sparse_mask_nodes")?,
         sparse_mask_us: parse_field(&fields, "sparse_mask_us")?,
         sparse_mask_fill_nodes: sparse_mask_fill.nodes,
@@ -292,6 +306,12 @@ fn summarize_log(
             record.indexer_topk_nodes,
             record.indexer_topk_us,
         );
+        add_optional_bucket(
+            &mut summary.indexer,
+            record.indexer_nodes,
+            record.indexer_us,
+        );
+        add_optional_bucket(&mut summary.top_k, record.top_k_nodes, record.top_k_us);
         add_bucket(
             &mut summary.sparse_mask,
             record.sparse_mask_nodes,
@@ -438,6 +458,7 @@ mod tests {
     };
 
     const LINE: &str = "skippy: glm_dsa_op_timing stage=1 tokens=128 total_us=1475800 indexer_topk_nodes=275 indexer_topk_us=129065 sparse_mask_nodes=235 sparse_mask_us=114543 mla_attention_nodes=47 mla_attention_us=35234 routed_moe_nodes=47 routed_moe_us=379574 shared_expert_nodes=47 shared_expert_us=817384";
+    const LINE_WITH_INDEXER_BREAKDOWN: &str = "skippy: glm_dsa_op_timing stage=1 tokens=128 total_us=1475800 indexer_topk_nodes=275 indexer_topk_us=129065 indexer_nodes=235 indexer_us=80000 top_k_nodes=40 top_k_us=49065 sparse_mask_nodes=235 sparse_mask_us=114543 mla_attention_nodes=47 mla_attention_us=35234 routed_moe_nodes=47 routed_moe_us=379574 shared_expert_nodes=47 shared_expert_us=817384";
     const LINE_WITH_SPARSE_BREAKDOWN: &str = "skippy: glm_dsa_op_timing stage=1 tokens=128 total_us=1475800 indexer_topk_nodes=275 indexer_topk_us=129065 sparse_mask_nodes=235 sparse_mask_us=114543 sparse_mask_fill_nodes=47 sparse_mask_fill_us=1000 sparse_mask_topk_nodes=47 sparse_mask_topk_us=2000 sparse_mask_add_nodes=47 sparse_mask_add_us=3000 mla_attention_nodes=47 mla_attention_us=35234 routed_moe_nodes=47 routed_moe_us=379574 shared_expert_nodes=47 shared_expert_us=817384";
     const LINE_WITH_DSA_SPARSE_ATTN: &str = "skippy: glm_dsa_op_timing stage=1 tokens=128 total_us=1475800 indexer_topk_nodes=275 indexer_topk_us=129065 sparse_mask_nodes=0 sparse_mask_us=0 dsa_sparse_attn_nodes=47 dsa_sparse_attn_us=114543 mla_attention_nodes=47 mla_attention_us=35234 routed_moe_nodes=47 routed_moe_us=379574 shared_expert_nodes=47 shared_expert_us=817384";
     const SIDEBAND_LINE: &str = "skippy: glm_dsa_top_k_sideband_forward stage=stage-0 request=1 session=2 kind=DecodeEmbd pos_start=718 tokens=1 hidden_bytes=24576 sideband_bytes=3072 sideband_i32=768";
@@ -451,6 +472,26 @@ mod tests {
         assert_eq!(records[0].tokens, 128);
         assert_eq!(records[0].indexer_topk_us, 129065);
         assert_eq!(records[0].shared_expert_nodes, 47);
+    }
+
+    #[test]
+    fn parses_optional_indexer_breakdown() {
+        let record = parse_timing_record(LINE_WITH_INDEXER_BREAKDOWN).unwrap();
+        assert_eq!(record.indexer_nodes, Some(235));
+        assert_eq!(record.indexer_us, Some(80_000));
+        assert_eq!(record.top_k_nodes, Some(40));
+        assert_eq!(record.top_k_us, Some(49_065));
+
+        let summary = summarize_log("stage1.log".into(), &[record], &[]);
+        let prefill = summary
+            .stage_records
+            .get(&1)
+            .unwrap()
+            .get(&Phase::Prefill)
+            .unwrap();
+        assert_eq!(prefill.indexer_topk.elapsed_us, 129_065);
+        assert_eq!(prefill.indexer.as_ref().unwrap().elapsed_us, 80_000);
+        assert_eq!(prefill.top_k.as_ref().unwrap().elapsed_us, 49_065);
     }
 
     #[test]
@@ -498,6 +539,17 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("sparse_mask_fill must include both nodes and us fields"));
+    }
+
+    #[test]
+    fn rejects_partial_indexer_breakdown() {
+        let error = parse_timing_record(&LINE.replace(
+            "indexer_topk_nodes=275",
+            "indexer_topk_nodes=275 indexer_nodes=235",
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("indexer must include both nodes and us fields"));
     }
 
     #[test]

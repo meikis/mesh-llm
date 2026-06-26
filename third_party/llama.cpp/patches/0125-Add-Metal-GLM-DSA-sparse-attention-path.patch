@@ -1,6 +1,6 @@
-From a80282747c3e8905395a976a9a20f874ab0382ea Mon Sep 17 00:00:00 2001
+From d353a7cef56fc784fb7cab377d2da2d479a0c6fa Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
-Date: Fri, 26 Jun 2026 07:31:46 +1000
+Date: Fri, 26 Jun 2026 10:12:50 +1000
 Subject: [PATCH] Add Metal GLM-DSA sparse attention path
 
 ---
@@ -11,11 +11,11 @@ Subject: [PATCH] Add Metal GLM-DSA sparse attention path
  ggml/src/ggml-metal/ggml-metal-ops.cpp    |  58 ++++++++
  ggml/src/ggml-metal/ggml-metal-ops.h      |   1 +
  ggml/src/ggml-metal/ggml-metal.metal      | 131 ++++++++++++++++++
- src/llama-graph.cpp                       |  81 +++++++++++-
+ src/llama-graph.cpp                       |  79 ++++++++++-
  src/llama-graph.h                         |  10 ++
  src/skippy.cpp                            |   3 +
  tests/test-backend-ops.cpp                | 153 +++++++++++++++++++++-
- 11 files changed, 525 insertions(+), 11 deletions(-)
+ 11 files changed, 523 insertions(+), 11 deletions(-)
 
 diff --git a/ggml/src/ggml-metal/ggml-metal-device.cpp b/ggml/src/ggml-metal/ggml-metal-device.cpp
 index 72fd52938..751cbf845 100644
@@ -391,7 +391,7 @@ index 81c385976..6795398b4 100644
          constant ggml_metal_kargs_diag & args,
          device   const char * src0,
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index eef53f1a3..57093e2dc 100644
+index eef53f1a3..ac24bfcdb 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -25,11 +25,19 @@ static thread_local skippy_activation_rwkv7_v_first g_skippy_rwkv7_v_first;
@@ -416,7 +416,7 @@ index eef53f1a3..57093e2dc 100644
  void skippy_graph_set_filter(const skippy_graph_filter & filter) {
      g_skippy_graph_filter = filter;
  }
-@@ -2372,6 +2380,45 @@ ggml_tensor * llm_graph_context::build_attn_mha(
+@@ -2372,6 +2380,43 @@ ggml_tensor * llm_graph_context::build_attn_mha(
      return cur;
  }
  
@@ -439,9 +439,7 @@ index eef53f1a3..57093e2dc 100644
 +    k = ggml_permute(ctx0, k, 0, 2, 1, 3);
 +    v = ggml_permute(ctx0, v, 0, 2, 1, 3);
 +
-+    if (v_trans) {
-+        v = ggml_transpose(ctx0, v);
-+    }
++    GGML_UNUSED(v_trans);
 +
 +    ggml_tensor * cur = ggml_dsa_sparse_attn(ctx0, q, k, v, kq_mask_rows, top_k, kq_scale);
 +    cb(cur, "dsa_sparse_attn", il);
@@ -462,7 +460,7 @@ index eef53f1a3..57093e2dc 100644
  llm_graph_input_attn_no_cache * llm_graph_context::build_attn_inp_no_cache() const {
      auto inp = std::make_unique<llm_graph_input_attn_no_cache>(hparams, cparams);
  
-@@ -2686,6 +2733,32 @@ ggml_tensor * llm_graph_context::build_attn(
+@@ -2686,6 +2731,32 @@ ggml_tensor * llm_graph_context::build_attn(
      // reshape top_k indices: [n_top_k, n_batch, 1, n_stream] -> [n_top_k, n_batch, n_stream, 1]
      ggml_tensor * top_k_3d = ggml_view_4d(ctx0, top_k, top_k->ne[0], top_k->ne[1], top_k->ne[3], 1, top_k->nb[1], top_k->nb[3], top_k->nb[2], 0);
  
@@ -495,7 +493,7 @@ index eef53f1a3..57093e2dc 100644
      ggml_tensor * kq_mask_top_k = nullptr;
      if (skippy_glm_dsa_fused_sparse_mask_enabled()) {
          kq_mask_top_k = ggml_dsa_sparse_mask(ctx0, kq_mask_rows, top_k_3d);
-@@ -2711,10 +2784,6 @@ ggml_tensor * llm_graph_context::build_attn(
+@@ -2711,10 +2782,6 @@ ggml_tensor * llm_graph_context::build_attn(
      // [1, n_kv, n_batch, n_stream] -> [n_kv, n_batch, 1, n_stream]
      kq_mask_top_k = ggml_view_4d(ctx0, kq_mask_top_k, kq_mask_top_k->ne[1], kq_mask_top_k->ne[2], 1, kq_mask_top_k->ne[3], kq_mask_top_k->nb[2], kq_mask_top_k->nb[3], kq_mask_top_k->nb[3], 0);
  

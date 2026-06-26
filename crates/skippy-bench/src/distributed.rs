@@ -2337,16 +2337,18 @@ fn rsync_model_artifacts(args: &RunArgs, stage: &StageAssignment) -> Result<()> 
         stage.local_materialized_model_path.as_ref(),
         stage.remote_model_path.as_ref(),
     ) {
-        materialize_stage_model_on_coordinator(stage_model, stage, local_model)?;
         if let Some(shared_model) = stage.local_shared_model_path.as_ref() {
-            place_stage_model_on_shared_root(local_model, shared_model).with_context(|| {
-                format!(
-                    "place coordinator-materialized stage model for {} at {}",
-                    stage.stage_id,
-                    shared_model.display()
-                )
-            })?;
+            materialize_stage_model_on_coordinator(stage_model, stage, shared_model).with_context(
+                || {
+                    format!(
+                        "materialize shared stage model for {} at {}",
+                        stage.stage_id,
+                        shared_model.display()
+                    )
+                },
+            )?;
         } else {
+            materialize_stage_model_on_coordinator(stage_model, stage, local_model)?;
             let remote_parent = remote_parent(remote_model)?;
             run_command(
                 Command::new("ssh")
@@ -2398,46 +2400,6 @@ fn rsync_model_artifacts(args: &RunArgs, stage: &StageAssignment) -> Result<()> 
         .with_context(|| format!("rsync model artifact to {}", stage.host))?;
     }
     Ok(())
-}
-
-fn place_stage_model_on_shared_root(source: &Path, destination: &Path) -> Result<()> {
-    let source_metadata =
-        fs::metadata(source).with_context(|| format!("read stage model {}", source.display()))?;
-    if destination.is_file() {
-        let destination_metadata = fs::metadata(destination)
-            .with_context(|| format!("read shared stage model {}", destination.display()))?;
-        if destination_metadata.len() == source_metadata.len()
-            && destination_metadata.modified().with_context(|| {
-                format!("read shared stage model mtime {}", destination.display())
-            })? >= source_metadata
-                .modified()
-                .with_context(|| format!("read stage model mtime {}", source.display()))?
-        {
-            return Ok(());
-        }
-    }
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create shared stage model dir {}", parent.display()))?;
-    }
-    let tmp = destination.with_extension("gguf.tmp");
-    let _ = fs::remove_file(&tmp);
-    match fs::hard_link(source, destination) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            fs::copy(source, &tmp).with_context(|| {
-                format!("copy stage model {} to {}", source.display(), tmp.display())
-            })?;
-            fs::rename(&tmp, destination).with_context(|| {
-                format!(
-                    "move shared stage model {} to {}",
-                    tmp.display(),
-                    destination.display()
-                )
-            })?;
-            Ok(())
-        }
-    }
 }
 
 fn materialize_stage_model_on_coordinator(

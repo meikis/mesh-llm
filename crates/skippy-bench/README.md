@@ -195,6 +195,12 @@ benchmarks can exercise per-session KV or n-gram history. It records
 per-request elapsed time, streaming TTFT when `--stream` is enabled, usage
 tokens when the frontend returns them, API error codes, and aggregate
 latency/token-rate summaries.
+Use `--prompt-id`, `--category`, and `--length-bucket` to target subsets of a
+corpus before `--prompt-limit` is applied. Rows may use `prompt_repetitions`
+or `prompt_repeat` plus optional `repeat_separator` to create bounded synthetic
+long-context prompts without duplicating large text in git. The checked-in
+`corpora/glm_dsa_long_context_coding_prompts.jsonl` corpus uses this for
+GLM-DSA 8k, 32k, and 128k coding/agent stress runs.
 Use `--concurrency-depth` for depth sweeps; the effective frontend generation
 limit, such as `serve-openai --generation-concurrency`, must still be recorded
 beside the result.

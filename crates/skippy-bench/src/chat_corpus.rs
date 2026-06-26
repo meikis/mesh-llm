@@ -16,6 +16,8 @@ use serde_json::{Map, Value, json};
 
 use crate::cli::ChatCorpusArgs;
 
+const MAX_PROMPT_REPETITIONS: usize = 4096;
+
 #[derive(Debug, Clone)]
 struct PromptCase {
     index: usize,
@@ -40,9 +42,17 @@ struct ChatCorpusReport {
     request_count: usize,
     prompt_corpus: Option<String>,
     prompt_limit: Option<usize>,
+    prompt_filters: PromptFiltersReport,
     sampling: SamplingReport,
     results: Vec<ChatCorpusResult>,
     summary: ChatCorpusSummary,
+}
+
+#[derive(Default, Serialize)]
+struct PromptFiltersReport {
+    prompt_id: Option<String>,
+    category: Option<String>,
+    length_bucket: Option<String>,
 }
 
 #[derive(Default, Serialize)]
@@ -155,6 +165,11 @@ pub fn chat_corpus(args: ChatCorpusArgs) -> Result<()> {
             .as_ref()
             .map(|path| path.display().to_string()),
         prompt_limit: args.prompt_limit,
+        prompt_filters: PromptFiltersReport {
+            prompt_id: args.prompt_id.clone(),
+            category: args.category.clone(),
+            length_bucket: args.length_bucket.clone(),
+        },
         sampling: SamplingReport {
             temperature: args.temperature,
             top_p: args.top_p,
@@ -463,6 +478,7 @@ fn prompt_cases(args: &ChatCorpusArgs) -> Result<Vec<PromptCase>> {
             messages: None,
         }],
     };
+    prompts.retain(|prompt| prompt_matches_filters(prompt, args));
     if let Some(limit) = args.prompt_limit {
         prompts.truncate(limit);
     }
@@ -473,6 +489,19 @@ fn prompt_cases(args: &ChatCorpusArgs) -> Result<Vec<PromptCase>> {
         prompt.index = index;
     }
     Ok(prompts)
+}
+
+fn prompt_matches_filters(prompt: &PromptCase, args: &ChatCorpusArgs) -> bool {
+    option_matches(prompt.prompt_id.as_deref(), args.prompt_id.as_deref())
+        && option_matches(prompt.category.as_deref(), args.category.as_deref())
+        && option_matches(
+            prompt.length_bucket.as_deref(),
+            args.length_bucket.as_deref(),
+        )
+}
+
+fn option_matches(actual: Option<&str>, expected: Option<&str>) -> bool {
+    expected.is_none_or(|expected| actual == Some(expected))
 }
 
 fn prompt_case_from_line(index: usize, line: &str) -> Result<PromptCase> {
@@ -511,6 +540,9 @@ fn prompt_case_from_line(index: usize, line: &str) -> Result<PromptCase> {
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
     if let Some(messages) = value.get("messages").and_then(Value::as_array) {
+        if prompt_repetitions(&value)? != 1 {
+            anyhow::bail!("prompt_repetitions is not supported for messages rows");
+        }
         let prompt = messages
             .iter()
             .filter_map(|message| message.get("content").and_then(Value::as_str))
@@ -537,6 +569,7 @@ fn prompt_case_from_line(index: usize, line: &str) -> Result<PromptCase> {
     } else {
         anyhow::bail!("JSONL row must include prompt, turns, or messages");
     };
+    let prompt = expand_prompt(&value, prompt)?;
     Ok(PromptCase {
         index,
         prompt_id,
@@ -546,6 +579,45 @@ fn prompt_case_from_line(index: usize, line: &str) -> Result<PromptCase> {
         prompt,
         messages: None,
     })
+}
+
+fn expand_prompt(value: &Value, prompt: String) -> Result<String> {
+    let repetitions = prompt_repetitions(value)?;
+    if repetitions == 1 {
+        return Ok(prompt);
+    }
+    let separator = value
+        .get("repeat_separator")
+        .and_then(Value::as_str)
+        .unwrap_or("\n\n");
+    let mut expanded =
+        String::with_capacity(prompt.len() * repetitions + separator.len() * (repetitions - 1));
+    for index in 0..repetitions {
+        if index > 0 {
+            expanded.push_str(separator);
+        }
+        expanded.push_str(&prompt);
+    }
+    Ok(expanded)
+}
+
+fn prompt_repetitions(value: &Value) -> Result<usize> {
+    let Some(raw) = value
+        .get("prompt_repetitions")
+        .or_else(|| value.get("prompt_repeat"))
+    else {
+        return Ok(1);
+    };
+    let Some(repetitions) = raw.as_u64() else {
+        anyhow::bail!("prompt_repetitions must be a positive integer");
+    };
+    if repetitions == 0 {
+        anyhow::bail!("prompt_repetitions must be greater than zero");
+    }
+    if repetitions > MAX_PROMPT_REPETITIONS as u64 {
+        anyhow::bail!("prompt_repetitions must be <= {MAX_PROMPT_REPETITIONS}");
+    }
+    Ok(repetitions as usize)
 }
 
 fn summarize(results: &[ChatCorpusResult], total_wall_ms: f64) -> ChatCorpusSummary {
@@ -621,6 +693,9 @@ mod tests {
             model: "org/repo:Q4_K_M".to_string(),
             prompt: "Hello".to_string(),
             prompt_corpus: None,
+            prompt_id: None,
+            category: None,
+            length_bucket: None,
             prompt_limit: None,
             max_tokens: 512,
             concurrency_depth: 1,
@@ -666,6 +741,59 @@ mod tests {
             cases.iter().map(|case| case.index).collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
+    }
+
+    #[test]
+    fn prompt_cases_load_glm_dsa_long_context_corpus() {
+        let mut args = default_args();
+        args.prompt_corpus = Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("corpora/glm_dsa_long_context_coding_prompts.jsonl"),
+        );
+
+        let cases = prompt_cases(&args).expect("GLM-DSA long-context corpus should load");
+
+        assert_eq!(cases.len(), 4);
+        assert_eq!(cases[0].length_bucket.as_deref(), Some("long_context_8k"));
+        assert_eq!(cases[3].length_bucket.as_deref(), Some("long_context_128k"));
+        assert!(cases[0].prompt.chars().count() > 50_000);
+        assert!(cases[3].prompt.chars().count() > 500_000);
+    }
+
+    #[test]
+    fn prompt_cases_filter_by_length_bucket_before_limit() {
+        let mut args = default_args();
+        args.prompt_corpus = Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("corpora/glm_dsa_long_context_coding_prompts.jsonl"),
+        );
+        args.length_bucket = Some("long_context_32k".to_string());
+        args.prompt_limit = Some(1);
+
+        let cases = prompt_cases(&args).expect("filtered corpus should load");
+
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0].length_bucket.as_deref(), Some("long_context_32k"));
+        assert_eq!(cases[0].index, 0);
+    }
+
+    #[test]
+    fn prompt_cases_filter_by_prompt_id() {
+        let mut args = default_args();
+        args.prompt_corpus = Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("corpora/glm_dsa_long_context_coding_prompts.jsonl"),
+        );
+        args.prompt_id = Some("glm-dsa-long-code-128k-001".to_string());
+
+        let cases = prompt_cases(&args).expect("filtered corpus should load");
+
+        assert_eq!(cases.len(), 1);
+        assert_eq!(
+            cases[0].prompt_id.as_deref(),
+            Some("glm-dsa-long-code-128k-001")
+        );
+        assert_eq!(cases[0].length_bucket.as_deref(), Some("long_context_128k"));
     }
 
     #[test]
@@ -733,5 +861,31 @@ mod tests {
         );
 
         assert_eq!(body["user"], "repo:turns");
+    }
+
+    #[test]
+    fn prompt_case_expands_bounded_prompt_repetitions() {
+        let prompt_case = prompt_case_from_line(
+            0,
+            r#"{"id":"long-1","prompt":"alpha","prompt_repetitions":3,"repeat_separator":"|"}"#,
+        )
+        .expect("repeat row should parse");
+
+        assert_eq!(prompt_case.prompt, "alpha|alpha|alpha");
+    }
+
+    #[test]
+    fn prompt_case_rejects_repeated_messages_rows() {
+        let error = prompt_case_from_line(
+            0,
+            r#"{"id":"bad-1","prompt_repetitions":2,"messages":[{"role":"user","content":"hello"}]}"#,
+        )
+        .expect_err("messages repeat should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("prompt_repetitions is not supported for messages rows")
+        );
     }
 }

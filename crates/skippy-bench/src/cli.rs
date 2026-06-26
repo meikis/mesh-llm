@@ -149,6 +149,12 @@ pub struct ChatCorpusArgs {
     #[arg(long)]
     pub prompt_corpus: Option<PathBuf>,
     #[arg(long)]
+    pub prompt_id: Option<String>,
+    #[arg(long)]
+    pub category: Option<String>,
+    #[arg(long)]
+    pub length_bucket: Option<String>,
+    #[arg(long)]
     pub prompt_limit: Option<usize>,
     #[arg(long, default_value_t = 16)]
     pub max_tokens: u32,

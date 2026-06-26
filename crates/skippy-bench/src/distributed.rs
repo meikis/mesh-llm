@@ -1992,6 +1992,7 @@ impl DriverTokenizer {
                 flash_attn_type: skippy_runtime::FlashAttentionType::Auto,
                 load_mode,
                 projector_path: None,
+                use_mmap: true,
                 include_embeddings: true,
                 include_output: plan.stages.len() == 1,
                 filter_tensors_on_load: args.stage_load_mode != "runtime-slice",

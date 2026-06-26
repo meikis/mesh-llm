@@ -87,6 +87,7 @@ pub fn token_lengths(args: TokenLengthsArgs) -> Result<()> {
             flash_attn_type: skippy_runtime::FlashAttentionType::Auto,
             load_mode: RuntimeLoadMode::RuntimeSlice,
             projector_path: None,
+            use_mmap: true,
             include_embeddings: true,
             include_output: false,
             filter_tensors_on_load: true,

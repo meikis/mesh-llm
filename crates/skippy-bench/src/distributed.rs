@@ -400,6 +400,7 @@ fn run_distributed_collect(args: RunArgs) -> Result<DistributedRunOutcome> {
         "stage_telemetry_level": args.stage_telemetry_level,
         "allow_unbalanced_stages": args.allow_unbalanced_stages,
         "glm_dsa_op_timing": args.glm_dsa_op_timing,
+        "glm_dsa_direct_sparse_attn": args.glm_dsa_direct_sparse_attn,
         "stages": plan
             .stages
             .iter()
@@ -1447,11 +1448,7 @@ fn stage_server_command(
     bin: &str,
     config_path: &str,
 ) -> String {
-    let env_prefix = if args.glm_dsa_op_timing {
-        "SKIPPY_GLM_DSA_OP_TIMING=1 "
-    } else {
-        ""
-    };
+    let env_prefix = stage_server_env_prefix(args);
     let reply_credit_arg = args
         .stage_reply_credit_limit
         .map(|limit| format!(" --reply-credit-limit {limit}"))
@@ -1484,6 +1481,21 @@ fn stage_server_command(
         args.stage_downstream_wire_delay_ms,
         downstream_wire_mbps_arg,
     )
+}
+
+fn stage_server_env_prefix(args: &RunArgs) -> String {
+    let mut env = Vec::new();
+    if args.glm_dsa_op_timing {
+        env.push("SKIPPY_GLM_DSA_OP_TIMING=1");
+    }
+    if args.glm_dsa_direct_sparse_attn {
+        env.push("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_ATTN=1");
+    }
+    if env.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", env.join(" "))
+    }
 }
 
 fn wait_remote_readiness(args: &RunArgs, plan: &DeploymentPlan) -> Result<Vec<RemoteStageStatus>> {
@@ -2822,6 +2834,7 @@ mod tests {
             stage_telemetry_level: "summary".to_string(),
             allow_unbalanced_stages: false,
             glm_dsa_op_timing: false,
+            glm_dsa_direct_sparse_attn: false,
         };
 
         assert_eq!(
@@ -3321,6 +3334,7 @@ mod tests {
             stage_telemetry_level: "summary".to_string(),
             allow_unbalanced_stages: false,
             glm_dsa_op_timing: false,
+            glm_dsa_direct_sparse_attn: false,
         };
         let plan = DeploymentPlan {
             run_id: "run-1".to_string(),
@@ -3381,8 +3395,10 @@ mod tests {
         assert!(command.contains("--telemetry-level"));
         assert!(command.contains("summary"));
         assert!(!command.contains("SKIPPY_GLM_DSA_OP_TIMING=1"));
+        assert!(!command.contains("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_ATTN=1"));
 
         args.glm_dsa_op_timing = true;
+        args.glm_dsa_direct_sparse_attn = true;
         let command = remote_start_command(
             &args,
             &plan,
@@ -3390,6 +3406,7 @@ mod tests {
             "/tmp/remote/run-1/stage-0/skippy-server",
         );
         assert!(command.contains("SKIPPY_GLM_DSA_OP_TIMING=1"));
+        assert!(command.contains("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_ATTN=1"));
     }
 
     fn test_run_args() -> RunArgs {
@@ -3445,6 +3462,7 @@ mod tests {
             stage_telemetry_level: "summary".to_string(),
             allow_unbalanced_stages: false,
             glm_dsa_op_timing: false,
+            glm_dsa_direct_sparse_attn: false,
         }
     }
 

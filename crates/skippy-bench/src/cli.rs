@@ -347,6 +347,12 @@ pub struct RunArgs {
         help = "Enable llama.cpp GLM-DSA op/group timing logs in every launched stage."
     )]
     pub glm_dsa_op_timing: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Enable llama.cpp GLM-DSA direct sparse-attention execution in every launched stage."
+    )]
+    pub glm_dsa_direct_sparse_attn: bool,
 }
 
 #[derive(Parser)]

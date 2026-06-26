@@ -269,6 +269,8 @@ pub struct StageConfig {
     pub flash_attn_type: FlashAttentionType,
     #[serde(default)]
     pub filter_tensors_on_load: bool,
+    #[serde(default = "default_use_mmap")]
+    pub use_mmap: bool,
     #[serde(default)]
     pub selected_device: Option<StageDevice>,
     #[serde(default)]
@@ -362,6 +364,10 @@ fn default_lane_count() -> u32 {
 
 fn default_cache_type() -> String {
     "f16".to_string()
+}
+
+fn default_use_mmap() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

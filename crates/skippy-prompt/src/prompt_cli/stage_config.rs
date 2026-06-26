@@ -68,6 +68,7 @@ fn write_local_configs(
             cache_type_v: args.cache_type_v.clone(),
             flash_attn_type: StageFlashAttentionType::Auto,
             filter_tensors_on_load: true,
+            use_mmap: true,
             selected_device: None,
             kv_cache,
             load_mode,

@@ -1022,6 +1022,7 @@ pub(crate) fn single_stage_config(options: &SkippyModelLoadOptions) -> Result<St
         cache_type_v: options.cache_type_v.clone(),
         flash_attn_type: options.flash_attn_type,
         filter_tensors_on_load: false,
+        use_mmap: true,
         selected_device: options.selected_device.clone().map(Into::into),
         kv_cache: None,
         load_mode: LoadMode::RuntimeSlice,

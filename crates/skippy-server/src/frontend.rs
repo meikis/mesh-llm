@@ -1284,6 +1284,7 @@ impl DraftRunner {
                 include_embeddings: true,
                 include_output: true,
                 filter_tensors_on_load: false,
+                use_mmap: true,
             },
         )
         .with_context(|| format!("open draft model {}", path.display()))?;

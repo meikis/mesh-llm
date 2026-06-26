@@ -1,6 +1,6 @@
 pub const ABI_VERSION_MAJOR: u32 = 0;
 pub const ABI_VERSION_MINOR: u32 = 1;
-pub const ABI_VERSION_PATCH: u32 = 27;
+pub const ABI_VERSION_PATCH: u32 = 28;
 pub const FEATURE_BACKEND_DEVICES: u64 = 1 << 23;
 pub const FEATURE_RUNTIME_EVENTS: u64 = 1 << 24;
 pub const FEATURE_NATIVE_MTP_N1: u64 = 1 << 25;
@@ -194,6 +194,7 @@ pub struct RuntimeConfig {
     pub flash_attn_type: i32,
     pub load_mode: LoadMode,
     pub disable_repack: bool,
+    pub use_mmap: bool,
     pub filter_tensors_on_load: bool,
     pub include_embeddings: bool,
     pub include_output: bool,

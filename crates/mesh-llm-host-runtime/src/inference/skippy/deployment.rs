@@ -103,6 +103,7 @@ pub(crate) fn stage0_config(
         cache_type_v: context.kv_cache.cache_type_v().to_string(),
         flash_attn_type: context.flash_attn_type,
         filter_tensors_on_load: true,
+        use_mmap: true,
         selected_device,
         kv_cache: None,
         load_mode: LoadMode::LayerPackage,

@@ -834,6 +834,7 @@ pub struct RuntimeConfig {
     pub flash_attn_type: FlashAttentionType,
     pub load_mode: LoadMode,
     pub projector_path: Option<String>,
+    pub use_mmap: bool,
     pub include_embeddings: bool,
     pub include_output: bool,
     pub filter_tensors_on_load: bool,
@@ -917,6 +918,7 @@ impl RuntimeConfig {
                 flash_attn_type: self.flash_attn_type as i32,
                 load_mode: self.load_mode,
                 disable_repack: false,
+                use_mmap: self.use_mmap,
                 filter_tensors_on_load: self.filter_tensors_on_load,
                 include_embeddings: self.include_embeddings,
                 include_output: self.include_output,
@@ -932,7 +934,7 @@ impl RuntimeConfig {
             .unwrap_or_else(|| default_n_batch_for_lane_count(self.lane_count));
         let n_ubatch = self.n_ubatch.unwrap_or(LLAMA_SERVER_DEFAULT_N_UBATCH);
         format!(
-            "stage_index={} layers={}..{} ctx={} lanes={} n_batch={} n_ubatch={} n_gpu_layers={} backend={} cache_k={} cache_v={} flash_attn={:?} load_mode={:?} include_embeddings={} include_output={} filter_tensors_on_load={}",
+            "stage_index={} layers={}..{} ctx={} lanes={} n_batch={} n_ubatch={} n_gpu_layers={} backend={} cache_k={} cache_v={} flash_attn={:?} load_mode={:?} use_mmap={} include_embeddings={} include_output={} filter_tensors_on_load={}",
             self.stage_index,
             self.layer_start,
             self.layer_end,
@@ -946,6 +948,7 @@ impl RuntimeConfig {
             self.cache_type_v,
             self.flash_attn_type,
             self.load_mode,
+            self.use_mmap,
             self.include_embeddings,
             self.include_output,
             self.filter_tensors_on_load,
@@ -985,6 +988,7 @@ impl Default for RuntimeConfig {
             flash_attn_type: FlashAttentionType::Auto,
             load_mode: LoadMode::RuntimeSlice,
             projector_path: None,
+            use_mmap: true,
             include_embeddings: true,
             include_output: true,
             filter_tensors_on_load: false,
@@ -4460,6 +4464,7 @@ mod tests {
             include_embeddings: true,
             include_output: true,
             filter_tensors_on_load: false,
+            use_mmap: true,
         };
         StageModel::open(model_path, &config)
     }

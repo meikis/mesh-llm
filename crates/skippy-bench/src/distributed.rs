@@ -398,6 +398,7 @@ fn run_distributed_collect(args: RunArgs) -> Result<DistributedRunOutcome> {
         "stage_downstream_wire_mbps": args.stage_downstream_wire_mbps,
         "stage_telemetry_queue_capacity": args.stage_telemetry_queue_capacity,
         "stage_telemetry_level": args.stage_telemetry_level,
+        "glm_dsa_op_timing": args.glm_dsa_op_timing,
         "stages": plan
             .stages
             .iter()
@@ -1445,6 +1446,11 @@ fn stage_server_command(
     bin: &str,
     config_path: &str,
 ) -> String {
+    let env_prefix = if args.glm_dsa_op_timing {
+        "SKIPPY_GLM_DSA_OP_TIMING=1 "
+    } else {
+        ""
+    };
     let reply_credit_arg = args
         .stage_reply_credit_limit
         .map(|limit| format!(" --reply-credit-limit {limit}"))
@@ -1459,7 +1465,8 @@ fn stage_server_command(
         .map(|mbps| format!(" --downstream-wire-mbps {mbps}"))
         .unwrap_or_default();
     format!(
-        "{} serve-binary --config {} --topology {} --activation-width {} --activation-wire-dtype {} --metrics-otlp-grpc {} --telemetry-queue-capacity {} --telemetry-level {} --max-inflight {}{}{} --downstream-wire-delay-ms {}{}",
+        "{}{} serve-binary --config {} --topology {} --activation-width {} --activation-wire-dtype {} --metrics-otlp-grpc {} --telemetry-queue-capacity {} --telemetry-level {} --max-inflight {}{}{} --downstream-wire-delay-ms {}{}",
+        env_prefix,
         shell_quote(bin),
         shell_quote(config_path),
         shell_quote(
@@ -2842,6 +2849,7 @@ mod tests {
             stage_downstream_wire_mbps: None,
             stage_telemetry_queue_capacity: 8192,
             stage_telemetry_level: "summary".to_string(),
+            glm_dsa_op_timing: false,
         };
 
         assert_eq!(
@@ -3277,7 +3285,7 @@ mod tests {
 
     #[test]
     fn remote_start_command_records_exit_code() {
-        let args = RunArgs {
+        let mut args = RunArgs {
             metrics_server_bin: PathBuf::from("metrics-server"),
             stage_server_bin: PathBuf::from("skippy-server"),
             hosts: "host.local".to_string(),
@@ -3327,6 +3335,7 @@ mod tests {
             stage_downstream_wire_mbps: Some(1000.0),
             stage_telemetry_queue_capacity: 8192,
             stage_telemetry_level: "summary".to_string(),
+            glm_dsa_op_timing: false,
         };
         let plan = DeploymentPlan {
             run_id: "run-1".to_string(),
@@ -3386,6 +3395,16 @@ mod tests {
         assert!(command.contains("--downstream-wire-mbps 1000"));
         assert!(command.contains("--telemetry-level"));
         assert!(command.contains("summary"));
+        assert!(!command.contains("SKIPPY_GLM_DSA_OP_TIMING=1"));
+
+        args.glm_dsa_op_timing = true;
+        let command = remote_start_command(
+            &args,
+            &plan,
+            &stage,
+            "/tmp/remote/run-1/stage-0/skippy-server",
+        );
+        assert!(command.contains("SKIPPY_GLM_DSA_OP_TIMING=1"));
     }
 
     fn test_run_args() -> RunArgs {
@@ -3439,6 +3458,7 @@ mod tests {
             stage_downstream_wire_mbps: None,
             stage_telemetry_queue_capacity: 8192,
             stage_telemetry_level: "summary".to_string(),
+            glm_dsa_op_timing: false,
         }
     }
 

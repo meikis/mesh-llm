@@ -335,6 +335,12 @@ pub struct RunArgs {
         help = "Stage telemetry volume: off, summary, or debug. Perf runs should use summary."
     )]
     pub stage_telemetry_level: String,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Enable llama.cpp GLM-DSA op/group timing logs in every launched stage."
+    )]
+    pub glm_dsa_op_timing: bool,
 }
 
 #[derive(Parser)]

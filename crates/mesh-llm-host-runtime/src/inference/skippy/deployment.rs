@@ -104,6 +104,7 @@ pub(crate) fn stage0_config(
         flash_attn_type: context.flash_attn_type,
         filter_tensors_on_load: true,
         use_mmap: true,
+        use_mmap_buffer: true,
         selected_device,
         kv_cache: None,
         load_mode: LoadMode::LayerPackage,

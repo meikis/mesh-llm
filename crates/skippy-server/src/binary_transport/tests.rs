@@ -1,6 +1,7 @@
 use super::{
     binary_full_prefill_record_identities, decode_record_tokens_sideband,
-    is_decode_frame_batch_candidate, native_mtp_enabled_from, prepare_binary_stage_connection,
+    initial_message_closes_without_downstream, is_decode_frame_batch_candidate,
+    native_mtp_enabled_from, prepare_binary_stage_connection,
     restore_prefill_decode_as_decode_message, token_sideband_or_fill,
 };
 use std::{
@@ -51,6 +52,15 @@ fn accepted_binary_stage_connection_is_blocking() {
     assert_ne!(flags, -1);
     assert_eq!(flags & libc::O_NONBLOCK, 0);
     drop(client.join().unwrap());
+}
+
+#[test]
+fn initial_stop_probe_does_not_require_downstream() {
+    let stop = StageWireMessage::stop(WireActivationDType::F16);
+    let decode = test_message(WireMessageKind::DecodeEmbd, 1);
+
+    assert!(initial_message_closes_without_downstream(&stop));
+    assert!(!initial_message_closes_without_downstream(&decode));
 }
 
 #[test]
@@ -220,6 +230,7 @@ fn prefix_cache_test_config() -> StageConfig {
         flash_attn_type: Default::default(),
         filter_tensors_on_load: false,
         use_mmap: true,
+        use_mmap_buffer: true,
         selected_device: None,
         kv_cache: Some(StageKvCacheConfig {
             mode: StageKvCacheMode::LookupRecord,

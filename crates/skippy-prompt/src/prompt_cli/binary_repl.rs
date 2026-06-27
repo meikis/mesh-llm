@@ -14,12 +14,23 @@ pub fn binary_repl(args: BinaryReplArgs) -> Result<()> {
     let tokenizer_path = materialized_tokenizer
         .as_deref()
         .unwrap_or(requested_tokenizer_path);
+    let tokenizer_layer_start = tokenizer_layer_start(&args, materialized_tokenizer.is_some());
+    let tokenizer_layer_end = tokenizer_layer_end(&args, materialized_tokenizer.is_some());
+    let tokenizer_load_mode = tokenizer_load_mode(&args, materialized_tokenizer.is_some());
+    eprintln!(
+        "opening tokenizer model: {} load_mode={:?} layers={}..{} include_embeddings=true include_output=false filter_tensors_on_load=true n_gpu_layers={}",
+        tokenizer_path.display(),
+        tokenizer_load_mode,
+        tokenizer_layer_start,
+        tokenizer_layer_end,
+        args.tokenizer_n_gpu_layers
+    );
     let tokenizer = StageModel::open(
         tokenizer_path,
         &RuntimeConfig {
             stage_index: 0,
-            layer_start: tokenizer_layer_start(&args, materialized_tokenizer.is_some()),
-            layer_end: tokenizer_layer_end(&args, materialized_tokenizer.is_some()),
+            layer_start: tokenizer_layer_start,
+            layer_end: tokenizer_layer_end,
             ctx_size: args.ctx_size,
             lane_count: 1,
             n_batch: None,
@@ -31,12 +42,14 @@ pub fn binary_repl(args: BinaryReplArgs) -> Result<()> {
             cache_type_k: GGML_TYPE_F16,
             cache_type_v: GGML_TYPE_F16,
             flash_attn_type: skippy_runtime::FlashAttentionType::Auto,
-            load_mode: tokenizer_load_mode(&args, materialized_tokenizer.is_some()),
+            load_mode: tokenizer_load_mode,
             projector_path: None,
             include_embeddings: true,
             include_output: false,
             filter_tensors_on_load: true,
             use_mmap: true,
+            use_mmap_prefetch: true,
+            use_mmap_buffer: true,
         },
     )
     .with_context(|| format!("open tokenizer model {}", tokenizer_path.display()))?;
@@ -81,7 +94,9 @@ pub fn binary_repl(args: BinaryReplArgs) -> Result<()> {
                 include_embeddings: true,
                 include_output: false,
                 filter_tensors_on_load: true,
-            use_mmap: true,
+                use_mmap: true,
+                use_mmap_prefetch: true,
+                use_mmap_buffer: true,
             },
         )
         .with_context(|| format!("open chat template model {}", args.model_path.display()))?;
@@ -337,7 +352,7 @@ fn materialize_tokenizer_package_if_needed(
         layer_start: 0,
         layer_end: 1,
         include_embeddings: true,
-        include_output: true,
+        include_output: false,
     })?;
     Ok(Some(tokenizer_gguf))
 }

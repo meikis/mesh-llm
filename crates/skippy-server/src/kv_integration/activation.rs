@@ -119,6 +119,7 @@ mod tests {
             flash_attn_type: Default::default(),
             filter_tensors_on_load: false,
             use_mmap: true,
+            use_mmap_buffer: true,
             selected_device: None,
             kv_cache: Some(StageKvCacheConfig {
                 mode: StageKvCacheMode::LookupRecord,

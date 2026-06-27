@@ -114,6 +114,7 @@ impl StageOpenAiBackend {
                 downstream_wire_condition,
                 prefill_reply_credit_limit,
                 lane_pool,
+                prediction_returns,
             } => self.generate_embedded_stage_zero_tokens(
                 EmbeddedStageZeroGeneration {
                     config: &config,
@@ -123,7 +124,16 @@ impl StageOpenAiBackend {
                     downstream_wire_condition,
                     prefill_reply_credit_limit,
                     lane_pool,
+                    prediction_return: prediction_returns
+                        .as_ref()
+                        .map(|hub| hub.register(ids.request_id, ids.session_id))
+                        .transpose()
+                        .map_err(openai_backend_error)?,
                     draft: self.draft.clone(),
+                    spd: self.spd.clone(),
+                    spd_optimistic_decode: self.spd_optimistic_decode,
+                    spd_rolling_executor: self.spd_rolling_executor,
+                    spd_optimistic_min_logit_margin: self.spd_optimistic_min_logit_margin,
                     speculative_window: self.speculative_window,
                     adaptive_speculative_window: self.adaptive_speculative_window,
                     prompt_token_ids: &prompt_token_ids,
@@ -206,11 +216,17 @@ impl StageOpenAiBackend {
                 activation_width,
                 downstream_wire_condition,
                 lane_pool,
+                prediction_returns,
                 ..
             } if config.downstream.is_some() => {
                 let lane_pool = lane_pool.ok_or_else(|| {
                     OpenAiError::backend("embedded stage 0 has no downstream lane pool")
                 })?;
+                let prediction_return = prediction_returns
+                    .as_ref()
+                    .map(|hub| hub.register(ids.request_id, ids.session_id))
+                    .transpose()
+                    .map_err(openai_backend_error)?;
                 return self.generate_split_multimodal_text(
                     SplitMultimodalGeneration {
                         prompt,
@@ -224,6 +240,7 @@ impl StageOpenAiBackend {
                         activation_width,
                         downstream_wire_condition,
                         lane_pool,
+                        prediction_return,
                     },
                     on_text_chunk,
                 );

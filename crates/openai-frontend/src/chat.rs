@@ -174,6 +174,8 @@ pub struct ChatCompletionResponse {
     pub model: String,
     pub choices: Vec<ChatCompletionChoice>,
     pub usage: Usage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skippy: Option<Value>,
 }
 
 impl ChatCompletionResponse {
@@ -204,6 +206,7 @@ impl ChatCompletionResponse {
                 finish_reason: Some(finish_reason),
             }],
             usage,
+            skippy: None,
         }
     }
 }

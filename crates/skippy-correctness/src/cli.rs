@@ -308,6 +308,10 @@ pub struct GlmDsaStage0TraceArgs {
         help = "Allow fused/direct traced tensor digest mismatches. By default, matching trace points must be byte-identical."
     )]
     pub allow_trace_mismatch: bool,
+    #[arg(long, default_value_t = 2e-4)]
+    pub activation_atol: f32,
+    #[arg(long, default_value_t = 5e-4)]
+    pub activation_relative_rmse_tolerance: f64,
     #[arg(long)]
     pub case_root: Option<PathBuf>,
 }

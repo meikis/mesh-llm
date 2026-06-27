@@ -247,6 +247,7 @@ mod tests {
             flash_attn_type: FlashAttentionType::Auto,
             filter_tensors_on_load: true,
             use_mmap: true,
+            use_mmap_buffer: true,
             selected_device: None::<StageDevice>,
             kv_cache: None::<StageKvCacheConfig>,
             load_mode: LoadMode::RuntimeSlice,

@@ -54,6 +54,10 @@ pub(crate) fn connect_downstream_socket(
         connect_route_selected_with_timeout(downstream_addr, source_ip, timeout)
     );
     try_connect!(
+        "plain-route",
+        connect_plain_with_timeout(downstream_addr, timeout)
+    );
+    try_connect!(
         "bound-interface",
         connect_bound_with_timeout(downstream_addr, source_ip, timeout, true)
     );
@@ -69,8 +73,47 @@ pub(crate) fn connect_downstream_socket(
         "blocking-route-selected",
         connect_route_selected_blocking_with_timeout(downstream_addr, source_ip, timeout)
     );
+    try_connect!(
+        "blocking-plain-route",
+        connect_plain_blocking_with_timeout(downstream_addr, timeout)
+    );
 
     Err(io::Error::other(errors.join("; ")))
+}
+
+pub(super) fn connect_plain_with_timeout(
+    downstream_addr: SocketAddr,
+    timeout: Duration,
+) -> io::Result<TcpStream> {
+    let stream = TcpStream::connect_timeout(&downstream_addr, timeout)?;
+    let local_addr = stream.local_addr().ok();
+    eprintln!(
+        "downstream connect retry succeeded: mode=plain-route local={local_addr:?} remote={downstream_addr}"
+    );
+    Ok(stream)
+}
+
+pub(super) fn connect_plain_blocking_with_timeout(
+    downstream_addr: SocketAddr,
+    timeout: Duration,
+) -> io::Result<TcpStream> {
+    let (tx, rx) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let result = TcpStream::connect(downstream_addr);
+        if let Ok(stream) = result.as_ref() {
+            let local_addr = stream.local_addr().ok();
+            eprintln!(
+                "downstream connect retry succeeded: mode=blocking-plain-route local={local_addr:?} remote={downstream_addr}"
+            );
+        }
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(timeout).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "blocking plain-route fallback connect timed out",
+        )
+    })?
 }
 
 pub(super) fn connect_route_selected_with_timeout(
@@ -279,5 +322,26 @@ pub(super) fn sockaddr_ip(addr: *const libc::sockaddr) -> Option<IpAddr> {
             Some(IpAddr::V6(addr.sin6_addr.s6_addr.into()))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn plain_route_connect_reaches_listener_without_source_validation() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+
+        let client = connect_plain_with_timeout(listener_addr, Duration::from_secs(2)).unwrap();
+        let (server, peer_addr) = listener.accept().unwrap();
+
+        assert_eq!(client.peer_addr().unwrap(), listener_addr);
+        assert_eq!(server.peer_addr().unwrap(), client.local_addr().unwrap());
+        assert_eq!(peer_addr, client.local_addr().unwrap());
     }
 }

@@ -64,6 +64,8 @@ pub enum WireMessageKind {
     TryRestorePrefillDecode = 18,
     TrimSession = 19,
     PredictionReturnOpen = 20,
+    CopySession = 21,
+    DropSession = 22,
 }
 
 impl WireMessageKind {
@@ -94,7 +96,11 @@ impl WireMessageKind {
     pub fn is_session_control(self) -> bool {
         matches!(
             self,
-            Self::CheckpointSession | Self::RestoreSession | Self::TrimSession
+            Self::CheckpointSession
+                | Self::RestoreSession
+                | Self::TrimSession
+                | Self::CopySession
+                | Self::DropSession
         )
     }
 
@@ -145,6 +151,8 @@ impl TryFrom<i32> for WireMessageKind {
             18 => Ok(Self::TryRestorePrefillDecode),
             19 => Ok(Self::TrimSession),
             20 => Ok(Self::PredictionReturnOpen),
+            21 => Ok(Self::CopySession),
+            22 => Ok(Self::DropSession),
             _ => Err(invalid_data("unknown stage message kind")),
         }
     }
@@ -156,6 +164,7 @@ pub enum WireReplyKind {
     Ack = 1,
     PredictedToken = 2,
     PredictedTokens = 3,
+    SpdTap = 4,
 }
 
 impl TryFrom<i32> for WireReplyKind {
@@ -166,6 +175,7 @@ impl TryFrom<i32> for WireReplyKind {
             1 => Ok(Self::Ack),
             2 => Ok(Self::PredictedToken),
             3 => Ok(Self::PredictedTokens),
+            4 => Ok(Self::SpdTap),
             _ => Err(invalid_data("unknown stage reply kind")),
         }
     }
@@ -189,11 +199,15 @@ pub mod state_flags {
     pub const CHAT_SAMPLING_METADATA: i32 = 1 << 5;
     pub const RWKV7_V_FIRST_SIDEBAND: i32 = 1 << 6;
     pub const GEMMA3N_ALTUP_SIDEBAND: i32 = 1 << 7;
+    pub const SPD_TAP_RETURN: i32 = 1 << 8;
+    pub const PREDICTION_RETURN_ORIGIN: i32 = 1 << 9;
+    pub const EXECUTION_SESSION: i32 = 1 << 10;
     pub const GLM_DSA_TOP_K_SIDEBAND: i32 = 1 << 11;
 }
 
 pub const ACTIVATION_FLAG_RWKV7_V_FIRST: u64 = 1 << 0;
 pub const ACTIVATION_FLAG_GEMMA3N_ALTUP: u64 = 1 << 1;
+pub const ACTIVATION_FLAG_FINAL_NORMED: u64 = 1 << 2;
 pub const ACTIVATION_FLAG_GLM_DSA_TOP_K: u64 = 1 << 3;
 
 pub fn activation_frame_flags_from_state_flags(flags: i32) -> u64 {
@@ -553,7 +567,23 @@ pub struct StageReply {
     pub kind: WireReplyKind,
     pub predicted: i32,
     pub predicted_tokens: Vec<i32>,
+    pub spd_tap: Option<StageReplySpdTap>,
     pub stats: StageReplyStats,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageReplySpdTap {
+    pub hf_index: u32,
+    pub producer_stage_index: i32,
+    pub layer_start: i32,
+    pub layer_end: i32,
+    pub token_count: u32,
+    pub sequence_count: u32,
+    pub dtype: i32,
+    pub layout: i32,
+    pub flags: u64,
+    pub positions: Vec<i32>,
+    pub payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

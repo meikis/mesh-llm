@@ -8,7 +8,7 @@ mod dynamic {
         HostRuntimeProfile, NativeRuntimeArtifact, NativeRuntimeCache, NativeRuntimeLoadPlan,
         NativeRuntimeReleaseManifest, RuntimeSelection, select_native_runtime,
     };
-    use std::path::PathBuf;
+    use std::{any::Any, path::PathBuf};
 
     #[derive(Clone, Debug)]
     pub(crate) struct LoadedNativeRuntime {
@@ -257,6 +257,31 @@ mod dynamic {
     }
 
     fn default_install_executor(
+        options: NativeRuntimeInstallOptions,
+    ) -> Result<NativeRuntimeInstallOutcome> {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return std::thread::Builder::new()
+                .name("native-runtime-install".to_string())
+                .spawn(move || run_native_runtime_install(options))
+                .context("spawn native runtime startup install executor")?
+                .join()
+                .map_err(native_runtime_install_panic_error)?;
+        }
+
+        run_native_runtime_install(options)
+    }
+
+    fn native_runtime_install_panic_error(panic: Box<dyn Any + Send>) -> anyhow::Error {
+        if let Some(message) = panic.downcast_ref::<&str>() {
+            anyhow::anyhow!("native runtime startup install panicked: {message}")
+        } else if let Some(message) = panic.downcast_ref::<String>() {
+            anyhow::anyhow!("native runtime startup install panicked: {message}")
+        } else {
+            anyhow::anyhow!("native runtime startup install panicked")
+        }
+    }
+
+    fn run_native_runtime_install(
         options: NativeRuntimeInstallOptions,
     ) -> Result<NativeRuntimeInstallOutcome> {
         tokio::runtime::Builder::new_current_thread()

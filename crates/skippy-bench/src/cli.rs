@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, path::PathBuf};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 
 pub const DEFAULT_LOCAL_MODEL_ID: &str = "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M";
 pub const DEFAULT_RUN_MAX_NEW_TOKENS: usize = 1;
@@ -28,6 +28,8 @@ pub enum CommandKind {
     TokenLengths(TokenLengthsArgs),
     #[command(name = "focused-runtime")]
     FocusedRuntime(FocusedRuntimeArgs),
+    #[command(name = "drive-existing")]
+    DriveExisting(DriveExistingArgs),
     #[command(name = "glm-dsa-op-report")]
     GlmDsaOpReport(GlmDsaOpReportArgs),
     #[command(name = "glm-dsa-op-compare")]
@@ -92,6 +94,77 @@ pub struct TokenLengthsArgs {
     pub output_tsv: PathBuf,
     #[arg(long)]
     pub summary_json: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+pub struct DriveExistingArgs {
+    #[arg(
+        long,
+        help = "Existing skippy-bench run directory containing deployment-plan.json."
+    )]
+    pub run_dir: PathBuf,
+    #[arg(
+        long,
+        help = "Full GGUF model path for prompt tokenization. If omitted with --stage-load-mode layer-package, --stage-model must point at the local layer package."
+    )]
+    pub model_path: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Layer-package directory used for tokenizer metadata when --model-path is omitted."
+    )]
+    pub stage_model: Option<PathBuf>,
+    #[arg(long, default_value = "layer-package")]
+    pub stage_load_mode: String,
+    #[arg(long, default_value_t = 131072)]
+    pub ctx_size: u32,
+    #[arg(long, default_value_t = -1, allow_hyphen_values = true)]
+    pub n_gpu_layers: i32,
+    #[arg(long, default_value = "f16")]
+    pub activation_wire_dtype: String,
+    #[arg(long, default_value = "Hello")]
+    pub prompt: String,
+    #[arg(long)]
+    pub prompt_corpus: Option<PathBuf>,
+    #[arg(long)]
+    pub prompt_limit: Option<usize>,
+    #[arg(long)]
+    pub prompt_token_ids: Option<String>,
+    #[arg(long, help = "Maximum generated tokens per prompt. Defaults to 1.")]
+    pub max_new_tokens: Option<usize>,
+    #[arg(long)]
+    pub prefill_chunk_size: Option<usize>,
+    #[arg(long)]
+    pub prefill_chunk_threshold: Option<usize>,
+    #[arg(long)]
+    pub prefill_chunk_schedule: Option<String>,
+    #[arg(long, default_value_t = 60)]
+    pub startup_timeout_secs: u64,
+    #[arg(
+        long,
+        default_value_t = true,
+        action = ArgAction::Set,
+        help = "Before driving prompts, verify all stages still answer binary readiness probes."
+    )]
+    pub check_stage_readiness: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Probe each upstream->downstream stage link before driving prompts."
+    )]
+    pub stage_connectivity_probe: bool,
+    #[arg(long, default_value_t = 180)]
+    pub stage_connectivity_probe_attempts: u32,
+    #[arg(long, default_value_t = 2)]
+    pub stage_connectivity_probe_timeout_secs: u64,
+    #[arg(long, default_value_t = 1000)]
+    pub stage_connectivity_probe_retry_delay_ms: u64,
+    #[arg(long, default_value_t = false)]
+    pub stage_connectivity_diagnostics: bool,
+    #[arg(
+        long,
+        help = "Driver result output. Defaults to <run-dir>/driver-result-reuse.json."
+    )]
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -344,15 +417,63 @@ pub struct RunArgs {
     #[arg(
         long,
         default_value_t = false,
+        help = "Disable mmap-backed backend buffers in generated stage configs. Useful when large materialized Metal stages stall in residency registration."
+    )]
+    pub stage_disable_mmap_buffer: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "After all binary stages are listening, probe every upstream->downstream stage link with skippy-server probe-downstream before running prompts."
+    )]
+    pub stage_connectivity_probe: bool,
+    #[arg(
+        long,
+        default_value_t = 180,
+        help = "Number of skippy-server probe-downstream attempts for each upstream->downstream stage link."
+    )]
+    pub stage_connectivity_probe_attempts: u32,
+    #[arg(
+        long,
+        default_value_t = 2,
+        help = "Per-attempt timeout in seconds for each stage connectivity probe."
+    )]
+    pub stage_connectivity_probe_timeout_secs: u64,
+    #[arg(
+        long,
+        default_value_t = 1000,
+        help = "Delay between failed stage connectivity probe attempts in milliseconds."
+    )]
+    pub stage_connectivity_probe_retry_delay_ms: u64,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "When a stage connectivity probe fails, append best-effort route, interface, ARP, and downstream listener diagnostics to the error."
+    )]
+    pub stage_connectivity_diagnostics: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "When a remote distributed run fails, leave launched stage processes alive for manual probing instead of cleaning them up."
+    )]
+    pub keep_remote_on_failure: bool,
+    #[arg(
+        long,
+        default_value_t = false,
         help = "Enable llama.cpp GLM-DSA op/group timing logs in every launched stage."
     )]
     pub glm_dsa_op_timing: bool,
     #[arg(
         long,
         default_value_t = false,
-        help = "Enable llama.cpp GLM-DSA direct sparse-attention execution in every launched stage."
+        help = "Enable llama.cpp GLM-DSA direct sparse-attention execution for decode-shaped microbatches in every launched stage."
     )]
     pub glm_dsa_direct_sparse_attn: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Also enable llama.cpp GLM-DSA direct sparse-attention execution for prefill microbatches. Use only for sparse-prefill experiments."
+    )]
+    pub glm_dsa_direct_sparse_prefill: bool,
 }
 
 #[derive(Parser)]
@@ -566,6 +687,40 @@ mod tests {
         };
 
         assert_eq!(args.run.max_new_tokens, None);
+    }
+
+    #[test]
+    fn parses_drive_existing_command() {
+        let cli = Cli::try_parse_from([
+            "skippy-bench",
+            "drive-existing",
+            "--run-dir",
+            "/tmp/skippy-runtime-bench/run-1",
+            "--stage-model",
+            "/models/package",
+            "--prompt",
+            "hello",
+            "--max-new-tokens",
+            "16",
+            "--stage-connectivity-probe",
+            "--stage-connectivity-probe-attempts",
+            "180",
+        ])
+        .unwrap();
+
+        let CommandKind::DriveExisting(args) = cli.command else {
+            panic!("expected drive-existing subcommand");
+        };
+
+        assert_eq!(
+            args.run_dir,
+            PathBuf::from("/tmp/skippy-runtime-bench/run-1")
+        );
+        assert_eq!(args.stage_model, Some(PathBuf::from("/models/package")));
+        assert_eq!(args.prompt, "hello");
+        assert_eq!(args.max_new_tokens, Some(16));
+        assert!(args.stage_connectivity_probe);
+        assert_eq!(args.stage_connectivity_probe_attempts, 180);
     }
 
     #[test]

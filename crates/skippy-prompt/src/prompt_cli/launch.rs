@@ -323,7 +323,7 @@ fn prompt_repl_launch(args: PromptArgs) -> Result<()> {
             layer_start: 0,
             layer_end: 1,
             include_embeddings: true,
-            include_output: true,
+            include_output: false,
         })
         .context("materialize tokenizer from layer package")?;
         Some(tokenizer_gguf)

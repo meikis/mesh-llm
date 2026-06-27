@@ -14,6 +14,8 @@ pub struct Cli {
 pub enum Command {
     Serve(ServeArgs),
     ServeBinary(ServeBinaryArgs),
+    #[command(name = "probe-downstream")]
+    ProbeDownstream(ProbeDownstreamArgs),
     #[command(name = "serve-openai")]
     ServeOpenAi(ServeOpenAiArgs),
     ExampleConfig,
@@ -122,15 +124,82 @@ pub struct ServeBinaryArgs {
         help = "Draft GGUF to use for speculative decoding in the embedded stage-0 OpenAI surface."
     )]
     pub openai_draft_model_path: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Experimental SPD head manifest to use as the embedded stage-0 speculative proposal source."
+    )]
+    pub openai_spd_manifest: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Optional experimental SPD parity fixture exported for the same head. When omitted, serving derives row metadata from the manifest and final norm weights from the full GGUF."
+    )]
+    pub openai_spd_fixture: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Full GGUF to replay live SPD taps from. Defaults to source_model_path, then model_path, from the stage config."
+    )]
+    pub openai_spd_model_path: Option<PathBuf>,
+    #[arg(long, default_value_t = 1)]
+    pub openai_spd_top_k: usize,
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        help = "Override n_gpu_layers for experimental SPD replay tap models. Defaults to the stage config n_gpu_layers."
+    )]
+    pub openai_spd_n_gpu_layers: Option<i32>,
+    #[arg(
+        long,
+        help = "Allow the experimental SPD source to run slow local full-context tap replay when inline taps are incomplete."
+    )]
+    pub openai_spd_replay_fallback: bool,
+    #[arg(
+        long,
+        help = "Experimentally start one target decode from an inline SPD proposal before the current target reply arrives. Only used for deterministic sampling."
+    )]
+    pub openai_spd_optimistic_decode: bool,
+    #[arg(
+        long,
+        help = "Route deterministic SPD optimistic work through the native rolling-executor scheduler. Requires --openai-spd-optimistic-decode."
+    )]
+    pub openai_spd_rolling_executor: bool,
+    #[arg(
+        long,
+        help = "Only start optimistic SPD target decode when the inline top-1/top-2 logit margin is at least this value. Requires --openai-spd-top-k >= 2 to produce margins."
+    )]
+    pub openai_spd_optimistic_min_logit_margin: Option<f32>,
     #[arg(long, default_value_t = 4)]
     pub openai_speculative_window: usize,
     #[arg(long)]
     pub openai_adaptive_speculative_window: bool,
     #[arg(
         long,
+        allow_hyphen_values = true,
         help = "Override n_gpu_layers for the embedded OpenAI draft model. Defaults to the stage config n_gpu_layers."
     )]
     pub openai_draft_n_gpu_layers: Option<i32>,
+}
+
+#[derive(Parser)]
+pub struct ProbeDownstreamArgs {
+    #[arg(long)]
+    pub bind_addr: SocketAddr,
+    #[arg(long)]
+    pub endpoint: String,
+    #[arg(long, default_value_t = 5)]
+    pub attempts: u32,
+    #[arg(long, default_value_t = 2)]
+    pub timeout_secs: u64,
+    #[arg(
+        long,
+        default_value_t = 500,
+        help = "Delay between failed probe attempts in milliseconds."
+    )]
+    pub retry_delay_ms: u64,
+    #[arg(
+        long,
+        help = "Print one route/interface snapshot before the probe. Useful for lab diagnostics."
+    )]
+    pub route_snapshot: bool,
 }
 
 #[derive(Parser)]
@@ -224,5 +293,93 @@ mod tests {
         assert_eq!(args.prefill_adaptive_start, 128);
         assert_eq!(args.prefill_adaptive_step, 128);
         assert_eq!(args.prefill_adaptive_max, 384);
+    }
+
+    #[test]
+    fn probe_downstream_parses_endpoint_and_bind_addr() {
+        let cli = Cli::try_parse_from([
+            "skippy-server",
+            "probe-downstream",
+            "--bind-addr",
+            "192.168.0.10:19131",
+            "--endpoint",
+            "tcp://192.168.0.5:19132",
+            "--attempts",
+            "3",
+            "--timeout-secs",
+            "4",
+            "--retry-delay-ms",
+            "250",
+            "--route-snapshot",
+        ])
+        .unwrap();
+
+        let Command::ProbeDownstream(args) = cli.command else {
+            panic!("expected probe-downstream command");
+        };
+        assert_eq!(args.bind_addr, "192.168.0.10:19131".parse().unwrap());
+        assert_eq!(args.endpoint, "tcp://192.168.0.5:19132");
+        assert_eq!(args.attempts, 3);
+        assert_eq!(args.timeout_secs, 4);
+        assert_eq!(args.retry_delay_ms, 250);
+        assert!(args.route_snapshot);
+    }
+
+    #[test]
+    fn serve_binary_parses_experimental_spd_options() {
+        let cli = Cli::try_parse_from([
+            "skippy-server",
+            "serve-binary",
+            "--config",
+            "stage.json",
+            "--topology",
+            "topology.json",
+            "--activation-width",
+            "2560",
+            "--openai-bind-addr",
+            "127.0.0.1:9337",
+            "--openai-spd-manifest",
+            "skippy-spd-head.json",
+            "--openai-spd-fixture",
+            "spd-parity-fixture.safetensors",
+            "--openai-spd-model-path",
+            "model.gguf",
+            "--openai-spd-top-k",
+            "4",
+            "--openai-spd-n-gpu-layers",
+            "-1",
+            "--openai-spd-replay-fallback",
+            "--openai-spd-optimistic-decode",
+            "--openai-spd-rolling-executor",
+            "--openai-spd-optimistic-min-logit-margin",
+            "5.5",
+            "--openai-speculative-window",
+            "2",
+        ])
+        .unwrap();
+
+        let Command::ServeBinary(args) = cli.command else {
+            panic!("expected serve-binary command");
+        };
+
+        assert_eq!(
+            args.openai_spd_manifest,
+            Some(PathBuf::from("skippy-spd-head.json"))
+        );
+        assert_eq!(
+            args.openai_spd_fixture,
+            Some(PathBuf::from("spd-parity-fixture.safetensors"))
+        );
+        assert_eq!(
+            args.openai_spd_model_path,
+            Some(PathBuf::from("model.gguf"))
+        );
+        assert_eq!(args.openai_spd_top_k, 4);
+        assert_eq!(args.openai_spd_n_gpu_layers, Some(-1));
+        assert!(args.openai_spd_replay_fallback);
+        assert!(args.openai_spd_optimistic_decode);
+        assert!(args.openai_spd_rolling_executor);
+        assert_eq!(args.openai_spd_optimistic_min_logit_margin, Some(5.5));
+        assert_eq!(args.openai_speculative_window, 2);
     }
 }

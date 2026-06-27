@@ -21,7 +21,7 @@ use skippy_protocol::binary::{
 use skippy_protocol::{LoadMode, StageTopology, StageTopologyEntry};
 use skippy_runtime::{
     RuntimeConfig, RuntimeLoadMode, StageModel,
-    package::{PackageStageRequest, materialize_layer_package_details},
+    package::{PackageStageRequest, select_layer_package_parts},
     write_gguf_from_parts,
 };
 use skippy_topology::{
@@ -30,7 +30,10 @@ use skippy_topology::{
 };
 
 use crate::{
-    cli::{DEFAULT_RUN_MAX_NEW_TOKENS, FocusedRuntimeArgs, FocusedRuntimeScenario, RunArgs},
+    cli::{
+        DEFAULT_RUN_MAX_NEW_TOKENS, DriveExistingArgs, FocusedRuntimeArgs, FocusedRuntimeScenario,
+        RunArgs,
+    },
     model_identity::model_identity_for_path,
     support::{ChildGuard, parse_wire_dtype, retry},
 };
@@ -52,6 +55,18 @@ struct DistributedRunOutcome {
     driver_report: Option<PromptDriverReport>,
     startup_elapsed: Option<Duration>,
     run_elapsed: Duration,
+}
+
+#[derive(Debug, Serialize)]
+struct DriveExistingOutcome {
+    run_id: String,
+    topology_id: String,
+    model_id: String,
+    run_dir: PathBuf,
+    deployment_plan: PathBuf,
+    driver_result: PathBuf,
+    stage_statuses: Vec<RemoteStageStatus>,
+    driver_summary: PromptDriverSummary,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,7 +164,7 @@ struct FocusedRuntimeOutputs {
     remote_status: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct StageAssignment {
     stage_id: String,
     stage_index: u32,
@@ -170,7 +185,7 @@ struct StageAssignment {
     selected_package_files: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct DeploymentPlan {
     run_id: String,
     topology_id: String,
@@ -275,7 +290,6 @@ struct PromptCase {
 
 struct DriverTokenizer {
     model: StageModel,
-    _materialized_model_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -321,6 +335,50 @@ struct PackageLayer {
 pub fn run_distributed(args: RunArgs) -> Result<()> {
     let outcome = run_distributed_collect(args)?;
     print_distributed_run_outcome(&outcome)
+}
+
+pub fn drive_existing(args: DriveExistingArgs) -> Result<()> {
+    let outcome = drive_existing_collect(args)?;
+    println!("{}", serde_json::to_string_pretty(&outcome)?);
+    Ok(())
+}
+
+fn drive_existing_collect(args: DriveExistingArgs) -> Result<DriveExistingOutcome> {
+    let plan_path = args.run_dir.join("deployment-plan.json");
+    let plan = read_deployment_plan(&plan_path)?;
+    let run_args = run_args_for_existing_driver(&args, &plan)?;
+    let stage_statuses = plan
+        .stages
+        .iter()
+        .map(remote_stage_status)
+        .collect::<Vec<_>>();
+    if args.check_stage_readiness {
+        wait_remote_readiness(&run_args, &plan).with_context(|| {
+            format!(
+                "existing stages in {} did not become ready",
+                args.run_dir.display()
+            )
+        })?;
+    }
+    if args.stage_connectivity_probe {
+        probe_stage_chain_connectivity(&run_args, &plan)?;
+    }
+    let report = run_remote_prompt_driver(&run_args, &plan)?;
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| args.run_dir.join("driver-result-reuse.json"));
+    write_json_file(&output, &report)?;
+    Ok(DriveExistingOutcome {
+        run_id: plan.run_id.clone(),
+        topology_id: plan.topology_id.clone(),
+        model_id: plan.model_id.clone(),
+        run_dir: args.run_dir,
+        deployment_plan: plan_path,
+        driver_result: output,
+        stage_statuses,
+        driver_summary: report.summary,
+    })
 }
 
 fn run_distributed_collect(args: RunArgs) -> Result<DistributedRunOutcome> {
@@ -399,8 +457,16 @@ fn run_distributed_collect(args: RunArgs) -> Result<DistributedRunOutcome> {
         "stage_telemetry_queue_capacity": args.stage_telemetry_queue_capacity,
         "stage_telemetry_level": args.stage_telemetry_level,
         "allow_unbalanced_stages": args.allow_unbalanced_stages,
+        "stage_disable_mmap_buffer": args.stage_disable_mmap_buffer,
+        "stage_connectivity_probe": args.stage_connectivity_probe,
+        "stage_connectivity_probe_attempts": args.stage_connectivity_probe_attempts,
+        "stage_connectivity_probe_timeout_secs": args.stage_connectivity_probe_timeout_secs,
+        "stage_connectivity_probe_retry_delay_ms": args.stage_connectivity_probe_retry_delay_ms,
+        "stage_connectivity_diagnostics": args.stage_connectivity_diagnostics,
+        "keep_remote_on_failure": args.keep_remote_on_failure,
         "glm_dsa_op_timing": args.glm_dsa_op_timing,
         "glm_dsa_direct_sparse_attn": args.glm_dsa_direct_sparse_attn,
+        "glm_dsa_direct_sparse_prefill": args.glm_dsa_direct_sparse_prefill,
         "stages": plan
             .stages
             .iter()
@@ -446,6 +512,9 @@ fn run_distributed_collect(args: RunArgs) -> Result<DistributedRunOutcome> {
         if args.execute_remote {
             remote_sessions = execute_remote_plan(&args, &plan)?;
             wait_remote_readiness(&args, &plan)?;
+            if args.stage_connectivity_probe {
+                probe_stage_chain_connectivity(&args, &plan)?;
+            }
             protocol_ready = true;
             startup_elapsed = Some(run_started.elapsed());
             let result = run_remote_prompt_driver(&args, &plan)?;
@@ -481,12 +550,14 @@ fn run_distributed_collect(args: RunArgs) -> Result<DistributedRunOutcome> {
 
     let mut remote_status_path = None;
     if args.execute_remote {
-        let cleanup_statuses = collect_and_cleanup_remote(&args, &plan, &run_dir, protocol_ready)
-            .context("collect remote logs and cleanup")?;
+        let keep_remote = args.keep_remote || (args.keep_remote_on_failure && run_result.is_err());
+        let cleanup_statuses =
+            collect_and_cleanup_remote(&plan, &run_dir, protocol_ready, keep_remote)
+                .context("collect remote logs and cleanup")?;
         let path = run_dir.join("remote-status.json");
         write_json_file(&path, &cleanup_statuses)?;
         remote_status_path = Some(path);
-        if args.keep_remote {
+        if keep_remote {
             for session in remote_sessions.drain(..) {
                 session.keep_alive();
             }
@@ -604,6 +675,109 @@ fn apply_focused_runtime_preset(mut args: FocusedRuntimeArgs) -> FocusedRuntimeA
 
 fn effective_run_max_new_tokens(args: &RunArgs) -> usize {
     args.max_new_tokens.unwrap_or(DEFAULT_RUN_MAX_NEW_TOKENS)
+}
+
+fn read_deployment_plan(path: &Path) -> Result<DeploymentPlan> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("read deployment plan {}", path.display()))?;
+    serde_json::from_str(&text).with_context(|| format!("parse deployment plan {}", path.display()))
+}
+
+fn run_args_for_existing_driver(
+    args: &DriveExistingArgs,
+    plan: &DeploymentPlan,
+) -> Result<RunArgs> {
+    let first = plan
+        .stages
+        .first()
+        .context("deployment plan has no stages")?;
+    let last = plan
+        .stages
+        .last()
+        .context("deployment plan has no stages")?;
+    Ok(RunArgs {
+        metrics_server_bin: PathBuf::from("target/debug/metrics-server"),
+        stage_server_bin: PathBuf::from("target/debug/skippy-server"),
+        hosts: plan.hosts.join(","),
+        run_id: Some(plan.run_id.clone()),
+        topology_id: plan.topology_id.clone(),
+        model_id: plan.model_id.clone(),
+        model_path: args.model_path.clone(),
+        stage_model: args.stage_model.clone(),
+        stage_load_mode: args.stage_load_mode.clone(),
+        splits: existing_plan_splits(plan),
+        layer_end: last.layer_end,
+        ctx_size: args.ctx_size,
+        n_gpu_layers: args.n_gpu_layers,
+        cache_type_k: "f16".to_string(),
+        cache_type_v: "f16".to_string(),
+        activation_width: 2048,
+        activation_wire_dtype: args.activation_wire_dtype.clone(),
+        prompt: args.prompt.clone(),
+        prompt_corpus: args.prompt_corpus.clone(),
+        prompt_limit: args.prompt_limit,
+        prompt_token_ids: args.prompt_token_ids.clone(),
+        max_new_tokens: args.max_new_tokens,
+        prefill_chunk_size: args.prefill_chunk_size,
+        prefill_chunk_threshold: args.prefill_chunk_threshold,
+        prefill_chunk_schedule: args.prefill_chunk_schedule.clone(),
+        metrics_http_addr: "127.0.0.1:18080"
+            .parse()
+            .context("parse default metrics HTTP addr")?,
+        metrics_otlp_grpc_addr: "127.0.0.1:14317"
+            .parse()
+            .context("parse default metrics OTLP addr")?,
+        metrics_otlp_grpc_url: None,
+        db: None,
+        output: None,
+        work_dir: args
+            .run_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        remote_root: plan.remote_root.clone(),
+        remote_root_map: None,
+        remote_shared_root_map: None,
+        endpoint_host_map: None,
+        remote_bind_host: "0.0.0.0".to_string(),
+        first_stage_port: first
+            .bind_addr
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.parse().ok())
+            .unwrap_or(19031),
+        execute_remote: true,
+        keep_remote: true,
+        rsync_model_artifacts: false,
+        child_logs: false,
+        startup_timeout_secs: args.startup_timeout_secs,
+        stage_max_inflight: 4,
+        stage_reply_credit_limit: None,
+        stage_async_prefill_forward: false,
+        stage_downstream_wire_delay_ms: 0.0,
+        stage_downstream_wire_mbps: None,
+        stage_telemetry_queue_capacity: 8192,
+        stage_telemetry_level: "summary".to_string(),
+        allow_unbalanced_stages: true,
+        stage_disable_mmap_buffer: false,
+        stage_connectivity_probe: args.stage_connectivity_probe,
+        stage_connectivity_probe_attempts: args.stage_connectivity_probe_attempts,
+        stage_connectivity_probe_timeout_secs: args.stage_connectivity_probe_timeout_secs,
+        stage_connectivity_probe_retry_delay_ms: args.stage_connectivity_probe_retry_delay_ms,
+        stage_connectivity_diagnostics: args.stage_connectivity_diagnostics,
+        keep_remote_on_failure: false,
+        glm_dsa_op_timing: false,
+        glm_dsa_direct_sparse_attn: false,
+        glm_dsa_direct_sparse_prefill: false,
+    })
+}
+
+fn existing_plan_splits(plan: &DeploymentPlan) -> String {
+    plan.stages
+        .iter()
+        .skip(1)
+        .map(|stage| stage.layer_start.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn validate_focused_runtime_topology(run: &RunArgs) -> Result<()> {
@@ -1160,6 +1334,7 @@ fn write_stage_configs(args: &RunArgs, plan: &DeploymentPlan, model_ref: &str) -
             "cache_type_k": args.cache_type_k,
             "cache_type_v": args.cache_type_v,
             "filter_tensors_on_load": config_load_mode != "runtime-slice",
+            "use_mmap_buffer": !args.stage_disable_mmap_buffer,
             "load_mode": config_load_mode,
             "bind_addr": stage.bind_addr,
             "upstream": upstream,
@@ -1491,10 +1666,222 @@ fn stage_server_env_prefix(args: &RunArgs) -> String {
     if args.glm_dsa_direct_sparse_attn {
         env.push("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_ATTN=1");
     }
+    if args.glm_dsa_direct_sparse_prefill {
+        env.push("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_PREFILL=1");
+    }
     if env.is_empty() {
         String::new()
     } else {
         format!("{} ", env.join(" "))
+    }
+}
+
+fn probe_stage_chain_connectivity(args: &RunArgs, plan: &DeploymentPlan) -> Result<()> {
+    for pair in plan.stages.windows(2) {
+        let upstream = &pair[0];
+        let downstream = &pair[1];
+        let output = if upstream.local {
+            probe_local_stage_connectivity(args, upstream, downstream)?
+        } else {
+            probe_remote_stage_connectivity(args, upstream, downstream)?
+        };
+        eprintln!(
+            "stage connectivity probe succeeded: {} -> {}\n{}",
+            upstream.stage_id,
+            downstream.stage_id,
+            output.trim_end()
+        );
+    }
+    Ok(())
+}
+
+fn probe_local_stage_connectivity(
+    args: &RunArgs,
+    upstream: &StageAssignment,
+    downstream: &StageAssignment,
+) -> Result<String> {
+    let output = Command::new(&args.stage_server_bin)
+        .args([
+            "probe-downstream",
+            "--bind-addr",
+            &upstream.bind_addr,
+            "--endpoint",
+            &downstream.endpoint,
+            "--attempts",
+            &args.stage_connectivity_probe_attempts.to_string(),
+            "--timeout-secs",
+            &args.stage_connectivity_probe_timeout_secs.to_string(),
+            "--retry-delay-ms",
+            &args.stage_connectivity_probe_retry_delay_ms.to_string(),
+            "--route-snapshot",
+        ])
+        .output()
+        .with_context(|| format!("spawn local connectivity probe for {}", upstream.stage_id))?;
+    probe_output_result(output, args, upstream, downstream)
+}
+
+fn probe_remote_stage_connectivity(
+    args: &RunArgs,
+    upstream: &StageAssignment,
+    downstream: &StageAssignment,
+) -> Result<String> {
+    let remote_stage_dir = remote_parent(&upstream.remote_config_path)?;
+    let remote_bin = format!("{remote_stage_dir}/skippy-server");
+    let command = format!(
+        "{} probe-downstream --bind-addr {} --endpoint {} --attempts {} --timeout-secs {} --retry-delay-ms {} --route-snapshot",
+        shell_quote(&remote_bin),
+        shell_quote(&upstream.bind_addr),
+        shell_quote(&downstream.endpoint),
+        args.stage_connectivity_probe_attempts,
+        args.stage_connectivity_probe_timeout_secs,
+        args.stage_connectivity_probe_retry_delay_ms,
+    );
+    let output = Command::new("ssh")
+        .arg(&upstream.host)
+        .arg(command)
+        .output()
+        .with_context(|| {
+            format!(
+                "spawn remote connectivity probe for {} on {}",
+                upstream.stage_id, upstream.host
+            )
+        })?;
+    probe_output_result(output, args, upstream, downstream)
+}
+
+fn probe_output_result(
+    output: std::process::Output,
+    args: &RunArgs,
+    upstream: &StageAssignment,
+    downstream: &StageAssignment,
+) -> Result<String> {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}{stderr}");
+    if output.status.success() {
+        return Ok(combined);
+    }
+    let diagnostics = if args.stage_connectivity_diagnostics {
+        format!(
+            "\n\nstage connectivity diagnostics:\n{}",
+            stage_connectivity_diagnostics(upstream, downstream)
+        )
+    } else {
+        String::new()
+    };
+    bail!(
+        "stage connectivity probe failed: {} -> {} status={} output:\n{}{}",
+        upstream.stage_id,
+        downstream.stage_id,
+        output.status,
+        combined.trim_end(),
+        diagnostics
+    )
+}
+
+fn stage_connectivity_diagnostics(
+    upstream: &StageAssignment,
+    downstream: &StageAssignment,
+) -> String {
+    let upstream_snapshot = network_snapshot(upstream, "upstream", Some(&downstream.endpoint));
+    let downstream_snapshot = network_snapshot(downstream, "downstream", None);
+    format!("{upstream_snapshot}\n{downstream_snapshot}")
+}
+
+fn network_snapshot(stage: &StageAssignment, role: &str, remote_endpoint: Option<&str>) -> String {
+    let command = network_snapshot_command(stage, role, remote_endpoint);
+    let output = if stage.local {
+        local_capture(&command)
+    } else {
+        ssh_capture(&stage.host, &command)
+    };
+    match output {
+        Ok(output) => output,
+        Err(error) => {
+            format!(
+                "=== {role} {} diagnostics failed ===\n{error:#}",
+                stage.stage_id
+            )
+        }
+    }
+}
+
+fn network_snapshot_command(
+    stage: &StageAssignment,
+    role: &str,
+    remote_endpoint: Option<&str>,
+) -> String {
+    let endpoint = endpoint_without_scheme(&stage.endpoint);
+    let (listen_host, listen_port) = endpoint_host_port(endpoint);
+    let mut commands = vec![
+        format!("echo '=== {role} {} diagnostics ==='", stage.stage_id),
+        "date".to_string(),
+        "uname -a".to_string(),
+        "echo '-- stage process --'".to_string(),
+        format!(
+            "cat {} 2>/dev/null | xargs -I{{}} ps -p {{}} -o pid,etime,pcpu,pmem,rss,command 2>/dev/null || true",
+            shell_quote(&stage.remote_pid_path)
+        ),
+        "echo '-- listeners --'".to_string(),
+        format!(
+            "lsof -nP -iTCP:{} -sTCP:LISTEN 2>/dev/null || true",
+            listen_port
+        ),
+        "echo '-- route table --'".to_string(),
+        "netstat -rn -f inet 2>/dev/null || netstat -rn 2>/dev/null || true".to_string(),
+        "echo '-- interfaces --'".to_string(),
+        "ifconfig 2>/dev/null | egrep '^[a-zA-Z0-9]+:|inet |status:|media:' || true".to_string(),
+    ];
+    if !listen_host.is_empty() {
+        commands.extend([
+            format!("echo '-- route get {listen_host} --'"),
+            format!(
+                "route -n get {} 2>/dev/null || true",
+                shell_quote(&listen_host)
+            ),
+            format!("echo '-- arp {listen_host} --'"),
+            format!(
+                "arp -an {} 2>/dev/null || arp -a 2>/dev/null | grep -F {} || true",
+                shell_quote(&listen_host),
+                shell_quote(&listen_host)
+            ),
+        ]);
+    }
+    if let Some(remote_endpoint) = remote_endpoint {
+        let remote_endpoint = endpoint_without_scheme(remote_endpoint);
+        let (remote_host, remote_port) = endpoint_host_port(remote_endpoint);
+        commands.extend([
+            format!("echo '-- route get remote {remote_host} --'"),
+            format!(
+                "route -n get {} 2>/dev/null || true",
+                shell_quote(&remote_host)
+            ),
+            format!("echo '-- arp remote {remote_host} --'"),
+            format!(
+                "arp -an {} 2>/dev/null || arp -a 2>/dev/null | grep -F {} || true",
+                shell_quote(&remote_host),
+                shell_quote(&remote_host)
+            ),
+            format!("echo '-- nc remote {remote_host}:{remote_port} --'"),
+            format!(
+                "nc -vz -w 2 {} {} 2>&1 || true",
+                shell_quote(&remote_host),
+                shell_quote(remote_port)
+            ),
+        ]);
+    }
+    commands.join("; ")
+}
+
+fn endpoint_without_scheme(endpoint: &str) -> &str {
+    endpoint.strip_prefix("tcp://").unwrap_or(endpoint)
+}
+
+fn endpoint_host_port(endpoint: &str) -> (String, &str) {
+    if let Some((host, port)) = endpoint.rsplit_once(':') {
+        (host.trim_matches(['[', ']']).to_string(), port)
+    } else {
+        (endpoint.to_string(), "")
     }
 }
 
@@ -1551,10 +1938,10 @@ fn probe_remote_chain_readiness(args: &RunArgs, plan: &DeploymentPlan) -> Result
 }
 
 fn collect_and_cleanup_remote(
-    args: &RunArgs,
     plan: &DeploymentPlan,
     run_dir: &Path,
     protocol_ready: bool,
+    keep_remote: bool,
 ) -> Result<Vec<RemoteStageStatus>> {
     let logs_dir = run_dir.join("logs");
     fs::create_dir_all(&logs_dir)
@@ -1564,7 +1951,7 @@ fn collect_and_cleanup_remote(
         let mut status = remote_stage_status(stage);
         status.protocol_ready = protocol_ready && stage.stage_index == 0;
         status.collected_log_path = collect_remote_log(stage, &logs_dir);
-        if !args.keep_remote {
+        if !keep_remote {
             status.terminated = terminate_remote_stage(stage, status.pid).is_ok();
             let _ = wait_remote_exit_code(stage, Duration::from_secs(5));
             let exit_code = remote_exit_code(stage).ok().flatten();
@@ -1963,68 +2350,78 @@ impl DriverTokenizer {
             .stages
             .first()
             .context("deployment plan has no stages")?;
-        let mut materialized_model_path = None;
-        let (model_path, load_mode) = if let Some(model_path) = args.model_path.as_ref() {
-            (model_path.clone(), RuntimeLoadMode::RuntimeSlice)
-        } else if args.stage_load_mode == "layer-package" {
-            let missing_model =
-                "--model-path is required unless --stage-model is a local layer-package directory";
-            let stage_model = args
-                .stage_model
-                .as_ref()
-                .filter(|path| path.is_dir())
-                .context(missing_model)?;
-            let package = materialize_layer_package_details(&PackageStageRequest {
-                model_id: args.model_id.clone(),
-                topology_id: args.topology_id.clone(),
-                package_ref: path_string(stage_model),
-                stage_id: "driver-tokenizer".to_string(),
-                layer_start: first.layer_start,
-                layer_end: first.layer_end,
-                include_embeddings: true,
-                include_output: plan.stages.len() == 1,
-            })
-            .context("materialize local layer-package tokenizer model")?;
-            materialized_model_path = Some(package.output_path.clone());
-            (package.output_path, RuntimeLoadMode::LayerPackage)
-        } else {
-            bail!(
-                "--model-path or a local layer-package --stage-model is required for prompt tokenization"
-            );
-        };
+        if let Some(model_path) = args.model_path.as_ref() {
+            let model = Self::open_model_path(
+                model_path,
+                args,
+                first,
+                RuntimeLoadMode::RuntimeSlice,
+                args.stage_load_mode != "runtime-slice",
+            )?;
+            return Ok(Self { model });
+        }
 
-        let model = StageModel::open(
-            &model_path,
-            &RuntimeConfig {
-                stage_index: 0,
-                layer_start: first.layer_start,
-                layer_end: first.layer_end,
-                ctx_size: args.ctx_size,
-                lane_count: 1,
-                n_batch: None,
-                n_ubatch: None,
-                n_threads: None,
-                n_threads_batch: None,
-                n_gpu_layers: args.n_gpu_layers,
-                selected_backend_device: None,
-                cache_type_k: skippy_runtime::GGML_TYPE_F16,
-                cache_type_v: skippy_runtime::GGML_TYPE_F16,
-                flash_attn_type: skippy_runtime::FlashAttentionType::Auto,
-                load_mode,
-                projector_path: None,
-                use_mmap: true,
-                use_mmap_prefetch: true,
-                use_mmap_buffer: true,
-                include_embeddings: true,
-                include_output: plan.stages.len() == 1,
-                filter_tensors_on_load: args.stage_load_mode != "runtime-slice",
-            },
+        if args.stage_load_mode == "layer-package" {
+            let model = Self::open_layer_package_tokenizer(args, plan, first)?;
+            return Ok(Self { model });
+        }
+
+        bail!(
+            "--model-path or a local layer-package --stage-model is required for prompt tokenization"
         )
-        .with_context(|| format!("open tokenizer model {}", model_path.display()))?;
-        Ok(Self {
-            model,
-            _materialized_model_path: materialized_model_path,
-        })
+    }
+
+    fn open_layer_package_tokenizer(
+        args: &RunArgs,
+        plan: &DeploymentPlan,
+        first: &StageAssignment,
+    ) -> Result<StageModel> {
+        let missing_model =
+            "--model-path is required unless --stage-model is a local layer-package directory";
+        let stage_model = args
+            .stage_model
+            .as_ref()
+            .filter(|path| path.is_dir())
+            .context(missing_model)?;
+        let request = driver_tokenizer_package_request(args, plan, first, stage_model);
+        let parts = select_layer_package_parts(&request)
+            .context("select local layer-package tokenizer parts")?;
+        Self::open_model_parts(
+            &parts.absolute_paths,
+            args,
+            first,
+            RuntimeLoadMode::LayerPackage,
+            true,
+        )
+    }
+
+    fn open_model_path(
+        model_path: &Path,
+        args: &RunArgs,
+        first: &StageAssignment,
+        load_mode: RuntimeLoadMode,
+        filter_tensors_on_load: bool,
+    ) -> Result<StageModel> {
+        let config = tokenizer_runtime_config(args, first, load_mode, filter_tensors_on_load);
+        StageModel::open(model_path, &config)
+            .with_context(|| format!("open tokenizer model {}", model_path.display()))
+    }
+
+    fn open_model_parts(
+        model_paths: &[PathBuf],
+        args: &RunArgs,
+        first: &StageAssignment,
+        load_mode: RuntimeLoadMode,
+        filter_tensors_on_load: bool,
+    ) -> Result<StageModel> {
+        let config = tokenizer_runtime_config(args, first, load_mode, filter_tensors_on_load);
+        let path_list = model_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        StageModel::open_from_parts(model_paths, &config)
+            .with_context(|| format!("open tokenizer model parts [{path_list}]"))
     }
 
     fn tokenize(&self, prompt: &str) -> Result<Vec<i32>> {
@@ -2032,6 +2429,64 @@ impl DriverTokenizer {
             .tokenize(prompt, true)
             .with_context(|| format!("tokenize prompt {prompt:?}"))
     }
+}
+
+fn tokenizer_runtime_config(
+    args: &RunArgs,
+    first: &StageAssignment,
+    load_mode: RuntimeLoadMode,
+    filter_tensors_on_load: bool,
+) -> RuntimeConfig {
+    RuntimeConfig {
+        stage_index: 0,
+        layer_start: tokenizer_layer_start(first),
+        layer_end: tokenizer_layer_end(first),
+        ctx_size: args.ctx_size,
+        lane_count: 1,
+        n_batch: None,
+        n_ubatch: None,
+        n_threads: None,
+        n_threads_batch: None,
+        n_gpu_layers: args.n_gpu_layers,
+        selected_backend_device: None,
+        cache_type_k: skippy_runtime::GGML_TYPE_F16,
+        cache_type_v: skippy_runtime::GGML_TYPE_F16,
+        flash_attn_type: skippy_runtime::FlashAttentionType::Auto,
+        load_mode,
+        projector_path: None,
+        use_mmap: true,
+        use_mmap_prefetch: true,
+        use_mmap_buffer: true,
+        include_embeddings: true,
+        include_output: false,
+        filter_tensors_on_load,
+    }
+}
+
+fn driver_tokenizer_package_request(
+    args: &RunArgs,
+    plan: &DeploymentPlan,
+    first: &StageAssignment,
+    stage_model: &Path,
+) -> PackageStageRequest {
+    PackageStageRequest {
+        model_id: args.model_id.clone(),
+        topology_id: args.topology_id.clone(),
+        package_ref: path_string(stage_model),
+        stage_id: "driver-tokenizer".to_string(),
+        layer_start: tokenizer_layer_start(first),
+        layer_end: tokenizer_layer_end(first),
+        include_embeddings: true,
+        include_output: plan.stages.len() == 1,
+    }
+}
+
+fn tokenizer_layer_start(first: &StageAssignment) -> u32 {
+    first.layer_start
+}
+
+fn tokenizer_layer_end(first: &StageAssignment) -> u32 {
+    first.layer_start.saturating_add(1).min(first.layer_end)
 }
 
 fn prompt_cases(args: &RunArgs) -> Result<Vec<PromptCase>> {
@@ -2501,6 +2956,22 @@ fn ssh_capture(host: &str, remote_command: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+fn local_capture(command: &str) -> Result<String> {
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .output()
+        .with_context(|| format!("run local command {command}"))?;
+    if !output.status.success() {
+        bail!(
+            "local command failed with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -2833,8 +3304,16 @@ mod tests {
             stage_telemetry_queue_capacity: 8192,
             stage_telemetry_level: "summary".to_string(),
             allow_unbalanced_stages: false,
+            stage_disable_mmap_buffer: false,
+            stage_connectivity_probe: false,
+            stage_connectivity_probe_attempts: 180,
+            stage_connectivity_probe_timeout_secs: 2,
+            stage_connectivity_probe_retry_delay_ms: 1000,
+            stage_connectivity_diagnostics: false,
+            keep_remote_on_failure: false,
             glm_dsa_op_timing: false,
             glm_dsa_direct_sparse_attn: false,
+            glm_dsa_direct_sparse_prefill: false,
         };
 
         assert_eq!(
@@ -2911,6 +3390,49 @@ mod tests {
             ],
         };
         let files = selected_package_files(&manifest, 0, 1, true, false).unwrap();
+        assert_eq!(
+            files,
+            vec![
+                "shared/metadata.gguf",
+                "shared/embeddings.gguf",
+                "layers/layer-000.gguf"
+            ]
+        );
+    }
+
+    #[test]
+    fn driver_tokenizer_uses_one_layer_package_slice() {
+        let mut args = test_run_args();
+        args.model_id = "org/repo:Q4_K_M".to_string();
+        args.topology_id = "glm52-two-stage-50-79".to_string();
+        args.model_path = None;
+        args.stage_model = Some(PathBuf::from("/models/glm52-layer-package"));
+        args.stage_load_mode = "layer-package".to_string();
+        let first = test_stage_assignment(0, 50);
+        let plan = test_deployment_plan(vec![first.clone(), test_stage_assignment(50, 79)]);
+
+        let request = driver_tokenizer_package_request(
+            &args,
+            &plan,
+            &first,
+            Path::new("/models/glm52-layer-package"),
+        );
+
+        assert_eq!(request.stage_id, "driver-tokenizer");
+        assert_eq!(request.layer_start, 0);
+        assert_eq!(request.layer_end, 1);
+        assert!(request.include_embeddings);
+        assert!(!request.include_output);
+
+        let manifest = package_manifest_with_layers(79);
+        let files = selected_package_files(
+            &manifest,
+            request.layer_start,
+            request.layer_end,
+            request.include_embeddings,
+            request.include_output,
+        )
+        .unwrap();
         assert_eq!(
             files,
             vec![
@@ -3333,8 +3855,16 @@ mod tests {
             stage_telemetry_queue_capacity: 8192,
             stage_telemetry_level: "summary".to_string(),
             allow_unbalanced_stages: false,
+            stage_disable_mmap_buffer: false,
+            stage_connectivity_probe: false,
+            stage_connectivity_probe_attempts: 180,
+            stage_connectivity_probe_timeout_secs: 2,
+            stage_connectivity_probe_retry_delay_ms: 1000,
+            stage_connectivity_diagnostics: false,
+            keep_remote_on_failure: false,
             glm_dsa_op_timing: false,
             glm_dsa_direct_sparse_attn: false,
+            glm_dsa_direct_sparse_prefill: false,
         };
         let plan = DeploymentPlan {
             run_id: "run-1".to_string(),
@@ -3396,9 +3926,11 @@ mod tests {
         assert!(command.contains("summary"));
         assert!(!command.contains("SKIPPY_GLM_DSA_OP_TIMING=1"));
         assert!(!command.contains("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_ATTN=1"));
+        assert!(!command.contains("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_PREFILL=1"));
 
         args.glm_dsa_op_timing = true;
         args.glm_dsa_direct_sparse_attn = true;
+        args.glm_dsa_direct_sparse_prefill = true;
         let command = remote_start_command(
             &args,
             &plan,
@@ -3407,6 +3939,98 @@ mod tests {
         );
         assert!(command.contains("SKIPPY_GLM_DSA_OP_TIMING=1"));
         assert!(command.contains("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_ATTN=1"));
+        assert!(command.contains("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_PREFILL=1"));
+    }
+
+    #[test]
+    fn parses_endpoint_host_port_for_probe_diagnostics() {
+        assert_eq!(
+            endpoint_without_scheme("tcp://192.168.0.5:19132"),
+            "192.168.0.5:19132"
+        );
+        assert_eq!(
+            endpoint_host_port("192.168.0.5:19132"),
+            ("192.168.0.5".to_string(), "19132")
+        );
+        assert_eq!(
+            endpoint_host_port("[::1]:19132"),
+            ("::1".to_string(), "19132")
+        );
+    }
+
+    #[test]
+    fn network_snapshot_command_records_route_and_listener_diagnostics() {
+        let mut upstream = test_stage_assignment(0, 50);
+        upstream.stage_id = "stage-0".to_string();
+        upstream.endpoint = "tcp://192.168.0.10:19131".to_string();
+        upstream.remote_pid_path = "/tmp/run/stage-0/stage.pid".to_string();
+        let mut downstream = test_stage_assignment(50, 79);
+        downstream.stage_id = "stage-1".to_string();
+        downstream.endpoint = "tcp://192.168.0.5:19132".to_string();
+
+        let command = network_snapshot_command(&upstream, "upstream", Some(&downstream.endpoint));
+
+        assert!(command.contains("=== upstream stage-0 diagnostics ==="));
+        assert!(command.contains("cat '/tmp/run/stage-0/stage.pid'"));
+        assert!(command.contains("lsof -nP -iTCP:19131"));
+        assert!(command.contains("route -n get '192.168.0.10'"));
+        assert!(command.contains("route -n get '192.168.0.5'"));
+        assert!(command.contains("arp -an '192.168.0.5'"));
+        assert!(command.contains("nc -vz -w 2 '192.168.0.5' '19132'"));
+    }
+
+    #[test]
+    fn drive_existing_args_reuse_saved_plan_topology() {
+        let first = test_stage_assignment(0, 50);
+        let second = test_stage_assignment(50, 79);
+        let mut plan = test_deployment_plan(vec![first, second]);
+        plan.run_id = "glm52-run".to_string();
+        plan.hosts = vec!["micstudio".to_string(), "jdumay@192.168.0.5".to_string()];
+        plan.remote_root = "/tmp/skippy-runtime-bench".to_string();
+        let args = DriveExistingArgs {
+            run_dir: PathBuf::from("/tmp/skippy-runtime-bench/glm52-run"),
+            model_path: None,
+            stage_model: Some(PathBuf::from("/models/glm52-layer-package")),
+            stage_load_mode: "layer-package".to_string(),
+            ctx_size: 131_072,
+            n_gpu_layers: -1,
+            activation_wire_dtype: "f16".to_string(),
+            prompt: "hello".to_string(),
+            prompt_corpus: None,
+            prompt_limit: Some(1),
+            prompt_token_ids: Some("1,2,3".to_string()),
+            max_new_tokens: Some(16),
+            prefill_chunk_size: Some(512),
+            prefill_chunk_threshold: Some(1024),
+            prefill_chunk_schedule: Some("2048:512".to_string()),
+            startup_timeout_secs: 5,
+            check_stage_readiness: true,
+            stage_connectivity_probe: true,
+            stage_connectivity_probe_attempts: 180,
+            stage_connectivity_probe_timeout_secs: 2,
+            stage_connectivity_probe_retry_delay_ms: 1000,
+            stage_connectivity_diagnostics: true,
+            output: None,
+        };
+
+        let run = run_args_for_existing_driver(&args, &plan).unwrap();
+
+        assert_eq!(run.run_id.as_deref(), Some("glm52-run"));
+        assert_eq!(run.hosts, "micstudio,jdumay@192.168.0.5");
+        assert_eq!(run.splits, "50");
+        assert_eq!(run.layer_end, 79);
+        assert_eq!(
+            run.stage_model,
+            Some(PathBuf::from("/models/glm52-layer-package"))
+        );
+        assert_eq!(run.prompt_token_ids.as_deref(), Some("1,2,3"));
+        assert_eq!(run.max_new_tokens, Some(16));
+        assert_eq!(run.prefill_chunk_size, Some(512));
+        assert_eq!(run.startup_timeout_secs, 5);
+        assert!(run.keep_remote);
+        assert!(run.execute_remote);
+        assert!(run.stage_connectivity_probe);
+        assert!(run.stage_connectivity_diagnostics);
     }
 
     fn test_run_args() -> RunArgs {
@@ -3461,8 +4085,16 @@ mod tests {
             stage_telemetry_queue_capacity: 8192,
             stage_telemetry_level: "summary".to_string(),
             allow_unbalanced_stages: false,
+            stage_disable_mmap_buffer: false,
+            stage_connectivity_probe: false,
+            stage_connectivity_probe_attempts: 180,
+            stage_connectivity_probe_timeout_secs: 2,
+            stage_connectivity_probe_retry_delay_ms: 1000,
+            stage_connectivity_diagnostics: false,
+            keep_remote_on_failure: false,
             glm_dsa_op_timing: false,
             glm_dsa_direct_sparse_attn: false,
+            glm_dsa_direct_sparse_prefill: false,
         }
     }
 
@@ -3513,5 +4145,80 @@ mod tests {
         let ranges = parse_stage_ranges(&args.splits, args.layer_end).unwrap();
 
         validate_topology_plan(&args, &hosts, &ranges).unwrap();
+    }
+
+    fn package_manifest_with_layers(layer_count: u32) -> PackageManifest {
+        PackageManifest {
+            model_id: "org/repo:Q4_K_M".to_string(),
+            source_model: PackageSourceModel {
+                repo: Some("org/repo".to_string()),
+                revision: Some("abc123".to_string()),
+                primary_file: Some("Model-Q4_K_M.gguf".to_string()),
+                canonical_ref: Some("org/repo@abc123/Model-Q4_K_M.gguf".to_string()),
+                distribution_id: Some("Model-Q4_K_M".to_string()),
+            },
+            shared: PackageShared {
+                metadata: PackageArtifact {
+                    path: "shared/metadata.gguf".to_string(),
+                },
+                embeddings: PackageArtifact {
+                    path: "shared/embeddings.gguf".to_string(),
+                },
+                output: PackageArtifact {
+                    path: "shared/output.gguf".to_string(),
+                },
+            },
+            layers: (0..layer_count)
+                .map(|layer_index| PackageLayer {
+                    layer_index,
+                    path: format!("layers/layer-{layer_index:03}.gguf"),
+                })
+                .collect(),
+        }
+    }
+
+    fn test_stage_assignment(layer_start: u32, layer_end: u32) -> StageAssignment {
+        StageAssignment {
+            stage_id: format!("stage-{layer_start}-{layer_end}"),
+            stage_index: 0,
+            host: "host.local".to_string(),
+            local: false,
+            layer_start,
+            layer_end,
+            bind_addr: "0.0.0.0:19031".to_string(),
+            endpoint: "tcp://host.local:19031".to_string(),
+            config_path: PathBuf::from("/tmp/local/stage.json"),
+            remote_config_path: "/tmp/remote/run-1/stage/stage.json".to_string(),
+            remote_log_path: "/tmp/remote/run-1/stage/stage.log".to_string(),
+            remote_pid_path: "/tmp/remote/run-1/stage/stage.pid".to_string(),
+            remote_exit_code_path: "/tmp/remote/run-1/stage/stage.exit".to_string(),
+            remote_model_path: None,
+            local_materialized_model_path: None,
+            local_shared_model_path: None,
+            selected_package_files: Vec::new(),
+        }
+    }
+
+    fn test_deployment_plan(stages: Vec<StageAssignment>) -> DeploymentPlan {
+        DeploymentPlan {
+            run_id: "run-1".to_string(),
+            topology_id: "topology".to_string(),
+            model_id: "test-org/bench-model-GGUF:Q4_K_M".to_string(),
+            model_identity: ModelIdentity::from_model_id("test-org/bench-model-GGUF:Q4_K_M"),
+            hosts: vec!["host.local".to_string()],
+            stage_load_mode: "layer-package".to_string(),
+            remote_root: "/tmp/remote".to_string(),
+            remote_roots: BTreeMap::new(),
+            remote_shared_roots: BTreeMap::new(),
+            endpoint_hosts: BTreeMap::new(),
+            work_dir: PathBuf::from("/tmp/work"),
+            metrics_http: "http://127.0.0.1:18080".to_string(),
+            metrics_otlp_grpc: "http://127.0.0.1:14317".to_string(),
+            driver_return_endpoint: "host.local:20031".to_string(),
+            stages,
+            execute_remote: false,
+            keep_remote: false,
+            rsync_model_artifacts: false,
+        }
     }
 }

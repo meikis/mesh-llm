@@ -38,9 +38,9 @@ use sha2::{Digest, Sha256};
 use skippy_metrics::attr as attr_key;
 use skippy_protocol::binary::{
     LLAMA_TOKEN_NULL, MAX_STAGE_LOGIT_BIAS, StageLogitBias as WireLogitBias, StageReply,
-    StageReplyStats, StageSamplingConfig as WireSamplingConfig, StageStateHeader, StageWireMessage,
-    WireActivationDType, WireMessageKind, WireReplyKind, recv_ready, recv_reply, state_flags,
-    write_stage_message,
+    StageReplySpdTap, StageReplyStats, StageSamplingConfig as WireSamplingConfig, StageStateHeader,
+    StageWireMessage, WireActivationDType, WireMessageKind, WireReplyKind, recv_ready, recv_reply,
+    state_flags, write_stage_message,
 };
 use skippy_protocol::{MessageBase, SCHEMA_VERSION, StageConfig, StageTopology};
 use skippy_runtime::{
@@ -57,7 +57,8 @@ use tokio::{
 
 use crate::{
     binary_transport::{
-        DecodeFrameBatcher, WireCondition, connect_binary_downstream, forwarded_stage_message,
+        DecodeFrameBatcher, PredictionReturnHub, PredictionReturnOrigin, PredictionReturnReceiver,
+        WireCondition, connect_binary_downstream, forwarded_stage_message,
         forwarded_stage_message_timed, run_binary_stage_message, stage_output_activation_capacity,
         write_stage_message_conditioned,
     },
@@ -80,6 +81,8 @@ mod prefill;
 mod prefix_cache;
 mod prompting;
 mod request;
+#[allow(dead_code, unused_imports)]
+mod spd;
 mod speculative;
 mod util;
 mod wire_messages;
@@ -90,6 +93,7 @@ use self::{
     native_mtp::*,
     prefill::*,
     request::*,
+    spd::*,
     speculative::*,
     util::*,
     wire_messages::*,
@@ -191,6 +195,10 @@ pub async fn serve_openai(args: ServeOpenAiArgs) -> Result<()> {
         ctx_size,
         mode,
         draft: None,
+        spd: None,
+        spd_optimistic_decode: false,
+        spd_rolling_executor: false,
+        spd_optimistic_min_logit_margin: None,
         speculative_window: 0,
         adaptive_speculative_window: false,
         generation_limit: Arc::new(Semaphore::new(args.generation_concurrency)),
@@ -218,6 +226,7 @@ pub async fn serve_openai(args: ServeOpenAiArgs) -> Result<()> {
 pub struct EmbeddedOpenAiArgs {
     pub bind_addr: SocketAddr,
     pub config: StageConfig,
+    pub topology: Option<StageTopology>,
     pub runtime: Arc<Mutex<RuntimeState>>,
     pub model_id: Option<String>,
     pub default_max_tokens: u32,
@@ -230,6 +239,15 @@ pub struct EmbeddedOpenAiArgs {
     pub prefill_adaptive_step: usize,
     pub prefill_adaptive_max: usize,
     pub draft_model_path: Option<PathBuf>,
+    pub spd_manifest_path: Option<PathBuf>,
+    pub spd_fixture_path: Option<PathBuf>,
+    pub spd_model_path: Option<PathBuf>,
+    pub spd_top_k: usize,
+    pub spd_n_gpu_layers: Option<i32>,
+    pub spd_replay_fallback: bool,
+    pub spd_optimistic_decode: bool,
+    pub spd_rolling_executor: bool,
+    pub spd_optimistic_min_logit_margin: Option<f32>,
     pub speculative_window: usize,
     pub adaptive_speculative_window: bool,
     pub draft_n_gpu_layers: Option<i32>,
@@ -238,6 +256,7 @@ pub struct EmbeddedOpenAiArgs {
     pub reply_credit_limit: Option<usize>,
     pub downstream_connect_timeout_secs: u64,
     pub downstream_wire_condition: WireCondition,
+    pub prediction_returns: Option<Arc<PredictionReturnHub>>,
     pub telemetry: Telemetry,
     pub hook_policy: Option<Arc<dyn OpenAiHookPolicy>>,
     pub openai_guardrails: Option<OpenAiGuardrailsConfig>,
@@ -473,6 +492,12 @@ pub fn embedded_openai_backend(args: EmbeddedOpenAiArgs) -> Result<EmbeddedOpenA
     if args.draft_model_path.is_some() && args.speculative_window == 0 {
         bail!("--openai-speculative-window must be greater than zero when a draft model is set");
     }
+    if args.draft_model_path.is_some() && args.spd_manifest_path.is_some() {
+        bail!("draft-model and SPD speculative sources cannot both be configured");
+    }
+    if args.spd_manifest_path.is_some() && args.speculative_window == 0 {
+        bail!("--openai-speculative-window must be greater than zero when SPD is set");
+    }
     if args.config.stage_index != 0 || args.config.layer_start != 0 {
         bail!("embedded OpenAI serving is only supported on stage 0");
     }
@@ -482,6 +507,17 @@ pub fn embedded_openai_backend(args: EmbeddedOpenAiArgs) -> Result<EmbeddedOpenA
         args.draft_n_gpu_layers,
         args.speculative_window,
     )?;
+    let spd = open_spd_replay_source(SpdReplayOpenArgs {
+        manifest_path: args.spd_manifest_path.as_deref(),
+        fixture_path: args.spd_fixture_path.as_deref(),
+        model_path: args.spd_model_path.as_deref(),
+        config: &args.config,
+        topology: args.topology.as_ref(),
+        n_gpu_layers: args.spd_n_gpu_layers,
+        replay_fallback: args.spd_replay_fallback,
+        window: args.speculative_window,
+        top_k: args.spd_top_k,
+    })?;
     let model_id = ModelId::new(
         args.model_id
             .unwrap_or_else(|| args.config.model_id.clone()),
@@ -513,6 +549,7 @@ pub fn embedded_openai_backend(args: EmbeddedOpenAiArgs) -> Result<EmbeddedOpenA
         downstream_wire_condition: args.downstream_wire_condition,
         prefill_reply_credit_limit,
         lane_pool,
+        prediction_returns: args.prediction_returns.clone(),
     };
     args.telemetry
         .emit("stage.openai_server_start", lifecycle_attrs(&args.config));
@@ -539,6 +576,10 @@ pub fn embedded_openai_backend(args: EmbeddedOpenAiArgs) -> Result<EmbeddedOpenA
         ctx_size,
         mode,
         draft,
+        spd,
+        spd_optimistic_decode: args.spd_optimistic_decode,
+        spd_rolling_executor: args.spd_rolling_executor,
+        spd_optimistic_min_logit_margin: args.spd_optimistic_min_logit_margin,
         speculative_window: args.speculative_window,
         adaptive_speculative_window: args.adaptive_speculative_window,
         generation_limit: Arc::new(Semaphore::new(args.generation_concurrency)),
@@ -580,6 +621,10 @@ struct StageOpenAiBackend {
     ctx_size: usize,
     mode: OpenAiBackendMode,
     draft: Option<Arc<Mutex<DraftRunner>>>,
+    spd: Option<SpdReplayProposalState>,
+    spd_optimistic_decode: bool,
+    spd_rolling_executor: bool,
+    spd_optimistic_min_logit_margin: Option<f32>,
     speculative_window: usize,
     adaptive_speculative_window: bool,
     generation_limit: Arc<Semaphore>,
@@ -826,6 +871,7 @@ enum OpenAiBackendMode {
         downstream_wire_condition: WireCondition,
         prefill_reply_credit_limit: usize,
         lane_pool: Option<Arc<PersistentStageLanePool>>,
+        prediction_returns: Option<Arc<PredictionReturnHub>>,
     },
 }
 
@@ -1189,6 +1235,7 @@ struct GenerationCacheStats {
     matched_prefix_tokens: u32,
     suffix_prefill_tokens: u32,
     hit_kind: Option<&'static str>,
+    spec: Option<GenerationSpecDiagnostics>,
 }
 
 impl Default for GenerationCacheStats {
@@ -1199,8 +1246,21 @@ impl Default for GenerationCacheStats {
             matched_prefix_tokens: 0,
             suffix_prefill_tokens: 0,
             hit_kind: None,
+            spec: None,
         }
     }
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct GenerationSpecDiagnostics {
+    enabled: bool,
+    windows: usize,
+    proposed: usize,
+    accepted: usize,
+    rejected: usize,
+    accept_rate: f64,
+    full_accept_windows: usize,
+    rejected_windows: usize,
 }
 
 struct ChainPrefixRestore {
@@ -1285,6 +1345,8 @@ impl DraftRunner {
                 include_output: true,
                 filter_tensors_on_load: false,
                 use_mmap: true,
+                use_mmap_prefetch: true,
+                use_mmap_buffer: true,
             },
         )
         .with_context(|| format!("open draft model {}", path.display()))?;
@@ -1317,6 +1379,24 @@ impl DraftRunner {
             tokens.push(current);
         }
         Ok(tokens)
+    }
+}
+
+impl SpeculativeProposalSource for DraftRunner {
+    fn label(&self) -> &'static str {
+        DRAFT_MODEL_PROPOSAL_SOURCE
+    }
+
+    fn max_window(&self) -> usize {
+        self.window
+    }
+
+    fn reset_to_context(&mut self, context_tokens: &[i32]) -> Result<()> {
+        Self::reset_to_context(self, context_tokens)
+    }
+
+    fn propose(&mut self, current: i32, max_tokens: usize) -> Result<Vec<i32>> {
+        Self::propose(self, current, max_tokens)
     }
 }
 
@@ -1514,7 +1594,7 @@ fn chat_output_parser_required(
     request: &ChatCompletionRequest,
     template_options: &ChatTemplateOptions,
 ) -> bool {
-    tool_calls_requested(request) || template_options.enable_thinking == Some(true)
+    tool_calls_requested(request) || template_options.enable_thinking.is_some()
 }
 
 fn chat_response_from_generated_text(
@@ -1545,15 +1625,18 @@ fn chat_response_from_generated_text(
                 finish_reason: Some(finish_reason),
             }],
             usage: output.usage(),
+            skippy: output.skippy_diagnostics(),
         };
     }
 
-    ChatCompletionResponse::new_with_reason(
+    let mut response = ChatCompletionResponse::new_with_reason(
         model,
         output.text.clone(),
         output.usage(),
         output.finish_reason,
-    )
+    );
+    response.skippy = output.skippy_diagnostics();
+    response
 }
 
 fn parsed_chat_message_from_json(
@@ -1731,6 +1814,7 @@ struct LocalGeneration<'a> {
     ids: &'a OpenAiGenerationIds,
 }
 
+#[allow(dead_code)]
 struct EmbeddedStageZeroGeneration<'a> {
     config: &'a StageConfig,
     wire_dtype: WireActivationDType,
@@ -1739,7 +1823,12 @@ struct EmbeddedStageZeroGeneration<'a> {
     downstream_wire_condition: WireCondition,
     prefill_reply_credit_limit: usize,
     lane_pool: Option<Arc<PersistentStageLanePool>>,
+    prediction_return: Option<PredictionReturnReceiver>,
     draft: Option<Arc<Mutex<DraftRunner>>>,
+    spd: Option<SpdReplayProposalState>,
+    spd_optimistic_decode: bool,
+    spd_rolling_executor: bool,
+    spd_optimistic_min_logit_margin: Option<f32>,
     speculative_window: usize,
     adaptive_speculative_window: bool,
     prompt_token_ids: &'a [i32],
@@ -1752,6 +1841,7 @@ struct EmbeddedStageZeroGeneration<'a> {
     ids: &'a OpenAiGenerationIds,
 }
 
+#[allow(dead_code)]
 struct SplitMultimodalGeneration<'a> {
     prompt: PreparedGenerationPrompt,
     max_tokens: GenerationTokenLimit,
@@ -1764,6 +1854,7 @@ struct SplitMultimodalGeneration<'a> {
     activation_width: i32,
     downstream_wire_condition: WireCondition,
     lane_pool: Arc<PersistentStageLanePool>,
+    prediction_return: Option<PredictionReturnReceiver>,
 }
 
 struct EmbeddedLocalOutput {
@@ -2098,6 +2189,7 @@ where
             matched_prefix_tokens: cache_stats.matched_prefix_tokens,
             suffix_prefill_tokens: cache_stats.suffix_prefill_tokens,
             cache_hit_kind: cache_stats.hit_kind,
+            spec: cache_stats.spec,
             text: self.text,
             finish_reason: self.finish_reason,
             detokenize_ms: self.metrics.detokenize_ms,
@@ -2115,6 +2207,7 @@ struct GeneratedText {
     matched_prefix_tokens: u32,
     suffix_prefill_tokens: u32,
     cache_hit_kind: Option<&'static str>,
+    spec: Option<GenerationSpecDiagnostics>,
     text: String,
     finish_reason: FinishReason,
     detokenize_ms: f64,
@@ -2126,6 +2219,10 @@ impl GeneratedText {
     fn usage(&self) -> Usage {
         Usage::new(self.prompt_tokens, self.completion_tokens)
             .with_cached_tokens(self.cached_prompt_tokens)
+    }
+
+    fn skippy_diagnostics(&self) -> Option<Value> {
+        self.spec.map(|spec| json!({ "spec": spec }))
     }
 }
 

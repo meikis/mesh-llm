@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::cli::{GlmDsaOpCompareArgs, GlmDsaOpReportArgs};
 
 const OP_TIMING_PREFIX: &str = "skippy: glm_dsa_op_timing ";
+const GROUP_TIMING_PREFIX: &str = "skippy: glm_dsa_group_timing ";
 const SIDEBAND_PREFIX: &str = "skippy: glm_dsa_top_k_sideband_forward ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
@@ -52,12 +53,23 @@ struct LogSummary {
     path: PathBuf,
     records: usize,
     stage_records: BTreeMap<i32, BTreeMap<Phase, PhaseSummary>>,
+    group_records: BTreeMap<i32, BTreeMap<String, BTreeMap<Phase, PhaseSummary>>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    hottest_group_records: Vec<HotGroupSummary>,
     sideband_records: BTreeMap<String, BTreeMap<Phase, SidebandSummary>>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 struct GlmDsaOpReport {
     logs: Vec<LogSummary>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct HotGroupSummary {
+    stage: i32,
+    phase: Phase,
+    group: String,
+    summary: PhaseSummary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +99,13 @@ struct TimingRecord {
     routed_moe_us: u64,
     shared_expert_nodes: u64,
     shared_expert_us: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TimingGroupRecord {
+    record_index: usize,
+    group: String,
+    timing: TimingRecord,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -151,15 +170,29 @@ fn build_report(args: &GlmDsaOpReportArgs) -> Result<GlmDsaOpReport> {
         let sideband_records = parse_sideband_records(&text).with_context(|| {
             format!("parse GLM-DSA top-k sideband records in {}", path.display())
         })?;
+        let group_records = parse_timing_group_records(&text)
+            .with_context(|| format!("parse GLM-DSA group timing records in {}", path.display()))?;
         let records = match args.first_records {
             Some(limit) => records.into_iter().take(limit).collect::<Vec<_>>(),
             None => records,
+        };
+        let group_records = match args.first_records {
+            Some(limit) => group_records
+                .into_iter()
+                .filter(|record| record.record_index < limit)
+                .collect::<Vec<_>>(),
+            None => group_records,
         };
         let sideband_records = match args.first_records {
             Some(limit) => sideband_records.into_iter().take(limit).collect::<Vec<_>>(),
             None => sideband_records,
         };
-        logs.push(summarize_log(path.clone(), &records, &sideband_records));
+        logs.push(summarize_log(
+            path.clone(),
+            &records,
+            &group_records,
+            &sideband_records,
+        ));
     }
     Ok(GlmDsaOpReport { logs })
 }
@@ -392,24 +425,60 @@ fn parse_timing_record(line: &str) -> Result<TimingRecord> {
         .split_whitespace()
         .filter_map(|field| field.split_once('='))
         .collect::<BTreeMap<_, _>>();
-    let indexer = parse_optional_bucket(&fields, "indexer")?;
-    let top_k = parse_optional_bucket(&fields, "top_k")?;
-    let sparse_mask_fill = parse_optional_bucket(&fields, "sparse_mask_fill")?;
-    let sparse_mask_topk = parse_optional_bucket(&fields, "sparse_mask_topk")?;
-    let sparse_mask_add = parse_optional_bucket(&fields, "sparse_mask_add")?;
-    let dsa_sparse_attn = parse_optional_bucket(&fields, "dsa_sparse_attn")?;
+    parse_timing_fields(&fields)
+}
+
+fn parse_timing_group_records(text: &str) -> Result<Vec<TimingGroupRecord>> {
+    let mut records = Vec::new();
+    let mut timing_record_count = 0usize;
+    for line in text.lines() {
+        if line.contains(OP_TIMING_PREFIX) {
+            timing_record_count += 1;
+            continue;
+        }
+        let Some(index) = line.find(GROUP_TIMING_PREFIX) else {
+            continue;
+        };
+        let record_index = timing_record_count.saturating_sub(1);
+        records.push(parse_timing_group_record(
+            record_index,
+            &line[index + GROUP_TIMING_PREFIX.len()..],
+        )?);
+    }
+    Ok(records)
+}
+
+fn parse_timing_group_record(record_index: usize, line: &str) -> Result<TimingGroupRecord> {
+    let fields = line
+        .split_whitespace()
+        .filter_map(|field| field.split_once('='))
+        .collect::<BTreeMap<_, _>>();
+    Ok(TimingGroupRecord {
+        record_index,
+        group: parse_string_field(&fields, "group")?,
+        timing: parse_timing_fields(&fields)?,
+    })
+}
+
+fn parse_timing_fields(fields: &BTreeMap<&str, &str>) -> Result<TimingRecord> {
+    let indexer = parse_optional_bucket(fields, "indexer")?;
+    let top_k = parse_optional_bucket(fields, "top_k")?;
+    let sparse_mask_fill = parse_optional_bucket(fields, "sparse_mask_fill")?;
+    let sparse_mask_topk = parse_optional_bucket(fields, "sparse_mask_topk")?;
+    let sparse_mask_add = parse_optional_bucket(fields, "sparse_mask_add")?;
+    let dsa_sparse_attn = parse_optional_bucket(fields, "dsa_sparse_attn")?;
     Ok(TimingRecord {
-        stage: parse_field(&fields, "stage")?,
-        tokens: parse_field(&fields, "tokens")?,
-        total_us: parse_field(&fields, "total_us")?,
-        indexer_topk_nodes: parse_field(&fields, "indexer_topk_nodes")?,
-        indexer_topk_us: parse_field(&fields, "indexer_topk_us")?,
+        stage: parse_field(fields, "stage")?,
+        tokens: parse_field(fields, "tokens")?,
+        total_us: parse_field(fields, "total_us")?,
+        indexer_topk_nodes: parse_field(fields, "indexer_topk_nodes")?,
+        indexer_topk_us: parse_field(fields, "indexer_topk_us")?,
         indexer_nodes: indexer.nodes,
         indexer_us: indexer.elapsed_us,
         top_k_nodes: top_k.nodes,
         top_k_us: top_k.elapsed_us,
-        sparse_mask_nodes: parse_field(&fields, "sparse_mask_nodes")?,
-        sparse_mask_us: parse_field(&fields, "sparse_mask_us")?,
+        sparse_mask_nodes: parse_field(fields, "sparse_mask_nodes")?,
+        sparse_mask_us: parse_field(fields, "sparse_mask_us")?,
         sparse_mask_fill_nodes: sparse_mask_fill.nodes,
         sparse_mask_fill_us: sparse_mask_fill.elapsed_us,
         sparse_mask_topk_nodes: sparse_mask_topk.nodes,
@@ -418,12 +487,12 @@ fn parse_timing_record(line: &str) -> Result<TimingRecord> {
         sparse_mask_add_us: sparse_mask_add.elapsed_us,
         dsa_sparse_attn_nodes: dsa_sparse_attn.nodes,
         dsa_sparse_attn_us: dsa_sparse_attn.elapsed_us,
-        mla_attention_nodes: parse_field(&fields, "mla_attention_nodes")?,
-        mla_attention_us: parse_field(&fields, "mla_attention_us")?,
-        routed_moe_nodes: parse_field(&fields, "routed_moe_nodes")?,
-        routed_moe_us: parse_field(&fields, "routed_moe_us")?,
-        shared_expert_nodes: parse_field(&fields, "shared_expert_nodes")?,
-        shared_expert_us: parse_field(&fields, "shared_expert_us")?,
+        mla_attention_nodes: parse_field(fields, "mla_attention_nodes")?,
+        mla_attention_us: parse_field(fields, "mla_attention_us")?,
+        routed_moe_nodes: parse_field(fields, "routed_moe_nodes")?,
+        routed_moe_us: parse_field(fields, "routed_moe_us")?,
+        shared_expert_nodes: parse_field(fields, "shared_expert_nodes")?,
+        shared_expert_us: parse_field(fields, "shared_expert_us")?,
     })
 }
 
@@ -508,87 +577,152 @@ fn parse_string_field(fields: &BTreeMap<&str, &str>, name: &str) -> Result<Strin
 fn summarize_log(
     path: PathBuf,
     records: &[TimingRecord],
+    group_records: &[TimingGroupRecord],
     sideband_records: &[SidebandRecord],
 ) -> LogSummary {
     let mut stage_records: BTreeMap<i32, BTreeMap<Phase, PhaseSummary>> = BTreeMap::new();
     for record in records {
-        let phase = if record.tokens == 1 {
-            Phase::Decode
-        } else {
-            Phase::Prefill
-        };
         let summary = stage_records
             .entry(record.stage)
             .or_default()
-            .entry(phase)
+            .entry(timing_phase(record))
             .or_default();
-        summary.records += 1;
-        summary.tokens += record.tokens;
-        summary.total_us += record.total_us;
-        add_bucket(
-            &mut summary.indexer_topk,
-            record.indexer_topk_nodes,
-            record.indexer_topk_us,
-        );
-        add_optional_bucket(
-            &mut summary.indexer,
-            record.indexer_nodes,
-            record.indexer_us,
-        );
-        add_optional_bucket(&mut summary.top_k, record.top_k_nodes, record.top_k_us);
-        add_bucket(
-            &mut summary.sparse_mask,
-            record.sparse_mask_nodes,
-            record.sparse_mask_us,
-        );
-        add_optional_bucket(
-            &mut summary.sparse_mask_fill,
-            record.sparse_mask_fill_nodes,
-            record.sparse_mask_fill_us,
-        );
-        add_optional_bucket(
-            &mut summary.sparse_mask_topk,
-            record.sparse_mask_topk_nodes,
-            record.sparse_mask_topk_us,
-        );
-        add_optional_bucket(
-            &mut summary.sparse_mask_add,
-            record.sparse_mask_add_nodes,
-            record.sparse_mask_add_us,
-        );
-        add_optional_bucket(
-            &mut summary.dsa_sparse_attn,
-            record.dsa_sparse_attn_nodes,
-            record.dsa_sparse_attn_us,
-        );
-        add_bucket(
-            &mut summary.mla_attention,
-            record.mla_attention_nodes,
-            record.mla_attention_us,
-        );
-        add_bucket(
-            &mut summary.routed_moe,
-            record.routed_moe_nodes,
-            record.routed_moe_us,
-        );
-        add_bucket(
-            &mut summary.shared_expert,
-            record.shared_expert_nodes,
-            record.shared_expert_us,
-        );
+        add_timing_record(summary, record);
     }
-    for phases in stage_records.values_mut() {
-        for summary in phases.values_mut() {
-            summary.avg_total_us_per_record = nonzero_div(summary.total_us, summary.records as u64);
-            summary.avg_total_us_per_token = nonzero_div(summary.total_us, summary.tokens);
+    finalize_phase_summaries(&mut stage_records);
+
+    let mut grouped_records: BTreeMap<i32, BTreeMap<String, BTreeMap<Phase, PhaseSummary>>> =
+        BTreeMap::new();
+    for record in group_records {
+        let timing = &record.timing;
+        let summary = grouped_records
+            .entry(timing.stage)
+            .or_default()
+            .entry(record.group.clone())
+            .or_default()
+            .entry(timing_phase(timing))
+            .or_default();
+        add_timing_record(summary, timing);
+    }
+    for groups in grouped_records.values_mut() {
+        for phases in groups.values_mut() {
+            finalize_phase_summary_map(phases);
         }
     }
+    let hottest_group_records = summarize_hottest_groups(&grouped_records);
+
     let sideband_records = summarize_sideband_records(sideband_records);
     LogSummary {
         path,
         records: records.len(),
         stage_records,
+        group_records: grouped_records,
+        hottest_group_records,
         sideband_records,
+    }
+}
+
+fn summarize_hottest_groups(
+    group_records: &BTreeMap<i32, BTreeMap<String, BTreeMap<Phase, PhaseSummary>>>,
+) -> Vec<HotGroupSummary> {
+    let mut hottest: BTreeMap<(i32, Phase), HotGroupSummary> = BTreeMap::new();
+    for (stage, groups) in group_records {
+        for (group, phases) in groups {
+            for (phase, summary) in phases {
+                let key = (*stage, *phase);
+                let candidate = HotGroupSummary {
+                    stage: *stage,
+                    phase: *phase,
+                    group: group.clone(),
+                    summary: summary.clone(),
+                };
+                match hottest.get(&key) {
+                    Some(existing) if existing.summary.total_us >= summary.total_us => {}
+                    _ => {
+                        hottest.insert(key, candidate);
+                    }
+                }
+            }
+        }
+    }
+    hottest.into_values().collect()
+}
+
+fn timing_phase(record: &TimingRecord) -> Phase {
+    if record.tokens == 1 {
+        Phase::Decode
+    } else {
+        Phase::Prefill
+    }
+}
+
+fn add_timing_record(summary: &mut PhaseSummary, record: &TimingRecord) {
+    summary.records += 1;
+    summary.tokens += record.tokens;
+    summary.total_us += record.total_us;
+    add_bucket(
+        &mut summary.indexer_topk,
+        record.indexer_topk_nodes,
+        record.indexer_topk_us,
+    );
+    add_optional_bucket(
+        &mut summary.indexer,
+        record.indexer_nodes,
+        record.indexer_us,
+    );
+    add_optional_bucket(&mut summary.top_k, record.top_k_nodes, record.top_k_us);
+    add_bucket(
+        &mut summary.sparse_mask,
+        record.sparse_mask_nodes,
+        record.sparse_mask_us,
+    );
+    add_optional_bucket(
+        &mut summary.sparse_mask_fill,
+        record.sparse_mask_fill_nodes,
+        record.sparse_mask_fill_us,
+    );
+    add_optional_bucket(
+        &mut summary.sparse_mask_topk,
+        record.sparse_mask_topk_nodes,
+        record.sparse_mask_topk_us,
+    );
+    add_optional_bucket(
+        &mut summary.sparse_mask_add,
+        record.sparse_mask_add_nodes,
+        record.sparse_mask_add_us,
+    );
+    add_optional_bucket(
+        &mut summary.dsa_sparse_attn,
+        record.dsa_sparse_attn_nodes,
+        record.dsa_sparse_attn_us,
+    );
+    add_bucket(
+        &mut summary.mla_attention,
+        record.mla_attention_nodes,
+        record.mla_attention_us,
+    );
+    add_bucket(
+        &mut summary.routed_moe,
+        record.routed_moe_nodes,
+        record.routed_moe_us,
+    );
+    add_bucket(
+        &mut summary.shared_expert,
+        record.shared_expert_nodes,
+        record.shared_expert_us,
+    );
+}
+
+fn finalize_phase_summaries(records: &mut BTreeMap<i32, BTreeMap<Phase, PhaseSummary>>) {
+    for phases in records.values_mut() {
+        finalize_phase_summary_map(phases);
+    }
+}
+
+fn finalize_phase_summary_map(phases: &mut BTreeMap<Phase, PhaseSummary>) {
+    for summary in phases.values_mut() {
+        summary.avg_total_us_per_record = nonzero_div(summary.total_us, summary.records as u64);
+        summary.avg_total_us_per_token = nonzero_div(summary.total_us, summary.tokens);
     }
 }
 
@@ -678,14 +812,16 @@ fn nonzero_div(numerator: u64, denominator: u64) -> Option<f64> {
 mod tests {
     use super::{
         ComparisonKey, OpBucket, Phase, PhaseSummary, compare_phase, parse_sideband_record,
-        parse_sideband_records, parse_timing_record, parse_timing_records,
-        summarize_comparison_rows, summarize_log,
+        parse_sideband_records, parse_timing_group_records, parse_timing_record,
+        parse_timing_records, summarize_comparison_rows, summarize_log,
     };
 
     const LINE: &str = "skippy: glm_dsa_op_timing stage=1 tokens=128 total_us=1475800 indexer_topk_nodes=275 indexer_topk_us=129065 sparse_mask_nodes=235 sparse_mask_us=114543 mla_attention_nodes=47 mla_attention_us=35234 routed_moe_nodes=47 routed_moe_us=379574 shared_expert_nodes=47 shared_expert_us=817384";
     const LINE_WITH_INDEXER_BREAKDOWN: &str = "skippy: glm_dsa_op_timing stage=1 tokens=128 total_us=1475800 indexer_topk_nodes=275 indexer_topk_us=129065 indexer_nodes=235 indexer_us=80000 top_k_nodes=40 top_k_us=49065 sparse_mask_nodes=235 sparse_mask_us=114543 mla_attention_nodes=47 mla_attention_us=35234 routed_moe_nodes=47 routed_moe_us=379574 shared_expert_nodes=47 shared_expert_us=817384";
     const LINE_WITH_SPARSE_BREAKDOWN: &str = "skippy: glm_dsa_op_timing stage=1 tokens=128 total_us=1475800 indexer_topk_nodes=275 indexer_topk_us=129065 sparse_mask_nodes=235 sparse_mask_us=114543 sparse_mask_fill_nodes=47 sparse_mask_fill_us=1000 sparse_mask_topk_nodes=47 sparse_mask_topk_us=2000 sparse_mask_add_nodes=47 sparse_mask_add_us=3000 mla_attention_nodes=47 mla_attention_us=35234 routed_moe_nodes=47 routed_moe_us=379574 shared_expert_nodes=47 shared_expert_us=817384";
     const LINE_WITH_DSA_SPARSE_ATTN: &str = "skippy: glm_dsa_op_timing stage=1 tokens=128 total_us=1475800 indexer_topk_nodes=275 indexer_topk_us=129065 sparse_mask_nodes=0 sparse_mask_us=0 dsa_sparse_attn_nodes=47 dsa_sparse_attn_us=114543 mla_attention_nodes=47 mla_attention_us=35234 routed_moe_nodes=47 routed_moe_us=379574 shared_expert_nodes=47 shared_expert_us=817384";
+    const GROUP_LINE_LAYER_0: &str = "skippy: glm_dsa_group_timing stage=1 tokens=128 group=layer_0 total_us=600000 indexer_topk_nodes=100 indexer_topk_us=50000 indexer_nodes=80 indexer_us=30000 top_k_nodes=20 top_k_us=20000 sparse_mask_nodes=40 sparse_mask_us=1000 sparse_mask_fill_nodes=0 sparse_mask_fill_us=0 sparse_mask_topk_nodes=40 sparse_mask_topk_us=1000 sparse_mask_add_nodes=0 sparse_mask_add_us=0 dsa_sparse_attn_nodes=0 dsa_sparse_attn_us=0 mla_attention_nodes=1 mla_attention_us=9000 routed_moe_nodes=0 routed_moe_us=0 shared_expert_nodes=0 shared_expert_us=0";
+    const GROUP_LINE_LAYER_1: &str = "skippy: glm_dsa_group_timing stage=1 tokens=128 group=layer_1 total_us=875800 indexer_topk_nodes=175 indexer_topk_us=79065 indexer_nodes=155 indexer_us=50000 top_k_nodes=20 top_k_us=29065 sparse_mask_nodes=195 sparse_mask_us=113543 sparse_mask_fill_nodes=47 sparse_mask_fill_us=1000 sparse_mask_topk_nodes=47 sparse_mask_topk_us=2000 sparse_mask_add_nodes=47 sparse_mask_add_us=3000 dsa_sparse_attn_nodes=0 dsa_sparse_attn_us=0 mla_attention_nodes=46 mla_attention_us=26234 routed_moe_nodes=47 routed_moe_us=379574 shared_expert_nodes=47 shared_expert_us=817384";
     const SIDEBAND_LINE: &str = "skippy: glm_dsa_top_k_sideband_forward stage=stage-0 request=1 session=2 kind=DecodeEmbd pos_start=718 tokens=1 hidden_bytes=24576 sideband_bytes=3072 sideband_i32=768";
     const PADDED_PREFILL_SIDEBAND_LINE: &str = "skippy: glm_dsa_top_k_sideband_forward stage=stage-0 request=1 session=2 kind=PrefillEmbd pos_start=512 tokens=128 hidden_bytes=3145728 sideband_bytes=393216 sideband_i32=98304";
 
@@ -707,7 +843,7 @@ mod tests {
         assert_eq!(record.top_k_nodes, Some(40));
         assert_eq!(record.top_k_us, Some(49_065));
 
-        let summary = summarize_log("stage1.log".into(), &[record], &[]);
+        let summary = summarize_log("stage1.log".into(), &[record], &[], &[]);
         let prefill = summary
             .stage_records
             .get(&1)
@@ -726,7 +862,7 @@ mod tests {
         assert_eq!(record.sparse_mask_topk_us, Some(2000));
         assert_eq!(record.sparse_mask_add_us, Some(3000));
 
-        let summary = summarize_log("stage1.log".into(), &[record], &[]);
+        let summary = summarize_log("stage1.log".into(), &[record], &[], &[]);
         let prefill = summary
             .stage_records
             .get(&1)
@@ -745,7 +881,7 @@ mod tests {
         assert_eq!(record.dsa_sparse_attn_nodes, Some(47));
         assert_eq!(record.dsa_sparse_attn_us, Some(114543));
 
-        let summary = summarize_log("stage1.log".into(), &[record], &[]);
+        let summary = summarize_log("stage1.log".into(), &[record], &[], &[]);
         let prefill = summary
             .stage_records
             .get(&1)
@@ -793,7 +929,7 @@ mod tests {
                 .replace("total_us=1475800", "total_us=200")
         );
         let records = parse_timing_records(&text).unwrap();
-        let summary = summarize_log("stage1.log".into(), &records, &[]);
+        let summary = summarize_log("stage1.log".into(), &records, &[], &[]);
         let stages = summary.stage_records.get(&1).unwrap();
         let prefill = stages.get(&Phase::Prefill).unwrap();
         let decode = stages.get(&Phase::Decode).unwrap();
@@ -802,6 +938,49 @@ mod tests {
         assert_eq!(decode.records, 1);
         assert_eq!(decode.tokens, 1);
         assert_eq!(decode.total_us, 200);
+    }
+
+    #[test]
+    fn parses_group_timing_records_with_parent_index() {
+        let text = format!(
+            "{LINE}\n{GROUP_LINE_LAYER_0}\n{GROUP_LINE_LAYER_1}\n{LINE_WITH_DSA_SPARSE_ATTN}"
+        );
+        let records = parse_timing_group_records(&text).unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].record_index, 0);
+        assert_eq!(records[0].group, "layer_0");
+        assert_eq!(records[0].timing.stage, 1);
+        assert_eq!(records[0].timing.indexer_topk_us, 50_000);
+        assert_eq!(records[1].record_index, 0);
+        assert_eq!(records[1].group, "layer_1");
+        assert_eq!(records[1].timing.sparse_mask_us, 113_543);
+    }
+
+    #[test]
+    fn summarizes_group_timing_by_stage_group_and_phase() {
+        let timing = parse_timing_records(LINE).unwrap();
+        let groups = parse_timing_group_records(&format!(
+            "{LINE}\n{GROUP_LINE_LAYER_0}\n{GROUP_LINE_LAYER_1}"
+        ))
+        .unwrap();
+        let summary = summarize_log("stage1.log".into(), &timing, &groups, &[]);
+        let stage = summary.group_records.get(&1).unwrap();
+        let layer_0 = stage.get("layer_0").unwrap().get(&Phase::Prefill).unwrap();
+        let layer_1 = stage.get("layer_1").unwrap().get(&Phase::Prefill).unwrap();
+
+        assert_eq!(layer_0.records, 1);
+        assert_eq!(layer_0.tokens, 128);
+        assert_eq!(layer_0.total_us, 600_000);
+        assert_eq!(layer_0.indexer_topk.elapsed_us, 50_000);
+        assert_eq!(layer_0.avg_total_us_per_token, Some(4687.5));
+        assert_eq!(layer_1.total_us, 875_800);
+        assert_eq!(layer_1.sparse_mask.elapsed_us, 113_543);
+        assert_eq!(summary.hottest_group_records.len(), 1);
+        assert_eq!(summary.hottest_group_records[0].stage, 1);
+        assert_eq!(summary.hottest_group_records[0].phase, Phase::Prefill);
+        assert_eq!(summary.hottest_group_records[0].group, "layer_1");
+        assert_eq!(summary.hottest_group_records[0].summary.total_us, 875_800);
     }
 
     #[test]
@@ -827,7 +1006,7 @@ mod tests {
     fn summarizes_sideband_payload_ratios() {
         let timing = parse_timing_records(LINE).unwrap();
         let sideband = parse_sideband_records(SIDEBAND_LINE).unwrap();
-        let summary = summarize_log("stage0.log".into(), &timing, &sideband);
+        let summary = summarize_log("stage0.log".into(), &timing, &[], &sideband);
         let stages = summary.sideband_records.get("stage-0").unwrap();
         let decode = stages.get(&Phase::Decode).unwrap();
         assert_eq!(decode.records, 1);
@@ -851,7 +1030,7 @@ mod tests {
     fn summarizes_sideband_padding_for_prefill() {
         let timing = parse_timing_records(LINE).unwrap();
         let sideband = parse_sideband_records(PADDED_PREFILL_SIDEBAND_LINE).unwrap();
-        let summary = summarize_log("stage0.log".into(), &timing, &sideband);
+        let summary = summarize_log("stage0.log".into(), &timing, &[], &sideband);
         let stages = summary.sideband_records.get("stage-0").unwrap();
         let prefill = stages.get(&Phase::Prefill).unwrap();
         assert_eq!(prefill.tokens, 128);

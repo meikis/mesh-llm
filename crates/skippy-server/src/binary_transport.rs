@@ -14,7 +14,7 @@ use std::{
 };
 
 use crate::{
-    cli::ServeBinaryArgs,
+    cli::{ProbeDownstreamArgs, ServeBinaryArgs},
     config::validate_config,
     frontend::{self, EmbeddedOpenAiArgs},
     kv_integration::{KvStageIntegration, PrefillKvIdentity},
@@ -27,11 +27,11 @@ use skippy_metrics::{attr, metric};
 use skippy_protocol::{
     MessageBase, SCHEMA_VERSION, StageConfig, StageTopology,
     binary::{
-        StageReply, StageReplyStats, StageSamplingConfig, StageStateHeader, StageWireMessage,
-        WireActivationDType, WireMessageKind, WireReplyKind,
+        READY_MAGIC, StageReply, StageReplyStats, StageSamplingConfig, StageStateHeader,
+        StageWireMessage, WireActivationDType, WireMessageKind, WireReplyKind,
         activation_frame_flags_from_state_flags, read_stage_message, recv_reply, send_ready,
         send_reply_ack, send_reply_ack_with_stats, send_reply_predicted_tokens_with_stats,
-        send_reply_predicted_with_tokens_and_stats, state_flags,
+        send_reply_predicted_with_tokens_and_stats, send_reply_spd_tap_with_stats, state_flags,
     },
 };
 use skippy_runtime::{
@@ -43,6 +43,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 const AUTO_ALIGN_SESSION_ENV: &str = "SKIPPY_STAGE_AUTO_ALIGN_SESSION";
 
 mod decode_batcher;
+#[allow(dead_code)]
 pub(crate) mod direct_return;
 pub(crate) mod forwarding;
 mod kv_eviction;
@@ -52,6 +53,8 @@ mod wire;
 
 pub(crate) use self::decode_batcher::DecodeFrameBatcher;
 pub use self::direct_return::PredictionReturnHub;
+pub use self::direct_return::PredictionReturnListener;
+pub(crate) use self::direct_return::{PredictionReturnOrigin, PredictionReturnReceiver};
 pub(crate) use self::forwarding::{forwarded_stage_message, forwarded_stage_message_timed};
 use self::kv_eviction::{
     BinaryProactiveEviction, BinaryProactiveEvictionPlan, binary_proactive_eviction_plan,
@@ -64,6 +67,8 @@ pub(crate) use self::wire::write_stage_message_conditioned;
 
 static BINARY_SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 const NATIVE_MTP_ENABLED_ENV: &str = "SKIPPY_NATIVE_MTP_ENABLED";
+const CLIENT_READY_HELLO_ENV: &str = "SKIPPY_STAGE_CLIENT_READY_HELLO";
+const CLIENT_READY_HELLO_OPT_IN_PEEK_MS: u64 = 500;
 
 #[derive(Default)]
 struct BinaryKvLookupResult {
@@ -158,6 +163,71 @@ pub async fn serve_binary(args: ServeBinaryArgs) -> Result<()> {
     serve_binary_stage(BinaryStageOptions::from_cli_args(args)?).await
 }
 
+pub fn probe_downstream(args: ProbeDownstreamArgs) -> Result<()> {
+    let endpoint = args
+        .endpoint
+        .strip_prefix("tcp://")
+        .unwrap_or(&args.endpoint);
+    let downstream_addr = resolve_downstream_endpoint(endpoint)?;
+    let source_ip = if args.bind_addr.ip().is_unspecified() {
+        None
+    } else {
+        Some(args.bind_addr.ip())
+    };
+    if args.route_snapshot {
+        print_probe_route_snapshot(source_ip, downstream_addr);
+    }
+    let attempts = args.attempts.max(1);
+    for attempt in 1..=attempts {
+        let started = Instant::now();
+        match connect_downstream_socket(
+            downstream_addr,
+            source_ip,
+            Duration::from_secs(args.timeout_secs),
+        ) {
+            Ok(stream) => {
+                stream.set_nodelay(true).ok();
+                println!(
+                    "probe-downstream ready: attempt={attempt}/{attempts} elapsed_ms={} source={source_ip:?} local={:?} remote={downstream_addr}",
+                    started.elapsed().as_millis(),
+                    stream.local_addr().ok(),
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                eprintln!(
+                    "probe-downstream failed: attempt={attempt}/{attempts} elapsed_ms={} source={source_ip:?} remote={downstream_addr} error={error}",
+                    started.elapsed().as_millis(),
+                );
+                if attempt < attempts && args.retry_delay_ms > 0 {
+                    thread::sleep(Duration::from_millis(args.retry_delay_ms));
+                }
+            }
+        }
+    }
+    bail!("probe-downstream failed after {attempts} attempt(s)")
+}
+
+fn print_probe_route_snapshot(source_ip: Option<IpAddr>, downstream_addr: SocketAddr) {
+    eprintln!("probe-downstream route snapshot: source={source_ip:?} remote={downstream_addr}");
+    #[cfg(target_os = "macos")]
+    if let Some(source_ip) = source_ip {
+        match interface_index_for_ip(source_ip) {
+            Ok(Some(index)) => {
+                eprintln!("probe-downstream route snapshot: source interface index={index}");
+            }
+            Ok(None) => {
+                eprintln!("probe-downstream route snapshot: source interface not found");
+            }
+            Err(error) => {
+                eprintln!(
+                    "probe-downstream route snapshot: source interface lookup failed: {error}"
+                );
+            }
+        }
+    }
+}
+
 pub async fn serve_binary_stage(options: BinaryStageOptions) -> Result<()> {
     serve_binary_stage_with_shutdown(options, std::future::pending::<()>()).await
 }
@@ -235,20 +305,24 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
         telemetry.emit("stage.binary_runtime_prewarm", attrs);
     }
     let kv = KvStageIntegration::from_config(&config)?.map(Arc::new);
-    let prediction_returns = Arc::new(PredictionReturnHub);
+    let prediction_returns = Arc::new(PredictionReturnHub::default());
     let listener = TcpListener::bind(bind_addr)?;
     listener.set_nonblocking(true)?;
+    let warm_downstream = Arc::new(Mutex::new(None));
     if let Some(openai_options) = openai {
         if config.stage_index != 0 || config.layer_start != 0 {
             bail!("--openai-bind-addr is only supported on stage 0");
         }
         let openai_config = config.clone();
+        let openai_topology = topology.clone();
         let openai_runtime = runtime.clone();
         let openai_telemetry = telemetry.clone();
+        let openai_prediction_returns = prediction_returns.clone();
         tokio::spawn(async move {
             if let Err(error) = frontend::serve_embedded_openai(EmbeddedOpenAiArgs {
                 bind_addr: openai_options.bind_addr,
                 config: openai_config,
+                topology: openai_topology,
                 runtime: openai_runtime,
                 model_id: openai_options.model_id,
                 default_max_tokens: openai_options.default_max_tokens,
@@ -261,6 +335,15 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
                 prefill_adaptive_step: openai_options.prefill_adaptive_step,
                 prefill_adaptive_max: openai_options.prefill_adaptive_max,
                 draft_model_path: openai_options.draft_model_path,
+                spd_manifest_path: openai_options.spd_manifest_path,
+                spd_fixture_path: openai_options.spd_fixture_path,
+                spd_model_path: openai_options.spd_model_path,
+                spd_top_k: openai_options.spd_top_k,
+                spd_n_gpu_layers: openai_options.spd_n_gpu_layers,
+                spd_replay_fallback: openai_options.spd_replay_fallback,
+                spd_optimistic_decode: openai_options.spd_optimistic_decode,
+                spd_rolling_executor: openai_options.spd_rolling_executor,
+                spd_optimistic_min_logit_margin: openai_options.spd_optimistic_min_logit_margin,
                 speculative_window: openai_options.speculative_window,
                 adaptive_speculative_window: openai_options.adaptive_speculative_window,
                 draft_n_gpu_layers: openai_options.draft_n_gpu_layers,
@@ -269,6 +352,7 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
                 reply_credit_limit,
                 downstream_connect_timeout_secs,
                 downstream_wire_condition,
+                prediction_returns: Some(openai_prediction_returns),
                 telemetry: openai_telemetry,
                 hook_policy: None,
                 openai_guardrails: Some(frontend::OpenAiGuardrailsConfig::disabled_for_skippy()),
@@ -311,6 +395,7 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
         let kv = kv.clone();
         let telemetry = telemetry.clone();
         let prediction_returns = prediction_returns.clone();
+        let warm_downstream = warm_downstream.clone();
         thread::spawn(move || {
             let connection_result = (|| -> Result<()> {
                 eprintln!(
@@ -328,11 +413,21 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
                     Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
                     Err(error) => return Err(error.into()),
                 };
+                if initial_message_closes_without_downstream(&first_message) {
+                    eprintln!(
+                        "binary received initial stop: stage_id={} peer={peer_addr:?}; closing without downstream connect",
+                        config.stage_id
+                    );
+                    return Ok(());
+                }
                 if first_message.kind == WireMessageKind::PredictionReturnOpen {
                     return prediction_returns.handle_return_connection(first_message, upstream);
                 }
-                let downstream =
-                    connect_binary_downstream(&config, downstream_connect_timeout_secs)?;
+                let downstream = take_warm_or_connect_downstream(
+                    &config,
+                    &warm_downstream,
+                    downstream_connect_timeout_secs,
+                )?;
                 handle_binary_connection(
                     &config,
                     topology.as_ref(),
@@ -366,12 +461,91 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
     Ok(())
 }
 
+fn take_warm_or_connect_downstream(
+    config: &StageConfig,
+    warm_downstream: &Arc<Mutex<Option<TcpStream>>>,
+    timeout_secs: u64,
+) -> Result<Option<TcpStream>> {
+    if config.downstream.is_none() {
+        return Ok(None);
+    }
+    let warm = warm_downstream
+        .lock()
+        .map_err(|_| anyhow!("warm downstream lock poisoned"))?
+        .take();
+    if let Some(stream) = warm {
+        let local_addr = stream.local_addr().ok();
+        let peer_addr = stream.peer_addr().ok();
+        eprintln!(
+            "downstream connect ready: stage_id={} mode=warm-preconnect local={local_addr:?} remote={peer_addr:?}",
+            config.stage_id,
+        );
+        return Ok(Some(stream));
+    }
+    connect_binary_downstream(config, timeout_secs)
+}
+
+fn initial_message_closes_without_downstream(message: &StageWireMessage) -> bool {
+    message.kind == WireMessageKind::Stop
+}
+
 fn prepare_binary_stage_connection(stream: &TcpStream) -> Result<()> {
     stream
         .set_nonblocking(false)
         .context("set binary stage connection blocking")?;
     stream.set_nodelay(true).ok();
     Ok(())
+}
+
+#[allow(dead_code)]
+pub(crate) fn send_client_ready_hello_if_enabled(stream: &mut TcpStream) -> Result<()> {
+    if !client_ready_hello_enabled() {
+        return Ok(());
+    }
+    send_ready(&mut *stream).context("send client ready hello")?;
+    stream.flush().ok();
+    Ok(())
+}
+
+pub(super) fn consume_optional_client_ready_hello(stream: &mut TcpStream) -> Result<()> {
+    if !client_ready_hello_enabled() {
+        return Ok(());
+    }
+    let previous_timeout = stream
+        .read_timeout()
+        .context("read stage connection timeout")?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(
+            CLIENT_READY_HELLO_OPT_IN_PEEK_MS,
+        )))
+        .context("set client ready hello peek timeout")?;
+    let mut bytes = [0_u8; 4];
+    let peek_result = stream.peek(&mut bytes);
+    stream
+        .set_read_timeout(previous_timeout)
+        .context("restore stage connection timeout")?;
+
+    match peek_result {
+        Ok(4) if i32::from_le_bytes(bytes) == READY_MAGIC => {
+            skippy_protocol::binary::recv_ready(&mut *stream)
+                .context("consume client ready hello")?;
+            eprintln!("binary consumed client ready hello");
+        }
+        Ok(_) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) => {}
+        Err(error) => return Err(error).context("peek optional client ready hello"),
+    }
+    Ok(())
+}
+
+fn client_ready_hello_enabled() -> bool {
+    env::var(CLIENT_READY_HELLO_ENV)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1440,6 +1614,7 @@ fn handle_binary_connection(
                     kind: reply_kind,
                     predicted: predicted_token,
                     predicted_tokens,
+                    spd_tap: None,
                     stats: message_reply_stats,
                 },
             )
@@ -1788,6 +1963,7 @@ fn estimated_reply_wire_bytes(reply_kind: WireReplyKind, predicted_token_count: 
         WireReplyKind::Ack => 0,
         WireReplyKind::PredictedToken => 1,
         WireReplyKind::PredictedTokens => predicted_token_count,
+        WireReplyKind::SpdTap => 0,
     };
     REPLY_HEADER_BYTES + token_count * std::mem::size_of::<i32>() + REPLY_STATS_BYTES
 }
@@ -2329,6 +2505,7 @@ fn handle_binary_restore_prefill_decode_control(
                 kind: WireReplyKind::Ack,
                 predicted: 0,
                 predicted_tokens: Vec::new(),
+                spd_tap: None,
                 stats: control_stats,
             },
         )
@@ -2485,6 +2662,7 @@ fn handle_binary_restore_prefill_decode_control(
             kind: WireReplyKind::PredictedToken,
             predicted: predicted_token,
             predicted_tokens: vec![predicted_token],
+            spd_tap: None,
             stats: control_stats,
         },
     )
@@ -2523,6 +2701,13 @@ fn send_stage_reply(stream: &mut TcpStream, reply: StageReply) -> Result<()> {
         WireReplyKind::PredictedTokens => {
             send_reply_predicted_tokens_with_stats(stream, &reply.predicted_tokens, reply.stats)
                 .context("send stage predicted-tokens reply")
+        }
+        WireReplyKind::SpdTap => {
+            let tap = reply
+                .spd_tap
+                .as_ref()
+                .context("SPD tap reply missing tap payload")?;
+            send_reply_spd_tap_with_stats(stream, tap, reply.stats).context("send stage SPD tap")
         }
     }
 }
@@ -3691,13 +3876,25 @@ pub(crate) fn connect_binary_downstream(
     let source_ip = downstream_source_ip(config)?;
     let attempts = timeout_secs.saturating_mul(2).max(1);
     let mut last_error = None;
-    for _ in 0..attempts {
+    for attempt in 1..=attempts {
+        let started = Instant::now();
         match connect_downstream_socket(downstream_addr, source_ip, Duration::from_secs(2)) {
             Ok(stream) => {
                 stream.set_nodelay(true).ok();
+                let local_addr = stream.local_addr().ok();
+                eprintln!(
+                    "downstream connect ready: stage_id={} attempt={attempt}/{attempts} elapsed_ms={} source={source_ip:?} local={local_addr:?} remote={downstream_addr}",
+                    config.stage_id,
+                    started.elapsed().as_millis(),
+                );
                 return Ok(Some(stream));
             }
             Err(error) => {
+                eprintln!(
+                    "downstream connect attempt failed: stage_id={} attempt={attempt}/{attempts} elapsed_ms={} source={source_ip:?} remote={downstream_addr} error={error}",
+                    config.stage_id,
+                    started.elapsed().as_millis(),
+                );
                 last_error = Some(anyhow!(error));
                 thread::sleep(Duration::from_millis(500));
             }
@@ -3805,7 +4002,9 @@ pub(crate) fn run_binary_stage_message(
         | WireMessageKind::RestorePrefill
         | WireMessageKind::TryRestorePrefill
         | WireMessageKind::TryRestorePrefillDecode
-        | WireMessageKind::PredictionReturnOpen => {
+        | WireMessageKind::PredictionReturnOpen
+        | WireMessageKind::CopySession
+        | WireMessageKind::DropSession => {
             bail!("message kind is not executable")
         }
     }

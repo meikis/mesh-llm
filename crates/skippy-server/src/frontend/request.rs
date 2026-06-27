@@ -353,7 +353,7 @@ pub(super) fn chat_template_options(
         &request.extra,
     )?;
     Ok(ChatTemplateOptions {
-        enable_thinking: reasoning_options.enable_thinking,
+        enable_thinking: Some(reasoning_options.enable_thinking.unwrap_or(false)),
         ..ChatTemplateOptions::default()
     })
 }

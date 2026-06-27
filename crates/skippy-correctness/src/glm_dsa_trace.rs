@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::{ErrorKind, Write},
-    net::{SocketAddr, TcpListener},
+    net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -16,18 +16,23 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use skippy_protocol::binary::{
-    StageReplyStats, WireMessageKind, read_stage_message, send_ready, send_reply_ack_with_stats,
-    send_reply_predicted_tokens_with_stats, send_reply_predicted_with_stats,
+    StageReplyStats, WireMessageKind, read_stage_message, recv_ready, send_ready,
+    send_reply_ack_with_stats, send_reply_predicted_tokens_with_stats,
+    send_reply_predicted_with_stats,
 };
 
 use crate::{
     cli::{FlashAttentionArg, GlmDsaStage0TraceArgs, StageLoadMode},
     report::{
-        GlmDsaStage0TraceReport, GlmDsaTimingReport, GlmDsaTraceKeyReport,
+        GlmDsaActivationErrorReport, GlmDsaActivationStatsReport, GlmDsaDownstreamComparisonReport,
+        GlmDsaDownstreamMessageReport, GlmDsaDownstreamParityReport, GlmDsaSemanticParityReport,
+        GlmDsaStage0TraceReport, GlmDsaTimingChunkReport, GlmDsaTimingGroupChunkReport,
+        GlmDsaTimingReport, GlmDsaTopKComparisonReport, GlmDsaTraceKeyReport,
         GlmDsaTraceParityMismatchReport, GlmDsaTraceParityReport, GlmDsaTraceVariantReport,
     },
-    support::{ChildGuard, connect_ready, parse_wire_dtype},
+    support::{ChildGuard, parse_wire_dtype},
 };
 
 #[derive(Debug, Clone)]
@@ -36,7 +41,11 @@ struct FakeDownstreamMessage {
     pos_start: i32,
     token_count: i32,
     activation_bytes: usize,
+    activation_sha256: String,
+    activation_f32: Option<GlmDsaActivationStatsReport>,
+    activation_f32_payload: Option<Vec<u8>>,
     top_k_count: usize,
+    top_k_sha256: String,
     top_k_values: Vec<i32>,
 }
 
@@ -44,6 +53,11 @@ struct FakeDownstreamGuard {
     stop: Arc<AtomicBool>,
     messages: Arc<Mutex<Vec<FakeDownstreamMessage>>>,
     handle: Option<JoinHandle<Result<()>>>,
+}
+
+struct TraceVariantRun {
+    report: GlmDsaTraceVariantReport,
+    fake_messages: Vec<FakeDownstreamMessage>,
 }
 
 #[derive(Clone, Copy)]
@@ -84,22 +98,32 @@ pub fn glm_dsa_stage0_trace(args: GlmDsaStage0TraceArgs) -> Result<()> {
         },
     )?;
 
-    let both_variants_completed = fused.prompt_success && direct.prompt_success;
+    let both_variants_completed = fused.report.prompt_success && direct.report.prompt_success;
     let trace_parity = compare_variant_traces(
-        &fused.stage_log,
-        &direct.stage_log,
+        &fused.report.stage_log,
+        &direct.report.stage_log,
         !args.allow_trace_mismatch,
     )?;
-    let status = if both_variants_completed && trace_parity.matched {
+    let downstream_parity =
+        compare_downstream_messages(&fused.fake_messages, &direct.fake_messages);
+    let semantic_parity = compare_semantic_parity(
+        &downstream_parity,
+        args.activation_atol,
+        args.activation_relative_rmse_tolerance,
+    );
+    let parity_matched = trace_parity.matched || semantic_parity.matched;
+    let status = if both_variants_completed && parity_matched {
         "pass"
     } else {
         "fail"
     };
-    let fused_prefill_speedup_vs_direct =
-        speedup(fused.prompt_prefill_tok_s, direct.prompt_prefill_tok_s);
+    let fused_prefill_speedup_vs_direct = speedup(
+        fused.report.prompt_prefill_tok_s,
+        direct.report.prompt_prefill_tok_s,
+    );
     let fused_glm_dsa_op_speedup_vs_direct = timing_speedup(
-        fused.avg_128_token_timing.as_ref(),
-        direct.avg_128_token_timing.as_ref(),
+        fused.report.avg_128_token_timing.as_ref(),
+        direct.report.avg_128_token_timing.as_ref(),
     );
     let report = GlmDsaStage0TraceReport {
         mode: "glm-dsa-stage0-trace",
@@ -122,14 +146,16 @@ pub fn glm_dsa_stage0_trace(args: GlmDsaStage0TraceArgs) -> Result<()> {
         fused_prefill_speedup_vs_direct,
         fused_glm_dsa_op_speedup_vs_direct,
         trace_parity,
-        variants: vec![fused, direct],
+        downstream_parity,
+        semantic_parity,
+        variants: vec![fused.report, direct.report],
     };
     emit_report(&report, args.output.report_out.as_deref())?;
     if !report.both_variants_completed {
         bail!("GLM-DSA stage0 trace did not complete both variants");
     }
-    if report.trace_parity.required && !report.trace_parity.matched {
-        bail!("GLM-DSA fused/direct trace parity failed");
+    if !parity_matched {
+        bail!("GLM-DSA fused/direct semantic parity failed");
     }
     Ok(())
 }
@@ -150,7 +176,7 @@ fn run_variant(
     run_id: &str,
     case_root: &Path,
     variant: TraceVariant,
-) -> Result<GlmDsaTraceVariantReport> {
+) -> Result<TraceVariantRun> {
     let variant_root = case_root.join(variant.name);
     fs::create_dir_all(&variant_root)
         .with_context(|| format!("create variant root {}", variant_root.display()))?;
@@ -161,18 +187,24 @@ fn run_variant(
 
     let fake = FakeDownstreamGuard::start(args.fake_downstream_bind_addr, args.activation_width)
         .context("start fake downstream")?;
-    let _stage =
+    let mut stage =
         start_stage0(args, &stage_config_path, &stage_log_path, variant).context("start stage0")?;
-    drop(
-        connect_ready(args.stage0_bind_addr, args.server.startup_timeout_secs)
-            .context("stage0 did not become ready")?,
-    );
+    drop(wait_for_stage_ready_or_exit(
+        &mut stage,
+        args.stage0_bind_addr,
+        args.server.startup_timeout_secs,
+        &stage_log_path,
+    )?);
 
     let prompt_output = run_prompt(args, &prompt_log_path).context("run skippy-prompt")?;
     let fake_messages = fake.finish()?;
     let stage_log = fs::read_to_string(&stage_log_path).unwrap_or_default();
     let prompt_log = fs::read_to_string(&prompt_log_path).unwrap_or_default();
-    let avg_128_token_timing = avg_128_token_timing(&stage_log);
+    let timing_chunks = parse_timing_chunks(&stage_log);
+    let timing_group_chunks = parse_timing_group_chunks(&stage_log);
+    let avg_128_token_timing = avg_128_token_timing(&timing_chunks);
+    let max_128_token_timing = max_128_token_timing(&timing_chunks);
+    let last_128_token_timing = last_128_token_timing(&timing_chunks);
     let (prompt_prefill_tok_s, prompt_decode_tok_s) = parse_prompt_speeds(&prompt_log);
     let trace_line_count = stage_log.matches("glm_dsa_tensor_trace").count();
     let timing_line_count = stage_log.matches("glm_dsa_op_timing").count();
@@ -253,8 +285,12 @@ fn run_variant(
         fake_downstream_total_top_k_count * std::mem::size_of::<i32>(),
         fake_downstream_top_k_activation_bytes,
     );
+    let fake_downstream_messages = fake_messages
+        .iter()
+        .map(fake_downstream_message_report)
+        .collect::<Vec<_>>();
 
-    Ok(GlmDsaTraceVariantReport {
+    let report = GlmDsaTraceVariantReport {
         variant: variant.name,
         direct_sparse_attn: variant.direct_sparse_attn,
         fused_sparse_mask: variant.fused_sparse_mask,
@@ -280,11 +316,20 @@ fn run_variant(
         fake_downstream_max_top_k_per_token,
         fake_downstream_top_k_padding_ratio,
         fake_downstream_top_k_sideband_to_hidden_ratio,
+        fake_downstream_messages,
         trace_line_count,
         timing_line_count,
         prompt_prefill_tok_s,
         prompt_decode_tok_s,
         avg_128_token_timing,
+        max_128_token_timing,
+        last_128_token_timing,
+        timing_chunks,
+        timing_group_chunks,
+    };
+    Ok(TraceVariantRun {
+        report,
+        fake_messages,
     })
 }
 
@@ -657,7 +702,8 @@ fn run_prompt(
         .with_context(|| format!("spawn {}", args.prompt_bin.display()))?;
     {
         let stdin = child.stdin.as_mut().context("open skippy-prompt stdin")?;
-        writeln!(stdin, "{}", args.runtime.prompt)?;
+        let prompt = args.runtime.prompt.replace(['\r', '\n'], " ");
+        writeln!(stdin, "{prompt}")?;
         writeln!(stdin, ":quit")?;
     }
     let output = child.wait_with_output().context("wait for skippy-prompt")?;
@@ -667,6 +713,54 @@ fn run_prompt(
     fs::write(prompt_log_path, log)
         .with_context(|| format!("write prompt log {}", prompt_log_path.display()))?;
     Ok(output)
+}
+
+fn wait_for_stage_ready_or_exit(
+    stage: &mut ChildGuard,
+    addr: SocketAddr,
+    timeout_secs: u64,
+    log_path: &Path,
+) -> Result<TcpStream> {
+    let attempts = timeout_secs.saturating_mul(2).max(1);
+    let mut last_error = None;
+    for _ in 0..attempts {
+        if let Some(status) = stage.try_wait()? {
+            bail!(
+                "stage0 exited before ready with status {status}; log tail:\n{}",
+                log_tail(log_path, 40)
+            );
+        }
+        match try_connect_ready(addr) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+    Err(last_error
+        .unwrap_or_else(|| anyhow!("timed out"))
+        .context("stage0 did not become ready"))
+}
+
+fn try_connect_ready(addr: SocketAddr) -> Result<TcpStream> {
+    let mut stream = TcpStream::connect(addr).context("connect failed")?;
+    stream.set_nodelay(true).ok();
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .ok();
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .ok();
+    recv_ready(&mut stream).context("ready handshake failed")?;
+    Ok(stream)
+}
+
+fn log_tail(path: &Path, max_lines: usize) -> String {
+    let Ok(log) = fs::read_to_string(path) else {
+        return format!("unable to read {}", path.display());
+    };
+    let mut lines = log.lines().rev().take(max_lines).collect::<Vec<_>>();
+    lines.reverse();
+    lines.join("\n")
 }
 
 impl FakeDownstreamGuard {
@@ -697,12 +791,20 @@ impl FakeDownstreamGuard {
                                     return Err(anyhow!(error).context("read stage message"));
                                 }
                             };
+                            let activation_f32_payload =
+                                message.activation_f32_payload(activation_width).ok();
                             let summary = FakeDownstreamMessage {
                                 kind: message.kind,
                                 pos_start: message.pos_start,
                                 token_count: message.token_count,
                                 activation_bytes: message.activation.len(),
+                                activation_sha256: sha256_hex(&message.activation),
+                                activation_f32: activation_f32_payload
+                                    .as_ref()
+                                    .and_then(|payload| activation_f32_stats(payload)),
+                                activation_f32_payload,
                                 top_k_count: message.raw_bytes.len() / std::mem::size_of::<i32>(),
+                                top_k_sha256: sha256_hex(&message.raw_bytes),
                                 top_k_values: decode_i32_values(&message.raw_bytes),
                             };
                             thread_messages
@@ -786,29 +888,69 @@ impl Drop for FakeDownstreamGuard {
     }
 }
 
-fn avg_128_token_timing(stage_log: &str) -> Option<GlmDsaTimingReport> {
-    let mut count = 0usize;
+fn parse_timing_chunks(stage_log: &str) -> Vec<GlmDsaTimingChunkReport> {
+    stage_log
+        .lines()
+        .filter(|line| line.contains("glm_dsa_op_timing"))
+        .enumerate()
+        .filter_map(|(index, line)| parse_timing_chunk(index, line))
+        .collect()
+}
+
+fn parse_timing_chunk(index: usize, line: &str) -> Option<GlmDsaTimingChunkReport> {
+    Some(GlmDsaTimingChunkReport {
+        index,
+        tokens: timing_value(line, "tokens")? as u32,
+        total_us: timing_value(line, "total_us")?,
+        indexer_topk_us: timing_value(line, "indexer_topk_us")?,
+        sparse_mask_us: timing_value(line, "sparse_mask_us")?,
+        dsa_sparse_attn_us: timing_value(line, "dsa_sparse_attn_us").unwrap_or(0.0),
+        mla_attention_us: timing_value(line, "mla_attention_us")?,
+    })
+}
+
+fn parse_timing_group_chunks(stage_log: &str) -> Vec<GlmDsaTimingGroupChunkReport> {
+    stage_log
+        .lines()
+        .filter(|line| line.contains("glm_dsa_group_timing"))
+        .enumerate()
+        .filter_map(|(index, line)| parse_timing_group_chunk(index, line))
+        .collect()
+}
+
+fn parse_timing_group_chunk(index: usize, line: &str) -> Option<GlmDsaTimingGroupChunkReport> {
+    Some(GlmDsaTimingGroupChunkReport {
+        index,
+        tokens: timing_value(line, "tokens")? as u32,
+        group: timing_string_value(line, "group")?.to_owned(),
+        total_us: timing_value(line, "total_us")?,
+        indexer_topk_us: timing_value(line, "indexer_topk_us")?,
+        sparse_mask_us: timing_value(line, "sparse_mask_us")?,
+        dsa_sparse_attn_us: timing_value(line, "dsa_sparse_attn_us").unwrap_or(0.0),
+        mla_attention_us: timing_value(line, "mla_attention_us")?,
+    })
+}
+
+fn avg_128_token_timing(chunks: &[GlmDsaTimingChunkReport]) -> Option<GlmDsaTimingReport> {
+    let chunks = chunks
+        .iter()
+        .filter(|chunk| chunk.tokens == 128)
+        .collect::<Vec<_>>();
+    let count = chunks.len();
+    if count == 0 {
+        return None;
+    }
     let mut total_us = 0.0;
     let mut indexer_topk_us = 0.0;
     let mut sparse_mask_us = 0.0;
     let mut dsa_sparse_attn_us = 0.0;
     let mut mla_attention_us = 0.0;
-    for line in stage_log
-        .lines()
-        .filter(|line| line.contains("glm_dsa_op_timing"))
-    {
-        if timing_value(line, "tokens")? != 128.0 {
-            continue;
-        }
-        count += 1;
-        total_us += timing_value(line, "total_us")?;
-        indexer_topk_us += timing_value(line, "indexer_topk_us")?;
-        sparse_mask_us += timing_value(line, "sparse_mask_us")?;
-        dsa_sparse_attn_us += timing_value(line, "dsa_sparse_attn_us").unwrap_or(0.0);
-        mla_attention_us += timing_value(line, "mla_attention_us")?;
-    }
-    if count == 0 {
-        return None;
+    for chunk in &chunks {
+        total_us += chunk.total_us;
+        indexer_topk_us += chunk.indexer_topk_us;
+        sparse_mask_us += chunk.sparse_mask_us;
+        dsa_sparse_attn_us += chunk.dsa_sparse_attn_us;
+        mla_attention_us += chunk.mla_attention_us;
     }
     let count_f = count as f64;
     Some(GlmDsaTimingReport {
@@ -821,12 +963,35 @@ fn avg_128_token_timing(stage_log: &str) -> Option<GlmDsaTimingReport> {
     })
 }
 
+fn max_128_token_timing(chunks: &[GlmDsaTimingChunkReport]) -> Option<GlmDsaTimingChunkReport> {
+    chunks
+        .iter()
+        .filter(|chunk| chunk.tokens == 128)
+        .max_by(|left, right| left.total_us.total_cmp(&right.total_us))
+        .cloned()
+}
+
+fn last_128_token_timing(chunks: &[GlmDsaTimingChunkReport]) -> Option<GlmDsaTimingChunkReport> {
+    chunks
+        .iter()
+        .rev()
+        .find(|chunk| chunk.tokens == 128)
+        .cloned()
+}
+
 fn timing_value(line: &str, key: &str) -> Option<f64> {
     line.split_whitespace().find_map(|field| {
         let (field_key, value) = field.split_once('=')?;
         (field_key == key)
             .then(|| value.parse::<f64>().ok())
             .flatten()
+    })
+}
+
+fn timing_string_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    line.split_whitespace().find_map(|field| {
+        let (field_key, value) = field.split_once('=')?;
+        (field_key == key).then_some(value)
     })
 }
 
@@ -869,6 +1034,321 @@ fn timing_speedup(
 
 fn nonzero_div_usize(numerator: usize, denominator: usize) -> Option<f64> {
     (denominator > 0).then_some(numerator as f64 / denominator as f64)
+}
+
+fn compare_downstream_messages(
+    fused: &[FakeDownstreamMessage],
+    direct: &[FakeDownstreamMessage],
+) -> GlmDsaDownstreamParityReport {
+    let compared_message_count = fused.len().min(direct.len());
+    let messages = (0..compared_message_count)
+        .map(|index| compare_downstream_message(index, &fused[index], &direct[index]))
+        .collect::<Vec<_>>();
+    let activation_mismatch_count = messages
+        .iter()
+        .filter(|message| !message.activation_sha256_equal)
+        .count()
+        + fused.len().abs_diff(direct.len());
+    let top_k_mismatch_count = messages
+        .iter()
+        .filter(|message| !message.top_k_sha256_equal || !message.top_k_count_equal)
+        .count();
+    let mismatched_message_count = messages
+        .iter()
+        .filter(|message| {
+            message.fused_kind != message.direct_kind
+                || message.fused_pos_start != message.direct_pos_start
+                || message.fused_token_count != message.direct_token_count
+                || !message.activation_sha256_equal
+                || !message.top_k_sha256_equal
+                || !message.top_k_count_equal
+        })
+        .count()
+        + fused.len().abs_diff(direct.len());
+    GlmDsaDownstreamParityReport {
+        matched: fused.len() == direct.len() && mismatched_message_count == 0,
+        fused_message_count: fused.len(),
+        direct_message_count: direct.len(),
+        compared_message_count,
+        mismatched_message_count,
+        activation_mismatch_count,
+        top_k_mismatch_count,
+        messages,
+    }
+}
+
+fn compare_semantic_parity(
+    downstream: &GlmDsaDownstreamParityReport,
+    activation_atol: f32,
+    activation_relative_rmse_tolerance: f64,
+) -> GlmDsaSemanticParityReport {
+    let message_metadata_exact = downstream.fused_message_count == downstream.direct_message_count
+        && downstream.messages.iter().all(|message| {
+            message.fused_kind == message.direct_kind
+                && message.fused_pos_start == message.direct_pos_start
+                && message.fused_token_count == message.direct_token_count
+        });
+    let top_k_exact = downstream.top_k_mismatch_count == 0
+        && downstream
+            .messages
+            .iter()
+            .all(|message| message.top_k_sha256_equal && message.top_k_count_equal);
+    let activation_out_of_tolerance_count = downstream
+        .messages
+        .iter()
+        .filter(|message| {
+            !activation_message_within_tolerance(
+                message,
+                activation_atol,
+                activation_relative_rmse_tolerance,
+            )
+        })
+        .count();
+    let activation_within_tolerance = downstream.fused_message_count
+        == downstream.direct_message_count
+        && activation_out_of_tolerance_count == 0;
+    GlmDsaSemanticParityReport {
+        matched: message_metadata_exact && top_k_exact && activation_within_tolerance,
+        activation_atol,
+        activation_relative_rmse_tolerance,
+        activation_within_tolerance,
+        activation_out_of_tolerance_count,
+        top_k_exact,
+        message_metadata_exact,
+        compared_message_count: downstream.compared_message_count,
+    }
+}
+
+fn activation_message_within_tolerance(
+    message: &GlmDsaDownstreamComparisonReport,
+    activation_atol: f32,
+    activation_relative_rmse_tolerance: f64,
+) -> bool {
+    if message.activation_sha256_equal {
+        return true;
+    }
+
+    let Some(error) = message.activation_error.as_ref() else {
+        return false;
+    };
+    let relative_rmse_ok = error
+        .relative_rmse
+        .is_some_and(|relative_rmse| relative_rmse <= activation_relative_rmse_tolerance);
+    error.non_finite_pair_count == 0 && error.max_abs_error <= activation_atol && relative_rmse_ok
+}
+
+fn compare_downstream_message(
+    index: usize,
+    fused: &FakeDownstreamMessage,
+    direct: &FakeDownstreamMessage,
+) -> GlmDsaDownstreamComparisonReport {
+    GlmDsaDownstreamComparisonReport {
+        index,
+        fused_kind: format!("{:?}", fused.kind),
+        direct_kind: format!("{:?}", direct.kind),
+        fused_pos_start: fused.pos_start,
+        direct_pos_start: direct.pos_start,
+        fused_token_count: fused.token_count,
+        direct_token_count: direct.token_count,
+        activation_sha256_equal: fused.activation_sha256 == direct.activation_sha256,
+        top_k_sha256_equal: fused.top_k_sha256 == direct.top_k_sha256,
+        top_k_count_equal: fused.top_k_count == direct.top_k_count,
+        top_k_comparison: compare_top_k_values(fused, direct),
+        activation_error: compare_activation_payloads(
+            fused.activation_f32_payload.as_deref(),
+            direct.activation_f32_payload.as_deref(),
+        ),
+    }
+}
+
+fn compare_top_k_values(
+    fused: &FakeDownstreamMessage,
+    direct: &FakeDownstreamMessage,
+) -> Option<GlmDsaTopKComparisonReport> {
+    if fused.top_k_values.is_empty() || fused.top_k_values.len() != direct.top_k_values.len() {
+        return None;
+    }
+
+    let mut mismatch_count = 0usize;
+    let mut first_mismatch = None;
+    let mut active_compared_count = 0usize;
+    let mut active_mismatch_count = 0usize;
+    let mut first_active_mismatch = None;
+    for (index, (fused_value, direct_value)) in fused
+        .top_k_values
+        .iter()
+        .zip(direct.top_k_values.iter())
+        .enumerate()
+    {
+        if fused_value != direct_value {
+            mismatch_count += 1;
+            first_mismatch.get_or_insert((index, *fused_value, *direct_value));
+        }
+        if top_k_index_is_active(fused, index, *fused_value)
+            || top_k_index_is_active(direct, index, *direct_value)
+        {
+            active_compared_count += 1;
+            if fused_value != direct_value {
+                active_mismatch_count += 1;
+                first_active_mismatch.get_or_insert((index, *fused_value, *direct_value));
+            }
+        }
+    }
+
+    let compared_count = fused.top_k_values.len();
+    Some(GlmDsaTopKComparisonReport {
+        compared_count,
+        mismatch_count,
+        mismatch_ratio: ratio(mismatch_count, compared_count),
+        active_compared_count,
+        active_mismatch_count,
+        active_mismatch_ratio: ratio(active_mismatch_count, active_compared_count),
+        first_mismatch_index: first_mismatch.map(|(index, _, _)| index),
+        first_mismatch_fused: first_mismatch.map(|(_, value, _)| value),
+        first_mismatch_direct: first_mismatch.map(|(_, _, value)| value),
+        first_active_mismatch_index: first_active_mismatch.map(|(index, _, _)| index),
+        first_active_mismatch_fused: first_active_mismatch.map(|(_, value, _)| value),
+        first_active_mismatch_direct: first_active_mismatch.map(|(_, _, value)| value),
+    })
+}
+
+fn top_k_index_is_active(message: &FakeDownstreamMessage, index: usize, value: i32) -> bool {
+    let token_count = message_token_count(message);
+    if token_count == 0 {
+        return false;
+    }
+    let sideband_width = message.top_k_values.len() / token_count;
+    if sideband_width == 0 {
+        return false;
+    }
+    let token_index = index / sideband_width;
+    let visible_width =
+        i32::try_from(causal_visible_width(message.pos_start, token_index)).unwrap_or(i32::MAX);
+    value >= 0 && value < visible_width
+}
+
+fn ratio(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
+fn compare_activation_payloads(
+    fused: Option<&[u8]>,
+    direct: Option<&[u8]>,
+) -> Option<GlmDsaActivationErrorReport> {
+    let fused = fused?;
+    let direct = direct?;
+    if fused.is_empty()
+        || fused.len() != direct.len()
+        || !fused.len().is_multiple_of(std::mem::size_of::<f32>())
+    {
+        return None;
+    }
+
+    let mut count = 0usize;
+    let mut non_finite_pair_count = 0usize;
+    let mut max_abs_error = 0.0f32;
+    let mut max_reference_abs = 0.0f32;
+    let mut abs_sum = 0.0f64;
+    let mut sq_sum = 0.0f64;
+    let mut ref_sq_sum = 0.0f64;
+    for (fused_chunk, direct_chunk) in fused
+        .chunks_exact(std::mem::size_of::<f32>())
+        .zip(direct.chunks_exact(std::mem::size_of::<f32>()))
+    {
+        let fused_value = f32::from_le_bytes(fused_chunk.try_into().ok()?);
+        let direct_value = f32::from_le_bytes(direct_chunk.try_into().ok()?);
+        count += 1;
+        if !fused_value.is_finite() || !direct_value.is_finite() {
+            non_finite_pair_count += 1;
+            continue;
+        }
+        let error = (fused_value - direct_value).abs();
+        max_abs_error = max_abs_error.max(error);
+        max_reference_abs = max_reference_abs.max(fused_value.abs());
+        abs_sum += f64::from(error);
+        sq_sum += f64::from(error) * f64::from(error);
+        ref_sq_sum += f64::from(fused_value) * f64::from(fused_value);
+    }
+    let finite_count = count.saturating_sub(non_finite_pair_count);
+    if finite_count == 0 {
+        return None;
+    }
+    let rmse = (sq_sum / finite_count as f64).sqrt();
+    let reference_rmse = (ref_sq_sum / finite_count as f64).sqrt();
+    Some(GlmDsaActivationErrorReport {
+        count,
+        max_abs_error,
+        mean_abs_error: abs_sum / finite_count as f64,
+        rmse,
+        relative_rmse: (reference_rmse > 0.0).then_some(rmse / reference_rmse),
+        max_reference_abs,
+        non_finite_pair_count,
+    })
+}
+
+fn fake_downstream_message_report(
+    message: &FakeDownstreamMessage,
+) -> GlmDsaDownstreamMessageReport {
+    GlmDsaDownstreamMessageReport {
+        kind: format!("{:?}", message.kind),
+        pos_start: message.pos_start,
+        token_count: message.token_count,
+        activation_bytes: message.activation_bytes,
+        activation_sha256: message.activation_sha256.clone(),
+        activation_f32: message.activation_f32.clone(),
+        top_k_count: message.top_k_count,
+        top_k_sha256: message.top_k_sha256.clone(),
+    }
+}
+
+fn activation_f32_stats(bytes: &[u8]) -> Option<GlmDsaActivationStatsReport> {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
+        return None;
+    }
+    let mut count = 0usize;
+    let mut non_finite_count = 0usize;
+    let mut sum = 0.0f64;
+    let mut max_abs = 0.0f32;
+    for chunk in bytes.chunks_exact(std::mem::size_of::<f32>()) {
+        let value = f32::from_le_bytes(chunk.try_into().ok()?);
+        count += 1;
+        if value.is_finite() {
+            sum += f64::from(value);
+            max_abs = max_abs.max(value.abs());
+        } else {
+            non_finite_count += 1;
+        }
+    }
+    let finite_count = count.saturating_sub(non_finite_count);
+    Some(GlmDsaActivationStatsReport {
+        count,
+        sum,
+        mean: if finite_count == 0 {
+            f64::NAN
+        } else {
+            sum / finite_count as f64
+        },
+        max_abs,
+        non_finite_count,
+    })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex_sha256_finish(hasher)
+}
+
+fn hex_sha256_finish(hasher: Sha256) -> String {
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn stage_model_path(args: &GlmDsaStage0TraceArgs) -> Result<PathBuf> {
@@ -922,7 +1402,7 @@ mod tests {
     use super::{
         FakeDownstreamMessage, WireMessageKind, active_top_k_window_count,
         causal_visible_top_k_count, compare_tensor_traces, finite_top_k_count,
-        parse_tensor_trace_records,
+        parse_tensor_trace_records, parse_timing_group_chunks,
     };
 
     #[test]
@@ -932,7 +1412,11 @@ mod tests {
             pos_start: 512,
             token_count: 128,
             activation_bytes: 0,
+            activation_sha256: String::new(),
+            activation_f32: None,
+            activation_f32_payload: None,
             top_k_count: 98_304,
+            top_k_sha256: String::new(),
             top_k_values: Vec::new(),
         };
 
@@ -946,7 +1430,11 @@ mod tests {
             pos_start: 2,
             token_count: 2,
             activation_bytes: 0,
+            activation_sha256: String::new(),
+            activation_f32: None,
+            activation_f32_payload: None,
             top_k_count: 8,
+            top_k_sha256: String::new(),
             top_k_values: vec![
                 7, 1, 9, 2, //
                 3, 8, 9, 7,
@@ -970,6 +1458,20 @@ mod tests {
         assert_eq!(record.tensor_type, "f16");
         assert_eq!(record.shape, [6144, 128, 1, 1]);
         assert_eq!(record.stats.as_deref(), Some("fnv64:abcd"));
+    }
+
+    #[test]
+    fn parses_glm_dsa_group_timing_chunks() {
+        let chunks = parse_timing_group_chunks(
+            "skippy: glm_dsa_group_timing stage=0 tokens=128 group=layer_0 total_us=123 indexer_topk_nodes=4 indexer_topk_us=12 indexer_nodes=3 indexer_us=8 top_k_nodes=1 top_k_us=4 sparse_mask_nodes=2 sparse_mask_us=7 sparse_mask_fill_nodes=1 sparse_mask_fill_us=2 sparse_mask_topk_nodes=0 sparse_mask_topk_us=0 sparse_mask_add_nodes=1 sparse_mask_add_us=5 dsa_sparse_attn_nodes=0 dsa_sparse_attn_us=0 mla_attention_nodes=1 mla_attention_us=99 routed_moe_nodes=0 routed_moe_us=0 shared_expert_nodes=0 shared_expert_us=0\n",
+        );
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].tokens, 128);
+        assert_eq!(chunks[0].group, "layer_0");
+        assert_eq!(chunks[0].indexer_topk_us, 12.0);
+        assert_eq!(chunks[0].sparse_mask_us, 7.0);
+        assert_eq!(chunks[0].mla_attention_us, 99.0);
     }
 
     #[test]

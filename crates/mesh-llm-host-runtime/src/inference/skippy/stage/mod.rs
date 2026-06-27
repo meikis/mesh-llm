@@ -728,6 +728,7 @@ fn stage_config(
             LoadMode::RuntimeSlice | LoadMode::LayerPackage
         ),
         use_mmap: true,
+        use_mmap_buffer: true,
         selected_device: load.selected_device.clone(),
         kv_cache: None,
         load_mode: load.load_mode.clone(),

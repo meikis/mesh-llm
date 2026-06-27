@@ -4,8 +4,8 @@ use super::{
     MAX_STAGE_ACTIVATION_BYTES, MAX_STAGE_CHAT_SAMPLING_METADATA_BYTES,
     MAX_STAGE_DECODED_ACTIVATION_BYTES, MAX_STAGE_LOGIT_BIAS, MAX_STAGE_PREDICTED_TOKENS,
     MAX_STAGE_SIDEBAND_VALUES, MAX_STAGE_STATE_IMPORT_BYTES, READY_MAGIC, STAGE_STATE_VERSION,
-    StageLogitBias, StageReply, StageReplyStats, StageSamplingConfig, StageStateHeader,
-    StageWireMessage, WireActivationDType, WireMessageKind, WireReplyKind,
+    StageLogitBias, StageReply, StageReplySpdTap, StageReplyStats, StageSamplingConfig,
+    StageStateHeader, StageWireMessage, WireActivationDType, WireMessageKind, WireReplyKind,
     activation::{
         activation_decoded_f32_bytes_with_state_flags, activation_wire_bytes_with_state_flags,
     },
@@ -91,6 +91,46 @@ pub fn send_reply_predicted_tokens_with_stats(
     write_reply_stats(&mut writer, stats)
 }
 
+pub fn send_reply_spd_tap_with_stats(
+    mut writer: impl Write,
+    tap: &StageReplySpdTap,
+    stats: StageReplyStats,
+) -> io::Result<()> {
+    if tap.positions.len() > MAX_STAGE_SIDEBAND_VALUES {
+        return Err(invalid_input("too many SPD tap positions"));
+    }
+    if tap.payload.len() > MAX_STAGE_DECODED_ACTIVATION_BYTES {
+        return Err(invalid_input("SPD tap payload is too large"));
+    }
+    write_i32(&mut writer, WireReplyKind::SpdTap as i32)?;
+    write_i32(&mut writer, 0)?;
+    write_i32(&mut writer, 0)?;
+    write_reply_stats(&mut writer, stats)?;
+    write_u32(&mut writer, tap.hf_index)?;
+    write_i32(&mut writer, tap.producer_stage_index)?;
+    write_i32(&mut writer, tap.layer_start)?;
+    write_i32(&mut writer, tap.layer_end)?;
+    write_u32(&mut writer, tap.token_count)?;
+    write_u32(&mut writer, tap.sequence_count)?;
+    write_i32(&mut writer, tap.dtype)?;
+    write_i32(&mut writer, tap.layout)?;
+    write_u64(&mut writer, tap.flags)?;
+    write_i32(
+        &mut writer,
+        i32::try_from(tap.positions.len())
+            .map_err(|_| invalid_input("too many SPD tap positions"))?,
+    )?;
+    write_i32(
+        &mut writer,
+        i32::try_from(tap.payload.len())
+            .map_err(|_| invalid_input("SPD tap payload is too large"))?,
+    )?;
+    for position in &tap.positions {
+        write_i32(&mut writer, *position)?;
+    }
+    writer.write_all(&tap.payload)
+}
+
 pub fn recv_reply(mut reader: impl Read) -> io::Result<StageReply> {
     let kind = WireReplyKind::try_from(read_i32(&mut reader)?)?;
     let predicted = read_i32(&mut reader)?;
@@ -105,10 +145,16 @@ pub fn recv_reply(mut reader: impl Read) -> io::Result<StageReply> {
         predicted_tokens.push(read_i32(&mut reader)?);
     }
     let stats = read_reply_stats(&mut reader)?;
+    let spd_tap = if kind == WireReplyKind::SpdTap {
+        Some(read_reply_spd_tap(&mut reader)?)
+    } else {
+        None
+    };
     Ok(StageReply {
         kind,
         predicted,
         predicted_tokens,
+        spd_tap,
         stats,
     })
 }
@@ -579,6 +625,49 @@ fn reply_stats_from_fields(fields: [i64; REPLY_STATS_FIELD_COUNT]) -> StageReply
         prefill_edge_activation_bytes_max: fields[37],
         prefill_edge_observation_count: fields[38],
     }
+}
+
+fn read_reply_spd_tap(mut reader: impl Read) -> io::Result<StageReplySpdTap> {
+    let hf_index = read_u32(&mut reader)?;
+    let producer_stage_index = read_i32(&mut reader)?;
+    let layer_start = read_i32(&mut reader)?;
+    let layer_end = read_i32(&mut reader)?;
+    let token_count = read_u32(&mut reader)?;
+    let sequence_count = read_u32(&mut reader)?;
+    let dtype = read_i32(&mut reader)?;
+    let layout = read_i32(&mut reader)?;
+    let flags = read_u64(&mut reader)?;
+    let position_count = checked_i32_len(
+        read_i32(&mut reader)?,
+        MAX_STAGE_SIDEBAND_VALUES,
+        "negative SPD tap position count",
+        "SPD tap position count exceeds maximum",
+    )?;
+    let payload_len = checked_i32_len(
+        read_i32(&mut reader)?,
+        MAX_STAGE_DECODED_ACTIVATION_BYTES,
+        "negative SPD tap payload length",
+        "SPD tap payload length exceeds maximum",
+    )?;
+    let mut positions = Vec::with_capacity(position_count);
+    for _ in 0..position_count {
+        positions.push(read_i32(&mut reader)?);
+    }
+    let mut payload = vec![0_u8; payload_len];
+    reader.read_exact(&mut payload)?;
+    Ok(StageReplySpdTap {
+        hf_index,
+        producer_stage_index,
+        layer_start,
+        layer_end,
+        token_count,
+        sequence_count,
+        dtype,
+        layout,
+        flags,
+        positions,
+        payload,
+    })
 }
 
 fn read_i32(mut reader: impl Read) -> io::Result<i32> {

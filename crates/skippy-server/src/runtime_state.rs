@@ -15,6 +15,7 @@ use skippy_runtime::{
 };
 
 use crate::package::select_package_parts;
+use skippy_runtime::package::SelectedPackageParts;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuntimeLaunchOverrides {
@@ -1151,6 +1152,7 @@ pub fn load_runtime_with_overrides(
         LoadMode::LayerPackage => {
             let selected =
                 select_package_parts(config).context("select layer package parts for stage")?;
+            log_layer_package_open(config, &runtime_config, &selected);
             if runtime_config.projector_path.is_none() && should_attach_package_projector(config) {
                 runtime_config.projector_path = selected
                     .projector_paths
@@ -1196,6 +1198,7 @@ pub fn load_runtime_with_overrides_and_open_events(
         LoadMode::LayerPackage => {
             let selected =
                 select_package_parts(config).context("select layer package parts for stage")?;
+            log_layer_package_open(config, &runtime_config, &selected);
             if runtime_config.projector_path.is_none() && should_attach_package_projector(config) {
                 runtime_config.projector_path = selected
                     .projector_paths
@@ -1229,6 +1232,37 @@ pub fn load_runtime_with_overrides_and_open_events(
         session_checkpoints: BTreeMap::new(),
         session_resident_prefixes: BTreeMap::new(),
     }))))
+}
+
+fn log_layer_package_open(
+    config: &StageConfig,
+    runtime_config: &RuntimeConfig,
+    selected: &SelectedPackageParts,
+) {
+    let parts = selected
+        .selected_parts
+        .iter()
+        .map(|part| match part.layer_index {
+            Some(layer_index) => format!("{}:{layer_index}:{}", part.role, part.path.display()),
+            None => format!("{}:{}", part.role, part.path.display()),
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    eprintln!(
+        "skippy-server: layer-package-open stage_id={} stage_index={} layers={}..{} include_embeddings={} include_output={} filter_tensors_on_load={} use_mmap={} use_mmap_prefetch={} use_mmap_buffer={} part_count={} parts=[{}]",
+        config.stage_id,
+        config.stage_index,
+        runtime_config.layer_start,
+        runtime_config.layer_end,
+        runtime_config.include_embeddings,
+        runtime_config.include_output,
+        runtime_config.filter_tensors_on_load,
+        runtime_config.use_mmap,
+        runtime_config.use_mmap_prefetch,
+        runtime_config.use_mmap_buffer,
+        selected.selected_parts.len(),
+        parts,
+    );
 }
 
 fn should_attach_package_projector(config: &StageConfig) -> bool {
@@ -1281,7 +1315,9 @@ fn runtime_config_from_stage_config(
             LoadMode::ArtifactSlice => RuntimeLoadMode::ArtifactSlice,
         },
         projector_path: config.projector_path.clone(),
-        use_mmap: config.use_mmap,
+        use_mmap: config.use_mmap && config.load_mode != LoadMode::LayerPackage,
+        use_mmap_prefetch: false,
+        use_mmap_buffer: config.use_mmap_buffer && config.load_mode != LoadMode::LayerPackage,
         include_embeddings: config.layer_start == 0,
         include_output: config.downstream.is_none(),
         filter_tensors_on_load: config.filter_tensors_on_load,
@@ -1481,6 +1517,7 @@ mod tests {
             flash_attn_type: FlashAttentionType::Enabled,
             filter_tensors_on_load: true,
             use_mmap: true,
+            use_mmap_buffer: true,
             selected_device: Some(StageDevice {
                 backend_device: "Vulkan1".into(),
                 stable_id: Some("pci:0000:65:00.0".into()),
@@ -1545,6 +1582,7 @@ mod tests {
             flash_attn_type: FlashAttentionType::Auto,
             filter_tensors_on_load: true,
             use_mmap: true,
+            use_mmap_buffer: true,
             selected_device: None,
             kv_cache: None,
             load_mode: LoadMode::LayerPackage,
@@ -1593,6 +1631,7 @@ mod tests {
             flash_attn_type: FlashAttentionType::Auto,
             filter_tensors_on_load: false,
             use_mmap: true,
+            use_mmap_buffer: true,
             selected_device: None,
             kv_cache: None,
             load_mode: LoadMode::RuntimeSlice,
@@ -1639,6 +1678,7 @@ mod tests {
             flash_attn_type: FlashAttentionType::Auto,
             filter_tensors_on_load: false,
             use_mmap: true,
+            use_mmap_buffer: true,
             selected_device: None,
             kv_cache: None,
             load_mode: LoadMode::RuntimeSlice,
@@ -1685,6 +1725,7 @@ mod tests {
             flash_attn_type: FlashAttentionType::Auto,
             filter_tensors_on_load: true,
             use_mmap: true,
+            use_mmap_buffer: true,
             selected_device: None,
             kv_cache: None,
             load_mode: LoadMode::LayerPackage,

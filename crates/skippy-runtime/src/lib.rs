@@ -66,6 +66,8 @@ pub use skippy_ffi::{
     ActivationDType as RuntimeActivationDType, ActivationLayout as RuntimeActivationLayout,
 };
 
+pub const ACTIVATION_FLAG_FINAL_NORMED: u64 = 1 << 2;
+
 #[cfg(feature = "dynamic-native-runtime")]
 pub use skippy_ffi::{
     NativeRuntimeLoadError, load_native_runtime_libraries, load_native_runtime_library,
@@ -519,6 +521,23 @@ fn summarize_native_log_line(line: &str) -> Option<NativeLogEvent> {
         });
     }
 
+    if line.contains(".gguf loaded")
+        || line.starts_with("llm_load_print_meta")
+        || line.starts_with("llm_load_tensors")
+        || (line.starts_with("load_tensors:")
+            && (line.contains("mapping")
+                || line.contains("backend buffer")
+                || line.contains("tensor data")))
+        || (line.contains("loading model") && !line.contains("clip_model"))
+        || (line.contains("loaded model") && !line.starts_with("llama_model_loader:"))
+    {
+        return Some(NativeLogEvent {
+            message: line.to_string(),
+            category: "model",
+            params: Vec::new(),
+        });
+    }
+
     let lower = line.to_ascii_lowercase();
     if line.contains("backend_init")
         || line.contains("llama_backend_init")
@@ -534,19 +553,6 @@ fn summarize_native_log_line(line: &str) -> Option<NativeLogEvent> {
         return Some(NativeLogEvent {
             message: line.to_string(),
             category: "backend",
-            params: Vec::new(),
-        });
-    }
-
-    if line.contains(".gguf loaded")
-        || line.starts_with("llm_load_print_meta")
-        || line.starts_with("llm_load_tensors")
-        || (line.contains("loading model") && !line.contains("clip_model"))
-        || (line.contains("loaded model") && !line.starts_with("llama_model_loader:"))
-    {
-        return Some(NativeLogEvent {
-            message: line.to_string(),
-            category: "model",
             params: Vec::new(),
         });
     }
@@ -835,6 +841,8 @@ pub struct RuntimeConfig {
     pub load_mode: LoadMode,
     pub projector_path: Option<String>,
     pub use_mmap: bool,
+    pub use_mmap_prefetch: bool,
+    pub use_mmap_buffer: bool,
     pub include_embeddings: bool,
     pub include_output: bool,
     pub filter_tensors_on_load: bool,
@@ -842,7 +850,7 @@ pub struct RuntimeConfig {
 
 impl RuntimeConfig {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.layer_start >= self.layer_end {
+        if self.layer_start >= self.layer_end && !self.is_embedding_only_slice() {
             return Err("layer_start must be less than layer_end");
         }
         if self
@@ -868,6 +876,14 @@ impl RuntimeConfig {
             return Err("n_threads_batch must be greater than zero when provided");
         }
         Ok(())
+    }
+
+    pub fn is_embedding_only_slice(&self) -> bool {
+        self.filter_tensors_on_load
+            && self.layer_start == 0
+            && self.layer_end == 0
+            && self.include_embeddings
+            && !self.include_output
     }
 
     fn as_raw(&self) -> Result<RawRuntimeConfigParts> {
@@ -919,6 +935,8 @@ impl RuntimeConfig {
                 load_mode: self.load_mode,
                 disable_repack: false,
                 use_mmap: self.use_mmap,
+                use_mmap_prefetch: self.use_mmap_prefetch,
+                use_mmap_buffer: self.use_mmap_buffer,
                 filter_tensors_on_load: self.filter_tensors_on_load,
                 include_embeddings: self.include_embeddings,
                 include_output: self.include_output,
@@ -934,7 +952,7 @@ impl RuntimeConfig {
             .unwrap_or_else(|| default_n_batch_for_lane_count(self.lane_count));
         let n_ubatch = self.n_ubatch.unwrap_or(LLAMA_SERVER_DEFAULT_N_UBATCH);
         format!(
-            "stage_index={} layers={}..{} ctx={} lanes={} n_batch={} n_ubatch={} n_gpu_layers={} backend={} cache_k={} cache_v={} flash_attn={:?} load_mode={:?} use_mmap={} include_embeddings={} include_output={} filter_tensors_on_load={}",
+            "stage_index={} layers={}..{} ctx={} lanes={} n_batch={} n_ubatch={} n_gpu_layers={} backend={} cache_k={} cache_v={} flash_attn={:?} load_mode={:?} use_mmap={} use_mmap_prefetch={} use_mmap_buffer={} include_embeddings={} include_output={} filter_tensors_on_load={}",
             self.stage_index,
             self.layer_start,
             self.layer_end,
@@ -949,6 +967,8 @@ impl RuntimeConfig {
             self.flash_attn_type,
             self.load_mode,
             self.use_mmap,
+            self.use_mmap_prefetch,
+            self.use_mmap_buffer,
             self.include_embeddings,
             self.include_output,
             self.filter_tensors_on_load,
@@ -989,6 +1009,8 @@ impl Default for RuntimeConfig {
             load_mode: LoadMode::RuntimeSlice,
             projector_path: None,
             use_mmap: true,
+            use_mmap_prefetch: true,
+            use_mmap_buffer: true,
             include_embeddings: true,
             include_output: true,
             filter_tensors_on_load: false,
@@ -4643,6 +4665,29 @@ mod tests {
                 params: Vec::new(),
             }]
         );
+    }
+
+    #[test]
+    fn aggregator_preserves_model_load_phase_lines() {
+        let mut aggregator = NativeLogAggregator::default();
+        for line in [
+            "load_tensors: initializing mappings for 306 model part(s)",
+            "load_tensors: initialized 306 mapping(s); creating backend buffers for 14 tensor group(s)",
+            "load_tensors: creating backend buffer group 1/14 (Metal)",
+            "load_tensors: created backend buffer group 1/14 with 1 buffer(s)",
+            "load_tensors: loading tensor data for 14 tensor group(s)",
+            "load_tensors: loading tensor data group 1/14",
+            "load_tensors: loaded tensor data for 14 tensor group(s)",
+        ] {
+            assert_eq!(
+                aggregator.process_line(line),
+                vec![NativeLogEvent {
+                    message: line.to_string(),
+                    category: "model",
+                    params: Vec::new(),
+                }]
+            );
+        }
     }
 
     #[test]

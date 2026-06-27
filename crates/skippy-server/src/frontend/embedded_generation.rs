@@ -786,7 +786,7 @@ impl StageOpenAiBackend {
                 adaptive_window_start: adaptive_window,
                 adaptive_window_final: adaptive_window,
                 adaptive_window_max: max_speculative_window,
-                adaptive_window_min: if request.draft.is_some() {
+                adaptive_window_min: if request.draft.is_some() || request.spd.is_some() {
                     adaptive_window
                 } else {
                     0
@@ -823,6 +823,33 @@ impl StageOpenAiBackend {
                 }
                 _ => None,
             };
+            if let Some(spd) = request
+                .spd
+                .as_ref()
+                .filter(|_| request.speculative_window > 0)
+            {
+                let spd_reset_timer = PhaseTimer::start();
+                spd.source
+                    .lock()
+                    .map_err(|_| OpenAiError::backend("SPD proposal source lock poisoned"))?
+                    .reset_to_context(&context_tokens)
+                    .map_err(openai_backend_error)?;
+                speculative_stats.draft_reset_ms += spd_reset_timer.elapsed_ms();
+                let mut attrs = self.openai_attrs(request.ids);
+                attrs.insert(
+                    "llama_stage.speculative_window".to_string(),
+                    json!(max_speculative_window),
+                );
+                attrs.insert(
+                    "llama_stage.adaptive_speculative_window".to_string(),
+                    json!(request.adaptive_speculative_window),
+                );
+                attrs.insert(
+                    "llama_stage.spec.proposal_source".to_string(),
+                    json!(SPD_REPLAY_PROPOSAL_SOURCE),
+                );
+                self.emit_openai_phase("stage.openai_spd_reset", spd_reset_timer, attrs);
+            }
             for decode_step in decoded_tokens as u32..request.max_tokens {
                 if fused_reached_stop {
                     break;
@@ -842,6 +869,7 @@ impl StageOpenAiBackend {
                 let can_run_native_mtp_batched_verify = native_mtp_batched_verify
                     && native_mtp_reject_cooldown_remaining == 0
                     && draft_guard.is_none()
+                    && request.spd.is_none()
                     && native_mtp_remaining >= 2;
                 let pending_native_mtp_draft = can_run_native_mtp_batched_verify
                     .then(|| native_mtp.take_pending_draft())
@@ -1129,7 +1157,7 @@ impl StageOpenAiBackend {
                     }
                     continue;
                 }
-                if draft_guard.is_some() {
+                if draft_guard.is_some() || request.spd.is_some() {
                     let remaining = (request.max_tokens as usize).saturating_sub(decoded_tokens);
                     if remaining == 0 {
                         break;
@@ -1138,9 +1166,19 @@ impl StageOpenAiBackend {
                     let proposal_limit = remaining.min(adaptive_window);
                     let propose_timer = PhaseTimer::start();
                     let mut draft_tokens = Vec::new();
-                    if let (true, Some(draft)) =
-                        (draft_tokens.is_empty(), draft_guard.as_deref_mut())
-                    {
+                    if let Some(spd) = request.spd.as_ref() {
+                        let proposal = {
+                            let mut source = spd.source.lock().map_err(|_| {
+                                OpenAiError::backend("SPD proposal source lock poisoned")
+                            })?;
+                            propose_from_source(&mut *source, current, proposal_limit)
+                                .map_err(openai_backend_error)?
+                        };
+                        if !proposal.is_empty() {
+                            proposal_source = proposal.source;
+                            draft_tokens = proposal.tokens;
+                        }
+                    } else if let Some(draft) = draft_guard.as_deref_mut() {
                         let proposal_limit = proposal_limit.min(draft.window);
                         draft_tokens = draft
                             .propose(current, proposal_limit)
@@ -1355,7 +1393,8 @@ impl StageOpenAiBackend {
                             }
                         }
                         speculative_stats.adaptive_window_final = adaptive_window;
-                        if proposal_source == "draft-model" && (decision.rejected() || reached_stop)
+                        if proposal_source == DRAFT_MODEL_PROPOSAL_SOURCE
+                            && (decision.rejected() || reached_stop)
                         {
                             let draft_reset_timer = PhaseTimer::start();
                             if let Some(draft) = draft_guard.as_deref_mut() {
@@ -1363,6 +1402,19 @@ impl StageOpenAiBackend {
                                     .reset_to_context(&context_tokens)
                                     .map_err(openai_backend_error)?;
                                 speculative_stats.draft_reset_ms += draft_reset_timer.elapsed_ms();
+                            }
+                        }
+                        if proposal_source == SPD_REPLAY_PROPOSAL_SOURCE {
+                            let spd_reset_timer = PhaseTimer::start();
+                            if let Some(spd) = request.spd.as_ref() {
+                                spd.source
+                                    .lock()
+                                    .map_err(|_| {
+                                        OpenAiError::backend("SPD proposal source lock poisoned")
+                                    })?
+                                    .reset_to_context(&context_tokens)
+                                    .map_err(openai_backend_error)?;
+                                speculative_stats.draft_reset_ms += spd_reset_timer.elapsed_ms();
                             }
                         }
                         let mut token_attrs = self.openai_attrs(request.ids);
@@ -1702,6 +1754,7 @@ impl StageOpenAiBackend {
                 "llama_stage.downstream_wait_ms".to_string(),
                 json!(decode_downstream_wait_ms),
             );
+            cache_stats.spec = speculative_stats.diagnostics();
             speculative_stats.insert_attrs(&mut decode_attrs);
             native_mtp.stats().insert_attrs(&mut decode_attrs);
             decode_attrs.insert(

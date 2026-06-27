@@ -1,5 +1,61 @@
 use super::*;
 
+pub(super) const DRAFT_MODEL_PROPOSAL_SOURCE: &str = "draft-model";
+
+pub(super) trait SpeculativeProposalSource {
+    fn label(&self) -> &'static str;
+
+    fn max_window(&self) -> usize;
+
+    fn reset_to_context(&mut self, context_tokens: &[i32]) -> Result<()>;
+
+    fn propose(&mut self, current: i32, max_tokens: usize) -> Result<Vec<i32>>;
+
+    #[allow(dead_code)]
+    fn should_reset_after_verify(&self, decision: VerifySpanDecision, reached_stop: bool) -> bool {
+        decision.rejected() || reached_stop
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SpeculativeProposal {
+    pub(super) source: &'static str,
+    pub(super) requested_limit: usize,
+    pub(super) tokens: Vec<i32>,
+}
+
+impl SpeculativeProposal {
+    pub(super) fn empty(requested_limit: usize) -> Self {
+        Self {
+            source: "none",
+            requested_limit,
+            tokens: Vec::new(),
+        }
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.tokens.is_empty()
+    }
+}
+
+pub(super) fn propose_from_source(
+    source: &mut dyn SpeculativeProposalSource,
+    current: i32,
+    requested_limit: usize,
+) -> Result<SpeculativeProposal> {
+    let capped_limit = requested_limit.min(source.max_window());
+    let tokens = source.propose(current, capped_limit)?;
+    if tokens.is_empty() {
+        Ok(SpeculativeProposal::empty(requested_limit))
+    } else {
+        Ok(SpeculativeProposal {
+            source: source.label(),
+            requested_limit,
+            tokens,
+        })
+    }
+}
+
 #[derive(Default)]
 pub(super) struct OpenAiSpeculativeStats {
     pub(super) windows: usize,
@@ -38,6 +94,31 @@ pub(super) struct OpenAiSpeculativeStats {
     pub(super) recovery_restore_downstream_write_ms: f64,
     pub(super) recovery_restore_downstream_wait_ms: f64,
     pub(super) recovery_reverify_elapsed_ms: f64,
+    pub(super) optimistic_decode_requests: usize,
+    pub(super) optimistic_decode_accepted: usize,
+    pub(super) optimistic_decode_rejected: usize,
+    pub(super) optimistic_decode_committed_tokens: usize,
+    pub(super) optimistic_checkpoint_ms: f64,
+    pub(super) optimistic_decode_elapsed_ms: f64,
+    pub(super) optimistic_decode_wait_ms: f64,
+    pub(super) optimistic_restore_ms: f64,
+    pub(super) chained_optimistic_decode_requests: usize,
+    pub(super) chained_optimistic_decode_accepted: usize,
+    pub(super) chained_optimistic_decode_rejected: usize,
+    pub(super) chained_optimistic_decode_committed_tokens: usize,
+    pub(super) spd_rolling_executor_launches: usize,
+    pub(super) spd_rolling_executor_launch_misses: usize,
+    pub(super) spd_rolling_executor_launch_miss_in_flight_full: usize,
+    pub(super) spd_rolling_executor_launch_miss_no_rows: usize,
+    pub(super) spd_rolling_executor_launch_miss_no_proposal: usize,
+    pub(super) spd_rolling_executor_launch_miss_shadow_not_seedable: usize,
+    pub(super) spd_rolling_executor_launch_miss_shadow_missing_view: usize,
+    pub(super) spd_rolling_executor_shadow_source_reseeds: usize,
+    pub(super) spd_rolling_executor_margin_rejects: usize,
+    pub(super) spd_rolling_executor_max_in_flight: usize,
+    pub(super) spd_rolling_executor_accepted_oldest: usize,
+    pub(super) spd_rolling_executor_rejected_oldest: usize,
+    pub(super) spd_rolling_executor_drained_younger: usize,
     pub(super) adaptive_window_start: usize,
     pub(super) adaptive_window_final: usize,
     pub(super) adaptive_window_max: usize,
@@ -50,6 +131,21 @@ pub(super) struct OpenAiSpeculativeStats {
 }
 
 impl OpenAiSpeculativeStats {
+    #[allow(dead_code)]
+    pub(super) fn observe_inline_verified_probe(&mut self, accepted: bool) {
+        self.windows += 1;
+        self.draft_tokens += 1;
+        if accepted {
+            self.accepted_tokens += 1;
+            self.full_accept_windows += 1;
+        } else {
+            self.rejected_tokens += 1;
+            self.rejected_windows += 1;
+            self.tail_reject_windows += 1;
+            self.first_reject_position_sum += 1;
+        }
+    }
+
     pub(super) fn observe_verify_decision(
         &mut self,
         decision: VerifySpanDecision,
@@ -260,6 +356,106 @@ impl OpenAiSpeculativeStats {
             json!(self.recovery_restore_downstream_wait_ms),
         );
         attrs.insert(
+            "llama_stage.spec.optimistic_decode_requests".to_string(),
+            json!(self.optimistic_decode_requests),
+        );
+        attrs.insert(
+            "llama_stage.spec.optimistic_decode_accepted".to_string(),
+            json!(self.optimistic_decode_accepted),
+        );
+        attrs.insert(
+            "llama_stage.spec.optimistic_decode_rejected".to_string(),
+            json!(self.optimistic_decode_rejected),
+        );
+        attrs.insert(
+            "llama_stage.spec.optimistic_decode_committed_tokens".to_string(),
+            json!(self.optimistic_decode_committed_tokens),
+        );
+        attrs.insert(
+            "llama_stage.spec.optimistic_checkpoint_ms".to_string(),
+            json!(self.optimistic_checkpoint_ms),
+        );
+        attrs.insert(
+            "llama_stage.spec.optimistic_decode_elapsed_ms".to_string(),
+            json!(self.optimistic_decode_elapsed_ms),
+        );
+        attrs.insert(
+            "llama_stage.spec.optimistic_decode_wait_ms".to_string(),
+            json!(self.optimistic_decode_wait_ms),
+        );
+        attrs.insert(
+            "llama_stage.spec.optimistic_restore_ms".to_string(),
+            json!(self.optimistic_restore_ms),
+        );
+        attrs.insert(
+            "llama_stage.spec.chained_optimistic_decode_requests".to_string(),
+            json!(self.chained_optimistic_decode_requests),
+        );
+        attrs.insert(
+            "llama_stage.spec.chained_optimistic_decode_accepted".to_string(),
+            json!(self.chained_optimistic_decode_accepted),
+        );
+        attrs.insert(
+            "llama_stage.spec.chained_optimistic_decode_rejected".to_string(),
+            json!(self.chained_optimistic_decode_rejected),
+        );
+        attrs.insert(
+            "llama_stage.spec.chained_optimistic_decode_committed_tokens".to_string(),
+            json!(self.chained_optimistic_decode_committed_tokens),
+        );
+        attrs.insert(
+            "llama_stage.spec.spd_rolling_executor_launches".to_string(),
+            json!(self.spd_rolling_executor_launches),
+        );
+        attrs.insert(
+            "llama_stage.spec.spd_rolling_executor_launch_misses".to_string(),
+            json!(self.spd_rolling_executor_launch_misses),
+        );
+        attrs.insert(
+            "llama_stage.spec.spd_rolling_executor_launch_miss_in_flight_full".to_string(),
+            json!(self.spd_rolling_executor_launch_miss_in_flight_full),
+        );
+        attrs.insert(
+            "llama_stage.spec.spd_rolling_executor_launch_miss_no_rows".to_string(),
+            json!(self.spd_rolling_executor_launch_miss_no_rows),
+        );
+        attrs.insert(
+            "llama_stage.spec.spd_rolling_executor_launch_miss_no_proposal".to_string(),
+            json!(self.spd_rolling_executor_launch_miss_no_proposal),
+        );
+        attrs.insert(
+            "llama_stage.spec.spd_rolling_executor_launch_miss_shadow_not_seedable".to_string(),
+            json!(self.spd_rolling_executor_launch_miss_shadow_not_seedable),
+        );
+        attrs.insert(
+            "llama_stage.spec.spd_rolling_executor_launch_miss_shadow_missing_view".to_string(),
+            json!(self.spd_rolling_executor_launch_miss_shadow_missing_view),
+        );
+        attrs.insert(
+            "llama_stage.spec.spd_rolling_executor_shadow_source_reseeds".to_string(),
+            json!(self.spd_rolling_executor_shadow_source_reseeds),
+        );
+        attrs.insert(
+            "llama_stage.spec.spd_rolling_executor_margin_rejects".to_string(),
+            json!(self.spd_rolling_executor_margin_rejects),
+        );
+        attrs.insert(
+            "llama_stage.spec.spd_rolling_executor_max_in_flight".to_string(),
+            json!(self.spd_rolling_executor_max_in_flight),
+        );
+        attrs.insert(
+            "llama_stage.spec.spd_rolling_executor_accepted_oldest".to_string(),
+            json!(self.spd_rolling_executor_accepted_oldest),
+        );
+        attrs.insert(
+            "llama_stage.spec.spd_rolling_executor_rejected_oldest".to_string(),
+            json!(self.spd_rolling_executor_rejected_oldest),
+        );
+        attrs.insert(
+            "llama_stage.spec.spd_rolling_executor_drained_younger".to_string(),
+            json!(self.spd_rolling_executor_drained_younger),
+        );
+        attrs.insert(
             "llama_stage.spec.adaptive_enabled".to_string(),
             json!(self.adaptive_window_enabled),
         );
@@ -291,6 +487,23 @@ impl OpenAiSpeculativeStats {
             "llama_stage.spec.window_shrinks".to_string(),
             json!(self.adaptive_window_shrinks),
         );
+    }
+
+    pub(super) fn diagnostics(&self) -> Option<GenerationSpecDiagnostics> {
+        (self.windows > 0).then(|| GenerationSpecDiagnostics {
+            enabled: true,
+            windows: self.windows,
+            proposed: self.draft_tokens,
+            accepted: self.accepted_tokens,
+            rejected: self.rejected_tokens,
+            accept_rate: if self.draft_tokens == 0 {
+                0.0
+            } else {
+                self.accepted_tokens as f64 / self.draft_tokens as f64
+            },
+            full_accept_windows: self.full_accept_windows,
+            rejected_windows: self.rejected_windows,
+        })
     }
 }
 
@@ -427,5 +640,137 @@ pub(super) fn nonzero_min(current: usize, candidate: usize) -> usize {
         candidate
     } else {
         current.min(candidate)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FixedProposalSource {
+        label: &'static str,
+        max_window: usize,
+        tokens: Vec<i32>,
+        observed_limit: Option<usize>,
+    }
+
+    impl SpeculativeProposalSource for FixedProposalSource {
+        fn label(&self) -> &'static str {
+            self.label
+        }
+
+        fn max_window(&self) -> usize {
+            self.max_window
+        }
+
+        fn reset_to_context(&mut self, _context_tokens: &[i32]) -> Result<()> {
+            Ok(())
+        }
+
+        fn propose(&mut self, _current: i32, max_tokens: usize) -> Result<Vec<i32>> {
+            self.observed_limit = Some(max_tokens);
+            Ok(self.tokens.iter().copied().take(max_tokens).collect())
+        }
+    }
+
+    #[test]
+    fn proposal_source_caps_requested_limit_to_source_window() {
+        let mut source = FixedProposalSource {
+            label: "test-source",
+            max_window: 2,
+            tokens: vec![11, 12, 13],
+            observed_limit: None,
+        };
+
+        let proposal = propose_from_source(&mut source, 10, 4).unwrap();
+
+        assert_eq!(source.observed_limit, Some(2));
+        assert_eq!(proposal.source, "test-source");
+        assert_eq!(proposal.requested_limit, 4);
+        assert_eq!(proposal.tokens, vec![11, 12]);
+    }
+
+    #[test]
+    fn empty_proposal_keeps_requested_limit_and_none_source() {
+        let mut source = FixedProposalSource {
+            label: "empty-source",
+            max_window: 4,
+            tokens: Vec::new(),
+            observed_limit: None,
+        };
+
+        let proposal = propose_from_source(&mut source, 10, 3).unwrap();
+
+        assert_eq!(source.observed_limit, Some(3));
+        assert_eq!(proposal, SpeculativeProposal::empty(3));
+        assert!(proposal.is_empty());
+    }
+
+    #[test]
+    fn verify_inputs_begin_with_current_and_shift_proposals() {
+        assert_eq!(verify_inputs_for_proposals(10, &[]), Vec::<i32>::new());
+        assert_eq!(verify_inputs_for_proposals(10, &[20]), vec![10]);
+        assert_eq!(
+            verify_inputs_for_proposals(10, &[20, 30, 40]),
+            vec![10, 20, 30]
+        );
+    }
+
+    #[test]
+    fn inline_verified_probe_records_acceptance_without_repair_work() {
+        let mut stats = OpenAiSpeculativeStats::default();
+
+        stats.observe_inline_verified_probe(true);
+        stats.observe_inline_verified_probe(false);
+
+        assert_eq!(stats.windows, 2);
+        assert_eq!(stats.draft_tokens, 2);
+        assert_eq!(stats.accepted_tokens, 1);
+        assert_eq!(stats.rejected_tokens, 1);
+        assert_eq!(stats.full_accept_windows, 1);
+        assert_eq!(stats.rejected_windows, 1);
+        assert_eq!(stats.tail_reject_windows, 1);
+        assert_eq!(stats.repair_required_windows, 0);
+        assert_eq!(stats.primary_verify_requests, 0);
+    }
+
+    #[test]
+    fn verify_span_classifies_full_accept() {
+        let decision = classify_verify_span(&[20, 30], &[20, 30], 0, 8, |_| Ok(false)).unwrap();
+
+        assert_eq!(decision.kind, VerifySpanDecisionKind::FullAccept);
+        assert_eq!(decision.accepted_before_reject, 2);
+        assert_eq!(decision.commit_count, 2);
+        assert_eq!(decision.repair_input_count, None);
+    }
+
+    #[test]
+    fn verify_span_classifies_tail_reject_without_repair() {
+        let decision = classify_verify_span(&[20, 30], &[20, 31], 0, 8, |_| Ok(false)).unwrap();
+
+        assert_eq!(decision.kind, VerifySpanDecisionKind::TailReject);
+        assert_eq!(decision.accepted_before_reject, 1);
+        assert_eq!(decision.commit_count, 2);
+        assert_eq!(decision.repair_input_count, Some(2));
+        assert!(!decision.requires_repair());
+    }
+
+    #[test]
+    fn verify_span_classifies_early_reject_with_repair() {
+        let decision =
+            classify_verify_span(&[20, 30, 40], &[20, 31, 41], 0, 8, |_| Ok(false)).unwrap();
+
+        assert_eq!(decision.kind, VerifySpanDecisionKind::EarlyReject);
+        assert_eq!(decision.accepted_before_reject, 1);
+        assert_eq!(decision.commit_count, 2);
+        assert_eq!(decision.repair_input_count, Some(2));
+        assert!(decision.requires_repair());
+    }
+
+    #[test]
+    fn repaired_commit_tokens_returns_repaired_target_prefix() {
+        let repaired = repaired_commit_tokens(&[20, 30, 40], 1, 2, &[20, 31, 41]).unwrap();
+
+        assert_eq!(repaired, vec![20, 31]);
     }
 }

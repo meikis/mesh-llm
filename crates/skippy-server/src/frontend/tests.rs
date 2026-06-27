@@ -90,6 +90,8 @@ fn prefix_cache_test_config() -> StageConfig {
         cache_type_v: "f16".to_string(),
         flash_attn_type: Default::default(),
         filter_tensors_on_load: false,
+        use_mmap: true,
+        use_mmap_buffer: true,
         selected_device: None,
         kv_cache: Some(StageKvCacheConfig {
             mode: StageKvCacheMode::LookupRecord,
@@ -708,6 +710,7 @@ impl OpenAiBackend for StructuredGuardrailRecordingBackend {
                 finish_reason: Some(FinishReason::ToolCalls),
             }],
             usage: Usage::new(1, 1),
+            skippy: None,
         })
     }
 
@@ -980,6 +983,20 @@ fn plain_chat_does_not_require_chat_output_parser() {
 }
 
 #[test]
+fn silent_chat_disables_thinking_and_uses_parser() {
+    let request: ChatCompletionRequest = serde_json::from_value(json!({
+        "model": "test",
+        "messages": [{"role": "user", "content": "what is the capital of France?"}]
+    }))
+    .unwrap();
+
+    let options = chat_template_options(&request).unwrap();
+
+    assert_eq!(options.enable_thinking, Some(false));
+    assert!(chat_output_parser_required(&request, &options));
+}
+
+#[test]
 fn tools_and_enabled_thinking_require_chat_output_parser() {
     assert!(chat_output_parser_required(
         &tool_request(),
@@ -997,6 +1014,24 @@ fn tools_and_enabled_thinking_require_chat_output_parser() {
         &request,
         &ChatTemplateOptions {
             enable_thinking: Some(true),
+            ..ChatTemplateOptions::default()
+        },
+    ));
+}
+
+#[test]
+fn disabled_thinking_still_requires_chat_output_parser() {
+    let request: ChatCompletionRequest = serde_json::from_value(json!({
+        "model": "test",
+        "messages": [{"role": "user", "content": "answer directly"}],
+        "reasoning": {"enabled": false}
+    }))
+    .unwrap();
+
+    assert!(chat_output_parser_required(
+        &request,
+        &ChatTemplateOptions {
+            enable_thinking: Some(false),
             ..ChatTemplateOptions::default()
         },
     ));
@@ -1049,6 +1084,7 @@ fn chat_response_from_parsed_message_separates_reasoning_content() {
         matched_prefix_tokens: 0,
         suffix_prefill_tokens: 0,
         cache_hit_kind: None,
+        spec: None,
         text: "Checked facts first.</think>Final answer.".to_string(),
         finish_reason: FinishReason::Stop,
         detokenize_ms: 0.0,
@@ -1264,6 +1300,8 @@ fn multimodal_stage_config(
         cache_type_v: "f16".to_string(),
         flash_attn_type: skippy_protocol::FlashAttentionType::Auto,
         filter_tensors_on_load: layer_start != 0 || layer_end != fixture.layer_end,
+        use_mmap: true,
+        use_mmap_buffer: true,
         selected_device: None,
         kv_cache: None,
         load_mode: skippy_protocol::LoadMode::RuntimeSlice,
@@ -1293,6 +1331,10 @@ fn local_openai_backend(config: StageConfig) -> Result<StageOpenAiBackend> {
         ctx_size,
         mode: OpenAiBackendMode::LocalRuntime,
         draft: None,
+        spd: None,
+        spd_optimistic_decode: false,
+        spd_rolling_executor: false,
+        spd_optimistic_min_logit_margin: None,
         speculative_window: 0,
         adaptive_speculative_window: false,
         generation_limit: Arc::new(Semaphore::new(1)),
@@ -1478,8 +1520,13 @@ async fn real_multimodal_split_smoke_when_fixture_is_set() -> Result<()> {
             downstream_wire_condition: WireCondition::new(0.0, None)?,
             prefill_reply_credit_limit: 0,
             lane_pool: Some(lane_pool),
+            prediction_returns: None,
         },
         draft: None,
+        spd: None,
+        spd_optimistic_decode: false,
+        spd_rolling_executor: false,
+        spd_optimistic_min_logit_margin: None,
         speculative_window: 0,
         adaptive_speculative_window: false,
         generation_limit: Arc::new(Semaphore::new(1)),

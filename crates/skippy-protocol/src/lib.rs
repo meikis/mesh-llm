@@ -271,6 +271,8 @@ pub struct StageConfig {
     pub filter_tensors_on_load: bool,
     #[serde(default = "default_use_mmap")]
     pub use_mmap: bool,
+    #[serde(default = "default_use_mmap_buffer")]
+    pub use_mmap_buffer: bool,
     #[serde(default)]
     pub selected_device: Option<StageDevice>,
     #[serde(default)]
@@ -367,6 +369,10 @@ fn default_cache_type() -> String {
 }
 
 fn default_use_mmap() -> bool {
+    true
+}
+
+fn default_use_mmap_buffer() -> bool {
     true
 }
 

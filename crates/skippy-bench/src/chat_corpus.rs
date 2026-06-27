@@ -80,6 +80,12 @@ struct ChatCorpusResult {
     total_tokens: Option<u64>,
     finish_reason: Option<String>,
     output_chars: usize,
+    spec_enabled: Option<bool>,
+    spec_windows: Option<u64>,
+    spec_proposed: Option<u64>,
+    spec_accepted: Option<u64>,
+    spec_rejected: Option<u64>,
+    spec_accept_rate: Option<f64>,
     error: Option<String>,
     api_error_code: Option<String>,
 }
@@ -101,6 +107,11 @@ struct ChatCorpusSummary {
     total_wall_ms: f64,
     completion_tok_s: Option<f64>,
     total_tok_s: Option<f64>,
+    spec_windows: u64,
+    spec_proposed: u64,
+    spec_accepted: u64,
+    spec_rejected: u64,
+    spec_accept_rate: Option<f64>,
 }
 
 pub fn chat_corpus(args: ChatCorpusArgs) -> Result<()> {
@@ -295,6 +306,12 @@ fn parse_json_response(
                     .map(str::chars)
                     .map(Iterator::count)
                     .unwrap_or_default(),
+                spec_enabled: skippy_spec_bool(&value, "enabled"),
+                spec_windows: skippy_spec_u64(&value, "windows"),
+                spec_proposed: skippy_spec_u64(&value, "proposed"),
+                spec_accepted: skippy_spec_u64(&value, "accepted"),
+                spec_rejected: skippy_spec_u64(&value, "rejected"),
+                spec_accept_rate: skippy_spec_f64(&value, "accept_rate"),
                 error: None,
                 api_error_code: None,
             }
@@ -405,6 +422,12 @@ fn parse_stream_response(
         total_tokens,
         finish_reason,
         output_chars,
+        spec_enabled: None,
+        spec_windows: None,
+        spec_proposed: None,
+        spec_accepted: None,
+        spec_rejected: None,
+        spec_accept_rate: None,
         error,
         api_error_code: api_error_code_value,
     }
@@ -431,6 +454,12 @@ fn error_result(
         total_tokens: None,
         finish_reason: None,
         output_chars: 0,
+        spec_enabled: None,
+        spec_windows: None,
+        spec_proposed: None,
+        spec_accepted: None,
+        spec_rejected: None,
+        spec_accept_rate: None,
         error: Some(error),
         api_error_code,
     }
@@ -445,6 +474,30 @@ fn api_error_code(value: &Value) -> Option<String> {
 
 fn usage_u64(usage: &Value, field: &str) -> Option<u64> {
     usage.get(field).and_then(Value::as_u64)
+}
+
+fn skippy_spec_bool(value: &Value, field: &str) -> Option<bool> {
+    value
+        .get("skippy")
+        .and_then(|skippy| skippy.get("spec"))
+        .and_then(|spec| spec.get(field))
+        .and_then(Value::as_bool)
+}
+
+fn skippy_spec_u64(value: &Value, field: &str) -> Option<u64> {
+    value
+        .get("skippy")
+        .and_then(|skippy| skippy.get("spec"))
+        .and_then(|spec| spec.get(field))
+        .and_then(Value::as_u64)
+}
+
+fn skippy_spec_f64(value: &Value, field: &str) -> Option<f64> {
+    value
+        .get("skippy")
+        .and_then(|skippy| skippy.get("spec"))
+        .and_then(|spec| spec.get(field))
+        .and_then(Value::as_f64)
 }
 
 fn prompt_cases(args: &ChatCorpusArgs) -> Result<Vec<PromptCase>> {
@@ -644,6 +697,22 @@ fn summarize(results: &[ChatCorpusResult], total_wall_ms: f64) -> ChatCorpusSumm
         .iter()
         .filter_map(|result| result.total_tokens)
         .sum::<u64>();
+    let spec_windows = results
+        .iter()
+        .filter_map(|result| result.spec_windows)
+        .sum::<u64>();
+    let spec_proposed = results
+        .iter()
+        .filter_map(|result| result.spec_proposed)
+        .sum::<u64>();
+    let spec_accepted = results
+        .iter()
+        .filter_map(|result| result.spec_accepted)
+        .sum::<u64>();
+    let spec_rejected = results
+        .iter()
+        .filter_map(|result| result.spec_rejected)
+        .sum::<u64>();
     elapsed.sort_by(f64::total_cmp);
     ttft.sort_by(f64::total_cmp);
     ChatCorpusSummary {
@@ -662,6 +731,11 @@ fn summarize(results: &[ChatCorpusResult], total_wall_ms: f64) -> ChatCorpusSumm
         total_wall_ms,
         completion_tok_s: rate(completion_tokens, total_wall_ms),
         total_tok_s: rate(total_tokens, total_wall_ms),
+        spec_windows,
+        spec_proposed,
+        spec_accepted,
+        spec_rejected,
+        spec_accept_rate: (spec_proposed > 0).then(|| spec_accepted as f64 / spec_proposed as f64),
     }
 }
 
@@ -887,5 +961,52 @@ mod tests {
                 .to_string()
                 .contains("prompt_repetitions is not supported for messages rows")
         );
+    }
+
+    #[test]
+    fn summary_aggregates_skippy_spec_acceptance() {
+        let results = vec![
+            chat_result_with_spec(0, 10, 7, 3),
+            chat_result_with_spec(1, 5, 2, 3),
+        ];
+
+        let summary = summarize(&results, 1000.0);
+
+        assert_eq!(summary.spec_windows, 2);
+        assert_eq!(summary.spec_proposed, 15);
+        assert_eq!(summary.spec_accepted, 9);
+        assert_eq!(summary.spec_rejected, 6);
+        assert_eq!(summary.spec_accept_rate, Some(0.6));
+    }
+
+    fn chat_result_with_spec(
+        sequence: usize,
+        proposed: u64,
+        accepted: u64,
+        rejected: u64,
+    ) -> ChatCorpusResult {
+        ChatCorpusResult {
+            sequence,
+            prompt_id: None,
+            category: None,
+            length_bucket: None,
+            session_id: format!("session-{sequence}"),
+            prompt_chars: 5,
+            elapsed_ms: 10.0,
+            ttft_ms: None,
+            completion_tokens: Some(1),
+            prompt_tokens: Some(2),
+            total_tokens: Some(3),
+            finish_reason: Some("stop".to_string()),
+            output_chars: 1,
+            spec_enabled: Some(true),
+            spec_windows: Some(1),
+            spec_proposed: Some(proposed),
+            spec_accepted: Some(accepted),
+            spec_rejected: Some(rejected),
+            spec_accept_rate: Some(accepted as f64 / proposed as f64),
+            error: None,
+            api_error_code: None,
+        }
     }
 }

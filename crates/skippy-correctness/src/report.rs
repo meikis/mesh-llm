@@ -312,6 +312,8 @@ pub struct GlmDsaStage0TraceReport {
     pub fused_prefill_speedup_vs_direct: Option<f64>,
     pub fused_glm_dsa_op_speedup_vs_direct: Option<f64>,
     pub trace_parity: GlmDsaTraceParityReport,
+    pub downstream_parity: GlmDsaDownstreamParityReport,
+    pub semantic_parity: GlmDsaSemanticParityReport,
     pub variants: Vec<GlmDsaTraceVariantReport>,
 }
 
@@ -379,16 +381,145 @@ pub struct GlmDsaTraceVariantReport {
     pub fake_downstream_max_top_k_per_token: Option<f64>,
     pub fake_downstream_top_k_padding_ratio: Option<f64>,
     pub fake_downstream_top_k_sideband_to_hidden_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fake_downstream_messages: Vec<GlmDsaDownstreamMessageReport>,
     pub trace_line_count: usize,
     pub timing_line_count: usize,
     pub prompt_prefill_tok_s: Option<f64>,
     pub prompt_decode_tok_s: Option<f64>,
     pub avg_128_token_timing: Option<GlmDsaTimingReport>,
+    pub max_128_token_timing: Option<GlmDsaTimingChunkReport>,
+    pub last_128_token_timing: Option<GlmDsaTimingChunkReport>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub timing_chunks: Vec<GlmDsaTimingChunkReport>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub timing_group_chunks: Vec<GlmDsaTimingGroupChunkReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GlmDsaDownstreamMessageReport {
+    pub kind: String,
+    pub pos_start: i32,
+    pub token_count: i32,
+    pub activation_bytes: usize,
+    pub activation_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation_f32: Option<GlmDsaActivationStatsReport>,
+    pub top_k_count: usize,
+    pub top_k_sha256: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GlmDsaDownstreamParityReport {
+    pub matched: bool,
+    pub fused_message_count: usize,
+    pub direct_message_count: usize,
+    pub compared_message_count: usize,
+    pub mismatched_message_count: usize,
+    pub activation_mismatch_count: usize,
+    pub top_k_mismatch_count: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<GlmDsaDownstreamComparisonReport>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GlmDsaSemanticParityReport {
+    pub matched: bool,
+    pub activation_atol: f32,
+    pub activation_relative_rmse_tolerance: f64,
+    pub activation_within_tolerance: bool,
+    pub activation_out_of_tolerance_count: usize,
+    pub top_k_exact: bool,
+    pub message_metadata_exact: bool,
+    pub compared_message_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GlmDsaDownstreamComparisonReport {
+    pub index: usize,
+    pub fused_kind: String,
+    pub direct_kind: String,
+    pub fused_pos_start: i32,
+    pub direct_pos_start: i32,
+    pub fused_token_count: i32,
+    pub direct_token_count: i32,
+    pub activation_sha256_equal: bool,
+    pub top_k_sha256_equal: bool,
+    pub top_k_count_equal: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k_comparison: Option<GlmDsaTopKComparisonReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation_error: Option<GlmDsaActivationErrorReport>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GlmDsaTopKComparisonReport {
+    pub compared_count: usize,
+    pub mismatch_count: usize,
+    pub mismatch_ratio: f64,
+    pub active_compared_count: usize,
+    pub active_mismatch_count: usize,
+    pub active_mismatch_ratio: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_mismatch_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_mismatch_fused: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_mismatch_direct: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_active_mismatch_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_active_mismatch_fused: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_active_mismatch_direct: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GlmDsaActivationErrorReport {
+    pub count: usize,
+    pub max_abs_error: f32,
+    pub mean_abs_error: f64,
+    pub rmse: f64,
+    pub relative_rmse: Option<f64>,
+    pub max_reference_abs: f32,
+    pub non_finite_pair_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GlmDsaActivationStatsReport {
+    pub count: usize,
+    pub sum: f64,
+    pub mean: f64,
+    pub max_abs: f32,
+    pub non_finite_count: usize,
 }
 
 #[derive(Debug, Serialize)]
 pub struct GlmDsaTimingReport {
     pub chunk_count: usize,
+    pub total_us: f64,
+    pub indexer_topk_us: f64,
+    pub sparse_mask_us: f64,
+    pub dsa_sparse_attn_us: f64,
+    pub mla_attention_us: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GlmDsaTimingChunkReport {
+    pub index: usize,
+    pub tokens: u32,
+    pub total_us: f64,
+    pub indexer_topk_us: f64,
+    pub sparse_mask_us: f64,
+    pub dsa_sparse_attn_us: f64,
+    pub mla_attention_us: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GlmDsaTimingGroupChunkReport {
+    pub index: usize,
+    pub tokens: u32,
+    pub group: String,
     pub total_us: f64,
     pub indexer_topk_us: f64,
     pub sparse_mask_us: f64,

@@ -34,6 +34,7 @@ const ENV_REAL_TOP_K_SOURCE_LAYER_START: &str =
     "SKIPPY_BENCH_GLM_DSA_REAL_TOP_K_SOURCE_LAYER_START";
 const ENV_REAL_TOP_K_CACHE_DIR: &str = "SKIPPY_BENCH_GLM_DSA_REAL_TOP_K_CACHE_DIR";
 const ENV_REAL_TOP_K_REQUIRE_CACHE: &str = "SKIPPY_BENCH_GLM_DSA_REAL_TOP_K_REQUIRE_CACHE";
+const ENV_REAL_TOP_K_CHAIN_SOURCES: &str = "SKIPPY_BENCH_GLM_DSA_REAL_TOP_K_CHAIN_SOURCES";
 const DEFAULT_SYNTHETIC_TOP_K_WIDTH: usize = 256;
 const INPUT_FRAME_CACHE_MAGIC: &[u8; 16] = b"SKPGLMDSAFRM1\0\0\0";
 
@@ -516,22 +517,46 @@ fn real_top_k_activation_frame(
     source_layer_start: u32,
 ) -> Result<PreparedInputActivation> {
     let source_layer_end = args.layer_start;
-    let cache_path = real_top_k_cache_path(args, flags, source_layer_start)?;
+    let generated = generate_real_top_k_frame(
+        args,
+        token_ids,
+        positions,
+        flags,
+        source_layer_start,
+        source_layer_end,
+    )?;
+    real_top_k_prepared_input(
+        args,
+        generated.frame,
+        source_layer_start,
+        source_layer_end,
+        generated.selected_parts,
+        generated.cache_path,
+        generated.cache_hit,
+    )
+}
+
+fn generate_real_top_k_frame(
+    args: &GlmDsaLayerMicrobenchArgs,
+    token_ids: &[i32],
+    positions: &[i32],
+    flags: MicrobenchFlags,
+    source_layer_start: u32,
+    source_layer_end: u32,
+) -> Result<GeneratedTopKFrame> {
+    let cache_path = real_top_k_cache_path(args, flags, source_layer_start, source_layer_end)?;
     if let Some(path) = cache_path.as_ref()
         && path.exists()
     {
         let frame = read_activation_frame_cache(path)
             .with_context(|| format!("read real top-k input cache {}", path.display()))?;
-        validate_real_top_k_frame(args, &frame, source_layer_start, source_layer_end)?;
-        return real_top_k_prepared_input(
-            args,
+        validate_real_top_k_frame_for_range(args, &frame, source_layer_start, source_layer_end)?;
+        return Ok(GeneratedTopKFrame {
             frame,
-            source_layer_start,
-            source_layer_end,
-            Vec::new(),
+            selected_parts: Vec::new(),
             cache_path,
-            true,
-        );
+            cache_hit: true,
+        });
     }
     if env_flag_enabled(ENV_REAL_TOP_K_REQUIRE_CACHE) {
         let cache = cache_path.as_ref().map_or_else(
@@ -540,11 +565,13 @@ fn real_top_k_activation_frame(
         );
         bail!("real top-k input cache is required but missing: {cache}");
     }
+
+    let source_input =
+        real_top_k_source_input(args, token_ids, positions, flags, source_layer_start)?;
     let source_request = package_request_for_range(args, source_layer_start, source_layer_end);
     let source_selected = select_layer_package_parts(&source_request)
         .context("select GLM-DSA real top-k source layer package parts")?;
     let source_config = runtime_config_for_range(args, source_layer_start, source_layer_end)?;
-    let source_input = synthetic_activation_frame_for_layer(args, source_layer_start, None)?;
     let source_flags = MicrobenchFlags {
         direct_sparse_attn: false,
         direct_sparse_prefill: false,
@@ -563,7 +590,7 @@ fn real_top_k_activation_frame(
         .with_context(|| {
             format!("run GLM-DSA real top-k source {source_layer_start}..{source_layer_end}")
         })?;
-    validate_real_top_k_frame(args, &frame, source_layer_start, source_layer_end)?;
+    validate_real_top_k_frame_for_range(args, &frame, source_layer_start, source_layer_end)?;
     if let Some(path) = cache_path.as_ref() {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| {
@@ -573,19 +600,75 @@ fn real_top_k_activation_frame(
         write_activation_frame_cache(path, &frame)
             .with_context(|| format!("write real top-k input cache {}", path.display()))?;
     }
-    real_top_k_prepared_input(
-        args,
+    Ok(GeneratedTopKFrame {
         frame,
-        source_layer_start,
-        source_layer_end,
-        source_selected
+        selected_parts: source_selected
             .selected_parts
             .iter()
             .map(package_part_summary)
             .collect(),
         cache_path,
-        false,
+        cache_hit: false,
+    })
+}
+
+fn real_top_k_source_input(
+    args: &GlmDsaLayerMicrobenchArgs,
+    token_ids: &[i32],
+    positions: &[i32],
+    flags: MicrobenchFlags,
+    source_layer_start: u32,
+) -> Result<ActivationFrame> {
+    let Some(chain_source_start) = chained_real_top_k_source_for(source_layer_start)? else {
+        return synthetic_activation_frame_for_layer(args, source_layer_start, None);
+    };
+    if chain_source_start >= source_layer_start {
+        bail!(
+            "{ENV_REAL_TOP_K_CHAIN_SOURCES} selected invalid chain source {chain_source_start} for {source_layer_start}"
+        );
+    }
+    generate_real_top_k_frame(
+        args,
+        token_ids,
+        positions,
+        flags,
+        chain_source_start,
+        source_layer_start,
     )
+    .map(|generated| generated.frame)
+}
+
+fn chained_real_top_k_source_for(target_layer_start: u32) -> Result<Option<u32>> {
+    let mut selected = None;
+    for source in env_real_top_k_chain_sources()? {
+        if source < target_layer_start && selected.is_none_or(|current| source > current) {
+            selected = Some(source);
+        }
+    }
+    Ok(selected)
+}
+
+fn env_real_top_k_chain_sources() -> Result<Vec<u32>> {
+    let Ok(value) = std::env::var(ENV_REAL_TOP_K_CHAIN_SOURCES) else {
+        return Ok(Vec::new());
+    };
+    parse_real_top_k_chain_sources(&value)
+}
+
+fn parse_real_top_k_chain_sources(value: &str) -> Result<Vec<u32>> {
+    let mut sources = Vec::new();
+    for raw in value.split(',') {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        sources.push(
+            trimmed
+                .parse::<u32>()
+                .with_context(|| format!("parse {ENV_REAL_TOP_K_CHAIN_SOURCES} entry {trimmed}"))?,
+        );
+    }
+    Ok(sources)
 }
 
 fn real_top_k_prepared_input(
@@ -614,6 +697,7 @@ fn real_top_k_cache_path(
     args: &GlmDsaLayerMicrobenchArgs,
     flags: MicrobenchFlags,
     source_layer_start: u32,
+    source_layer_end: u32,
 ) -> Result<Option<PathBuf>> {
     let Ok(value) = std::env::var(ENV_REAL_TOP_K_CACHE_DIR) else {
         return Ok(None);
@@ -627,7 +711,7 @@ fn real_top_k_cache_path(
     let file_name = format!(
         "real-topk-src{}-dst{}-tok{}-ctx{}-act{}-ngpu{}-nb{}-nub{}-pi{}.skippy-frame",
         source_layer_start,
-        args.layer_start,
+        source_layer_end,
         args.tokens,
         args.ctx_size,
         args.activation_width,
@@ -772,19 +856,19 @@ impl<'a> CacheCursor<'a> {
     }
 }
 
-fn validate_real_top_k_frame(
+fn validate_real_top_k_frame_for_range(
     args: &GlmDsaLayerMicrobenchArgs,
     frame: &ActivationFrame,
     source_layer_start: u32,
     source_layer_end: u32,
 ) -> Result<()> {
-    if frame.desc.layer_end != i32::try_from(args.layer_start).context("layer_start exceeds i32")? {
+    if frame.desc.layer_end != i32::try_from(source_layer_end).context("layer_end exceeds i32")? {
         bail!(
             "real top-k source {}..{} produced layer_end {}, expected {}",
             source_layer_start,
             source_layer_end,
             frame.desc.layer_end,
-            args.layer_start
+            source_layer_end
         );
     }
     if (frame.desc.flags & ACTIVATION_FLAG_GLM_DSA_TOP_K) == 0 {
@@ -931,6 +1015,13 @@ fn synthetic_activation_value(token: usize, dim: usize) -> f32 {
 struct PreparedInputActivation {
     frame: ActivationFrame,
     report: InputSourceReport,
+}
+
+struct GeneratedTopKFrame {
+    frame: ActivationFrame,
+    selected_parts: Vec<PackagePartSummary>,
+    cache_path: Option<PathBuf>,
+    cache_hit: bool,
 }
 
 fn positions(tokens: usize) -> Result<Vec<i32>> {
@@ -1728,6 +1819,22 @@ mod tests {
         assert_eq!(guard.encode_candidate_records, 4);
         assert_eq!(guard.encode_skipped_candidate_records, 4);
         assert_eq!(guard.fused_dispatch_records, 0);
+    }
+
+    #[test]
+    fn parses_real_top_k_chain_sources() {
+        assert_eq!(
+            parse_real_top_k_chain_sources(" 30, 60 ,,").unwrap(),
+            vec![30, 60]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_real_top_k_chain_source() {
+        let error = parse_real_top_k_chain_sources("30, nope")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("SKIPPY_BENCH_GLM_DSA_REAL_TOP_K_CHAIN_SOURCES"));
     }
 
     fn case_summary(

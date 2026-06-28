@@ -39,6 +39,7 @@ Options:
   --ctx-size N             Context size. Default: 4096.
   --activation-width N     Synthetic activation width. Default: 6144.
   --iterations N           Measured iterations per case. Default: 1.
+  --samples N              Alias for --iterations.
   --warmup N               Warmup iterations per case. Default: 0.
   --tokens LIST            Comma-separated token sweep, e.g. 1,8,16,32,33,64.
   --layers LIST            Comma-separated single-layer starts, e.g. 30,45,60.
@@ -84,6 +85,10 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --iterations)
+      ITERATIONS="$2"
+      shift 2
+      ;;
+    --samples)
       ITERATIONS="$2"
       shift 2
       ;;
@@ -204,6 +209,7 @@ write_summary() {
 import json
 import pathlib
 import re
+import statistics
 import sys
 
 base = pathlib.Path(sys.argv[1])
@@ -222,6 +228,32 @@ def case_sort_key(path):
 cases = sorted(base.glob("*.json"), key=case_sort_key)
 paired = {}
 
+def sample_stats(values):
+    values = [value for value in values if value is not None]
+    if not values:
+        return {
+            "count": 0,
+            "min": None,
+            "median": None,
+            "max": None,
+        }
+    return {
+        "count": len(values),
+        "min": min(values),
+        "median": statistics.median(values),
+        "max": max(values),
+    }
+
+def format_float(value):
+    if value is None:
+        return "n/a"
+    return f"{value:.3f}"
+
+def format_int(value):
+    if value is None:
+        return "n/a"
+    return str(int(value))
+
 print(f"output_dir={base}")
 for path in cases:
     name = path.stem
@@ -231,16 +263,19 @@ for path in cases:
     comparison = report["comparison"]
     parity = comparison["parity"]
     candidate = comparison["candidate"]
-    timing = candidate["op_timing_records"][0]
+    op_timing_records = candidate.get("op_timing_records", [])
+    timing = op_timing_records[0] if op_timing_records else {}
     decision_summary = candidate.get("direct_sparse_decision_summary", {})
-    elapsed_ms = candidate.get("timings", [{}])[0].get("elapsed_ms")
-    total_us = timing.get("total_us")
+    elapsed_stats = sample_stats(
+        timing.get("elapsed_ms") for timing in candidate.get("timings", [])
+    )
+    native_stats = sample_stats(record.get("total_us") for record in op_timing_records)
     pair = re.match(r"(default|optin)-l(\d+)-t(\d+)$", name)
     if pair:
         variant, layer, tokens = pair.groups()
         paired.setdefault((int(layer), int(tokens)), {})[variant] = {
-            "elapsed_ms": elapsed_ms,
-            "total_us": total_us,
+            "elapsed_ms": elapsed_stats,
+            "total_us": native_stats,
             "use_direct": decision_summary.get("use_direct", 0),
             "fallback": decision_summary.get("fallback", 0),
             "dsa_sparse_attn_nodes": timing.get("dsa_sparse_attn_nodes"),
@@ -248,7 +283,20 @@ for path in cases:
         }
     print(f"  parity={parity['passed']} hidden_mismatches={parity['hidden_mismatches']} sideband_mismatches={parity['sideband_mismatched_bytes']}")
     print(f"  dsa_sparse_attn_nodes={timing.get('dsa_sparse_attn_nodes')} sparse_mask_nodes={timing.get('sparse_mask_nodes')}")
-    print(f"  elapsed_ms={elapsed_ms} native_total_us={total_us}")
+    print(
+        "  elapsed_ms="
+        f"count={elapsed_stats['count']} "
+        f"min={format_float(elapsed_stats['min'])} "
+        f"median={format_float(elapsed_stats['median'])} "
+        f"max={format_float(elapsed_stats['max'])}"
+    )
+    print(
+        "  native_total_us="
+        f"count={native_stats['count']} "
+        f"min={format_int(native_stats['min'])} "
+        f"median={format_float(native_stats['median'])} "
+        f"max={format_int(native_stats['max'])}"
+    )
     print(
         "  decisions="
         f"{decision_summary.get('records', 0)} "
@@ -270,22 +318,24 @@ for path in cases:
 if paired:
     print()
     print("pairwise_optin_vs_default")
-    print("layer tokens default_ms optin_ms elapsed_ratio default_native_us optin_native_us native_ratio optin_direct optin_fallback")
+    print("layer tokens samples default_ms_median optin_ms_median elapsed_ratio default_native_us_median optin_native_us_median native_ratio optin_direct optin_fallback")
     for (layer, tokens), variants in sorted(paired.items()):
         default = variants.get("default")
         optin = variants.get("optin")
         if not default or not optin:
             continue
-        elapsed_ratio = None
-        native_ratio = None
-        if default["elapsed_ms"] not in (None, 0) and optin["elapsed_ms"] is not None:
-            elapsed_ratio = optin["elapsed_ms"] / default["elapsed_ms"]
-        if default["total_us"] not in (None, 0) and optin["total_us"] is not None:
-            native_ratio = optin["total_us"] / default["total_us"]
+        default_elapsed = default["elapsed_ms"]["median"]
+        optin_elapsed = optin["elapsed_ms"]["median"]
+        default_native = default["total_us"]["median"]
+        optin_native = optin["total_us"]["median"]
+        samples = min(default["elapsed_ms"]["count"], optin["elapsed_ms"]["count"])
+        elapsed_ratio = optin_elapsed / default_elapsed if default_elapsed not in (None, 0) and optin_elapsed is not None else None
+        native_ratio = optin_native / default_native if default_native not in (None, 0) and optin_native is not None else None
         print(
             f"{layer} {tokens} "
-            f"{default['elapsed_ms']:.3f} {optin['elapsed_ms']:.3f} {elapsed_ratio:.3f} "
-            f"{default['total_us']} {optin['total_us']} {native_ratio:.3f} "
+            f"{samples} "
+            f"{format_float(default_elapsed)} {format_float(optin_elapsed)} {format_float(elapsed_ratio)} "
+            f"{format_float(default_native)} {format_float(optin_native)} {format_float(native_ratio)} "
             f"{optin['use_direct']} {optin['fallback']}"
         )
 PY

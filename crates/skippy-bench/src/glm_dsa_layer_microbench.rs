@@ -90,31 +90,30 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
             case.as_case_summary()
         }
     };
-    let optimized_dispatch_probe =
-        if comparison.is_none() && flags.op_timing && flags.metal_dispatch_log {
-            let probe_flags = MicrobenchFlags {
-                op_timing: false,
-                metal_dispatch_log: true,
-                metal_topk_moe_route_fusion: true,
-                ..flags
-            };
-            Some(
-                run_microbench_case(
-                    "optimized_dispatch_probe",
-                    &selected.absolute_paths,
-                    &runtime_config,
-                    &args,
-                    probe_flags,
-                    &input.frame,
-                    &token_ids,
-                    &positions,
-                    false,
-                )?
-                .as_case_summary(),
-            )
-        } else {
-            None
+    let optimized_dispatch_probe = if should_run_optimized_dispatch_probe(flags) {
+        let probe_flags = MicrobenchFlags {
+            op_timing: false,
+            metal_dispatch_log: true,
+            metal_topk_moe_route_fusion: true,
+            ..flags
         };
+        Some(
+            run_microbench_case(
+                "optimized_dispatch_probe",
+                &selected.absolute_paths,
+                &runtime_config,
+                &args,
+                probe_flags,
+                &input.frame,
+                &token_ids,
+                &positions,
+                false,
+            )?
+            .as_case_summary(),
+        )
+    } else {
+        None
+    };
 
     let direct_sparse_decision_summary =
         summarize_direct_sparse_decisions(&case.direct_sparse_decision_records);
@@ -1658,6 +1657,10 @@ impl MicrobenchFlags {
     }
 }
 
+fn should_run_optimized_dispatch_probe(flags: MicrobenchFlags) -> bool {
+    flags.op_timing && flags.metal_dispatch_log
+}
+
 #[derive(Serialize)]
 struct ProfileIntegrityReport {
     op_timing_enabled: bool,
@@ -1876,6 +1879,21 @@ mod tests {
         assert_eq!(guard.encode_candidate_records, 4);
         assert_eq!(guard.encode_skipped_candidate_records, 4);
         assert_eq!(guard.fused_dispatch_records, 0);
+    }
+
+    #[test]
+    fn optimized_dispatch_probe_runs_for_diagnostic_reports() {
+        let flags = MicrobenchFlags {
+            direct_sparse_attn: true,
+            direct_sparse_prefill: false,
+            fused_sparse_mask: true,
+            parallel_lightning_indexer: true,
+            op_timing: true,
+            metal_dispatch_log: true,
+            metal_topk_moe_route_fusion: false,
+        };
+
+        assert!(should_run_optimized_dispatch_probe(flags));
     }
 
     #[test]

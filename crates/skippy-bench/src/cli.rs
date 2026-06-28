@@ -225,6 +225,16 @@ pub struct GlmDsaLayerMicrobenchArgs {
     pub parallel_lightning_indexer: bool,
     #[arg(long, default_value_t = true, action = ArgAction::Set)]
     pub op_timing: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Run a dense-mask fallback baseline and compare it with the requested direct sparse settings."
+    )]
+    pub compare_dense_fallback: bool,
+    #[arg(long, default_value_t = 1.0e-3)]
+    pub parity_atol: f32,
+    #[arg(long, default_value_t = 1.0e-3)]
+    pub parity_rtol: f32,
     #[arg(long)]
     pub output: Option<PathBuf>,
 }
@@ -834,6 +844,7 @@ mod tests {
             "31",
             "--tokens",
             "128",
+            "--compare-dense-fallback",
         ])
         .unwrap();
 
@@ -845,5 +856,6 @@ mod tests {
         assert_eq!(args.layer_start, 30);
         assert_eq!(args.layer_end, 31);
         assert_eq!(args.tokens, 128);
+        assert!(args.compare_dense_fallback);
     }
 }

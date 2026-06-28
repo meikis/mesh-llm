@@ -22,37 +22,44 @@ use crate::{
 
 pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
     validate_args(&args)?;
-    configure_env_flags(&args);
 
     let selected = select_layer_package_parts(&package_request(&args))
         .context("select GLM-DSA layer package parts")?;
     let runtime_config = runtime_config(&args)?;
-    let model = StageModel::open_from_parts(&selected.absolute_paths, &runtime_config)
-        .context("open GLM-DSA layer microbench model")?;
-    let native_logs = NativeLogCapture::start(args.op_timing)?;
     let input = synthetic_activation_frame(&args)?;
     let token_ids = vec![1_i32; args.tokens];
     let positions = positions(args.tokens)?;
-
-    let mut timings = Vec::with_capacity(args.iterations);
-    let total_runs = args.warmup + args.iterations;
-    for run_index in 0..total_runs {
-        let mut session = model.create_session().context("create stage session")?;
-        let started = Instant::now();
-        let output = session
-            .prefill_chunk_frame_with_positions(&token_ids, &positions, Some(&input), 0)
-            .with_context(|| format!("run microbench iteration {run_index}"))?;
-        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-        if run_index >= args.warmup {
-            timings.push(IterationTiming {
-                iteration: run_index - args.warmup,
-                elapsed_ms,
-                output_payload_bytes: output.payload.len(),
-                output_flags: output.desc.flags,
-            });
+    let flags = MicrobenchFlags::from_args(&args);
+    let comparison = if args.compare_dense_fallback {
+        Some(run_dense_fallback_comparison(
+            &args,
+            &selected.absolute_paths,
+            &runtime_config,
+            &input,
+            &token_ids,
+            &positions,
+            flags,
+        )?)
+    } else {
+        None
+    };
+    let case = match comparison.as_ref() {
+        Some(comparison) => comparison.candidate.clone(),
+        None => {
+            let case = run_microbench_case(
+                "candidate",
+                &selected.absolute_paths,
+                &runtime_config,
+                &args,
+                flags,
+                &input,
+                &token_ids,
+                &positions,
+                false,
+            )?;
+            case.as_case_summary()
         }
-    }
-    let native_timings = native_logs.finish()?;
+    };
 
     let report = MicrobenchReport {
         command: "glm-dsa-layer-microbench",
@@ -68,19 +75,118 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
         n_gpu_layers: args.n_gpu_layers,
         n_batch: runtime_config.n_batch,
         n_ubatch: runtime_config.n_ubatch,
-        flags: MicrobenchFlags {
-            direct_sparse_attn: args.direct_sparse_attn,
-            direct_sparse_prefill: args.direct_sparse_prefill,
-            fused_sparse_mask: args.fused_sparse_mask,
-            parallel_lightning_indexer: args.parallel_lightning_indexer,
-            op_timing: args.op_timing,
-        },
+        flags: case.flags,
         selected_parts: selected
             .selected_parts
             .iter()
             .map(package_part_summary)
             .collect(),
         input_payload_bytes: input.payload.len(),
+        native_log_path: case.native_log_path,
+        op_timing_records: case.op_timing_records,
+        group_timing_records: case.group_timing_records,
+        comparison,
+        timings: case.timings,
+    };
+    let parity_passed = report
+        .comparison
+        .as_ref()
+        .is_none_or(|comparison| comparison.parity.passed);
+
+    write_report(args.output.as_deref(), &report)?;
+    if !parity_passed {
+        bail!("dense fallback parity comparison failed");
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_dense_fallback_comparison(
+    args: &GlmDsaLayerMicrobenchArgs,
+    selected_paths: &[PathBuf],
+    runtime_config: &RuntimeConfig,
+    input: &ActivationFrame,
+    token_ids: &[i32],
+    positions: &[i32],
+    candidate_flags: MicrobenchFlags,
+) -> Result<DenseFallbackComparisonReport> {
+    let baseline_flags = MicrobenchFlags {
+        direct_sparse_attn: false,
+        direct_sparse_prefill: false,
+        ..candidate_flags
+    };
+    let baseline = run_microbench_case(
+        "dense_fallback",
+        selected_paths,
+        runtime_config,
+        args,
+        baseline_flags,
+        input,
+        token_ids,
+        positions,
+        true,
+    )?;
+    let candidate = run_microbench_case(
+        "candidate",
+        selected_paths,
+        runtime_config,
+        args,
+        candidate_flags,
+        input,
+        token_ids,
+        positions,
+        true,
+    )?;
+    let parity = compare_case_outputs(&baseline.outputs, &candidate.outputs, args)?;
+    Ok(DenseFallbackComparisonReport {
+        baseline: baseline.as_case_summary(),
+        candidate: candidate.as_case_summary(),
+        parity,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_microbench_case(
+    label: &'static str,
+    selected_paths: &[PathBuf],
+    runtime_config: &RuntimeConfig,
+    args: &GlmDsaLayerMicrobenchArgs,
+    flags: MicrobenchFlags,
+    input: &ActivationFrame,
+    token_ids: &[i32],
+    positions: &[i32],
+    collect_outputs: bool,
+) -> Result<MicrobenchCase> {
+    configure_env_flags(flags);
+    let model = StageModel::open_from_parts(selected_paths, runtime_config)
+        .with_context(|| format!("open GLM-DSA layer microbench model for {label}"))?;
+    let native_logs = NativeLogCapture::start(flags.op_timing)?;
+    let mut timings = Vec::with_capacity(args.iterations);
+    let mut outputs = Vec::with_capacity(if collect_outputs { args.iterations } else { 0 });
+    let total_runs = args.warmup + args.iterations;
+    for run_index in 0..total_runs {
+        let mut session = model.create_session().context("create stage session")?;
+        let started = Instant::now();
+        let output = session
+            .prefill_chunk_frame_with_positions(token_ids, positions, Some(input), 0)
+            .with_context(|| format!("run microbench iteration {run_index}"))?;
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        if run_index >= args.warmup {
+            timings.push(IterationTiming {
+                iteration: run_index - args.warmup,
+                elapsed_ms,
+                output_payload_bytes: output.payload.len(),
+                output_flags: output.desc.flags,
+            });
+            if collect_outputs {
+                outputs.push(output);
+            }
+        }
+    }
+    let native_timings = native_logs.finish()?;
+    Ok(MicrobenchCase {
+        label,
+        flags,
         native_log_path: native_timings.log_path,
         op_timing_records: skip_warmup_records(native_timings.op_timing_records, args.warmup),
         group_timing_records: skip_warmup_group_records(
@@ -88,9 +194,8 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
             args.warmup,
         ),
         timings,
-    };
-
-    write_report(args.output.as_deref(), &report)
+        outputs,
+    })
 }
 
 fn validate_args(args: &GlmDsaLayerMicrobenchArgs) -> Result<()> {
@@ -114,24 +219,24 @@ fn validate_args(args: &GlmDsaLayerMicrobenchArgs) -> Result<()> {
     Ok(())
 }
 
-fn configure_env_flags(args: &GlmDsaLayerMicrobenchArgs) {
+fn configure_env_flags(flags: MicrobenchFlags) {
     set_env_flag(
         "SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_ATTN",
-        args.direct_sparse_attn,
+        flags.direct_sparse_attn,
     );
     set_env_flag(
         "SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_PREFILL",
-        args.direct_sparse_prefill,
+        flags.direct_sparse_prefill,
     );
     set_env_flag(
         "SKIPPY_GLM_DSA_ENABLE_FUSED_SPARSE_MASK",
-        args.fused_sparse_mask,
+        flags.fused_sparse_mask,
     );
     set_env_flag(
         "LLAMA_GLM_DSA_PARALLEL_LIGHTNING_INDEXER",
-        args.parallel_lightning_indexer,
+        flags.parallel_lightning_indexer,
     );
-    set_env_flag("SKIPPY_GLM_DSA_OP_TIMING", args.op_timing);
+    set_env_flag("SKIPPY_GLM_DSA_OP_TIMING", flags.op_timing);
 }
 
 fn set_env_flag(name: &str, enabled: bool) {
@@ -334,6 +439,249 @@ fn skip_warmup_group_records(
         .collect()
 }
 
+fn compare_case_outputs(
+    baseline_outputs: &[ActivationFrame],
+    candidate_outputs: &[ActivationFrame],
+    args: &GlmDsaLayerMicrobenchArgs,
+) -> Result<ParityComparison> {
+    if baseline_outputs.len() != candidate_outputs.len() {
+        bail!(
+            "baseline output count {} did not match candidate output count {}",
+            baseline_outputs.len(),
+            candidate_outputs.len()
+        );
+    }
+    let hidden_bytes = hidden_payload_bytes(args)?;
+    let mut frames = Vec::with_capacity(baseline_outputs.len());
+    let mut hidden_mismatches = 0usize;
+    let mut sideband_mismatched_bytes = 0usize;
+    let mut max_abs_diff = 0.0f32;
+    let mut max_rel_diff = 0.0f32;
+    for (iteration, (baseline, candidate)) in baseline_outputs
+        .iter()
+        .zip(candidate_outputs.iter())
+        .enumerate()
+    {
+        let frame = compare_activation_frames(
+            iteration,
+            baseline,
+            candidate,
+            hidden_bytes,
+            args.parity_atol,
+            args.parity_rtol,
+        )?;
+        hidden_mismatches += frame.hidden_mismatches;
+        sideband_mismatched_bytes += frame.sideband_mismatched_bytes;
+        max_abs_diff = max_abs_diff.max(frame.hidden_max_abs_diff);
+        max_rel_diff = max_rel_diff.max(frame.hidden_max_rel_diff);
+        frames.push(frame);
+    }
+    let passed = frames.iter().all(|frame| frame.passed);
+    Ok(ParityComparison {
+        passed,
+        iterations: frames.len(),
+        atol: args.parity_atol,
+        rtol: args.parity_rtol,
+        hidden_mismatches,
+        sideband_mismatched_bytes,
+        hidden_max_abs_diff: max_abs_diff,
+        hidden_max_rel_diff: max_rel_diff,
+        frames,
+    })
+}
+
+fn hidden_payload_bytes(args: &GlmDsaLayerMicrobenchArgs) -> Result<usize> {
+    let width = usize::try_from(args.activation_width).context("activation_width exceeds usize")?;
+    args.tokens
+        .checked_mul(width)
+        .and_then(|values| values.checked_mul(std::mem::size_of::<f32>()))
+        .context("hidden activation payload size overflow")
+}
+
+fn compare_activation_frames(
+    iteration: usize,
+    baseline: &ActivationFrame,
+    candidate: &ActivationFrame,
+    hidden_bytes: usize,
+    atol: f32,
+    rtol: f32,
+) -> Result<FrameParity> {
+    ensure_hidden_payload("baseline", baseline, hidden_bytes)?;
+    ensure_hidden_payload("candidate", candidate, hidden_bytes)?;
+    let hidden = compare_hidden_payloads(
+        &baseline.payload[..hidden_bytes],
+        &candidate.payload[..hidden_bytes],
+        atol,
+        rtol,
+    )?;
+    let sideband = compare_sideband_payloads(
+        &baseline.payload[hidden_bytes..],
+        &candidate.payload[hidden_bytes..],
+    );
+    let output_flags_match = baseline.desc.flags == candidate.desc.flags;
+    let payload_len_match = baseline.payload.len() == candidate.payload.len();
+    let passed = output_flags_match
+        && payload_len_match
+        && hidden.mismatches == 0
+        && sideband.mismatched_bytes == 0;
+    Ok(FrameParity {
+        iteration,
+        passed,
+        output_flags_match,
+        baseline_output_flags: baseline.desc.flags,
+        candidate_output_flags: candidate.desc.flags,
+        payload_len_match,
+        baseline_payload_bytes: baseline.payload.len(),
+        candidate_payload_bytes: candidate.payload.len(),
+        hidden_value_count: hidden.value_count,
+        hidden_mismatches: hidden.mismatches,
+        hidden_max_abs_diff: hidden.max_abs_diff,
+        hidden_max_rel_diff: hidden.max_rel_diff,
+        first_hidden_mismatch: hidden.first_mismatch,
+        sideband_bytes: sideband.compared_bytes,
+        sideband_mismatched_bytes: sideband.mismatched_bytes,
+        first_sideband_mismatch: sideband.first_mismatch,
+    })
+}
+
+fn ensure_hidden_payload(label: &str, frame: &ActivationFrame, hidden_bytes: usize) -> Result<()> {
+    if frame.payload.len() < hidden_bytes {
+        bail!(
+            "{label} payload has {} bytes, expected at least {hidden_bytes} hidden bytes",
+            frame.payload.len()
+        );
+    }
+    Ok(())
+}
+
+fn compare_hidden_payloads(
+    baseline: &[u8],
+    candidate: &[u8],
+    atol: f32,
+    rtol: f32,
+) -> Result<HiddenComparison> {
+    if baseline.len() != candidate.len()
+        || !baseline.len().is_multiple_of(std::mem::size_of::<f32>())
+    {
+        bail!("hidden payloads must be equal-sized f32 byte slices");
+    }
+    let mut mismatches = 0usize;
+    let mut max_abs_diff = 0.0f32;
+    let mut max_rel_diff = 0.0f32;
+    let mut first_mismatch = None;
+    for (index, (baseline_bytes, candidate_bytes)) in baseline
+        .chunks_exact(std::mem::size_of::<f32>())
+        .zip(candidate.chunks_exact(std::mem::size_of::<f32>()))
+        .enumerate()
+    {
+        let baseline_value = f32::from_ne_bytes(
+            baseline_bytes
+                .try_into()
+                .with_context(|| format!("read baseline f32 at {index}"))?,
+        );
+        let candidate_value = f32::from_ne_bytes(
+            candidate_bytes
+                .try_into()
+                .with_context(|| format!("read candidate f32 at {index}"))?,
+        );
+        let abs_diff = (baseline_value - candidate_value).abs();
+        let scale = baseline_value
+            .abs()
+            .max(candidate_value.abs())
+            .max(f32::MIN_POSITIVE);
+        let rel_diff = abs_diff / scale;
+        max_abs_diff = max_abs_diff.max(abs_diff);
+        max_rel_diff = max_rel_diff.max(rel_diff);
+        if !values_close(baseline_value, candidate_value, atol, rtol) {
+            mismatches += 1;
+            first_mismatch.get_or_insert(HiddenMismatch {
+                index,
+                baseline: baseline_value,
+                candidate: candidate_value,
+                abs_diff,
+                rel_diff,
+            });
+        }
+    }
+    Ok(HiddenComparison {
+        value_count: baseline.len() / std::mem::size_of::<f32>(),
+        mismatches,
+        max_abs_diff,
+        max_rel_diff,
+        first_mismatch,
+    })
+}
+
+fn values_close(baseline: f32, candidate: f32, atol: f32, rtol: f32) -> bool {
+    if baseline == candidate {
+        return true;
+    }
+    if baseline.is_nan() || candidate.is_nan() {
+        return baseline.is_nan() && candidate.is_nan();
+    }
+    let tolerance = atol + rtol * baseline.abs().max(candidate.abs());
+    (baseline - candidate).abs() <= tolerance
+}
+
+fn compare_sideband_payloads(baseline: &[u8], candidate: &[u8]) -> SidebandComparison {
+    let compared_bytes = baseline.len().min(candidate.len());
+    let mut mismatched_bytes = baseline.len().abs_diff(candidate.len());
+    let mut first_mismatch = None;
+    for (index, (baseline_byte, candidate_byte)) in
+        baseline.iter().zip(candidate.iter()).enumerate()
+    {
+        if baseline_byte != candidate_byte {
+            mismatched_bytes += 1;
+            first_mismatch.get_or_insert(index);
+        }
+    }
+    if first_mismatch.is_none() && baseline.len() != candidate.len() {
+        first_mismatch = Some(compared_bytes);
+    }
+    SidebandComparison {
+        compared_bytes,
+        mismatched_bytes,
+        first_mismatch,
+    }
+}
+
+struct MicrobenchCase {
+    label: &'static str,
+    flags: MicrobenchFlags,
+    native_log_path: Option<PathBuf>,
+    op_timing_records: Vec<TimingRecord>,
+    group_timing_records: Vec<TimingGroupRecord>,
+    timings: Vec<IterationTiming>,
+    outputs: Vec<ActivationFrame>,
+}
+
+impl MicrobenchCase {
+    fn as_case_summary(&self) -> MicrobenchCaseSummary {
+        MicrobenchCaseSummary {
+            label: self.label,
+            flags: self.flags,
+            native_log_path: self.native_log_path.clone(),
+            op_timing_records: self.op_timing_records.clone(),
+            group_timing_records: self.group_timing_records.clone(),
+            timings: self.timings.clone(),
+        }
+    }
+}
+
+struct HiddenComparison {
+    value_count: usize,
+    mismatches: usize,
+    max_abs_diff: f32,
+    max_rel_diff: f32,
+    first_mismatch: Option<HiddenMismatch>,
+}
+
+struct SidebandComparison {
+    compared_bytes: usize,
+    mismatched_bytes: usize,
+    first_mismatch: Option<usize>,
+}
+
 #[derive(Serialize)]
 struct MicrobenchReport {
     command: &'static str,
@@ -358,16 +706,94 @@ struct MicrobenchReport {
     op_timing_records: Vec<TimingRecord>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     group_timing_records: Vec<TimingGroupRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comparison: Option<DenseFallbackComparisonReport>,
     timings: Vec<IterationTiming>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Copy, Serialize)]
 struct MicrobenchFlags {
     direct_sparse_attn: bool,
     direct_sparse_prefill: bool,
     fused_sparse_mask: bool,
     parallel_lightning_indexer: bool,
     op_timing: bool,
+}
+
+impl MicrobenchFlags {
+    fn from_args(args: &GlmDsaLayerMicrobenchArgs) -> Self {
+        Self {
+            direct_sparse_attn: args.direct_sparse_attn,
+            direct_sparse_prefill: args.direct_sparse_prefill,
+            fused_sparse_mask: args.fused_sparse_mask,
+            parallel_lightning_indexer: args.parallel_lightning_indexer,
+            op_timing: args.op_timing,
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
+struct MicrobenchCaseSummary {
+    label: &'static str,
+    flags: MicrobenchFlags,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_log_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    op_timing_records: Vec<TimingRecord>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    group_timing_records: Vec<TimingGroupRecord>,
+    timings: Vec<IterationTiming>,
+}
+
+#[derive(Serialize)]
+struct DenseFallbackComparisonReport {
+    baseline: MicrobenchCaseSummary,
+    candidate: MicrobenchCaseSummary,
+    parity: ParityComparison,
+}
+
+#[derive(Serialize)]
+struct ParityComparison {
+    passed: bool,
+    iterations: usize,
+    atol: f32,
+    rtol: f32,
+    hidden_mismatches: usize,
+    sideband_mismatched_bytes: usize,
+    hidden_max_abs_diff: f32,
+    hidden_max_rel_diff: f32,
+    frames: Vec<FrameParity>,
+}
+
+#[derive(Serialize)]
+struct FrameParity {
+    iteration: usize,
+    passed: bool,
+    output_flags_match: bool,
+    baseline_output_flags: u64,
+    candidate_output_flags: u64,
+    payload_len_match: bool,
+    baseline_payload_bytes: usize,
+    candidate_payload_bytes: usize,
+    hidden_value_count: usize,
+    hidden_mismatches: usize,
+    hidden_max_abs_diff: f32,
+    hidden_max_rel_diff: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    first_hidden_mismatch: Option<HiddenMismatch>,
+    sideband_bytes: usize,
+    sideband_mismatched_bytes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    first_sideband_mismatch: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct HiddenMismatch {
+    index: usize,
+    baseline: f32,
+    candidate: f32,
+    abs_diff: f32,
+    rel_diff: f32,
 }
 
 #[derive(Serialize)]
@@ -378,7 +804,7 @@ struct PackagePartSummary {
     artifact_bytes: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct IterationTiming {
     iteration: usize,
     elapsed_ms: f64,

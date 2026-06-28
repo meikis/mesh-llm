@@ -22,7 +22,7 @@ index ac24bfcd..7012153c 100644
 +static int64_t skippy_glm_dsa_direct_sparse_prefill_max_tokens() {
 +    const char * value = getenv("SKIPPY_GLM_DSA_DIRECT_SPARSE_PREFILL_MAX_TOKENS");
 +    if (value == nullptr || value[0] == '\0') {
-+        return 32;
++        return INT64_MAX;
 +    }
 +
 +    const int64_t parsed = atoll(value);

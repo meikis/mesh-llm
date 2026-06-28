@@ -727,7 +727,7 @@ fn clear_native_log_file() {
 }
 
 fn set_native_log_callback(callback: skippy_ffi::LlamaLogCallback) {
-    if !skippy_ffi::native_runtime_loaded() {
+    if !native_runtime_loaded() {
         return;
     }
     unsafe {
@@ -4487,6 +4487,8 @@ mod tests {
             include_output: true,
             filter_tensors_on_load: false,
             use_mmap: true,
+            use_mmap_prefetch: false,
+            use_mmap_buffer: false,
         };
         StageModel::open(model_path, &config)
     }

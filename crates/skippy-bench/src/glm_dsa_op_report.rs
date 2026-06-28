@@ -72,40 +72,40 @@ struct HotGroupSummary {
     summary: PhaseSummary,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TimingRecord {
-    stage: i32,
-    tokens: u64,
-    total_us: u64,
-    indexer_topk_nodes: u64,
-    indexer_topk_us: u64,
-    indexer_nodes: Option<u64>,
-    indexer_us: Option<u64>,
-    top_k_nodes: Option<u64>,
-    top_k_us: Option<u64>,
-    sparse_mask_nodes: u64,
-    sparse_mask_us: u64,
-    sparse_mask_fill_nodes: Option<u64>,
-    sparse_mask_fill_us: Option<u64>,
-    sparse_mask_topk_nodes: Option<u64>,
-    sparse_mask_topk_us: Option<u64>,
-    sparse_mask_add_nodes: Option<u64>,
-    sparse_mask_add_us: Option<u64>,
-    dsa_sparse_attn_nodes: Option<u64>,
-    dsa_sparse_attn_us: Option<u64>,
-    mla_attention_nodes: u64,
-    mla_attention_us: u64,
-    routed_moe_nodes: u64,
-    routed_moe_us: u64,
-    shared_expert_nodes: u64,
-    shared_expert_us: u64,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct TimingRecord {
+    pub(crate) stage: i32,
+    pub(crate) tokens: u64,
+    pub(crate) total_us: u64,
+    pub(crate) indexer_topk_nodes: u64,
+    pub(crate) indexer_topk_us: u64,
+    pub(crate) indexer_nodes: Option<u64>,
+    pub(crate) indexer_us: Option<u64>,
+    pub(crate) top_k_nodes: Option<u64>,
+    pub(crate) top_k_us: Option<u64>,
+    pub(crate) sparse_mask_nodes: u64,
+    pub(crate) sparse_mask_us: u64,
+    pub(crate) sparse_mask_fill_nodes: Option<u64>,
+    pub(crate) sparse_mask_fill_us: Option<u64>,
+    pub(crate) sparse_mask_topk_nodes: Option<u64>,
+    pub(crate) sparse_mask_topk_us: Option<u64>,
+    pub(crate) sparse_mask_add_nodes: Option<u64>,
+    pub(crate) sparse_mask_add_us: Option<u64>,
+    pub(crate) dsa_sparse_attn_nodes: Option<u64>,
+    pub(crate) dsa_sparse_attn_us: Option<u64>,
+    pub(crate) mla_attention_nodes: u64,
+    pub(crate) mla_attention_us: u64,
+    pub(crate) routed_moe_nodes: u64,
+    pub(crate) routed_moe_us: u64,
+    pub(crate) shared_expert_nodes: u64,
+    pub(crate) shared_expert_us: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct TimingGroupRecord {
-    record_index: usize,
-    group: String,
-    timing: TimingRecord,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct TimingGroupRecord {
+    pub(crate) record_index: usize,
+    pub(crate) group: String,
+    pub(crate) timing: TimingRecord,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -410,7 +410,7 @@ fn delta(candidate: u64, baseline: u64) -> i128 {
     i128::from(candidate) - i128::from(baseline)
 }
 
-fn parse_timing_records(text: &str) -> Result<Vec<TimingRecord>> {
+pub(crate) fn parse_timing_records(text: &str) -> Result<Vec<TimingRecord>> {
     text.lines()
         .filter_map(|line| {
             line.find(OP_TIMING_PREFIX)
@@ -428,7 +428,7 @@ fn parse_timing_record(line: &str) -> Result<TimingRecord> {
     parse_timing_fields(&fields)
 }
 
-fn parse_timing_group_records(text: &str) -> Result<Vec<TimingGroupRecord>> {
+pub(crate) fn parse_timing_group_records(text: &str) -> Result<Vec<TimingGroupRecord>> {
     let mut records = Vec::new();
     let mut timing_record_count = 0usize;
     for line in text.lines() {

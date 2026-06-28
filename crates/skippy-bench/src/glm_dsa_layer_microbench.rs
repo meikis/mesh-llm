@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -10,9 +10,15 @@ use skippy_runtime::package::{PackagePart, PackageStageRequest, select_layer_pac
 use skippy_runtime::{
     ActivationDesc, ActivationFrame, FlashAttentionType, RuntimeActivationDType,
     RuntimeActivationLayout, RuntimeConfig, RuntimeLoadMode, StageModel, parse_cache_type,
+    redirect_native_logs_to_file, restore_native_logs,
 };
 
-use crate::cli::GlmDsaLayerMicrobenchArgs;
+use crate::{
+    cli::GlmDsaLayerMicrobenchArgs,
+    glm_dsa_op_report::{
+        TimingGroupRecord, TimingRecord, parse_timing_group_records, parse_timing_records,
+    },
+};
 
 pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
     validate_args(&args)?;
@@ -23,6 +29,7 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
     let runtime_config = runtime_config(&args)?;
     let model = StageModel::open_from_parts(&selected.absolute_paths, &runtime_config)
         .context("open GLM-DSA layer microbench model")?;
+    let native_logs = NativeLogCapture::start(args.op_timing)?;
     let input = synthetic_activation_frame(&args)?;
     let token_ids = vec![1_i32; args.tokens];
     let positions = positions(args.tokens)?;
@@ -45,6 +52,7 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
             });
         }
     }
+    let native_timings = native_logs.finish()?;
 
     let report = MicrobenchReport {
         command: "glm-dsa-layer-microbench",
@@ -73,6 +81,12 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
             .map(package_part_summary)
             .collect(),
         input_payload_bytes: input.payload.len(),
+        native_log_path: native_timings.log_path,
+        op_timing_records: skip_warmup_records(native_timings.op_timing_records, args.warmup),
+        group_timing_records: skip_warmup_group_records(
+            native_timings.group_timing_records,
+            args.warmup,
+        ),
         timings,
     };
 
@@ -235,6 +249,91 @@ fn write_report(output: Option<&Path>, report: &MicrobenchReport) -> Result<()> 
     Ok(())
 }
 
+struct NativeLogCapture {
+    path: Option<PathBuf>,
+    active: bool,
+}
+
+impl NativeLogCapture {
+    fn start(enabled: bool) -> Result<Self> {
+        if !enabled {
+            return Ok(Self {
+                path: None,
+                active: false,
+            });
+        }
+        let path = native_log_capture_path()?;
+        redirect_native_logs_to_file(&path)?;
+        Ok(Self {
+            path: Some(path),
+            active: true,
+        })
+    }
+
+    fn finish(mut self) -> Result<NativeTimingCapture> {
+        let Some(path) = self.path.clone() else {
+            return Ok(NativeTimingCapture::default());
+        };
+        restore_native_logs();
+        self.active = false;
+        let text = fs::read_to_string(&path)
+            .with_context(|| format!("read native timing log {}", path.display()))?;
+        Ok(NativeTimingCapture {
+            log_path: Some(path),
+            op_timing_records: parse_timing_records(&text).context("parse native op timings")?,
+            group_timing_records: parse_timing_group_records(&text)
+                .context("parse native group timings")?,
+        })
+    }
+}
+
+impl Drop for NativeLogCapture {
+    fn drop(&mut self) {
+        if self.active {
+            restore_native_logs();
+            self.active = false;
+        }
+    }
+}
+
+#[derive(Default)]
+struct NativeTimingCapture {
+    log_path: Option<PathBuf>,
+    op_timing_records: Vec<TimingRecord>,
+    group_timing_records: Vec<TimingGroupRecord>,
+}
+
+fn native_log_capture_path() -> Result<PathBuf> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before unix epoch")?
+        .as_nanos();
+    Ok(std::env::temp_dir().join(format!(
+        "skippy-bench-glm-dsa-layer-microbench-{}-{nanos}.log",
+        std::process::id()
+    )))
+}
+
+fn skip_warmup_records(records: Vec<TimingRecord>, warmup: usize) -> Vec<TimingRecord> {
+    records.into_iter().skip(warmup).collect()
+}
+
+fn skip_warmup_group_records(
+    records: Vec<TimingGroupRecord>,
+    warmup: usize,
+) -> Vec<TimingGroupRecord> {
+    records
+        .into_iter()
+        .filter_map(|mut record| {
+            if record.record_index < warmup {
+                return None;
+            }
+            record.record_index -= warmup;
+            Some(record)
+        })
+        .collect()
+}
+
 #[derive(Serialize)]
 struct MicrobenchReport {
     command: &'static str,
@@ -253,6 +352,12 @@ struct MicrobenchReport {
     flags: MicrobenchFlags,
     selected_parts: Vec<PackagePartSummary>,
     input_payload_bytes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_log_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    op_timing_records: Vec<TimingRecord>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    group_timing_records: Vec<TimingGroupRecord>,
     timings: Vec<IterationTiming>,
 }
 

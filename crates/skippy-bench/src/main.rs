@@ -2,6 +2,7 @@ mod chat_corpus;
 mod cli;
 mod distributed;
 mod glm_dsa_layer_microbench;
+mod glm_dsa_microbench_summary;
 mod glm_dsa_op_report;
 mod local_single;
 mod local_split;

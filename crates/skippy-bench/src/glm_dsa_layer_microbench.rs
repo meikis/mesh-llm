@@ -15,6 +15,10 @@ use skippy_runtime::{
 
 use crate::{
     cli::GlmDsaLayerMicrobenchArgs,
+    glm_dsa_microbench_summary::{
+        GlmDsaDispatchSummary, TimingDistributionSummary, summarize_elapsed_ms,
+        summarize_metal_dispatch,
+    },
     glm_dsa_op_report::{
         DirectSparseDecisionRecord, HotTensorRecord, MetalDispatchRecord, TimingGroupRecord,
         TimingRecord, parse_direct_sparse_decision_records, parse_hot_tensor_records,
@@ -85,6 +89,8 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
 
     let direct_sparse_decision_summary =
         summarize_direct_sparse_decisions(&case.direct_sparse_decision_records);
+    let timing_summary = case.timing_summary.clone();
+    let metal_dispatch_summary = case.metal_dispatch_summary.clone();
     let report = MicrobenchReport {
         command: "glm-dsa-layer-microbench",
         model_id: args.model_id,
@@ -109,6 +115,8 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
         input_payload_bytes: input.frame.payload.len(),
         native_log_path: case.native_log_path,
         direct_sparse_decision_summary,
+        timing_summary,
+        metal_dispatch_summary,
         direct_sparse_decision_records: case.direct_sparse_decision_records,
         metal_dispatch_records: case.metal_dispatch_records,
         op_timing_records: case.op_timing_records,
@@ -1274,6 +1282,10 @@ impl MicrobenchCase {
             direct_sparse_decision_summary: summarize_direct_sparse_decisions(
                 &self.direct_sparse_decision_records,
             ),
+            timing_summary: summarize_elapsed_ms(
+                self.timings.iter().map(|timing| timing.elapsed_ms),
+            ),
+            metal_dispatch_summary: summarize_metal_dispatch(&self.metal_dispatch_records),
             direct_sparse_decision_records: self.direct_sparse_decision_records.clone(),
             metal_dispatch_records: self.metal_dispatch_records.clone(),
             op_timing_records: self.op_timing_records.clone(),
@@ -1321,6 +1333,10 @@ struct MicrobenchReport {
     native_log_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "DirectSparseDecisionSummary::is_empty")]
     direct_sparse_decision_summary: DirectSparseDecisionSummary,
+    #[serde(skip_serializing_if = "TimingDistributionSummary::is_empty")]
+    timing_summary: TimingDistributionSummary,
+    #[serde(skip_serializing_if = "GlmDsaDispatchSummary::is_empty")]
+    metal_dispatch_summary: GlmDsaDispatchSummary,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     direct_sparse_decision_records: Vec<DirectSparseDecisionRecord>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1392,6 +1408,10 @@ struct MicrobenchCaseSummary {
     native_log_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "DirectSparseDecisionSummary::is_empty")]
     direct_sparse_decision_summary: DirectSparseDecisionSummary,
+    #[serde(skip_serializing_if = "TimingDistributionSummary::is_empty")]
+    timing_summary: TimingDistributionSummary,
+    #[serde(skip_serializing_if = "GlmDsaDispatchSummary::is_empty")]
+    metal_dispatch_summary: GlmDsaDispatchSummary,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     direct_sparse_decision_records: Vec<DirectSparseDecisionRecord>,
     #[serde(skip_serializing_if = "Vec::is_empty")]

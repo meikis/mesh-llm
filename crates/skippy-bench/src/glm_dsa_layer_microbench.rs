@@ -25,6 +25,8 @@ use crate::{
 const ACTIVATION_FLAG_GLM_DSA_TOP_K: u64 = 1 << 3;
 const ENV_SYNTHETIC_TOP_K_SIDEBAND: &str = "SKIPPY_BENCH_GLM_DSA_SYNTHETIC_TOP_K_SIDEBAND";
 const ENV_SYNTHETIC_TOP_K_WIDTH: &str = "SKIPPY_BENCH_GLM_DSA_SYNTHETIC_TOP_K_WIDTH";
+const ENV_REAL_TOP_K_SOURCE_LAYER_START: &str =
+    "SKIPPY_BENCH_GLM_DSA_REAL_TOP_K_SOURCE_LAYER_START";
 const DEFAULT_SYNTHETIC_TOP_K_WIDTH: usize = 256;
 
 pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
@@ -33,16 +35,16 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
     let selected = select_layer_package_parts(&package_request(&args))
         .context("select GLM-DSA layer package parts")?;
     let runtime_config = runtime_config(&args)?;
-    let input = synthetic_activation_frame(&args)?;
     let token_ids = vec![1_i32; args.tokens];
     let positions = positions(args.tokens)?;
     let flags = MicrobenchFlags::from_args(&args);
+    let input = prepare_input_activation(&args, &token_ids, &positions, flags)?;
     let comparison = if args.compare_dense_fallback {
         Some(run_dense_fallback_comparison(
             &args,
             &selected.absolute_paths,
             &runtime_config,
-            &input,
+            &input.frame,
             &token_ids,
             &positions,
             flags,
@@ -52,7 +54,7 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
             &args,
             &selected.absolute_paths,
             &runtime_config,
-            &input,
+            &input.frame,
             &token_ids,
             &positions,
             flags,
@@ -69,7 +71,7 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
                 &runtime_config,
                 &args,
                 flags,
-                &input,
+                &input.frame,
                 &token_ids,
                 &positions,
                 false,
@@ -95,12 +97,13 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
         n_batch: runtime_config.n_batch,
         n_ubatch: runtime_config.n_ubatch,
         flags: case.flags,
+        input_source: input.report,
         selected_parts: selected
             .selected_parts
             .iter()
             .map(package_part_summary)
             .collect(),
-        input_payload_bytes: input.payload.len(),
+        input_payload_bytes: input.frame.payload.len(),
         native_log_path: case.native_log_path,
         direct_sparse_decision_summary,
         direct_sparse_decision_records: case.direct_sparse_decision_records,
@@ -294,6 +297,13 @@ fn validate_args(args: &GlmDsaLayerMicrobenchArgs) -> Result<()> {
     if args.compare_dense_fallback && args.compare_cpu_direct_sparse {
         bail!("compare_dense_fallback and compare_cpu_direct_sparse are mutually exclusive");
     }
+    if real_top_k_source_layer_start(args)?.is_some()
+        && synthetic_top_k_sideband_config()?.is_some()
+    {
+        bail!(
+            "{ENV_REAL_TOP_K_SOURCE_LAYER_START} cannot be combined with {ENV_SYNTHETIC_TOP_K_SIDEBAND}"
+        );
+    }
     Ok(())
 }
 
@@ -330,23 +340,39 @@ fn set_env_flag(name: &str, enabled: bool) {
 }
 
 fn package_request(args: &GlmDsaLayerMicrobenchArgs) -> PackageStageRequest {
+    package_request_for_range(args, args.layer_start, args.layer_end)
+}
+
+fn package_request_for_range(
+    args: &GlmDsaLayerMicrobenchArgs,
+    layer_start: u32,
+    layer_end: u32,
+) -> PackageStageRequest {
     PackageStageRequest {
         model_id: args.model_id.clone(),
         topology_id: "glm-dsa-layer-microbench".to_string(),
         package_ref: args.stage_model.to_string_lossy().to_string(),
-        stage_id: format!("layers-{}-{}", args.layer_start, args.layer_end),
-        layer_start: args.layer_start,
-        layer_end: args.layer_end,
+        stage_id: format!("layers-{layer_start}-{layer_end}"),
+        layer_start,
+        layer_end,
         include_embeddings: false,
         include_output: false,
     }
 }
 
 fn runtime_config(args: &GlmDsaLayerMicrobenchArgs) -> Result<RuntimeConfig> {
+    runtime_config_for_range(args, args.layer_start, args.layer_end)
+}
+
+fn runtime_config_for_range(
+    args: &GlmDsaLayerMicrobenchArgs,
+    layer_start: u32,
+    layer_end: u32,
+) -> Result<RuntimeConfig> {
     Ok(RuntimeConfig {
         stage_index: 0,
-        layer_start: args.layer_start,
-        layer_end: args.layer_end,
+        layer_start,
+        layer_end,
         ctx_size: args.ctx_size,
         lane_count: 1,
         n_batch: Some(args.n_batch.unwrap_or_else(|| bounded_u32(args.tokens))),
@@ -373,9 +399,144 @@ fn bounded_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX).max(1)
 }
 
-fn synthetic_activation_frame(args: &GlmDsaLayerMicrobenchArgs) -> Result<ActivationFrame> {
-    let width = usize::try_from(args.activation_width).context("activation_width exceeds usize")?;
+fn prepare_input_activation(
+    args: &GlmDsaLayerMicrobenchArgs,
+    token_ids: &[i32],
+    positions: &[i32],
+    flags: MicrobenchFlags,
+) -> Result<PreparedInputActivation> {
+    if let Some(source_layer_start) = real_top_k_source_layer_start(args)? {
+        return real_top_k_activation_frame(args, token_ids, positions, flags, source_layer_start);
+    }
     let top_k_sideband = synthetic_top_k_sideband_config()?;
+    let frame = synthetic_activation_frame_for_layer(args, args.layer_start, top_k_sideband)?;
+    let report = InputSourceReport::Synthetic {
+        top_k_sideband: top_k_sideband.map(|sideband| sideband.width),
+    };
+    Ok(PreparedInputActivation { frame, report })
+}
+
+fn real_top_k_source_layer_start(args: &GlmDsaLayerMicrobenchArgs) -> Result<Option<u32>> {
+    let Ok(value) = std::env::var(ENV_REAL_TOP_K_SOURCE_LAYER_START) else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "0" || trimmed.eq_ignore_ascii_case("off") {
+        return Ok(None);
+    }
+    let layer_start = trimmed
+        .parse::<u32>()
+        .with_context(|| format!("parse {ENV_REAL_TOP_K_SOURCE_LAYER_START}"))?;
+    if layer_start >= args.layer_start {
+        bail!(
+            "{ENV_REAL_TOP_K_SOURCE_LAYER_START} must be less than target layer_start {}",
+            args.layer_start
+        );
+    }
+    Ok(Some(layer_start))
+}
+
+fn real_top_k_activation_frame(
+    args: &GlmDsaLayerMicrobenchArgs,
+    token_ids: &[i32],
+    positions: &[i32],
+    flags: MicrobenchFlags,
+    source_layer_start: u32,
+) -> Result<PreparedInputActivation> {
+    let source_layer_end = args.layer_start;
+    let source_request = package_request_for_range(args, source_layer_start, source_layer_end);
+    let source_selected = select_layer_package_parts(&source_request)
+        .context("select GLM-DSA real top-k source layer package parts")?;
+    let source_config = runtime_config_for_range(args, source_layer_start, source_layer_end)?;
+    let source_input = synthetic_activation_frame_for_layer(args, source_layer_start, None)?;
+    let source_flags = MicrobenchFlags {
+        direct_sparse_attn: false,
+        direct_sparse_prefill: false,
+        ..flags
+    };
+    configure_env_flags(source_flags);
+    let source_model = StageModel::open_from_parts(&source_selected.absolute_paths, &source_config)
+        .with_context(|| {
+            format!("open GLM-DSA real top-k source model {source_layer_start}..{source_layer_end}")
+        })?;
+    let mut source_session = source_model
+        .create_session()
+        .context("create GLM-DSA real top-k source session")?;
+    let frame = source_session
+        .prefill_chunk_frame_with_positions(token_ids, positions, Some(&source_input), 0)
+        .with_context(|| {
+            format!("run GLM-DSA real top-k source {source_layer_start}..{source_layer_end}")
+        })?;
+    validate_real_top_k_frame(args, &frame, source_layer_start, source_layer_end)?;
+    let report = InputSourceReport::RealTopK {
+        layer_start: source_layer_start,
+        layer_end: source_layer_end,
+        output_flags: frame.desc.flags,
+        output_payload_bytes: frame.payload.len(),
+        sideband_bytes: real_top_k_sideband_bytes(args, &frame)?,
+        selected_parts: source_selected
+            .selected_parts
+            .iter()
+            .map(package_part_summary)
+            .collect(),
+    };
+    Ok(PreparedInputActivation { frame, report })
+}
+
+fn validate_real_top_k_frame(
+    args: &GlmDsaLayerMicrobenchArgs,
+    frame: &ActivationFrame,
+    source_layer_start: u32,
+    source_layer_end: u32,
+) -> Result<()> {
+    if frame.desc.layer_end != i32::try_from(args.layer_start).context("layer_start exceeds i32")? {
+        bail!(
+            "real top-k source {}..{} produced layer_end {}, expected {}",
+            source_layer_start,
+            source_layer_end,
+            frame.desc.layer_end,
+            args.layer_start
+        );
+    }
+    if (frame.desc.flags & ACTIVATION_FLAG_GLM_DSA_TOP_K) == 0 {
+        bail!(
+            "real top-k source {}..{} did not produce GLM-DSA top-k sideband",
+            source_layer_start,
+            source_layer_end
+        );
+    }
+    let hidden_bytes = hidden_payload_bytes(args)?;
+    if frame.payload.len() <= hidden_bytes {
+        bail!(
+            "real top-k source {}..{} payload has no top-k sideband: {} bytes <= {hidden_bytes}",
+            source_layer_start,
+            source_layer_end,
+            frame.payload.len()
+        );
+    }
+    Ok(())
+}
+
+fn real_top_k_sideband_bytes(
+    args: &GlmDsaLayerMicrobenchArgs,
+    frame: &ActivationFrame,
+) -> Result<usize> {
+    let hidden_bytes = hidden_payload_bytes(args)?;
+    if frame.payload.len() < hidden_bytes {
+        bail!(
+            "real top-k source payload has {} bytes, expected at least {hidden_bytes}",
+            frame.payload.len()
+        );
+    }
+    Ok(frame.payload.len() - hidden_bytes)
+}
+
+fn synthetic_activation_frame_for_layer(
+    args: &GlmDsaLayerMicrobenchArgs,
+    layer_start: u32,
+    top_k_sideband: Option<SyntheticTopKSideband>,
+) -> Result<ActivationFrame> {
+    let width = usize::try_from(args.activation_width).context("activation_width exceeds usize")?;
     let value_count = args
         .tokens
         .checked_mul(width)
@@ -409,9 +570,9 @@ fn synthetic_activation_frame(args: &GlmDsaLayerMicrobenchArgs) -> Result<Activa
             dtype: RuntimeActivationDType::F32,
             layout: RuntimeActivationLayout::TokenMajor,
             producer_stage_index: -1,
-            layer_start: i32::try_from(args.layer_start.saturating_sub(1))
-                .context("layer_start exceeds i32")?,
-            layer_end: i32::try_from(args.layer_start).context("layer_start exceeds i32")?,
+            layer_start: i32::try_from(layer_start.saturating_sub(1))
+                .context("input layer_start exceeds i32")?,
+            layer_end: i32::try_from(layer_start).context("input layer_start exceeds i32")?,
             token_count: u32::try_from(args.tokens).context("tokens exceeds u32")?,
             sequence_count: 1,
             payload_bytes: u64::try_from(payload.len()).context("payload length exceeds u64")?,
@@ -476,6 +637,11 @@ fn append_synthetic_top_k_sideband(
 fn synthetic_activation_value(token: usize, dim: usize) -> f32 {
     let residue = ((token.wrapping_mul(31) + dim.wrapping_mul(17)) % 97) as f32;
     (residue / 97.0 - 0.5) * 0.02
+}
+
+struct PreparedInputActivation {
+    frame: ActivationFrame,
+    report: InputSourceReport,
 }
 
 fn positions(tokens: usize) -> Result<Vec<i32>> {
@@ -901,6 +1067,7 @@ struct MicrobenchReport {
     n_batch: Option<u32>,
     n_ubatch: Option<u32>,
     flags: MicrobenchFlags,
+    input_source: InputSourceReport,
     selected_parts: Vec<PackagePartSummary>,
     input_payload_bytes: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -918,6 +1085,23 @@ struct MicrobenchReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     comparison: Option<MicrobenchComparisonReport>,
     timings: Vec<IterationTiming>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum InputSourceReport {
+    Synthetic {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        top_k_sideband: Option<usize>,
+    },
+    RealTopK {
+        layer_start: u32,
+        layer_end: u32,
+        output_flags: u64,
+        output_payload_bytes: usize,
+        sideband_bytes: usize,
+        selected_parts: Vec<PackagePartSummary>,
+    },
 }
 
 #[derive(Clone, Copy, Serialize)]

@@ -99,6 +99,22 @@ pub(crate) struct TimingRecord {
     pub(crate) mla_attention_us: u64,
     pub(crate) routed_moe_nodes: u64,
     pub(crate) routed_moe_us: u64,
+    pub(crate) routed_moe_route_nodes: Option<u64>,
+    pub(crate) routed_moe_route_us: Option<u64>,
+    pub(crate) routed_moe_gate_up_nodes: Option<u64>,
+    pub(crate) routed_moe_gate_up_us: Option<u64>,
+    pub(crate) routed_moe_gate_nodes: Option<u64>,
+    pub(crate) routed_moe_gate_us: Option<u64>,
+    pub(crate) routed_moe_up_nodes: Option<u64>,
+    pub(crate) routed_moe_up_us: Option<u64>,
+    pub(crate) routed_moe_act_nodes: Option<u64>,
+    pub(crate) routed_moe_act_us: Option<u64>,
+    pub(crate) routed_moe_down_nodes: Option<u64>,
+    pub(crate) routed_moe_down_us: Option<u64>,
+    pub(crate) routed_moe_weighted_nodes: Option<u64>,
+    pub(crate) routed_moe_weighted_us: Option<u64>,
+    pub(crate) routed_moe_aggregate_nodes: Option<u64>,
+    pub(crate) routed_moe_aggregate_us: Option<u64>,
     pub(crate) shared_expert_nodes: u64,
     pub(crate) shared_expert_us: u64,
 }
@@ -595,6 +611,14 @@ fn parse_timing_fields(fields: &BTreeMap<&str, &str>) -> Result<TimingRecord> {
     let sparse_mask_topk = parse_optional_bucket(fields, "sparse_mask_topk")?;
     let sparse_mask_add = parse_optional_bucket(fields, "sparse_mask_add")?;
     let dsa_sparse_attn = parse_optional_bucket(fields, "dsa_sparse_attn")?;
+    let routed_moe_route = parse_optional_bucket(fields, "routed_moe_route")?;
+    let routed_moe_gate_up = parse_optional_bucket(fields, "routed_moe_gate_up")?;
+    let routed_moe_gate = parse_optional_bucket(fields, "routed_moe_gate")?;
+    let routed_moe_up = parse_optional_bucket(fields, "routed_moe_up")?;
+    let routed_moe_act = parse_optional_bucket(fields, "routed_moe_act")?;
+    let routed_moe_down = parse_optional_bucket(fields, "routed_moe_down")?;
+    let routed_moe_weighted = parse_optional_bucket(fields, "routed_moe_weighted")?;
+    let routed_moe_aggregate = parse_optional_bucket(fields, "routed_moe_aggregate")?;
     Ok(TimingRecord {
         stage: parse_field(fields, "stage")?,
         tokens: parse_field(fields, "tokens")?,
@@ -619,6 +643,22 @@ fn parse_timing_fields(fields: &BTreeMap<&str, &str>) -> Result<TimingRecord> {
         mla_attention_us: parse_field(fields, "mla_attention_us")?,
         routed_moe_nodes: parse_field(fields, "routed_moe_nodes")?,
         routed_moe_us: parse_field(fields, "routed_moe_us")?,
+        routed_moe_route_nodes: routed_moe_route.nodes,
+        routed_moe_route_us: routed_moe_route.elapsed_us,
+        routed_moe_gate_up_nodes: routed_moe_gate_up.nodes,
+        routed_moe_gate_up_us: routed_moe_gate_up.elapsed_us,
+        routed_moe_gate_nodes: routed_moe_gate.nodes,
+        routed_moe_gate_us: routed_moe_gate.elapsed_us,
+        routed_moe_up_nodes: routed_moe_up.nodes,
+        routed_moe_up_us: routed_moe_up.elapsed_us,
+        routed_moe_act_nodes: routed_moe_act.nodes,
+        routed_moe_act_us: routed_moe_act.elapsed_us,
+        routed_moe_down_nodes: routed_moe_down.nodes,
+        routed_moe_down_us: routed_moe_down.elapsed_us,
+        routed_moe_weighted_nodes: routed_moe_weighted.nodes,
+        routed_moe_weighted_us: routed_moe_weighted.elapsed_us,
+        routed_moe_aggregate_nodes: routed_moe_aggregate.nodes,
+        routed_moe_aggregate_us: routed_moe_aggregate.elapsed_us,
         shared_expert_nodes: parse_field(fields, "shared_expert_nodes")?,
         shared_expert_us: parse_field(fields, "shared_expert_us")?,
     })

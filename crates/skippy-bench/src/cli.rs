@@ -217,7 +217,7 @@ pub struct GlmDsaLayerMicrobenchArgs {
     pub cache_type_v: String,
     #[arg(long, default_value_t = true, action = ArgAction::Set)]
     pub direct_sparse_attn: bool,
-    #[arg(long, default_value_t = true, action = ArgAction::Set)]
+    #[arg(long, default_value_t = false, action = ArgAction::Set)]
     pub direct_sparse_prefill: bool,
     #[arg(long, default_value_t = true, action = ArgAction::Set)]
     pub fused_sparse_mask: bool,
@@ -231,6 +231,12 @@ pub struct GlmDsaLayerMicrobenchArgs {
         help = "Run a dense-mask fallback baseline and compare it with the requested direct sparse settings."
     )]
     pub compare_dense_fallback: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Run a CPU direct-sparse baseline and compare it with the requested backend settings."
+    )]
+    pub compare_cpu_direct_sparse: bool,
     #[arg(long, default_value_t = 1.0e-3)]
     pub parity_atol: f32,
     #[arg(long, default_value_t = 1.0e-3)]
@@ -857,5 +863,25 @@ mod tests {
         assert_eq!(args.layer_end, 31);
         assert_eq!(args.tokens, 128);
         assert!(args.compare_dense_fallback);
+        assert!(!args.compare_cpu_direct_sparse);
+    }
+
+    #[test]
+    fn parses_glm_dsa_layer_microbench_cpu_direct_comparison() {
+        let cli = Cli::try_parse_from([
+            "skippy-bench",
+            "glm-dsa-layer-microbench",
+            "--stage-model",
+            "/tmp/glm52-layers",
+            "--compare-cpu-direct-sparse",
+        ])
+        .unwrap();
+
+        let CommandKind::GlmDsaLayerMicrobench(args) = cli.command else {
+            panic!("expected glm-dsa-layer-microbench subcommand");
+        };
+
+        assert!(args.compare_cpu_direct_sparse);
+        assert!(!args.compare_dense_fallback);
     }
 }

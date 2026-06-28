@@ -40,6 +40,16 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
             &positions,
             flags,
         )?)
+    } else if args.compare_cpu_direct_sparse {
+        Some(run_cpu_direct_sparse_comparison(
+            &args,
+            &selected.absolute_paths,
+            &runtime_config,
+            &input,
+            &token_ids,
+            &positions,
+            flags,
+        )?)
     } else {
         None
     };
@@ -95,7 +105,7 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
 
     write_report(args.output.as_deref(), &report)?;
     if !parity_passed {
-        bail!("dense fallback parity comparison failed");
+        bail!("GLM-DSA layer microbench parity comparison failed");
     }
     Ok(())
 }
@@ -109,7 +119,7 @@ fn run_dense_fallback_comparison(
     token_ids: &[i32],
     positions: &[i32],
     candidate_flags: MicrobenchFlags,
-) -> Result<DenseFallbackComparisonReport> {
+) -> Result<MicrobenchComparisonReport> {
     let baseline_flags = MicrobenchFlags {
         direct_sparse_attn: false,
         direct_sparse_prefill: false,
@@ -138,7 +148,54 @@ fn run_dense_fallback_comparison(
         true,
     )?;
     let parity = compare_case_outputs(&baseline.outputs, &candidate.outputs, args)?;
-    Ok(DenseFallbackComparisonReport {
+    Ok(MicrobenchComparisonReport {
+        baseline: baseline.as_case_summary(),
+        candidate: candidate.as_case_summary(),
+        parity,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_cpu_direct_sparse_comparison(
+    args: &GlmDsaLayerMicrobenchArgs,
+    selected_paths: &[PathBuf],
+    runtime_config: &RuntimeConfig,
+    input: &ActivationFrame,
+    token_ids: &[i32],
+    positions: &[i32],
+    candidate_flags: MicrobenchFlags,
+) -> Result<MicrobenchComparisonReport> {
+    let mut baseline_config = runtime_config.clone();
+    baseline_config.n_gpu_layers = 0;
+    let baseline_flags = MicrobenchFlags {
+        direct_sparse_attn: true,
+        direct_sparse_prefill: true,
+        ..candidate_flags
+    };
+    let baseline = run_microbench_case(
+        "cpu_direct_sparse",
+        selected_paths,
+        &baseline_config,
+        args,
+        baseline_flags,
+        input,
+        token_ids,
+        positions,
+        true,
+    )?;
+    let candidate = run_microbench_case(
+        "candidate",
+        selected_paths,
+        runtime_config,
+        args,
+        candidate_flags,
+        input,
+        token_ids,
+        positions,
+        true,
+    )?;
+    let parity = compare_case_outputs(&baseline.outputs, &candidate.outputs, args)?;
+    Ok(MicrobenchComparisonReport {
         baseline: baseline.as_case_summary(),
         candidate: candidate.as_case_summary(),
         parity,
@@ -187,6 +244,7 @@ fn run_microbench_case(
     Ok(MicrobenchCase {
         label,
         flags,
+        n_gpu_layers: runtime_config.n_gpu_layers,
         native_log_path: native_timings.log_path,
         op_timing_records: skip_warmup_records(native_timings.op_timing_records, args.warmup),
         group_timing_records: skip_warmup_group_records(
@@ -215,6 +273,9 @@ fn validate_args(args: &GlmDsaLayerMicrobenchArgs) -> Result<()> {
     }
     if args.activation_width == 0 {
         bail!("activation_width must be greater than zero");
+    }
+    if args.compare_dense_fallback && args.compare_cpu_direct_sparse {
+        bail!("compare_dense_fallback and compare_cpu_direct_sparse are mutually exclusive");
     }
     Ok(())
 }
@@ -648,6 +709,7 @@ fn compare_sideband_payloads(baseline: &[u8], candidate: &[u8]) -> SidebandCompa
 struct MicrobenchCase {
     label: &'static str,
     flags: MicrobenchFlags,
+    n_gpu_layers: i32,
     native_log_path: Option<PathBuf>,
     op_timing_records: Vec<TimingRecord>,
     group_timing_records: Vec<TimingGroupRecord>,
@@ -660,6 +722,7 @@ impl MicrobenchCase {
         MicrobenchCaseSummary {
             label: self.label,
             flags: self.flags,
+            n_gpu_layers: self.n_gpu_layers,
             native_log_path: self.native_log_path.clone(),
             op_timing_records: self.op_timing_records.clone(),
             group_timing_records: self.group_timing_records.clone(),
@@ -707,7 +770,7 @@ struct MicrobenchReport {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     group_timing_records: Vec<TimingGroupRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    comparison: Option<DenseFallbackComparisonReport>,
+    comparison: Option<MicrobenchComparisonReport>,
     timings: Vec<IterationTiming>,
 }
 
@@ -736,6 +799,7 @@ impl MicrobenchFlags {
 struct MicrobenchCaseSummary {
     label: &'static str,
     flags: MicrobenchFlags,
+    n_gpu_layers: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     native_log_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -746,7 +810,7 @@ struct MicrobenchCaseSummary {
 }
 
 #[derive(Serialize)]
-struct DenseFallbackComparisonReport {
+struct MicrobenchComparisonReport {
     baseline: MicrobenchCaseSummary,
     candidate: MicrobenchCaseSummary,
     parity: ParityComparison,

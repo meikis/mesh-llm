@@ -228,6 +228,13 @@ pub struct GlmDsaLayerMicrobenchArgs {
     #[arg(
         long,
         default_value_t = false,
+        action = ArgAction::Set,
+        help = "Capture native Metal dispatch logs without enabling per-op timing callbacks."
+    )]
+    pub metal_dispatch_log: bool,
+    #[arg(
+        long,
+        default_value_t = false,
         help = "Run a dense-mask fallback baseline and compare it with the requested direct sparse settings."
     )]
     pub compare_dense_fallback: bool,

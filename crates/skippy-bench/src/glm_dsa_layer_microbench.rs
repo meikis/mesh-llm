@@ -234,7 +234,7 @@ fn run_microbench_case(
     collect_outputs: bool,
 ) -> Result<MicrobenchCase> {
     configure_env_flags(flags);
-    let native_logs = NativeLogCapture::start(flags.op_timing)?;
+    let native_logs = NativeLogCapture::start(flags.capture_native_logs())?;
     let model = StageModel::open_from_parts(selected_paths, runtime_config)
         .with_context(|| format!("open GLM-DSA layer microbench model for {label}"))?;
     let mut timings = Vec::with_capacity(args.iterations);
@@ -337,7 +337,10 @@ fn configure_env_flags(flags: MicrobenchFlags) {
         "SKIPPY_GLM_DSA_LOG_DIRECT_SPARSE_DECISIONS",
         flags.op_timing,
     );
-    set_env_flag("SKIPPY_GLM_DSA_LOG_METAL_DISPATCH", flags.op_timing);
+    set_env_flag(
+        "SKIPPY_GLM_DSA_LOG_METAL_DISPATCH",
+        flags.metal_dispatch_log,
+    );
 }
 
 fn set_env_flag(name: &str, enabled: bool) {
@@ -1360,6 +1363,7 @@ struct MicrobenchFlags {
     fused_sparse_mask: bool,
     parallel_lightning_indexer: bool,
     op_timing: bool,
+    metal_dispatch_log: bool,
 }
 
 impl MicrobenchFlags {
@@ -1370,7 +1374,12 @@ impl MicrobenchFlags {
             fused_sparse_mask: args.fused_sparse_mask,
             parallel_lightning_indexer: args.parallel_lightning_indexer,
             op_timing: args.op_timing,
+            metal_dispatch_log: args.metal_dispatch_log,
         }
+    }
+
+    fn capture_native_logs(self) -> bool {
+        self.op_timing || self.metal_dispatch_log
     }
 }
 

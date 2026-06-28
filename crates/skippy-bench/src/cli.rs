@@ -235,6 +235,13 @@ pub struct GlmDsaLayerMicrobenchArgs {
     #[arg(
         long,
         default_value_t = false,
+        action = ArgAction::Set,
+        help = "Enable the native Metal GLM-DSA top-k MoE route-fusion prototype."
+    )]
+    pub metal_topk_moe_route_fusion: bool,
+    #[arg(
+        long,
+        default_value_t = false,
         help = "Fail unless the optimized dispatch profile has at least one GLM-DSA route-fusion encode candidate, no skipped encode candidates, and at least one fused route dispatch."
     )]
     pub require_optimized_route_fusion: bool,

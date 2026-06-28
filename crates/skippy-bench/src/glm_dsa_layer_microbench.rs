@@ -95,6 +95,7 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
             let probe_flags = MicrobenchFlags {
                 op_timing: false,
                 metal_dispatch_log: true,
+                metal_topk_moe_route_fusion: true,
                 ..flags
             };
             Some(
@@ -404,6 +405,10 @@ fn configure_env_flags(flags: MicrobenchFlags) {
     set_env_flag(
         "SKIPPY_GLM_DSA_LOG_METAL_DISPATCH",
         flags.metal_dispatch_log,
+    );
+    set_env_flag(
+        "SKIPPY_GLM_DSA_ENABLE_METAL_TOPK_MOE_FUSION",
+        flags.metal_topk_moe_route_fusion,
     );
 }
 
@@ -1632,6 +1637,7 @@ struct MicrobenchFlags {
     parallel_lightning_indexer: bool,
     op_timing: bool,
     metal_dispatch_log: bool,
+    metal_topk_moe_route_fusion: bool,
 }
 
 impl MicrobenchFlags {
@@ -1643,6 +1649,7 @@ impl MicrobenchFlags {
             parallel_lightning_indexer: args.parallel_lightning_indexer,
             op_timing: args.op_timing,
             metal_dispatch_log: args.metal_dispatch_log,
+            metal_topk_moe_route_fusion: args.metal_topk_moe_route_fusion,
         }
     }
 
@@ -1951,6 +1958,7 @@ mod tests {
                 parallel_lightning_indexer: false,
                 op_timing: false,
                 metal_dispatch_log: true,
+                metal_topk_moe_route_fusion: false,
             },
             n_gpu_layers: -1,
             native_log_path: None,

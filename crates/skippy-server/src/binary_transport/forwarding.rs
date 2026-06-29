@@ -214,7 +214,8 @@ mod tests {
     use skippy_protocol::{
         FlashAttentionType, LoadMode, PeerConfig, StageDevice, StageKvCacheConfig,
         binary::{
-            StageStateHeader, WireMessageKind, activation_frame_flags_from_state_flags, state_flags,
+            MAX_STAGE_SIDEBAND_VALUES, StageStateHeader, WireMessageKind,
+            activation_frame_flags_from_state_flags, state_flags,
         },
     };
     use skippy_runtime::{ActivationDesc, RuntimeActivationDType, RuntimeActivationLayout};
@@ -321,6 +322,21 @@ mod tests {
         frame
     }
 
+    fn glm_dsa_large_top_k_sideband_frame() -> ActivationFrame {
+        let mut frame = f32_frame(
+            skippy_protocol::binary::ACTIVATION_FLAG_GLM_DSA_TOP_K,
+            1,
+            &[1.0_f32, 2.0],
+        );
+        let sideband_i32_count = MAX_STAGE_SIDEBAND_VALUES + 1;
+        frame.payload.resize(
+            frame.payload.len() + sideband_i32_count * std::mem::size_of::<i32>(),
+            0,
+        );
+        frame.desc.payload_bytes = frame.payload.len() as u64;
+        frame
+    }
+
     fn f16_frame() -> ActivationFrame {
         ActivationFrame {
             desc: ActivationDesc {
@@ -404,6 +420,32 @@ mod tests {
         assert_eq!(
             activation_frame_flags_from_state_flags(forwarded.message.state.flags),
             skippy_protocol::binary::ACTIVATION_FLAG_GLM_DSA_TOP_K
+        );
+    }
+
+    #[test]
+    fn forwarded_stage_message_carries_large_glm_dsa_top_k_raw_sideband() {
+        let forwarded = forwarded_stage_message_timed(
+            &stage_config(),
+            &incoming_message(),
+            &glm_dsa_large_top_k_sideband_frame(),
+            WireActivationDType::F32,
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(forwarded.message.activation.len(), 8);
+        assert_eq!(
+            forwarded.glm_dsa_top_k_sideband_count,
+            MAX_STAGE_SIDEBAND_VALUES + 1
+        );
+        assert_eq!(
+            forwarded.message.raw_bytes.len(),
+            (MAX_STAGE_SIDEBAND_VALUES + 1) * std::mem::size_of::<i32>()
+        );
+        assert_ne!(
+            forwarded.message.state.flags & state_flags::GLM_DSA_TOP_K_SIDEBAND,
+            0
         );
     }
 

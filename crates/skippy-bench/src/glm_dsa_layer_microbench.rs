@@ -2051,7 +2051,7 @@ fn compare_activation_frames(
     let passed = output_flags_match
         && payload_len_match
         && hidden.mismatches == 0
-        && sideband.mismatched_bytes == 0;
+        && sideband.semantic_match;
     Ok(FrameParity {
         iteration,
         passed,
@@ -2066,6 +2066,8 @@ fn compare_activation_frames(
         hidden_max_abs_diff: hidden.max_abs_diff,
         hidden_max_rel_diff: hidden.max_rel_diff,
         first_hidden_mismatch: hidden.first_mismatch,
+        sideband_exact_match: sideband.exact_match,
+        sideband_semantic_match: sideband.semantic_match,
         sideband_bytes: sideband.compared_bytes,
         sideband_mismatched_bytes: sideband.mismatched_bytes,
         first_sideband_mismatch: sideband.first_mismatch,
@@ -2178,12 +2180,31 @@ fn compare_sideband_payloads(
         first_mismatch = Some(compared_bytes);
     }
     let i32_diff = compare_sideband_i32_payloads(baseline, candidate, token_count)?;
+    let exact_match = mismatched_bytes == 0;
+    let semantic_match = sideband_semantic_match(exact_match, &i32_diff);
     Ok(SidebandComparison {
         compared_bytes,
         mismatched_bytes,
         first_mismatch,
+        exact_match,
+        semantic_match,
         i32_diff,
     })
+}
+
+fn sideband_semantic_match(exact_match: bool, i32_diff: &Option<SidebandI32Diff>) -> bool {
+    if exact_match {
+        return true;
+    }
+    let Some(diff) = i32_diff else {
+        return false;
+    };
+    if !diff.i32_aligned || diff.baseline_i32_count != diff.candidate_i32_count {
+        return false;
+    }
+    diff.token_summary
+        .as_ref()
+        .is_some_and(|summary| summary.set_mismatched_tokens == 0)
 }
 
 fn compare_sideband_i32_payloads(
@@ -2426,6 +2447,8 @@ struct SidebandComparison {
     compared_bytes: usize,
     mismatched_bytes: usize,
     first_mismatch: Option<usize>,
+    exact_match: bool,
+    semantic_match: bool,
     i32_diff: Option<SidebandI32Diff>,
 }
 
@@ -3108,6 +3131,8 @@ struct FrameParity {
     hidden_max_rel_diff: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     first_hidden_mismatch: Option<HiddenMismatch>,
+    sideband_exact_match: bool,
+    sideband_semantic_match: bool,
     sideband_bytes: usize,
     sideband_mismatched_bytes: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3220,6 +3245,8 @@ mod tests {
 
         let comparison = compare_sideband_payloads(&baseline, &candidate, Some(2)).unwrap();
 
+        assert!(!comparison.exact_match);
+        assert!(!comparison.semantic_match);
         let diff = comparison.i32_diff.expect("decoded i32 diff");
         assert!(diff.i32_aligned);
         assert_eq!(diff.baseline_i32_count, 8);
@@ -3244,6 +3271,24 @@ mod tests {
         assert_eq!(first_set_mismatch.token_index, 1);
         assert_eq!(first_set_mismatch.baseline_only, vec![6]);
         assert_eq!(first_set_mismatch.candidate_only, vec![8]);
+    }
+
+    #[test]
+    fn sideband_i32_order_only_diff_matches_semantically() {
+        let baseline = i32_sideband_bytes(&[0, 1, 2, 3, 4, 5, 6, 7]);
+        let candidate = i32_sideband_bytes(&[1, 0, 3, 2, 7, 6, 5, 4]);
+
+        let comparison = compare_sideband_payloads(&baseline, &candidate, Some(2)).unwrap();
+
+        assert!(!comparison.exact_match);
+        assert!(comparison.semantic_match);
+        let token_summary = comparison
+            .i32_diff
+            .and_then(|diff| diff.token_summary)
+            .expect("token summary");
+        assert_eq!(token_summary.exact_order_matching_tokens, 0);
+        assert_eq!(token_summary.set_equivalent_tokens, 2);
+        assert_eq!(token_summary.set_mismatched_tokens, 0);
     }
 
     #[test]

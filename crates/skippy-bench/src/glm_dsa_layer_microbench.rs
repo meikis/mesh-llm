@@ -123,6 +123,8 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
     let op_timing_summary = case.op_timing_summary.clone();
     let routed_moe_timing_summary = case.routed_moe_timing_summary.clone();
     let input_contract = activation_contract_report(&args, &input.frame)?;
+    let execution_contract =
+        execution_contract_report(&args, &input.report, &input_contract, &indexshare_policy);
     let profile_integrity = ProfileIntegrityReport::new(
         flags,
         &metal_dispatch_summary,
@@ -157,6 +159,7 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
             .collect(),
         input_payload_bytes: input.frame.payload.len(),
         input_contract,
+        execution_contract,
         native_log_path: case.native_log_path,
         direct_sparse_decision_summary,
         timing_summary,
@@ -1092,6 +1095,130 @@ fn fnv1a64(bytes: &[u8]) -> String {
     format!("{hash:016x}")
 }
 
+fn execution_contract_report(
+    args: &GlmDsaLayerMicrobenchArgs,
+    input: &InputSourceReport,
+    activation: &ActivationContractReport,
+    policy: &IndexSharePolicy,
+) -> ExecutionContractReport {
+    let target_layer_role = indexshare_layer_role(args.layer_start, policy);
+    let sideband_source = sideband_source_report(input);
+    let sideband_required = matches!(target_layer_role.role, IndexShareRole::SharedConsumer);
+    let sideband_present = activation.sideband.sideband_bytes > 0 && activation.sideband.present;
+    let proof_kind = proof_kind(
+        target_layer_role.role,
+        sideband_source.kind,
+        sideband_present,
+    );
+    ExecutionContractReport {
+        proof_kind,
+        target_layer_role,
+        sideband_source,
+        sideband_required,
+        sideband_present,
+        sideband_contract_satisfied: !sideband_required || sideband_present,
+        native_consumer_execution_proven: matches!(
+            (proof_kind, sideband_present),
+            (ExecutionProofKind::SharedConsumerWithRealTopK, true)
+        ),
+    }
+}
+
+fn proof_kind(
+    target_role: IndexShareRole,
+    sideband_kind: SidebandSourceKind,
+    sideband_present: bool,
+) -> ExecutionProofKind {
+    match (target_role, sideband_kind, sideband_present) {
+        (IndexShareRole::SharedConsumer, SidebandSourceKind::RealTopK, true) => {
+            ExecutionProofKind::SharedConsumerWithRealTopK
+        }
+        (IndexShareRole::SharedConsumer, SidebandSourceKind::SyntheticTopK, true) => {
+            ExecutionProofKind::SharedConsumerWithSyntheticTopK
+        }
+        (IndexShareRole::SharedConsumer, _, _) => ExecutionProofKind::SharedConsumerMissingSideband,
+        (IndexShareRole::FullProducer, SidebandSourceKind::None, false) => {
+            ExecutionProofKind::FullProducerNoSideband
+        }
+        (IndexShareRole::FullProducer, SidebandSourceKind::RealTopK, true) => {
+            ExecutionProofKind::FullProducerWithRealTopKInput
+        }
+        (IndexShareRole::FullProducer, SidebandSourceKind::SyntheticTopK, true) => {
+            ExecutionProofKind::FullProducerWithSyntheticTopKInput
+        }
+        (IndexShareRole::FullProducer, _, _) => ExecutionProofKind::FullProducerOtherInput,
+    }
+}
+
+fn indexshare_layer_role(layer_index: u32, policy: &IndexSharePolicy) -> IndexShareLayerRole {
+    if let Some(pattern) = policy.pattern.as_deref()
+        && let Some(role) = indexshare_pattern_role(layer_index, pattern)
+    {
+        return IndexShareLayerRole {
+            role,
+            basis: IndexShareRoleBasis::Pattern,
+            freq: policy.freq,
+            pattern: policy.pattern.clone(),
+        };
+    }
+    let freq = policy.freq.unwrap_or(1).max(1);
+    let role = if freq <= 1 || layer_index.is_multiple_of(freq) {
+        IndexShareRole::FullProducer
+    } else {
+        IndexShareRole::SharedConsumer
+    };
+    IndexShareLayerRole {
+        role,
+        basis: IndexShareRoleBasis::Frequency,
+        freq: Some(freq),
+        pattern: policy.pattern.clone(),
+    }
+}
+
+fn indexshare_pattern_role(layer_index: u32, pattern: &str) -> Option<IndexShareRole> {
+    let mut current_layer = 0_u32;
+    for value in pattern
+        .chars()
+        .filter_map(|ch| match ch.to_ascii_uppercase() {
+            'F' => Some(IndexShareRole::FullProducer),
+            'S' => Some(IndexShareRole::SharedConsumer),
+            _ => None,
+        })
+    {
+        if current_layer == layer_index {
+            return Some(value);
+        }
+        current_layer = current_layer.saturating_add(1);
+    }
+    None
+}
+
+fn sideband_source_report(input: &InputSourceReport) -> SidebandSourceReport {
+    match input {
+        InputSourceReport::Synthetic { top_k_sideband } => SidebandSourceReport {
+            kind: if top_k_sideband.is_some() {
+                SidebandSourceKind::SyntheticTopK
+            } else {
+                SidebandSourceKind::None
+            },
+            source_layer_start: None,
+            source_layer_end: None,
+            top_k_width: *top_k_sideband,
+        },
+        InputSourceReport::RealTopK {
+            layer_start,
+            layer_end,
+            sideband,
+            ..
+        } => SidebandSourceReport {
+            kind: SidebandSourceKind::RealTopK,
+            source_layer_start: Some(*layer_start),
+            source_layer_end: Some(*layer_end),
+            top_k_width: Some(sideband.sideband_i32_count),
+        },
+    }
+}
+
 fn synthetic_activation_frame_for_layer(
     args: &GlmDsaLayerMicrobenchArgs,
     layer_start: u32,
@@ -1672,6 +1799,7 @@ struct MicrobenchReport {
     selected_parts: Vec<PackagePartSummary>,
     input_payload_bytes: usize,
     input_contract: ActivationContractReport,
+    execution_contract: ExecutionContractReport,
     #[serde(skip_serializing_if = "Option::is_none")]
     native_log_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "DirectSparseDecisionSummary::is_empty")]
@@ -1756,6 +1884,72 @@ struct SidebandContractReport {
     negative_index_count: usize,
     first_indices: Vec<i32>,
     last_indices: Vec<i32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ExecutionProofKind {
+    FullProducerNoSideband,
+    FullProducerWithRealTopKInput,
+    FullProducerWithSyntheticTopKInput,
+    FullProducerOtherInput,
+    SharedConsumerWithRealTopK,
+    SharedConsumerWithSyntheticTopK,
+    SharedConsumerMissingSideband,
+}
+
+#[derive(Serialize)]
+struct ExecutionContractReport {
+    proof_kind: ExecutionProofKind,
+    target_layer_role: IndexShareLayerRole,
+    sideband_source: SidebandSourceReport,
+    sideband_required: bool,
+    sideband_present: bool,
+    sideband_contract_satisfied: bool,
+    native_consumer_execution_proven: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum IndexShareRole {
+    FullProducer,
+    SharedConsumer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum IndexShareRoleBasis {
+    Pattern,
+    Frequency,
+}
+
+#[derive(Serialize)]
+struct IndexShareLayerRole {
+    role: IndexShareRole,
+    basis: IndexShareRoleBasis,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    freq: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pattern: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SidebandSourceKind {
+    None,
+    SyntheticTopK,
+    RealTopK,
+}
+
+#[derive(Serialize)]
+struct SidebandSourceReport {
+    kind: SidebandSourceKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_layer_start: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_layer_end: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_k_width: Option<usize>,
 }
 
 fn build_route_fusion_guard(
@@ -2197,6 +2391,85 @@ mod tests {
         let error = positions(i32::MAX, 2).unwrap_err().to_string();
 
         assert!(error.contains("position exceeds i32"));
+    }
+
+    #[test]
+    fn indexshare_frequency_marks_intervening_layers_shared() {
+        let policy = IndexSharePolicy {
+            freq: Some(4),
+            pattern: None,
+        };
+
+        assert_eq!(
+            indexshare_layer_role(28, &policy).role,
+            IndexShareRole::FullProducer
+        );
+        assert_eq!(
+            indexshare_layer_role(30, &policy).role,
+            IndexShareRole::SharedConsumer
+        );
+    }
+
+    #[test]
+    fn indexshare_pattern_overrides_frequency() {
+        let policy = IndexSharePolicy {
+            freq: Some(1),
+            pattern: Some("FSSS".to_string()),
+        };
+
+        assert_eq!(
+            indexshare_layer_role(1, &policy).role,
+            IndexShareRole::SharedConsumer
+        );
+        assert_eq!(
+            indexshare_layer_role(4, &policy).role,
+            IndexShareRole::FullProducer
+        );
+    }
+
+    #[test]
+    fn execution_contract_marks_real_top_k_shared_consumer_proof() {
+        let mut args = test_args();
+        args.layer_start = 30;
+        args.layer_end = 31;
+        args.position_start = 255;
+        let frame = synthetic_activation_frame_for_layer(
+            &args,
+            args.layer_start,
+            Some(SyntheticTopKSideband { width: 4 }),
+        )
+        .unwrap();
+        let input_contract = activation_contract_report(&args, &frame).unwrap();
+        let sideband = sideband_contract_report(&args, &frame, Some(26), 30, 30).unwrap();
+        let input = InputSourceReport::RealTopK {
+            layer_start: 26,
+            layer_end: 30,
+            output_flags: frame.desc.flags,
+            output_payload_bytes: frame.payload.len(),
+            sideband: Box::new(sideband),
+            cache_path: None,
+            cache_hit: false,
+            selected_parts: Vec::new(),
+        };
+        let policy = IndexSharePolicy {
+            freq: Some(4),
+            pattern: None,
+        };
+
+        let report = execution_contract_report(&args, &input, &input_contract, &policy);
+
+        assert_eq!(
+            report.proof_kind,
+            ExecutionProofKind::SharedConsumerWithRealTopK
+        );
+        assert_eq!(
+            report.target_layer_role.role,
+            IndexShareRole::SharedConsumer
+        );
+        assert!(report.sideband_required);
+        assert!(report.sideband_present);
+        assert!(report.sideband_contract_satisfied);
+        assert!(report.native_consumer_execution_proven);
     }
 
     fn test_package_part(artifact_bytes: u64) -> PackagePart {

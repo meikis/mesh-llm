@@ -49,6 +49,18 @@ pub(crate) fn connect_downstream_socket(
         };
     }
 
+    if downstream_addr.ip().is_loopback() {
+        try_connect!(
+            "loopback-plain-route",
+            connect_plain_with_timeout(downstream_addr, timeout)
+        );
+        try_connect!(
+            "loopback-blocking-plain-route",
+            connect_plain_blocking_with_timeout(downstream_addr, timeout)
+        );
+        return Err(io::Error::other(errors.join("; ")));
+    }
+
     try_connect!(
         "route-selected",
         connect_route_selected_with_timeout(downstream_addr, source_ip, timeout)

@@ -358,11 +358,32 @@ impl StageControlState {
         .await
         .context("join resolve stage load package task")??
         {
+            tracing::info!(
+                topology_id = %effective_load.topology_id,
+                run_id = %effective_load.run_id,
+                stage_id = %effective_load.stage_id,
+                local_ref = %package.local_ref,
+                source_model_bytes = ?package.source_model_bytes,
+                "split stage package resolved"
+            );
             effective_load.model_path = Some(package.local_ref.clone());
             effective_load.source_model_bytes = package.source_model_bytes;
             resolved_package = Some(package);
         }
         let config = stage_config(&effective_load, None, resolved_package.as_ref())?;
+        tracing::info!(
+            topology_id = %effective_load.topology_id,
+            run_id = %effective_load.run_id,
+            stage_id = %effective_load.stage_id,
+            stage_index = effective_load.stage_index,
+            layer_start = effective_load.layer_start,
+            layer_end = effective_load.layer_end,
+            bind_addr = %bind_addr,
+            model_path = ?effective_load.model_path,
+            source_model_bytes = ?effective_load.source_model_bytes,
+            load_mode = ?effective_load.load_mode,
+            "starting split binary stage"
+        );
         let server = skippy_server::start_binary_stage(BinaryStageOptions {
             config,
             topology: None,
@@ -379,6 +400,13 @@ impl StageControlState {
             downstream_connect_timeout_secs: 30,
             openai: None,
         });
+        tracing::info!(
+            topology_id = %effective_load.topology_id,
+            run_id = %effective_load.run_id,
+            stage_id = %effective_load.stage_id,
+            bind_addr = %bind_addr,
+            "split binary stage task spawned; waiting for readiness"
+        );
         if let Err(error) =
             wait_for_binary_stage_ready(bind_addr, stage_load_timeout(&effective_load)).await
         {
@@ -391,6 +419,13 @@ impl StageControlState {
             let _ = server.shutdown().await;
             return Err(error.context(context));
         }
+        tracing::info!(
+            topology_id = %effective_load.topology_id,
+            run_id = %effective_load.run_id,
+            stage_id = %effective_load.stage_id,
+            bind_addr = %bind_addr,
+            "split binary stage ready"
+        );
 
         self.stages.insert(
             key,

@@ -1,7 +1,7 @@
 use super::{
     binary_full_prefill_record_identities, decode_record_tokens_sideband,
     initial_message_closes_without_downstream, is_decode_frame_batch_candidate,
-    native_mtp_enabled_from, prepare_binary_stage_connection,
+    is_unsupported_trim_memory_error, native_mtp_enabled_from, prepare_binary_stage_connection,
     restore_prefill_decode_as_decode_message, token_sideband_or_fill,
 };
 use std::{
@@ -71,6 +71,19 @@ fn native_mtp_enabled_flag_defaults_on_and_accepts_false_values() {
     assert!(!native_mtp_enabled_from(Some("0")));
     assert!(!native_mtp_enabled_from(Some("false")));
     assert!(!native_mtp_enabled_from(Some(" disabled ")));
+}
+
+#[test]
+fn unsupported_trim_fallback_is_limited_to_native_trim_memory_error() {
+    let unsupported = anyhow::anyhow!("Unsupported: runtime memory type is not supported for trim");
+    assert!(is_unsupported_trim_memory_error(&unsupported));
+
+    let different_unsupported = anyhow::anyhow!("Unsupported: native recurrent checkpoint failed");
+    assert!(!is_unsupported_trim_memory_error(&different_unsupported));
+
+    let trim_runtime_error =
+        anyhow::anyhow!("RuntimeError: runtime memory type is not supported for trim");
+    assert!(!is_unsupported_trim_memory_error(&trim_runtime_error));
 }
 
 #[test]

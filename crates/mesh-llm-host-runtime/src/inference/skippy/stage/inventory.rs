@@ -89,6 +89,17 @@ pub(super) async fn run_stage_prepare_task(
     cancelled: Arc<AtomicBool>,
 ) {
     let load = request.load.clone();
+    tracing::info!(
+        topology_id = %load.topology_id,
+        run_id = %load.run_id,
+        stage_id = %load.stage_id,
+        stage_index = load.stage_index,
+        layer_start = load.layer_start,
+        layer_end = load.layer_end,
+        load_mode = ?load.load_mode,
+        package_ref = %load.package_ref,
+        "stage prepare task started"
+    );
     if !update_preparation(
         &preparations,
         &key,
@@ -101,7 +112,22 @@ pub(super) async fn run_stage_prepare_task(
     }
     let peer_prefetch_error =
         prefetch_stage_package_if_needed(&preparations, &key, &request, package_prefetcher).await;
+    if let Some(error) = &peer_prefetch_error {
+        tracing::debug!(
+            topology_id = %load.topology_id,
+            run_id = %load.run_id,
+            stage_id = %load.stage_id,
+            error,
+            "stage package prefetch failed before local resolver fallback"
+        );
+    }
     if cancelled.load(Ordering::Acquire) {
+        tracing::info!(
+            topology_id = %load.topology_id,
+            run_id = %load.run_id,
+            stage_id = %load.stage_id,
+            "stage prepare task cancelled after prefetch"
+        );
         return;
     }
     if peer_prefetch_error.is_none()
@@ -118,10 +144,23 @@ pub(super) async fn run_stage_prepare_task(
     }
     let result = prepare_stage_source(&load).await;
     if cancelled.load(Ordering::Acquire) {
+        tracing::info!(
+            topology_id = %load.topology_id,
+            run_id = %load.run_id,
+            stage_id = %load.stage_id,
+            "stage prepare task cancelled after source prepare"
+        );
         return;
     }
     let state = match result {
         Ok(PrepareSourceResult { bytes_total }) => {
+            tracing::info!(
+                topology_id = %load.topology_id,
+                run_id = %load.run_id,
+                stage_id = %load.stage_id,
+                bytes_total,
+                "stage source available"
+            );
             let mut status =
                 preparation_status_from_load(&load, StagePreparationState::Available, None);
             status.bytes_done = bytes_total;
@@ -129,6 +168,14 @@ pub(super) async fn run_stage_prepare_task(
             status
         }
         Err(error) => {
+            tracing::warn!(
+                topology_id = %load.topology_id,
+                run_id = %load.run_id,
+                stage_id = %load.stage_id,
+                error = %error,
+                peer_prefetch_error = peer_prefetch_error.as_deref(),
+                "stage source prepare failed"
+            );
             let mut status =
                 preparation_status_from_load(&load, StagePreparationState::Failed, None);
             status.error = Some(format_stage_prepare_error(

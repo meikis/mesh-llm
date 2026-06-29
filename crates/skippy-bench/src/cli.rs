@@ -201,6 +201,12 @@ pub struct GlmDsaLayerMicrobenchArgs {
     pub activation_width: u32,
     #[arg(long, default_value_t = 1)]
     pub tokens: usize,
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Starting token position for GLM-DSA layer microbench inputs."
+    )]
+    pub position_start: i32,
     #[arg(long, default_value_t = 3)]
     pub iterations: usize,
     #[arg(long, default_value_t = 1)]
@@ -455,6 +461,11 @@ pub struct RunArgs {
     pub remote_root_map: Option<String>,
     #[arg(long)]
     pub remote_shared_root_map: Option<String>,
+    #[arg(
+        long,
+        help = "Comma-separated host=PATH overrides for --stage-model when hosts see a shared layer package at different mount points."
+    )]
+    pub stage_model_path_map: Option<String>,
     #[arg(long)]
     pub endpoint_host_map: Option<String>,
     #[arg(long, default_value = "0.0.0.0")]
@@ -902,6 +913,8 @@ mod tests {
             "31",
             "--tokens",
             "128",
+            "--position-start",
+            "255",
             "--indexshare-freq",
             "4",
             "--indexshare-pattern",
@@ -919,6 +932,7 @@ mod tests {
         assert_eq!(args.layer_start, 30);
         assert_eq!(args.layer_end, 31);
         assert_eq!(args.tokens, 128);
+        assert_eq!(args.position_start, 255);
         assert_eq!(args.indexshare_freq, Some(4));
         assert_eq!(args.indexshare_pattern.as_deref(), Some("FSSS"));
         assert!(args.require_optimized_route_fusion);

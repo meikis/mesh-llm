@@ -47,7 +47,7 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
         .context("select GLM-DSA layer package parts")?;
     let runtime_config = runtime_config(&args)?;
     let token_ids = vec![1_i32; args.tokens];
-    let positions = positions(args.tokens)?;
+    let positions = positions(args.position_start, args.tokens)?;
     let flags = MicrobenchFlags::from_args(&args);
     let indexshare_policy = IndexSharePolicy::from_args_and_env(&args);
     let input = prepare_input_activation(&args, &token_ids, &positions, flags)?;
@@ -140,6 +140,7 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
         ctx_size: args.ctx_size,
         activation_width: args.activation_width,
         tokens: args.tokens,
+        position_start: args.position_start,
         warmup: args.warmup,
         iterations: args.iterations,
         n_gpu_layers: args.n_gpu_layers,
@@ -786,10 +787,11 @@ fn real_top_k_cache_path(
     let n_batch = args.n_batch.unwrap_or_else(|| bounded_u32(args.tokens));
     let n_ubatch = args.n_ubatch.unwrap_or_else(|| bounded_u32(args.tokens));
     let file_name = format!(
-        "real-topk-src{}-dst{}-tok{}-ctx{}-act{}-ngpu{}-nb{}-nub{}-pi{}.skippy-frame",
+        "real-topk-src{}-dst{}-tok{}-pos{}-ctx{}-act{}-ngpu{}-nb{}-nub{}-pi{}.skippy-frame",
         source_layer_start,
         source_layer_end,
         args.tokens,
+        args.position_start,
         args.ctx_size,
         args.activation_width,
         args.n_gpu_layers,
@@ -1101,9 +1103,14 @@ struct GeneratedTopKFrame {
     cache_hit: bool,
 }
 
-fn positions(tokens: usize) -> Result<Vec<i32>> {
+fn positions(position_start: i32, tokens: usize) -> Result<Vec<i32>> {
     (0..tokens)
-        .map(|position| i32::try_from(position).context("position exceeds i32"))
+        .map(|offset| {
+            let offset = i32::try_from(offset).context("position offset exceeds i32")?;
+            position_start
+                .checked_add(offset)
+                .context("position exceeds i32")
+        })
         .collect()
 }
 
@@ -1543,6 +1550,7 @@ struct MicrobenchReport {
     ctx_size: u32,
     activation_width: u32,
     tokens: usize,
+    position_start: i32,
     warmup: usize,
     iterations: usize,
     n_gpu_layers: i32,

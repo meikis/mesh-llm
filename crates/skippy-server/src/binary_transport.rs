@@ -18,7 +18,7 @@ use crate::{
     config::validate_config,
     frontend::{self, EmbeddedOpenAiArgs},
     kv_integration::{KvStageIntegration, PrefillKvIdentity},
-    runtime_state::{RuntimeSessionStats, RuntimeState, load_runtime},
+    runtime_state::{RuntimeSessionDropStats, RuntimeSessionStats, RuntimeState, load_runtime},
     telemetry::{Telemetry, lifecycle_attrs, now_unix_nanos},
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -48,6 +48,7 @@ pub(crate) mod direct_return;
 pub(crate) mod forwarding;
 mod kv_eviction;
 mod options;
+mod preconnect;
 mod socket;
 mod wire;
 
@@ -61,6 +62,7 @@ use self::kv_eviction::{
     evict_binary_resident_prefix_for_decode,
 };
 pub use self::options::{BinaryStageOptions, EmbeddedOpenAiStageOptions, parse_wire_dtype};
+use self::preconnect::{spawn_downstream_preconnector, try_initial_downstream_preconnect};
 use self::socket::*;
 pub use self::wire::WireCondition;
 pub(crate) use self::wire::write_stage_message_conditioned;
@@ -93,6 +95,14 @@ struct BinaryKvRecordResult {
 struct BinaryPrefixCacheControlResult {
     hit: bool,
     stats: StageReplyStats,
+}
+
+enum LocalSessionControlOutcome {
+    Applied,
+    DroppedForUnsupportedTrim {
+        error: String,
+        drop_stats: RuntimeSessionDropStats,
+    },
 }
 
 struct BinaryRestoredPrefix {
@@ -266,6 +276,18 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
         downstream_connect_timeout_secs,
         openai,
     } = options;
+    eprintln!(
+        "skippy-server: binary-stage-start stage_id={} stage_index={} layers={}..{} bind={} model_path={:?} load_mode={:?} max_inflight={} lane_count={}",
+        config.stage_id,
+        config.stage_index,
+        config.layer_start,
+        config.layer_end,
+        bind_addr,
+        config.model_path,
+        config.load_mode,
+        max_inflight,
+        config.lane_count,
+    );
     validate_config(&config, topology.as_ref())?;
     let max_inflight = max_inflight.min(config.lane_count as usize);
     let telemetry = Telemetry::new(
@@ -275,15 +297,40 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
         telemetry_level,
     );
     telemetry.emit("stage.binary_server_start", lifecycle_attrs(&config));
+    let warm_downstream = Arc::new(Mutex::new(None));
+    let warm_preconnect = warm_downstream_preconnect_enabled();
+    if warm_preconnect {
+        try_initial_downstream_preconnect(
+            &config,
+            &warm_downstream,
+            downstream_connect_timeout_secs,
+        );
+    }
+    eprintln!(
+        "skippy-server: binary-stage-load-runtime-start stage_id={} bind={}",
+        config.stage_id, bind_addr
+    );
     let runtime = load_runtime(&config)?.context("binary stage server requires model_path")?;
+    eprintln!(
+        "skippy-server: binary-stage-load-runtime-done stage_id={} bind={}",
+        config.stage_id, bind_addr
+    );
     let decode_frame_batcher = DecodeFrameBatcher::new(runtime.clone(), max_inflight);
     if max_inflight > 0 {
         let timer = Instant::now();
+        eprintln!(
+            "skippy-server: binary-stage-prewarm-start stage_id={} max_inflight={}",
+            config.stage_id, max_inflight
+        );
         let sessions = runtime
             .lock()
             .map_err(|_| anyhow!("runtime lock poisoned"))?
             .prewarm_idle_sessions(max_inflight)
             .context("prewarm binary stage runtime sessions")?;
+        eprintln!(
+            "skippy-server: binary-stage-prewarm-done stage_id={} active_sessions={} idle_sessions={}",
+            config.stage_id, sessions.active_sessions, sessions.idle_sessions
+        );
         let mut attrs = lifecycle_attrs(&config);
         attrs.insert("llama_stage.max_inflight".to_string(), json!(max_inflight));
         attrs.insert(
@@ -306,9 +353,24 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
     }
     let kv = KvStageIntegration::from_config(&config)?.map(Arc::new);
     let prediction_returns = Arc::new(PredictionReturnHub::default());
+    eprintln!(
+        "skippy-server: binary-stage-bind-start stage_id={} bind={}",
+        config.stage_id, bind_addr
+    );
     let listener = TcpListener::bind(bind_addr)?;
     listener.set_nonblocking(true)?;
-    let warm_downstream = Arc::new(Mutex::new(None));
+    eprintln!(
+        "skippy-server: binary-stage-bind-ready stage_id={} bind={}",
+        config.stage_id, bind_addr
+    );
+    if warm_preconnect {
+        spawn_downstream_preconnector(
+            config.clone(),
+            warm_downstream.clone(),
+            shutdown.clone(),
+            downstream_connect_timeout_secs,
+        );
+    }
     if let Some(openai_options) = openai {
         if config.stage_index != 0 || config.layer_start != 0 {
             bail!("--openai-bind-addr is only supported on stage 0");
@@ -459,6 +521,15 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
         });
     }
     Ok(())
+}
+
+fn warm_downstream_preconnect_enabled() -> bool {
+    std::env::var("SKIPPY_BINARY_WARM_PRECONNECT").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 fn take_warm_or_connect_downstream(
@@ -765,21 +836,10 @@ fn handle_binary_connection(
             let prefill_drained_replies =
                 pending_prefill_before_control.saturating_sub(pending_prefill_replies);
             let local_started = Instant::now();
-            {
+            let local_outcome = {
                 let mut runtime = runtime.lock().expect("runtime lock poisoned");
-                match message.kind {
-                    WireMessageKind::CheckpointSession => runtime
-                        .checkpoint_session(&session_key)
-                        .context("checkpoint binary stage session")?,
-                    WireMessageKind::RestoreSession => runtime
-                        .restore_session(&session_key)
-                        .context("restore binary stage session")?,
-                    WireMessageKind::TrimSession => runtime
-                        .trim_session(&session_key, message.token_count.max(0) as u64)
-                        .context("trim binary stage session")?,
-                    _ => unreachable!("session control checked above"),
-                }
-            }
+                apply_local_session_control(&mut runtime, &session_key, &message)?
+            };
             let local_us = elapsed_us(local_started);
             let mut downstream_write_us = 0;
             let mut downstream_wait_us = 0;
@@ -801,6 +861,44 @@ fn handle_binary_connection(
                     bail!("session control expected downstream ACK");
                 }
                 control_stats.merge(reply.stats);
+            }
+            if let LocalSessionControlOutcome::DroppedForUnsupportedTrim { error, drop_stats } =
+                &local_outcome
+            {
+                eprintln!(
+                    "skippy-server: trim-session-fallback-drop stage_id={} session={} token_count={} error={}",
+                    config.stage_id,
+                    session_id,
+                    message.token_count.max(0),
+                    error
+                );
+                let mut attrs = binary_message_attrs(config, session_id, &message);
+                attrs.insert(
+                    "llama_stage.trim_fallback".to_string(),
+                    json!("drop_session"),
+                );
+                attrs.insert("llama_stage.trim_fallback_reason".to_string(), json!(error));
+                attrs.insert(
+                    "llama_stage.session_reset_ms".to_string(),
+                    json!(drop_stats.reset_ms),
+                );
+                attrs.insert(
+                    "llama_stage.session_reset".to_string(),
+                    json!(drop_stats.reset_session),
+                );
+                attrs.insert(
+                    "llama_stage.lane_discarded".to_string(),
+                    json!(drop_stats.lane_discarded),
+                );
+                if let Some(reason) = drop_stats.lane_discard_reason.as_deref() {
+                    attrs.insert("llama_stage.lane_discard_reason".to_string(), json!(reason));
+                }
+                insert_runtime_session_stats(
+                    &mut attrs,
+                    "llama_stage.runtime_sessions_after",
+                    &drop_stats.stats_after,
+                );
+                telemetry.emit_debug("stage.binary_trim_fallback", attrs);
             }
             record_session_control_timing(
                 &mut control_stats,
@@ -2108,6 +2206,48 @@ fn drain_deferred_prefill_replies(
         *pending_prefill_replies -= 1;
     }
     Ok(())
+}
+
+fn apply_local_session_control(
+    runtime: &mut RuntimeState,
+    session_key: &str,
+    message: &StageWireMessage,
+) -> Result<LocalSessionControlOutcome> {
+    match message.kind {
+        WireMessageKind::CheckpointSession => {
+            runtime
+                .checkpoint_session(session_key)
+                .context("checkpoint binary stage session")?;
+            Ok(LocalSessionControlOutcome::Applied)
+        }
+        WireMessageKind::RestoreSession => {
+            runtime
+                .restore_session(session_key)
+                .context("restore binary stage session")?;
+            Ok(LocalSessionControlOutcome::Applied)
+        }
+        WireMessageKind::TrimSession => {
+            let token_count = message.token_count.max(0) as u64;
+            match runtime.trim_session(session_key, token_count) {
+                Ok(()) => Ok(LocalSessionControlOutcome::Applied),
+                Err(error) if is_unsupported_trim_memory_error(&error) => {
+                    let error = format!("{error:#}");
+                    let drop_stats = runtime
+                        .drop_session_timed(session_key)
+                        .context("drop binary stage session after unsupported trim")?;
+                    Ok(LocalSessionControlOutcome::DroppedForUnsupportedTrim { error, drop_stats })
+                }
+                Err(error) => Err(error).context("trim binary stage session"),
+            }
+        }
+        _ => unreachable!("session control checked above"),
+    }
+}
+
+fn is_unsupported_trim_memory_error(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}");
+    message.contains("Unsupported")
+        && message.contains("runtime memory type is not supported for trim")
 }
 
 fn record_session_control_timing(

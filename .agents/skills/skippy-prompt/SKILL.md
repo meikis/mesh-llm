@@ -34,9 +34,13 @@ startup, observation, prompt driving, and teardown.
 2. Stop existing mesh/runtime processes on every selected host:
    `mesh-llm stop` first, then verify with `ps`; use `pkill -f` only if the
    scoped stop path fails.
-3. Rsync the current source tree to each remote host under
-   `$HOME/tmp/mesh-llm-prompt-src/<branch-or-sha>/`, excluding build outputs and
-   caches (`target/`, `.git/`, `.deps/llama-build/`, UI `node_modules/`).
+3. Sync the current source tree to each remote host with
+   `scripts/sync-lab-source.sh <host> [remote-dir]`. Use
+   `/Users/lab/src/mesh-llm-codex` for the standard two-machine lab unless the
+   user asks for an isolated copy. This script preserves remote caches
+   (`target/`, `.deps/`, `.git/`, `node_modules/`, sccache/cargo cache dirs)
+   while still deleting stale normal source files, so do not hand-roll raw
+   `rsync --delete` commands for lab source syncs.
 4. Detect each host:
    `uname -s`, `uname -m`, GPU inventory, compiler/runtime availability, and
    existing llama build cache.

@@ -69,6 +69,7 @@ fn write_local_configs(
             flash_attn_type: StageFlashAttentionType::Auto,
             filter_tensors_on_load: true,
             use_mmap: true,
+            use_mmap_buffer: true,
             selected_device: None,
             kv_cache,
             load_mode,
@@ -154,9 +155,10 @@ fn prompt_stage_cache_max_bytes(
             &args.cache_type_k,
             &args.cache_type_v,
             &meta,
-        ) {
-            return Ok(bytes);
-        }
+        )
+    {
+        return Ok(bytes);
+    }
 
     estimate_prompt_stage_cache_max_bytes_from_width(
         stage.layer_start,
@@ -498,7 +500,7 @@ fn package_artifact_available(path: &Path) -> Result<bool> {
                     "stat package manifest {}",
                     path.join("model-package.json").display()
                 )
-            })
+            });
         }
     }
     match fs::metadata(path.join(".complete")) {

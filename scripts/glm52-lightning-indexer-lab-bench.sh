@@ -18,7 +18,7 @@ MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-8}"
 PREFILL_CHUNK_SIZE="${PREFILL_CHUNK_SIZE:-128}"
 
 CTX_SIZE="${CTX_SIZE:-131072}"
-SPLITS="${SPLITS:-25}"
+SPLITS="${SPLITS:-35}"
 LAYER_END="${LAYER_END:-79}"
 ACTIVATION_WIDTH="${ACTIVATION_WIDTH:-6144}"
 ACTIVATION_WIRE_DTYPE="${ACTIVATION_WIRE_DTYPE:-f16}"
@@ -37,7 +37,8 @@ HOSTS="${HOSTS:-localhost,micstudio}"
 ENDPOINT_HOST_MAP="${ENDPOINT_HOST_MAP:-localhost=192.168.0.5,micstudio=192.168.0.10}"
 REMOTE_ROOT="${REMOTE_ROOT:-/Users/lab/models/skippy-runtime-bench}"
 REMOTE_ROOT_MAP="${REMOTE_ROOT_MAP:-localhost=/Volumes/External/skippy-runtime-bench,micstudio=/Users/lab/models/skippy-runtime-bench}"
-REMOTE_SHARED_ROOT_MAP="${REMOTE_SHARED_ROOT_MAP:-localhost=/Volumes/External/skippy-runtime-bench,micstudio=/Volumes/External/models/skippy-runtime-bench}"
+REMOTE_SHARED_ROOT_MAP="${REMOTE_SHARED_ROOT_MAP:-localhost=/Volumes/External/skippy-runtime-bench,micstudio=/Users/lab/models/skippy-runtime-bench}"
+STAGE_MODEL_PATH_MAP="${STAGE_MODEL_PATH_MAP:-localhost=${STAGE_MODEL},micstudio=/Users/lab/models/huggingface/hub/models--meshllm--GLM-5.2-Q2_K-MTP-Q8-layers/snapshots/main}"
 WORK_DIR="${WORK_DIR:-/Volumes/External/skippy-runtime-bench}"
 FIRST_STAGE_PORT="${FIRST_STAGE_PORT:-19240}"
 METRICS_HTTP_ADDR="${METRICS_HTTP_ADDR:-127.0.0.1:18080}"
@@ -58,8 +59,8 @@ Runs the repeatable GLM 5.2 two-node lab benchmark used to compare the serial
 and parallel Metal GLM-DSA Lightning Indexer paths.
 
 Default topology:
-  stage 0: studio54/localhost, layers 0..25, 192.168.0.5:19240
-  stage 1: micstudio,         layers 25..79, 192.168.0.10:19241
+  stage 0: studio54/localhost, layers 0..35, 192.168.0.5:19240
+  stage 1: micstudio,         layers 35..79, 192.168.0.10:19241
 
 Options:
   --mode serial|parallel|pair   Run serial only, parallel only, or serial then parallel. Default: pair.
@@ -73,14 +74,14 @@ Options:
   --sync-remote                 Sync this source tree to micstudio before running.
   --build-local                 Build local release skippy-bench/skippy-server/metrics-server first.
   --build-remote                Build remote release skippy-server first.
-  --reset-stage-cache           Remove cached materialized stage GGUFs for the selected topology first.
+  --reset-stage-cache           Remove legacy composed stage GGUF cache for the selected topology first.
   --dry-run                     Print commands without executing.
   -h, --help                    Show this help.
 
 Useful environment overrides:
   HOSTS, ENDPOINT_HOST_MAP, SPLITS, CTX_SIZE, STAGE_MAX_INFLIGHT,
   STAGE_DISABLE_MMAP_BUFFER, STAGE_SERVER_BIN, SKIPPY_BENCH_BIN,
-  METRICS_SERVER_BIN, REMOTE_SOURCE_DIR.
+  METRICS_SERVER_BIN, STAGE_MODEL_PATH_MAP, REMOTE_SOURCE_DIR.
 
 Examples:
   scripts/glm52-lightning-indexer-lab-bench.sh --mode serial
@@ -187,6 +188,13 @@ safe_cache_component() {
   LC_ALL=C sed -E 's/[^A-Za-z0-9_.-]/_/g' <<<"$1"
 }
 
+topology_id_for_variant() {
+  local variant="$1"
+  local split_id
+  split_id="$(safe_cache_component "$SPLITS")"
+  printf 'glm52-dsa-li-%s-s%s-ctx%s' "$variant" "$split_id" "$CTX_SIZE"
+}
+
 remote_shared_roots() {
   local value="$REMOTE_SHARED_ROOT_MAP"
   local entry
@@ -201,7 +209,7 @@ reset_stage_cache() {
   local model_key
   local topology_key
   model_key="$(safe_cache_component "$MODEL_ID")"
-  topology_key="$(safe_cache_component "glm52-dsa-li-${variant}")"
+  topology_key="$(safe_cache_component "$(topology_id_for_variant "$variant")")"
 
   local -a roots=("$WORK_DIR")
   while IFS= read -r root; do
@@ -267,7 +275,8 @@ EOF
 run_one() {
   local variant="$1"
   local run_id="${RUN_PREFIX}-${variant}-$(date +%Y%m%d-%H%M%S)"
-  local topology_id="glm52-dsa-li-${variant}"
+  local topology_id
+  topology_id="$(topology_id_for_variant "$variant")"
   local output="${WORK_DIR}/${run_id}/driver-result.json"
   local -a env_prefix=(SKIPPY_BINARY_WARM_PRECONNECT=1)
 
@@ -304,6 +313,7 @@ run_one() {
     --remote-root "$REMOTE_ROOT"
     --remote-root-map "$REMOTE_ROOT_MAP"
     --remote-shared-root-map "$REMOTE_SHARED_ROOT_MAP"
+    --stage-model-path-map "$STAGE_MODEL_PATH_MAP"
     --endpoint-host-map "$ENDPOINT_HOST_MAP"
     --first-stage-port "$FIRST_STAGE_PORT"
     --metrics-http-addr "$METRICS_HTTP_ADDR"
@@ -311,7 +321,6 @@ run_one() {
     --metrics-otlp-grpc-url "$METRICS_OTLP_GRPC_URL"
     --execute-remote
     --allow-unbalanced-stages
-    --rsync-model-artifacts
     --stage-connectivity-probe
     --stage-connectivity-diagnostics
     --keep-remote-on-failure

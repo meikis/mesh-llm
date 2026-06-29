@@ -180,6 +180,7 @@ struct StageAssignment {
     remote_pid_path: String,
     remote_exit_code_path: String,
     remote_model_path: Option<String>,
+    stage_model_path: Option<String>,
     local_materialized_model_path: Option<PathBuf>,
     local_shared_model_path: Option<PathBuf>,
     selected_package_files: Vec<String>,
@@ -743,6 +744,7 @@ fn run_args_for_existing_driver(
         remote_root: plan.remote_root.clone(),
         remote_root_map: None,
         remote_shared_root_map: None,
+        stage_model_path_map: None,
         endpoint_host_map: None,
         remote_bind_host: "0.0.0.0".to_string(),
         first_stage_port: first
@@ -1140,6 +1142,7 @@ fn build_deployment_plan(
     let metrics_otlp = metrics_otlp_grpc_url(args);
     let remote_root_map = parse_remote_root_map(args.remote_root_map.as_deref())?;
     let remote_shared_root_map = parse_path_map(args.remote_shared_root_map.as_deref())?;
+    let stage_model_path_map = parse_remote_root_map(args.stage_model_path_map.as_deref())?;
     let endpoint_host_map = parse_remote_root_map(args.endpoint_host_map.as_deref())?;
     let package_manifest = if args.stage_load_mode == "layer-package" {
         args.stage_model
@@ -1218,6 +1221,7 @@ fn build_deployment_plan(
         } else {
             None
         };
+        let stage_model_path = stage_model_path_map.get(&host).cloned();
         stages.push(StageAssignment {
             stage_id,
             stage_index: index as u32,
@@ -1233,6 +1237,7 @@ fn build_deployment_plan(
             remote_pid_path: format!("{remote_stage_dir}/stage.pid"),
             remote_exit_code_path: format!("{remote_stage_dir}/stage.exit"),
             remote_model_path,
+            stage_model_path,
             local_materialized_model_path,
             local_shared_model_path,
             selected_package_files,
@@ -1289,69 +1294,90 @@ fn model_identity_from_package_manifest(manifest: &PackageManifest) -> Result<Mo
 
 fn write_stage_configs(args: &RunArgs, plan: &DeploymentPlan, model_ref: &str) -> Result<()> {
     for stage in &plan.stages {
-        let stage_model_ref = if let Some(remote_model_path) = stage.remote_model_path.as_ref() {
-            if stage.local {
-                stage
-                    .local_materialized_model_path
-                    .as_ref()
-                    .map(|path| path_string(path))
-                    .unwrap_or_else(|| remote_model_path.clone())
-            } else {
-                remote_model_path.clone()
-            }
-        } else if args.execute_remote
-            && args.rsync_model_artifacts
-            && args.stage_load_mode == "layer-package"
-        {
-            format!("{}/package", remote_parent(&stage.remote_config_path)?)
-        } else {
-            model_ref.to_string()
-        };
-        let config_load_mode = stage_config_load_mode(args, stage);
-        let upstream = if stage.stage_index == 0 {
-            json!(null)
-        } else {
-            let previous = &plan.stages[stage.stage_index as usize - 1];
-            json!({
-                "stage_id": previous.stage_id,
-                "stage_index": previous.stage_index,
-                "endpoint": if stage.stage_index == 1 { "driver".to_string() } else { previous.endpoint.clone() }
-            })
-        };
-        let downstream = plan
-            .stages
-            .get(stage.stage_index as usize + 1)
-            .map(|next| {
-                json!({
-                    "stage_id": next.stage_id,
-                    "stage_index": next.stage_index,
-                    "endpoint": next.endpoint,
-                })
-            })
-            .unwrap_or_else(|| json!(null));
-        let config = json!({
-            "run_id": plan.run_id,
-            "topology_id": plan.topology_id,
-            "model_id": plan.model_id,
-            "model_path": stage_model_ref,
-            "stage_id": stage.stage_id,
-            "stage_index": stage.stage_index,
-            "layer_start": stage.layer_start,
-            "layer_end": stage.layer_end,
-            "ctx_size": args.ctx_size,
-            "n_gpu_layers": args.n_gpu_layers,
-            "cache_type_k": args.cache_type_k,
-            "cache_type_v": args.cache_type_v,
-            "filter_tensors_on_load": config_load_mode != "runtime-slice",
-            "use_mmap_buffer": !args.stage_disable_mmap_buffer,
-            "load_mode": config_load_mode,
-            "bind_addr": stage.bind_addr,
-            "upstream": upstream,
-            "downstream": downstream,
-        });
+        let config = stage_config_json(args, plan, stage, model_ref)?;
         write_json_file(&stage.config_path, &config)?;
     }
     Ok(())
+}
+
+fn stage_config_json(
+    args: &RunArgs,
+    plan: &DeploymentPlan,
+    stage: &StageAssignment,
+    model_ref: &str,
+) -> Result<Value> {
+    let stage_model_ref = if let Some(remote_model_path) = stage.remote_model_path.as_ref() {
+        if stage.local {
+            stage
+                .local_materialized_model_path
+                .as_ref()
+                .map(|path| path_string(path))
+                .unwrap_or_else(|| remote_model_path.clone())
+        } else {
+            remote_model_path.clone()
+        }
+    } else if args.execute_remote
+        && args.rsync_model_artifacts
+        && args.stage_load_mode == "layer-package"
+    {
+        format!("{}/package", remote_parent(&stage.remote_config_path)?)
+    } else if let Some(stage_model_path) = stage.stage_model_path.as_ref() {
+        stage_model_path.clone()
+    } else {
+        model_ref.to_string()
+    };
+    let config_load_mode = stage_config_load_mode(args, stage);
+    let upstream = if stage.stage_index == 0 {
+        json!(null)
+    } else {
+        let previous = &plan.stages[stage.stage_index as usize - 1];
+        json!({
+            "stage_id": previous.stage_id,
+            "stage_index": previous.stage_index,
+            "endpoint": if stage.stage_index == 1 {
+                "driver".to_string()
+            } else {
+                previous.endpoint.clone()
+            }
+        })
+    };
+    let downstream = plan
+        .stages
+        .get(stage.stage_index as usize + 1)
+        .map(|next| {
+            json!({
+                "stage_id": next.stage_id,
+                "stage_index": next.stage_index,
+                "endpoint": next.endpoint,
+            })
+        })
+        .unwrap_or_else(|| json!(null));
+    Ok(json!({
+        "run_id": plan.run_id,
+        "topology_id": plan.topology_id,
+        "model_id": plan.model_id,
+        "model_path": stage_model_ref,
+        "stage_id": stage.stage_id,
+        "stage_index": stage.stage_index,
+        "layer_start": stage.layer_start,
+        "layer_end": stage.layer_end,
+        "ctx_size": args.ctx_size,
+        "lane_count": stage_config_lane_count(args)?,
+        "n_gpu_layers": args.n_gpu_layers,
+        "cache_type_k": args.cache_type_k,
+        "cache_type_v": args.cache_type_v,
+        "filter_tensors_on_load": config_load_mode != "runtime-slice",
+        "use_mmap_buffer": !args.stage_disable_mmap_buffer,
+        "load_mode": config_load_mode,
+        "bind_addr": stage.bind_addr,
+        "upstream": upstream,
+        "downstream": downstream,
+    }))
+}
+
+fn stage_config_lane_count(args: &RunArgs) -> Result<u32> {
+    let lane_count = args.stage_max_inflight.max(1);
+    u32::try_from(lane_count).context("stage max inflight exceeds u32")
 }
 
 fn write_stage_topology(args: &RunArgs, plan: &DeploymentPlan, topology_path: &Path) -> Result<()> {
@@ -1436,10 +1462,12 @@ fn execute_remote_plan(args: &RunArgs, plan: &DeploymentPlan) -> Result<Vec<Chil
     for stage in plan.stages.iter().rev() {
         if stage.local {
             prepare_local_stage(args, stage)?;
+            remove_local_stage_runtime_files(stage)?;
+            probe_stage_connectivity_before_start(args, plan, stage)?;
             let command = local_start_command(args, plan, stage);
-            let mut local = Command::new("sh");
+            let mut local = Command::new("/usr/bin/script");
             local
-                .arg("-c")
+                .args(["-q", "/dev/null", "/bin/zsh", "-ilc"])
                 .arg(command)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -1455,6 +1483,7 @@ fn execute_remote_plan(args: &RunArgs, plan: &DeploymentPlan) -> Result<Vec<Chil
                     .arg(format!("mkdir -p {remote_stage_dir}")),
             )
             .with_context(|| format!("create remote stage dir on {}", stage.host))?;
+            remove_remote_stage_runtime_files(stage)?;
 
             run_command(
                 Command::new("rsync")
@@ -1487,6 +1516,7 @@ fn execute_remote_plan(args: &RunArgs, plan: &DeploymentPlan) -> Result<Vec<Chil
                 rsync_model_artifacts(args, stage)?;
             }
 
+            probe_stage_connectivity_before_start(args, plan, stage)?;
             let remote_bin = format!("{remote_stage_dir}/skippy-server");
             let command = remote_start_command(args, plan, stage, &remote_bin);
             let mut ssh = Command::new("ssh");
@@ -1512,6 +1542,57 @@ fn execute_remote_plan(args: &RunArgs, plan: &DeploymentPlan) -> Result<Vec<Chil
         }
     }
     Ok(sessions)
+}
+
+fn probe_stage_connectivity_before_start(
+    args: &RunArgs,
+    plan: &DeploymentPlan,
+    stage: &StageAssignment,
+) -> Result<()> {
+    if !args.stage_connectivity_probe {
+        return Ok(());
+    }
+    let Some(downstream) = plan.stages.get(stage.stage_index as usize + 1) else {
+        return Ok(());
+    };
+    let output = if stage.local {
+        probe_local_stage_connectivity(args, stage, downstream)?
+    } else {
+        probe_remote_stage_connectivity(args, stage, downstream)?
+    };
+    eprintln!(
+        "pre-start stage connectivity probe succeeded: {} -> {}\n{}",
+        stage.stage_id,
+        downstream.stage_id,
+        output.trim_end()
+    );
+    Ok(())
+}
+
+fn remove_local_stage_runtime_files(stage: &StageAssignment) -> Result<()> {
+    for path in [
+        &stage.remote_exit_code_path,
+        &stage.remote_pid_path,
+        &stage.remote_log_path,
+    ] {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).with_context(|| format!("remove stale {path}")),
+        }
+    }
+    Ok(())
+}
+
+fn remove_remote_stage_runtime_files(stage: &StageAssignment) -> Result<()> {
+    let command = format!(
+        "rm -f {} {} {}",
+        shell_quote(&stage.remote_exit_code_path),
+        shell_quote(&stage.remote_pid_path),
+        shell_quote(&stage.remote_log_path),
+    );
+    run_command(Command::new("ssh").arg(&stage.host).arg(command))
+        .with_context(|| format!("remove stale stage runtime files on {}", stage.host))
 }
 
 fn wait_stage_log_ready(stage: &StageAssignment, timeout_secs: u64) -> Result<()> {
@@ -1613,14 +1694,30 @@ fn stage_start_wrapper(
     let exit_path = shell_quote(&stage.remote_exit_code_path);
     let log_path = shell_quote(&stage.remote_log_path);
     let pid_path = shell_quote(&stage.remote_pid_path);
+    let wrapper_shell = if stage.local {
+        "/bin/zsh -ilc"
+    } else {
+        "sh -c"
+    };
+    let trap_signals = if args.keep_remote || args.keep_remote_on_failure {
+        "TERM INT"
+    } else {
+        "TERM INT HUP"
+    };
+    let hup_trap = if args.keep_remote || args.keep_remote_on_failure {
+        "trap '' HUP; "
+    } else {
+        ""
+    };
     let wrapper = format!(
-        "trap 'kill \"$child\" 2>/dev/null || true; wait \"$child\" 2>/dev/null; status=$?; printf \"%s\\n\" \"$status\" > {exit_path}; exit \"$status\"' TERM INT HUP; {stage_command} > {log_path} 2>&1 & child=$!; printf \"%s\\n\" \"$child\" > {pid_path}; wait \"$child\"; status=$?; printf \"%s\\n\" \"$status\" > {exit_path}; exit \"$status\""
+        "{hup_trap}trap 'kill \"$child\" 2>/dev/null || true; wait \"$child\" 2>/dev/null; status=$?; printf \"%s\\n\" \"$status\" > {exit_path}; exit \"$status\"' {trap_signals}; {stage_command} > {log_path} 2>&1 & child=$!; printf \"%s\\n\" \"$child\" > {pid_path}; wait \"$child\"; status=$?; printf \"%s\\n\" \"$status\" > {exit_path}; exit \"$status\""
     );
     format!(
-        "chmod +x {} && rm -f {} {} && sh -c {}",
+        "chmod +x {} && rm -f {} {} {} && {wrapper_shell} {}",
         shell_quote(bin),
         shell_quote(&stage.remote_exit_code_path),
         shell_quote(&stage.remote_pid_path),
+        shell_quote(&stage.remote_log_path),
         shell_quote(&wrapper),
     )
 }
@@ -1744,21 +1841,18 @@ fn probe_local_stage_connectivity(
     upstream: &StageAssignment,
     downstream: &StageAssignment,
 ) -> Result<String> {
-    let output = Command::new(&args.stage_server_bin)
-        .args([
-            "probe-downstream",
-            "--bind-addr",
-            &upstream.bind_addr,
-            "--endpoint",
-            &downstream.endpoint,
-            "--attempts",
-            &args.stage_connectivity_probe_attempts.to_string(),
-            "--timeout-secs",
-            &args.stage_connectivity_probe_timeout_secs.to_string(),
-            "--retry-delay-ms",
-            &args.stage_connectivity_probe_retry_delay_ms.to_string(),
-            "--route-snapshot",
-        ])
+    let command = format!(
+        "{} probe-downstream --bind-addr {} --endpoint {} --attempts {} --timeout-secs {} --retry-delay-ms {} --route-snapshot",
+        shell_quote(&args.stage_server_bin.to_string_lossy()),
+        shell_quote(&upstream.bind_addr),
+        shell_quote(&downstream.endpoint),
+        args.stage_connectivity_probe_attempts,
+        args.stage_connectivity_probe_timeout_secs,
+        args.stage_connectivity_probe_retry_delay_ms,
+    );
+    let output = Command::new("/usr/bin/script")
+        .args(["-q", "/dev/null", "/bin/zsh", "-ilc"])
+        .arg(command)
         .output()
         .with_context(|| format!("spawn local connectivity probe for {}", upstream.stage_id))?;
     probe_output_result(output, args, upstream, downstream)
@@ -1973,11 +2067,8 @@ fn probe_remote_chain_readiness(args: &RunArgs, plan: &DeploymentPlan) -> Result
         .stages
         .first()
         .context("deployment plan has no stages")?;
-    let mut stream = connect_endpoint_ready(&first.endpoint, args.startup_timeout_secs)
+    connect_endpoint_ready(&first.endpoint, args.startup_timeout_secs)
         .with_context(|| format!("connect to first binary stage {}", first.endpoint))?;
-    let wire_dtype = parse_wire_dtype(&args.activation_wire_dtype)?;
-    write_stage_message(&mut stream, &StageWireMessage::stop(wire_dtype), wire_dtype)
-        .context("send readiness stop frame")?;
     Ok(())
 }
 
@@ -3332,6 +3423,7 @@ mod tests {
             remote_root: "/tmp/remote".to_string(),
             remote_root_map: None,
             remote_shared_root_map: None,
+            stage_model_path_map: None,
             endpoint_host_map: None,
             remote_bind_host: "0.0.0.0".to_string(),
             first_stage_port: 19031,
@@ -3373,6 +3465,59 @@ mod tests {
     }
 
     #[test]
+    fn shared_layer_package_plan_keeps_direct_package_load_without_artifact_rsync() -> Result<()> {
+        let package_dir = unique_test_dir("shared-layer-package");
+        write_minimal_package_manifest(&package_dir, 2)?;
+        let config_dir = package_dir.join("configs");
+        let mut args = test_run_args();
+        args.hosts = "localhost,micstudio".to_string();
+        args.model_path = None;
+        args.stage_model = Some(package_dir.clone());
+        args.stage_load_mode = "layer-package".to_string();
+        args.splits = "1".to_string();
+        args.layer_end = 2;
+        args.execute_remote = true;
+        args.rsync_model_artifacts = false;
+        args.remote_shared_root_map =
+            Some("localhost=/shared/local,micstudio=/shared/remote".to_string());
+        args.stage_model_path_map = Some(format!(
+            "localhost={},micstudio=/Users/lab/models/package",
+            path_string(&package_dir)
+        ));
+        let hosts = parse_hosts(&args.hosts)?;
+        let ranges = parse_stage_ranges(&args.splits, args.layer_end)?;
+        let model_ref = model_ref_for_configs(&args)?;
+
+        let plan = build_deployment_plan(
+            &args,
+            "run-1",
+            &hosts,
+            &ranges,
+            &config_dir,
+            &model_ref,
+            ModelIdentity::from_model_id(&args.model_id),
+        )?;
+
+        assert_eq!(plan.stages.len(), 2);
+        for stage in &plan.stages {
+            assert!(stage.remote_model_path.is_none());
+            assert!(stage.local_materialized_model_path.is_none());
+            assert!(stage.local_shared_model_path.is_none());
+            assert_eq!(stage_config_load_mode(&args, stage), "layer-package");
+            let config = stage_config_json(&args, &plan, stage, &model_ref)?;
+            assert_eq!(config["load_mode"], "layer-package");
+            if stage.host == "micstudio" {
+                assert_eq!(config["model_path"], "/Users/lab/models/package");
+            } else {
+                assert_eq!(config["model_path"], path_string(&package_dir));
+            }
+        }
+
+        let _ = fs::remove_dir_all(package_dir);
+        Ok(())
+    }
+
+    #[test]
     fn builds_stage_ranges_from_splits() {
         assert_eq!(
             parse_stage_ranges("1,4", 40).unwrap(),
@@ -3402,6 +3547,18 @@ mod tests {
 
         args.allow_unbalanced_stages = true;
         validate_stage_balance_for_run(&args, &ranges).unwrap();
+    }
+
+    #[test]
+    fn stage_config_lane_count_tracks_max_inflight() {
+        let mut args = test_run_args();
+        args.stage_max_inflight = 1;
+        let stage = test_stage_assignment(0, 50);
+        let plan = test_deployment_plan(vec![stage.clone()]);
+
+        let config = stage_config_json(&args, &plan, &stage, "model.gguf").unwrap();
+
+        assert_eq!(config["lane_count"], json!(1));
     }
 
     #[test]
@@ -3887,6 +4044,7 @@ mod tests {
             remote_root: "/tmp/remote".to_string(),
             remote_root_map: None,
             remote_shared_root_map: None,
+            stage_model_path_map: None,
             endpoint_host_map: None,
             remote_bind_host: "0.0.0.0".to_string(),
             first_stage_port: 19031,
@@ -3953,6 +4111,7 @@ mod tests {
             remote_pid_path: "/tmp/remote/run-1/stage-0/stage.pid".to_string(),
             remote_exit_code_path: "/tmp/remote/run-1/stage-0/stage.exit".to_string(),
             remote_model_path: None,
+            stage_model_path: None,
             local_materialized_model_path: None,
             local_shared_model_path: None,
             selected_package_files: Vec::new(),
@@ -3965,6 +4124,7 @@ mod tests {
         );
         assert!(command.contains("stage.exit"));
         assert!(command.contains("stage.pid"));
+        assert!(command.contains("stage.log"));
         assert!(command.contains("wait \"$child\""));
         assert!(!command.contains("nohup"));
         assert!(command.contains("--metrics-otlp-grpc"));
@@ -4002,6 +4162,50 @@ mod tests {
         assert!(command.contains("SKIPPY_GLM_DSA_LOG_METAL_DISPATCH"));
         assert!(command.contains("LLAMA_GLM_DSA_INDEXSHARE_FREQ"));
         assert!(command.contains("LLAMA_GLM_DSA_INDEXSHARE_PATTERN"));
+    }
+
+    #[test]
+    fn local_start_command_uses_login_shell_and_clears_stale_log() {
+        let args = test_run_args();
+        let plan = test_deployment_plan(Vec::new());
+        let mut stage = test_stage_assignment(0, 1);
+        stage.local = true;
+
+        let command = local_start_command(&args, &plan, &stage);
+
+        assert!(command.contains("rm -f"));
+        assert!(command.contains("/tmp/remote/run-1/stage/stage.log"));
+        assert!(command.contains("/bin/zsh -ilc"));
+        assert!(command.contains("serve-binary"));
+    }
+
+    #[test]
+    fn keep_on_failure_wrapper_ignores_hup() {
+        let mut args = test_run_args();
+        args.keep_remote_on_failure = true;
+        let plan = test_deployment_plan(Vec::new());
+        let mut stage = test_stage_assignment(0, 1);
+        stage.local = true;
+
+        let command = local_start_command(&args, &plan, &stage);
+
+        assert!(command.contains("HUP"));
+        assert!(command.contains("' TERM INT;"));
+        assert!(!command.contains("' TERM INT HUP;"));
+    }
+
+    #[test]
+    fn remote_start_command_keeps_plain_shell_wrapper() {
+        let args = test_run_args();
+        let plan = test_deployment_plan(Vec::new());
+        let stage = test_stage_assignment(0, 1);
+
+        let command = remote_start_command(&args, &plan, &stage, "/tmp/run/skippy-server");
+
+        assert!(command.contains("rm -f"));
+        assert!(command.contains("/tmp/remote/run-1/stage/stage.log"));
+        assert!(command.contains("sh -c"));
+        assert!(!command.contains("/bin/zsh -ilc"));
     }
 
     #[test]
@@ -4131,6 +4335,7 @@ mod tests {
             remote_root: "/tmp/remote".to_string(),
             remote_root_map: None,
             remote_shared_root_map: None,
+            stage_model_path_map: None,
             endpoint_host_map: None,
             remote_bind_host: "0.0.0.0".to_string(),
             first_stage_port: 19031,
@@ -4243,6 +4448,44 @@ mod tests {
         }
     }
 
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "skippy-bench-{name}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    fn write_minimal_package_manifest(package_dir: &Path, layer_count: u32) -> Result<()> {
+        fs::create_dir_all(package_dir)?;
+        let layers = (0..layer_count)
+            .map(|layer_index| {
+                json!({
+                    "layer_index": layer_index,
+                    "path": format!("layers/layer-{layer_index:03}.gguf"),
+                })
+            })
+            .collect::<Vec<_>>();
+        let manifest = json!({
+            "model_id": "org/repo:Q4_K_M",
+            "source_model": {},
+            "shared": {
+                "metadata": { "path": "shared/metadata.gguf" },
+                "embeddings": { "path": "shared/embeddings.gguf" },
+                "output": { "path": "shared/output.gguf" }
+            },
+            "layers": layers
+        });
+        fs::write(
+            package_dir.join("model-package.json"),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+        Ok(())
+    }
+
     fn test_stage_assignment(layer_start: u32, layer_end: u32) -> StageAssignment {
         StageAssignment {
             stage_id: format!("stage-{layer_start}-{layer_end}"),
@@ -4259,6 +4502,7 @@ mod tests {
             remote_pid_path: "/tmp/remote/run-1/stage/stage.pid".to_string(),
             remote_exit_code_path: "/tmp/remote/run-1/stage/stage.exit".to_string(),
             remote_model_path: None,
+            stage_model_path: None,
             local_materialized_model_path: None,
             local_shared_model_path: None,
             selected_package_files: Vec::new(),

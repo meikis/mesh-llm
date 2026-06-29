@@ -3388,6 +3388,17 @@ async fn wait_for_split_stage_source(
         let inventory = query_stage_inventory(node, stage_node_id, load)
             .await
             .with_context(|| stage_control_unreachable_message(&load.stage_id, stage_node_id))?;
+        tracing::info!(
+            topology_id = %load.topology_id,
+            run_id = %load.run_id,
+            stage_id = %load.stage_id,
+            node = %stage_node_id.fmt_short(),
+            ready_ranges = ?inventory.ready_ranges,
+            available_ranges = ?inventory.available_ranges,
+            missing_ranges = ?inventory.missing_ranges,
+            preparing_ranges = ?inventory.preparing_ranges,
+            "split stage source inventory polled"
+        );
         if split_stage_source_is_ready(&inventory, load) {
             tracing::info!(
                 topology_id = %load.topology_id,

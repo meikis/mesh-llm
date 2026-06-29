@@ -40,6 +40,20 @@ const ENV_REAL_TOP_K_MAX_SOURCE_BYTES: &str = "SKIPPY_BENCH_GLM_DSA_REAL_TOP_K_M
 const DEFAULT_SYNTHETIC_TOP_K_WIDTH: usize = 256;
 const DEFAULT_REAL_TOP_K_MAX_SOURCE_BYTES: u64 = 110 * 1024 * 1024 * 1024;
 const GGUF_TENSOR_NAME_SCAN_CHUNK_BYTES: usize = 1024 * 1024;
+const GGUF_MAGIC: &[u8; 4] = b"GGUF";
+const GGUF_TYPE_UINT8: u32 = 0;
+const GGUF_TYPE_INT8: u32 = 1;
+const GGUF_TYPE_UINT16: u32 = 2;
+const GGUF_TYPE_INT16: u32 = 3;
+const GGUF_TYPE_UINT32: u32 = 4;
+const GGUF_TYPE_INT32: u32 = 5;
+const GGUF_TYPE_FLOAT32: u32 = 6;
+const GGUF_TYPE_BOOL: u32 = 7;
+const GGUF_TYPE_STRING: u32 = 8;
+const GGUF_TYPE_ARRAY: u32 = 9;
+const GGUF_TYPE_UINT64: u32 = 10;
+const GGUF_TYPE_INT64: u32 = 11;
+const GGUF_TYPE_FLOAT64: u32 = 12;
 const INPUT_FRAME_CACHE_MAGIC: &[u8; 16] = b"SKPGLMDSAFRM1\0\0\0";
 
 pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
@@ -624,6 +638,13 @@ fn generate_real_top_k_frame(
         .context("select GLM-DSA real top-k source layer package parts")?;
     guard_real_top_k_source_size(&source_selected.selected_parts)
         .context("check GLM-DSA real top-k source span size")?;
+    guard_real_top_k_source_start(
+        &source_input,
+        &source_selected.selected_parts,
+        &source_selected.absolute_paths,
+        source_layer_start,
+    )
+    .context("check GLM-DSA real top-k source start")?;
     let source_config = runtime_config_for_range(args, source_layer_start, source_layer_end)?;
     let source_flags = MicrobenchFlags {
         direct_sparse_attn: false,
@@ -729,6 +750,26 @@ fn guard_real_top_k_source_size(selected_parts: &[PackagePart]) -> Result<()> {
         return Ok(());
     };
     guard_real_top_k_source_size_with_limit(selected_parts, max_bytes)
+}
+
+fn guard_real_top_k_source_start(
+    source_input: &ActivationFrame,
+    selected_parts: &[PackagePart],
+    absolute_paths: &[PathBuf],
+    source_layer_start: u32,
+) -> Result<()> {
+    if (source_input.desc.flags & ACTIVATION_FLAG_GLM_DSA_TOP_K) != 0 {
+        return Ok(());
+    }
+    let artifact_role =
+        artifact_layer_role_report(selected_parts, absolute_paths, source_layer_start)?;
+    if artifact_role.can_produce_top_k == Some(true) {
+        return Ok(());
+    }
+    bail!(
+        "real top-k source layer {source_layer_start} has no input top-k sideband and cannot produce top-k from artifact role {:?}; choose a producer layer or set {ENV_REAL_TOP_K_CHAIN_SOURCES}",
+        artifact_role.role
+    )
 }
 
 fn guard_real_top_k_source_size_with_limit(
@@ -1128,7 +1169,7 @@ fn artifact_layer_role_report(
             can_produce_top_k: None,
         });
     };
-    let can_produce_top_k = file_contains_bytes(path, indexer_tensor_prefix.as_bytes())
+    let can_produce_top_k = gguf_has_tensor_name_prefix(path, &indexer_tensor_prefix)
         .with_context(|| format!("scan {} for GLM-DSA indexer tensor names", path.display()))?;
     Ok(ArtifactLayerRoleReport {
         layer_index,
@@ -1142,6 +1183,117 @@ fn artifact_layer_role_report(
         indexer_tensor_prefix,
         can_produce_top_k: Some(can_produce_top_k),
     })
+}
+
+fn gguf_has_tensor_name_prefix(path: &Path, prefix: &str) -> Result<bool> {
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut reader = BufReader::with_capacity(GGUF_TENSOR_NAME_SCAN_CHUNK_BYTES, file);
+    let mut magic = [0_u8; 4];
+    reader
+        .read_exact(&mut magic)
+        .with_context(|| format!("read GGUF magic from {}", path.display()))?;
+    if &magic != GGUF_MAGIC {
+        return file_contains_bytes(path, prefix.as_bytes());
+    }
+    let _version = read_u32_le(&mut reader)?;
+    let tensor_count = read_u64_le(&mut reader)?;
+    let metadata_count = read_u64_le(&mut reader)?;
+    for _ in 0..metadata_count {
+        skip_gguf_string(&mut reader)?;
+        let value_type = read_u32_le(&mut reader)?;
+        skip_gguf_value(&mut reader, value_type)?;
+    }
+    for _ in 0..tensor_count {
+        let name = read_gguf_string(&mut reader)?;
+        if name.starts_with(prefix) {
+            return Ok(true);
+        }
+        let n_dims = read_u32_le(&mut reader)?;
+        for _ in 0..n_dims {
+            let _ = read_u64_le(&mut reader)?;
+        }
+        let _tensor_type = read_u32_le(&mut reader)?;
+        let _offset = read_u64_le(&mut reader)?;
+    }
+    Ok(false)
+}
+
+fn read_u32_le(reader: &mut impl Read) -> Result<u32> {
+    let mut bytes = [0_u8; 4];
+    reader.read_exact(&mut bytes).context("read GGUF u32")?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_u64_le(reader: &mut impl Read) -> Result<u64> {
+    let mut bytes = [0_u8; 8];
+    reader.read_exact(&mut bytes).context("read GGUF u64")?;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+fn read_gguf_string(reader: &mut impl Read) -> Result<String> {
+    let len = usize::try_from(read_u64_le(reader)?).context("GGUF string length exceeds usize")?;
+    let mut bytes = vec![0_u8; len];
+    reader
+        .read_exact(&mut bytes)
+        .context("read GGUF string bytes")?;
+    String::from_utf8(bytes).context("GGUF string is not valid UTF-8")
+}
+
+fn skip_gguf_string(reader: &mut impl Read) -> Result<()> {
+    let len = read_u64_le(reader)?;
+    skip_exact(reader, len)
+}
+
+fn skip_gguf_value(reader: &mut impl Read, value_type: u32) -> Result<()> {
+    match value_type {
+        GGUF_TYPE_UINT8 | GGUF_TYPE_INT8 | GGUF_TYPE_BOOL => skip_exact(reader, 1),
+        GGUF_TYPE_UINT16 | GGUF_TYPE_INT16 => skip_exact(reader, 2),
+        GGUF_TYPE_UINT32 | GGUF_TYPE_INT32 | GGUF_TYPE_FLOAT32 => skip_exact(reader, 4),
+        GGUF_TYPE_UINT64 | GGUF_TYPE_INT64 | GGUF_TYPE_FLOAT64 => skip_exact(reader, 8),
+        GGUF_TYPE_STRING => skip_gguf_string(reader),
+        GGUF_TYPE_ARRAY => {
+            let element_type = read_u32_le(reader)?;
+            let len = read_u64_le(reader)?;
+            skip_gguf_array(reader, element_type, len)
+        }
+        _ => bail!("unsupported GGUF metadata value type {value_type}"),
+    }
+}
+
+fn skip_gguf_array(reader: &mut impl Read, element_type: u32, len: u64) -> Result<()> {
+    if let Some(width) = gguf_scalar_width(element_type) {
+        return skip_exact(
+            reader,
+            len.checked_mul(width)
+                .context("GGUF array byte count overflow")?,
+        );
+    }
+    if element_type == GGUF_TYPE_STRING {
+        for _ in 0..len {
+            skip_gguf_string(reader)?;
+        }
+        return Ok(());
+    }
+    bail!("unsupported GGUF array element type {element_type}")
+}
+
+fn gguf_scalar_width(value_type: u32) -> Option<u64> {
+    match value_type {
+        GGUF_TYPE_UINT8 | GGUF_TYPE_INT8 | GGUF_TYPE_BOOL => Some(1),
+        GGUF_TYPE_UINT16 | GGUF_TYPE_INT16 => Some(2),
+        GGUF_TYPE_UINT32 | GGUF_TYPE_INT32 | GGUF_TYPE_FLOAT32 => Some(4),
+        GGUF_TYPE_UINT64 | GGUF_TYPE_INT64 | GGUF_TYPE_FLOAT64 => Some(8),
+        _ => None,
+    }
+}
+
+fn skip_exact(reader: &mut impl Read, len: u64) -> Result<()> {
+    let mut limited = reader.take(len);
+    std::io::copy(&mut limited, &mut std::io::sink()).context("skip GGUF bytes")?;
+    if limited.limit() != 0 {
+        bail!("unexpected EOF while skipping GGUF bytes");
+    }
+    Ok(())
 }
 
 fn file_contains_bytes(path: &Path, needle: &[u8]) -> Result<bool> {
@@ -2672,6 +2824,21 @@ mod tests {
     }
 
     #[test]
+    fn gguf_tensor_directory_detects_indexer_prefix() {
+        let path = temp_test_file("glm-dsa-indexer-directory.gguf");
+        fs::write(
+            &path,
+            minimal_gguf_with_tensor_names(&["blk.28.attn_q.weight", "blk.28.indexer.proj.weight"]),
+        )
+        .unwrap();
+
+        assert!(gguf_has_tensor_name_prefix(&path, "blk.28.indexer.").unwrap());
+        assert!(!gguf_has_tensor_name_prefix(&path, "blk.29.indexer.").unwrap());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn execution_contract_downgrades_policy_full_when_artifact_lacks_indexer() {
         let mut args = test_args();
         args.layer_start = 28;
@@ -2707,6 +2874,37 @@ mod tests {
         assert!(report.sideband_required);
         assert!(!report.sideband_contract_satisfied);
         assert!(!report.native_consumer_execution_proven);
+    }
+
+    #[test]
+    fn real_top_k_source_start_rejects_non_indexer_without_sideband_input() {
+        let path = temp_test_file("glm-dsa-source-no-indexer.gguf");
+        fs::write(&path, b"blk.28.attn_q.weight").unwrap();
+        let part = test_layer_package_part(28, 32);
+        let source_input = activation_frame_for_test(28, 0);
+
+        let error =
+            guard_real_top_k_source_start(&source_input, &[part], std::slice::from_ref(&path), 28)
+                .unwrap_err()
+                .to_string();
+
+        assert!(error.contains("real top-k source layer 28"));
+        assert!(error.contains("cannot produce top-k"));
+        assert!(error.contains("SKIPPY_BENCH_GLM_DSA_REAL_TOP_K_CHAIN_SOURCES"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn real_top_k_source_start_allows_non_indexer_with_sideband_input() {
+        let path = temp_test_file("glm-dsa-source-chained-sideband.gguf");
+        fs::write(&path, b"blk.28.attn_q.weight").unwrap();
+        let part = test_layer_package_part(28, 32);
+        let source_input = activation_frame_for_test(28, ACTIVATION_FLAG_GLM_DSA_TOP_K);
+
+        guard_real_top_k_source_start(&source_input, &[part], std::slice::from_ref(&path), 28)
+            .unwrap();
+
+        let _ = fs::remove_file(path);
     }
 
     fn artifact_role_for_test(
@@ -2755,6 +2953,45 @@ mod tests {
             "skippy-bench-{name}-{}-{nanos}",
             std::process::id()
         ))
+    }
+
+    fn activation_frame_for_test(layer_end: u32, flags: u64) -> ActivationFrame {
+        ActivationFrame {
+            desc: ActivationDesc {
+                version: 1,
+                dtype: RuntimeActivationDType::F32,
+                layout: RuntimeActivationLayout::TokenMajor,
+                producer_stage_index: -1,
+                layer_start: i32::try_from(layer_end.saturating_sub(1)).unwrap(),
+                layer_end: i32::try_from(layer_end).unwrap(),
+                token_count: 1,
+                sequence_count: 1,
+                payload_bytes: 16,
+                flags,
+            },
+            payload: vec![0; 16],
+        }
+    }
+
+    fn minimal_gguf_with_tensor_names(names: &[&str]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(GGUF_MAGIC);
+        bytes.extend_from_slice(&3_u32.to_le_bytes());
+        bytes.extend_from_slice(&(names.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        for name in names {
+            push_gguf_string(&mut bytes, name);
+            bytes.extend_from_slice(&1_u32.to_le_bytes());
+            bytes.extend_from_slice(&1_u64.to_le_bytes());
+            bytes.extend_from_slice(&0_u32.to_le_bytes());
+            bytes.extend_from_slice(&0_u64.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn push_gguf_string(bytes: &mut Vec<u8>, value: &str) {
+        bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(value.as_bytes());
     }
 
     fn test_args() -> GlmDsaLayerMicrobenchArgs {

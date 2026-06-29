@@ -174,6 +174,9 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
     let route_fusion_guard = args
         .require_optimized_route_fusion
         .then(|| build_route_fusion_guard(&case, optimized_dispatch_probe.as_ref()));
+    let direct_sparse_prefill_guard = args
+        .require_direct_sparse_prefill_proof
+        .then(|| build_direct_sparse_prefill_guard(&case));
     let report = MicrobenchReport {
         command: "glm-dsa-layer-microbench",
         model_id: args.model_id,
@@ -209,6 +212,7 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
         routed_moe_timing_summary,
         profile_integrity,
         route_fusion_guard,
+        direct_sparse_prefill_guard,
         direct_sparse_decision_records: case.direct_sparse_decision_records,
         metal_dispatch_records: case.metal_dispatch_records,
         op_timing_records: case.op_timing_records,
@@ -234,6 +238,19 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
             guard.encode_skipped_candidate_records,
             guard.fused_dispatch_records,
             guard.reason_summary
+        );
+    }
+    if let Some(guard) = &report.direct_sparse_prefill_guard
+        && !guard.passed
+    {
+        bail!(
+            "GLM-DSA direct sparse prefill proof failed for {}: large_prefill_direct={} sparse_mask_nodes={} dsa_nodes={} capped_dispatches={} failures={}",
+            guard.checked_case,
+            guard.large_prefill_direct_decisions,
+            guard.sparse_mask_nodes,
+            guard.dsa_sparse_attn_nodes,
+            guard.capped_large_prefill_dispatches,
+            guard.failure_summary,
         );
     }
     if !parity_passed {
@@ -2248,6 +2265,8 @@ struct MicrobenchReport {
     profile_integrity: ProfileIntegrityReport,
     #[serde(skip_serializing_if = "Option::is_none")]
     route_fusion_guard: Option<RouteFusionGuardReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    direct_sparse_prefill_guard: Option<DirectSparsePrefillGuardReport>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     direct_sparse_decision_records: Vec<DirectSparseDecisionRecord>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -2274,6 +2293,23 @@ struct RouteFusionGuardReport {
     encode_skipped_candidate_records: usize,
     fused_dispatch_records: usize,
     reason_summary: String,
+}
+
+#[derive(Serialize)]
+struct DirectSparsePrefillGuardReport {
+    checked_case: &'static str,
+    passed: bool,
+    direct_decision_records: usize,
+    direct_use_records: usize,
+    fallback_records: usize,
+    large_prefill_decisions: usize,
+    large_prefill_direct_decisions: usize,
+    sparse_mask_nodes: u64,
+    dsa_sparse_attn_nodes: u64,
+    dsa_sparse_attn_dispatches: usize,
+    capped_large_prefill_dispatches: usize,
+    expected_large_prefill_threads_x: u64,
+    failure_summary: String,
 }
 
 #[derive(Serialize)]
@@ -2469,6 +2505,83 @@ fn build_route_fusion_guard(
         encode_skipped_candidate_records,
         fused_dispatch_records,
         reason_summary: summarize_route_fusion_reasons(dispatch),
+    }
+}
+
+fn build_direct_sparse_prefill_guard(
+    candidate: &MicrobenchCaseSummary,
+) -> DirectSparsePrefillGuardReport {
+    const EXPECTED_LARGE_PREFILL_THREADS_X: u64 = 32;
+
+    let direct_decision_records = candidate.direct_sparse_decision_records.len();
+    let direct_use_records = candidate
+        .direct_sparse_decision_records
+        .iter()
+        .filter(|record| record.use_direct)
+        .count();
+    let fallback_records = direct_decision_records.saturating_sub(direct_use_records);
+    let large_prefill_decisions = candidate
+        .direct_sparse_decision_records
+        .iter()
+        .filter(|record| record.large_prefill_shape == Some(true))
+        .count();
+    let large_prefill_direct_decisions = candidate
+        .direct_sparse_decision_records
+        .iter()
+        .filter(|record| record.large_prefill_shape == Some(true) && record.use_direct)
+        .count();
+    let sparse_mask_nodes = candidate.op_timing_summary.sparse_mask.nodes;
+    let dsa_sparse_attn_nodes = candidate.op_timing_summary.dsa_sparse_attn.nodes;
+    let dsa_sparse_attn_dispatches = candidate
+        .metal_dispatch_records
+        .iter()
+        .filter(|record| record.op == "dsa_sparse_attn")
+        .count();
+    let capped_large_prefill_dispatches = candidate
+        .metal_dispatch_records
+        .iter()
+        .filter(|record| {
+            record.op == "dsa_sparse_attn"
+                && record.batch.is_some_and(|batch| batch > 1)
+                && record.top_k.is_some_and(|top_k| top_k >= 64)
+                && record.threads_x == EXPECTED_LARGE_PREFILL_THREADS_X
+        })
+        .count();
+    let mut failures = Vec::new();
+    if large_prefill_direct_decisions == 0 {
+        failures.push("no_large_prefill_direct_decision");
+    }
+    if fallback_records > 0 {
+        failures.push("fallback_decision_present");
+    }
+    if sparse_mask_nodes > 0 {
+        failures.push("sparse_mask_nodes_present");
+    }
+    if dsa_sparse_attn_nodes == 0 {
+        failures.push("missing_dsa_sparse_attn_timing");
+    }
+    if capped_large_prefill_dispatches == 0 {
+        failures.push("missing_capped_large_prefill_dispatch");
+    }
+    let passed = failures.is_empty();
+    DirectSparsePrefillGuardReport {
+        checked_case: candidate.label,
+        passed,
+        direct_decision_records,
+        direct_use_records,
+        fallback_records,
+        large_prefill_decisions,
+        large_prefill_direct_decisions,
+        sparse_mask_nodes,
+        dsa_sparse_attn_nodes,
+        dsa_sparse_attn_dispatches,
+        capped_large_prefill_dispatches,
+        expected_large_prefill_threads_x: EXPECTED_LARGE_PREFILL_THREADS_X,
+        failure_summary: if failures.is_empty() {
+            "none".to_string()
+        } else {
+            failures.join(",")
+        },
     }
 }
 
@@ -2789,6 +2902,47 @@ mod tests {
         assert_eq!(guard.encode_candidate_records, 4);
         assert_eq!(guard.encode_skipped_candidate_records, 4);
         assert_eq!(guard.fused_dispatch_records, 0);
+    }
+
+    #[test]
+    fn direct_sparse_prefill_guard_accepts_large_prefill_direct_path() {
+        let candidate = direct_sparse_prefill_case_summary(
+            &[direct_sparse_decision(true, true)],
+            0,
+            1,
+            &[dsa_sparse_attn_dispatch(64, 256, 32)],
+        );
+
+        let guard = build_direct_sparse_prefill_guard(&candidate);
+
+        assert!(guard.passed);
+        assert_eq!(guard.large_prefill_direct_decisions, 1);
+        assert_eq!(guard.sparse_mask_nodes, 0);
+        assert_eq!(guard.dsa_sparse_attn_nodes, 1);
+        assert_eq!(guard.capped_large_prefill_dispatches, 1);
+        assert_eq!(guard.failure_summary, "none");
+    }
+
+    #[test]
+    fn direct_sparse_prefill_guard_rejects_dense_mask_or_uncapped_dispatch() {
+        let candidate = direct_sparse_prefill_case_summary(
+            &[direct_sparse_decision(true, true)],
+            1,
+            1,
+            &[dsa_sparse_attn_dispatch(64, 256, 64)],
+        );
+
+        let guard = build_direct_sparse_prefill_guard(&candidate);
+
+        assert!(!guard.passed);
+        assert_eq!(guard.sparse_mask_nodes, 1);
+        assert_eq!(guard.capped_large_prefill_dispatches, 0);
+        assert!(guard.failure_summary.contains("sparse_mask_nodes_present"));
+        assert!(
+            guard
+                .failure_summary
+                .contains("missing_capped_large_prefill_dispatch")
+        );
     }
 
     #[test]
@@ -3236,6 +3390,7 @@ mod tests {
             indexshare_pattern: None,
             dense_sparse_mask_max_bytes: None,
             require_optimized_route_fusion: false,
+            require_direct_sparse_prefill_proof: false,
             compare_dense_fallback: false,
             compare_cpu_direct_sparse: false,
             parity_atol: 1.0e-3,
@@ -3283,6 +3438,77 @@ mod tests {
             group_timing_records: Vec::new(),
             hot_tensor_records: Vec::new(),
             timings: Vec::new(),
+        }
+    }
+
+    fn direct_sparse_prefill_case_summary(
+        decisions: &[DirectSparseDecisionRecord],
+        sparse_mask_nodes: u64,
+        dsa_sparse_attn_nodes: u64,
+        dispatches: &[MetalDispatchRecord],
+    ) -> MicrobenchCaseSummary {
+        let mut case = case_summary("candidate", 0, 0, 0);
+        case.direct_sparse_decision_records = decisions.to_vec();
+        case.op_timing_summary.records = 1;
+        case.op_timing_summary.sparse_mask.nodes = sparse_mask_nodes;
+        case.op_timing_summary.dsa_sparse_attn.nodes = dsa_sparse_attn_nodes;
+        case.metal_dispatch_records = dispatches.to_vec();
+        case
+    }
+
+    fn direct_sparse_decision(
+        large_prefill_shape: bool,
+        use_direct: bool,
+    ) -> DirectSparseDecisionRecord {
+        DirectSparseDecisionRecord {
+            layer: 30,
+            ubatch_tokens: 64,
+            sparse_batch: 64,
+            sparse_streams: 1,
+            prefill_cap: 32,
+            dense_mask_bytes: Some(524288),
+            dense_mask_limit: Some(1),
+            direct_enabled: true,
+            prefill_enabled: true,
+            decode_shape: false,
+            prefill_shape: false,
+            large_prefill_shape: Some(large_prefill_shape),
+            token_shape_allowed: true,
+            kq_b_ok: true,
+            sinks_ok: true,
+            alibi_ok: true,
+            soft_cap_ok: true,
+            use_direct,
+        }
+    }
+
+    fn dsa_sparse_attn_dispatch(batch: u64, top_k: u64, threads_x: u64) -> MetalDispatchRecord {
+        MetalDispatchRecord {
+            op: "dsa_sparse_attn".to_string(),
+            kernel: Some("default".to_string()),
+            tensor: "dsa_sparse_attn-30".to_string(),
+            reason: None,
+            parallel: None,
+            q_type: Some("f32".to_string()),
+            k_type: Some("f16".to_string()),
+            v_type: Some("f16".to_string()),
+            mask_type: Some("f16".to_string()),
+            top_k_type: Some("i32".to_string()),
+            src_type: None,
+            dst_type: Some("f32".to_string()),
+            q_width: Some(576),
+            v_width: Some(512),
+            batch: Some(batch),
+            heads: Some(64),
+            stream: Some(1),
+            kv: Some(256),
+            top_k: Some(top_k),
+            top_stream: Some(1),
+            grid_x: 64,
+            grid_y: batch,
+            grid_z: 1,
+            threads_x,
+            threads_y: Some(1),
         }
     }
 }

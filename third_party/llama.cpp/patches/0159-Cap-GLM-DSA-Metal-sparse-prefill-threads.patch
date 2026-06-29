@@ -54,4 +54,3 @@ index 86aba010c..bfb2c0828 100644
      test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 16, 1, 1));
 -- 
 2.53.0
-

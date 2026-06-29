@@ -269,6 +269,12 @@ pub struct GlmDsaLayerMicrobenchArgs {
     #[arg(
         long,
         default_value_t = false,
+        help = "Fail unless the run proves large-prefill GLM-DSA direct sparse attention avoided sparse-mask timing nodes and used the Metal correctness-capped sparse-attention dispatch."
+    )]
+    pub require_direct_sparse_prefill_proof: bool,
+    #[arg(
+        long,
+        default_value_t = false,
         help = "Run a dense-mask fallback baseline and compare it with the requested direct sparse settings."
     )]
     pub compare_dense_fallback: bool,

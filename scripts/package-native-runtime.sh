@@ -218,34 +218,46 @@ library_pattern() {
     esac
 }
 
-primary_library_name() {
+primary_library_names() {
     case "$TARGET_TRIPLE" in
         *apple-darwin) printf 'libllama.dylib\n' ;;
-        *windows*) printf 'llama.dll\n' ;;
+        *windows*) printf 'llama.dll\nlibllama.dll\n' ;;
         *) printf 'libllama.so\n' ;;
     esac
 }
 
 collect_runtime_libraries() {
-    local pattern primary
+    local pattern primary_names
     pattern="$(library_pattern)"
-    primary="$(primary_library_name)"
+    primary_names="$(primary_library_names | tr '\n' ' ')"
     find "$LLAMA_STAGE_BUILD_DIR" \( -type f -o -type l \) -name "$pattern" \
         ! -path '*/CMakeFiles/*' \
         | sort \
-        | awk -v primary="$primary" '
-            BEGIN { primary_path = "" }
+        | awk -v primary_names="$primary_names" '
+            BEGIN {
+                primary_count = split(primary_names, names, " ")
+                for (idx = 1; idx <= primary_count; idx++) {
+                    if (names[idx] != "") primary[names[idx]] = idx
+                }
+            }
             {
                 name = $0
                 sub(/^.*\//, "", name)
-                if (name == primary) {
-                    primary_path = $0
-                } else {
-                    print $0
-                }
+                paths[++path_count] = $0
+                if (name in primary) primary_paths[name] = $0
             }
             END {
-                if (primary_path != "") print primary_path
+                chosen_primary = ""
+                for (idx = 1; idx <= primary_count; idx++) {
+                    if (names[idx] in primary_paths) {
+                        chosen_primary = primary_paths[names[idx]]
+                        break
+                    }
+                }
+                for (idx = 1; idx <= path_count; idx++) {
+                    if (paths[idx] != chosen_primary) print paths[idx]
+                }
+                if (chosen_primary != "") print chosen_primary
             }
         '
 }
@@ -346,10 +358,11 @@ if [[ "${#runtime_libraries[@]}" -eq 0 ]]; then
     exit 1
 fi
 
-primary_name="$(primary_library_name)"
 last_index=$((${#runtime_libraries[@]} - 1))
-if [[ "$(basename "${runtime_libraries[$last_index]}")" != "$primary_name" ]]; then
-    echo "primary native runtime library not found: $primary_name" >&2
+primary_name="$(basename "${runtime_libraries[$last_index]}")"
+if ! primary_library_names | grep -Fxq "$primary_name"; then
+    echo "primary native runtime library not found; expected one of:" >&2
+    primary_library_names | sed 's/^/  /' >&2
     exit 1
 fi
 

@@ -1998,15 +1998,25 @@ fn insert_optional_unix_nanos(attrs: &mut BTreeMap<String, Value>, key: &str, va
 struct GlmDsaTopKSidebandStats {
     bytes: usize,
     count: usize,
+    i32_per_token: usize,
+    remainder_count: usize,
 }
 
 fn glm_dsa_top_k_sideband_stats(message: &StageWireMessage) -> GlmDsaTopKSidebandStats {
     if (message.state.flags & state_flags::GLM_DSA_TOP_K_SIDEBAND) == 0 {
         return GlmDsaTopKSidebandStats::default();
     }
+    let count = message.raw_bytes.len() / std::mem::size_of::<i32>();
+    let token_count = usize::try_from(message.token_count).unwrap_or(0);
+    let (i32_per_token, remainder_count) = match count.checked_div(token_count) {
+        Some(i32_per_token) => (i32_per_token, count % token_count),
+        None => (0, count),
+    };
     GlmDsaTopKSidebandStats {
         bytes: message.raw_bytes.len(),
-        count: message.raw_bytes.len() / std::mem::size_of::<i32>(),
+        count,
+        i32_per_token,
+        remainder_count,
     }
 }
 
@@ -2017,6 +2027,14 @@ fn insert_glm_dsa_top_k_sideband_attrs(
 ) {
     attrs.insert(format!("{prefix}_bytes"), json!(stats.bytes));
     attrs.insert(format!("{prefix}_count"), json!(stats.count));
+    attrs.insert(
+        format!("{prefix}_i32_per_token"),
+        json!(stats.i32_per_token),
+    );
+    attrs.insert(
+        format!("{prefix}_remainder_count"),
+        json!(stats.remainder_count),
+    );
 }
 
 fn native_mtp_prediction_tokens(predicted: i32, draft: Option<NativeMtpDraft>) -> Vec<i32> {
@@ -3523,6 +3541,8 @@ struct BinaryRequestSummary {
     input_glm_dsa_top_k_sideband_count: usize,
     max_input_glm_dsa_top_k_sideband_bytes: usize,
     max_input_glm_dsa_top_k_sideband_count: usize,
+    max_input_glm_dsa_top_k_sideband_i32_per_token: usize,
+    input_glm_dsa_top_k_sideband_remainder_count: usize,
     kv_tokens_after_max: i64,
     kv_token_layer_cells_max: i64,
     prefill_credit_limit: usize,
@@ -3707,6 +3727,9 @@ impl BinaryRequestSummary {
         self.input_glm_dsa_top_k_sideband_count = self
             .input_glm_dsa_top_k_sideband_count
             .saturating_add(observation.input_glm_dsa_top_k_sideband.count);
+        self.input_glm_dsa_top_k_sideband_remainder_count = self
+            .input_glm_dsa_top_k_sideband_remainder_count
+            .saturating_add(observation.input_glm_dsa_top_k_sideband.remainder_count);
         self.max_input_activation_bytes = self
             .max_input_activation_bytes
             .max(observation.input_activation_bytes);
@@ -3719,6 +3742,9 @@ impl BinaryRequestSummary {
         self.max_input_glm_dsa_top_k_sideband_count = self
             .max_input_glm_dsa_top_k_sideband_count
             .max(observation.input_glm_dsa_top_k_sideband.count);
+        self.max_input_glm_dsa_top_k_sideband_i32_per_token = self
+            .max_input_glm_dsa_top_k_sideband_i32_per_token
+            .max(observation.input_glm_dsa_top_k_sideband.i32_per_token);
 
         let layer_count = i64::from(
             observation
@@ -3860,6 +3886,14 @@ impl BinaryRequestSummary {
         attrs.insert(
             "skippy.max_input_glm_dsa_top_k_sideband_count".to_string(),
             json!(self.max_input_glm_dsa_top_k_sideband_count),
+        );
+        attrs.insert(
+            "skippy.max_input_glm_dsa_top_k_sideband_i32_per_token".to_string(),
+            json!(self.max_input_glm_dsa_top_k_sideband_i32_per_token),
+        );
+        attrs.insert(
+            "skippy.input_glm_dsa_top_k_sideband_remainder_count".to_string(),
+            json!(self.input_glm_dsa_top_k_sideband_remainder_count),
         );
         attrs.insert(
             "skippy.kv_tokens_after".to_string(),

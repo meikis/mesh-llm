@@ -158,6 +158,8 @@ fn request_summary_tracks_input_glm_dsa_top_k_sideband() {
     assert_eq!(summary.input_glm_dsa_top_k_sideband_count, 4);
     assert_eq!(summary.max_input_glm_dsa_top_k_sideband_bytes, 16);
     assert_eq!(summary.max_input_glm_dsa_top_k_sideband_count, 4);
+    assert_eq!(summary.max_input_glm_dsa_top_k_sideband_i32_per_token, 4);
+    assert_eq!(summary.input_glm_dsa_top_k_sideband_remainder_count, 0);
 }
 
 #[test]

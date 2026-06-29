@@ -108,10 +108,13 @@ as `skippy.input_glm_dsa_top_k_sideband_bytes`,
 `skippy.input_glm_dsa_top_k_sideband_count`,
 `skippy.max_input_glm_dsa_top_k_sideband_bytes`,
 `skippy.max_input_glm_dsa_top_k_sideband_count`,
+`skippy.max_input_glm_dsa_top_k_sideband_i32_per_token`,
+`skippy.input_glm_dsa_top_k_sideband_remainder_count`,
 `llama_stage.input_glm_dsa_top_k_sideband_bytes`, and
-`llama_stage.input_glm_dsa_top_k_sideband_count`. These are bounded numeric
-shape counters only; raw activation payloads, token IDs, top-k index values, and
-prompt/completion text are not exported.
+`llama_stage.input_glm_dsa_top_k_sideband_count`. Debug stage spans may also
+include the matching per-message i32-per-token and remainder counters. These are
+bounded numeric shape counters only; raw activation payloads, token IDs, top-k
+index values, and prompt/completion text are not exported.
 
 Guardrail v1 is validated emulation, not hard constrained decoding. Streaming is
 pass-through, no tool execution happens inside the guardrail layer, and real

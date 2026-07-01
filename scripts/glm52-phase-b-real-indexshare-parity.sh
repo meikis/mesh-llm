@@ -349,9 +349,9 @@ fi
 
 if [[ "$KV_WARMUP_TOKENS" != "0" ]]; then
   BENCH_ARGS+=(--kv-warmup-tokens "$KV_WARMUP_TOKENS")
-fi
-if [[ -n "$KV_WARMUP_CHUNK_TOKENS" ]]; then
-  BENCH_ARGS+=(--kv-warmup-chunk-tokens "$KV_WARMUP_CHUNK_TOKENS")
+  if [[ -n "$KV_WARMUP_CHUNK_TOKENS" ]]; then
+    BENCH_ARGS+=(--kv-warmup-chunk-tokens "$KV_WARMUP_CHUNK_TOKENS")
+  fi
 fi
 if [[ "$SYNTHETIC_KV_WARMUP" == "1" ]]; then
   BENCH_ARGS+=(--synthetic-kv-warmup)

@@ -10,9 +10,11 @@ SKIPPY_BENCH_BIN="${SKIPPY_BENCH_BIN:-$ROOT/target/debug/skippy-bench}"
 OUT_DIR="${OUT_DIR:-/tmp/glm52-phase-ab-real-indexshare-matrix}"
 CTX_SIZE="${CTX_SIZE:-128}"
 TOKENS="${TOKENS:-1}"
-POSITION_START="${POSITION_START:-0}"
-N_BATCH="${N_BATCH:-1}"
-N_UBATCH="${N_UBATCH:-1}"
+POSITION_START="${POSITION_START:-16}"
+N_BATCH="${N_BATCH:-16}"
+N_UBATCH="${N_UBATCH:-16}"
+KV_WARMUP_TOKENS="${KV_WARMUP_TOKENS:-16}"
+KV_WARMUP_CHUNK_TOKENS="${KV_WARMUP_CHUNK_TOKENS:-16}"
 SPANS="${SPANS:-2:6:initial,6:10:early,30:34:middle,74:78:late}"
 RUN_NEGATIVE="${RUN_NEGATIVE:-1}"
 
@@ -40,9 +42,12 @@ Options:
                            2:6:initial,6:10:early,30:34:middle,74:78:late
   --ctx-size N            Context size. Default: 128
   --tokens N              Tokens. Default: 1
-  --position-start N      Decode position start. Default: 0
-  --n-batch N             Batch size. Default: 1
-  --n-ubatch N            Microbatch size. Default: 1
+  --position-start N      Decode position start. Default: 16
+  --n-batch N             Batch size. Default: 16
+  --n-ubatch N            Microbatch size. Default: 16
+  --kv-warmup-tokens N    KV prefix tokens. Default: 16
+  --kv-warmup-chunk-tokens N
+                           KV warmup chunk size. Default: 16
   --skip-negative         Do not run the Shared-only missing-top-k negative case.
   -h, --help              Show this help.
 
@@ -94,6 +99,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --n-ubatch)
       N_UBATCH="$2"
+      shift 2
+      ;;
+    --kv-warmup-tokens)
+      KV_WARMUP_TOKENS="$2"
+      shift 2
+      ;;
+    --kv-warmup-chunk-tokens)
+      KV_WARMUP_CHUNK_TOKENS="$2"
       shift 2
       ;;
     --skip-negative)
@@ -180,6 +193,7 @@ for item in "${SPAN_ITEMS[@]}"; do
   report="$span_dir/report.json"
   log="$span_dir/run.log"
   REPORT="$report" LOG="$log" \
+  KV_WARMUP_TOKENS="$KV_WARMUP_TOKENS" KV_WARMUP_CHUNK_TOKENS="$KV_WARMUP_CHUNK_TOKENS" \
   DIRECT_SPARSE_ATTN=0 DIRECT_SPARSE_PREFILL=0 COMPACT_FLASH_ATTN=0 ALLOW_COMPACT_FLASH_AUTO=0 \
   "$ROOT/scripts/glm52-phase-b-real-indexshare-parity.sh" \
     --stage-model "$STAGE_MODEL" \
@@ -192,6 +206,8 @@ for item in "${SPAN_ITEMS[@]}"; do
     --position-start "$POSITION_START" \
     --n-batch "$N_BATCH" \
     --n-ubatch "$N_UBATCH" \
+    --kv-warmup-tokens "$KV_WARMUP_TOKENS" \
+    --kv-warmup-chunk-tokens "$KV_WARMUP_CHUNK_TOKENS" \
     --out-dir "$span_dir" \
     >"$span_dir/stdout.txt" \
     2>"$span_dir/stderr.txt"
@@ -204,21 +220,30 @@ if [[ "$RUN_NEGATIVE" == "1" ]]; then
   negative_dir="$OUT_DIR/shared-only-negative"
   mkdir -p "$negative_dir"
   set +e
-  "$SKIPPY_BENCH_BIN" glm-dsa-layer-microbench \
-    --stage-model "$STAGE_MODEL" \
-    --model-id "$MODEL_ID" \
-    --layer-start 3 \
-    --layer-end 4 \
-    --ctx-size "$CTX_SIZE" \
-    --tokens "$TOKENS" \
-    --position-start "$POSITION_START" \
-    --iterations 1 \
-    --warmup 0 \
-    --n-batch "$N_BATCH" \
-    --n-ubatch "$N_UBATCH" \
-    --direct-sparse-attn false \
-    --op-timing true \
-    --output "$negative_dir/report.json" \
+  NEGATIVE_ARGS=(
+    glm-dsa-layer-microbench
+    --stage-model "$STAGE_MODEL"
+    --model-id "$MODEL_ID"
+    --layer-start 3
+    --layer-end 4
+    --ctx-size "$CTX_SIZE"
+    --tokens "$TOKENS"
+    --position-start "$POSITION_START"
+    --iterations 1
+    --warmup 0
+    --n-batch "$N_BATCH"
+    --n-ubatch "$N_UBATCH"
+    --direct-sparse-attn false
+    --op-timing true
+    --output "$negative_dir/report.json"
+  )
+  if [[ "$KV_WARMUP_TOKENS" != "0" ]]; then
+    NEGATIVE_ARGS+=(--kv-warmup-tokens "$KV_WARMUP_TOKENS")
+    if [[ -n "$KV_WARMUP_CHUNK_TOKENS" ]]; then
+      NEGATIVE_ARGS+=(--kv-warmup-chunk-tokens "$KV_WARMUP_CHUNK_TOKENS")
+    fi
+  fi
+  "$SKIPPY_BENCH_BIN" "${NEGATIVE_ARGS[@]}" \
     >"$negative_dir/stdout.txt" \
     2>"$negative_dir/stderr.txt"
   negative_rc=$?

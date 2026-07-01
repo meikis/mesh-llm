@@ -153,9 +153,11 @@ OUT_DIR="$matrix_dir" \
   SPANS="$matrix_spans" \
   CTX_SIZE=128 \
   TOKENS=1 \
-  POSITION_START=0 \
-  N_BATCH=1 \
-  N_UBATCH=1 \
+  POSITION_START=16 \
+  KV_WARMUP_TOKENS=16 \
+  KV_WARMUP_CHUNK_TOKENS=16 \
+  N_BATCH=16 \
+  N_UBATCH=16 \
   "$ROOT/scripts/glm52-phase-ab-real-indexshare-matrix.sh" \
     >"$OUT_DIR/real-matrix.stdout" \
     2>"$OUT_DIR/real-matrix.stderr"
@@ -177,6 +179,7 @@ if [[ "$QUICK" == "1" ]]; then
     --ctx-size 64 \
     --tokens 2 \
     --position-start 0 \
+    --kv-warmup-tokens 0 \
     --n-batch 2 \
     --n-ubatch 2
 else
@@ -206,6 +209,7 @@ else
     --ctx-size 128 \
     --tokens 16 \
     --position-start 0 \
+    --kv-warmup-tokens 0 \
     --n-batch 16 \
     --n-ubatch 16
 fi
@@ -228,6 +232,7 @@ def validate_report(label, path, require_prefill_shape=False, require_warmup=Fal
     report = load(path)
     comparison = report.get("comparison") or {}
     parity = comparison.get("parity") or {}
+    sensitivity = comparison.get("sideband_sensitivity") or {}
     guard = report.get("native_indexshare_guard") or {}
     candidate = comparison.get("candidate") or {}
     candidate_ops = candidate.get("op_timing_summary") or {}
@@ -243,6 +248,11 @@ def validate_report(label, path, require_prefill_shape=False, require_warmup=Fal
         "hidden_mismatches": parity.get("hidden_mismatches"),
         "sideband_mismatched_bytes": parity.get("sideband_mismatched_bytes"),
         "guard_passed": bool(guard.get("passed")),
+        "sideband_sensitivity_passed": bool(sensitivity.get("passed")),
+        "sideband_poison_changed_i32": ((sensitivity.get("poison") or {}).get("changed_i32_count")),
+        "sideband_poison_width_i32": ((sensitivity.get("poison") or {}).get("sideband_i32_per_token")),
+        "poisoned_hidden_mismatches": sensitivity.get("poisoned_hidden_mismatches"),
+        "poisoned_hidden_max_abs_diff": sensitivity.get("poisoned_hidden_max_abs_diff"),
         "full_layers": guard.get("full_layers"),
         "shared_layers": guard.get("shared_layers"),
         "shared_exec_with_input_top_k": guard.get("shared_exec_with_input_top_k"),
@@ -260,6 +270,12 @@ def validate_report(label, path, require_prefill_shape=False, require_warmup=Fal
         failures.append(f"{label}: sideband mismatch {row['sideband_mismatched_bytes']}")
     if not row["guard_passed"]:
         failures.append(f"{label}: native IndexShare guard failed")
+    if not row["sideband_sensitivity_passed"]:
+        failures.append(f"{label}: sideband sensitivity proof failed")
+    if (row["sideband_poison_changed_i32"] or 0) <= 0:
+        failures.append(f"{label}: sideband poison did not change top-k indices")
+    if (row["poisoned_hidden_mismatches"] or 0) <= 0 and (row["poisoned_hidden_max_abs_diff"] or 0) == 0:
+        failures.append(f"{label}: poisoned sideband did not change hidden output")
     if row["shared_exec_missing_input_top_k"] not in (0, None):
         failures.append(f"{label}: shared consumer missed top-k")
     if row["candidate_indexer_topk_nodes"] not in (0, None):
@@ -325,6 +341,8 @@ for row in matrix_rows:
 for row in case_rows:
     print(
         f"case:{row['label']} tokens={row['tokens']} position={row['position_start']} "
-        f"kv_warmup={row['kv_warmup_tokens']} topk_recompute={row['candidate_indexer_topk_nodes']}"
+        f"kv_warmup={row['kv_warmup_tokens']} topk_recompute={row['candidate_indexer_topk_nodes']} "
+        f"poison_changed_i32={row['sideband_poison_changed_i32']} "
+        f"poisoned_hidden_mismatches={row['poisoned_hidden_mismatches']}"
     )
 PY

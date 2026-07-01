@@ -323,6 +323,11 @@ for case_dir in sorted(path for path in out_dir.iterdir() if path.is_dir()):
         "candidate_dsa_sparse_attn_nodes": (candidate_ops.get("dsa_sparse_attn") or {}).get("nodes"),
         "candidate_dsa_sparse_attn_dispatches": candidate_dispatch.get("dsa_sparse_attn_records"),
         "candidate_flash_attn_ext_records": candidate_dispatch.get("flash_attn_ext_records"),
+        "candidate_compact_get_rows_records": compact_guard.get("compact_get_rows_records"),
+        "candidate_dsa_compact_get_rows_fused_records": compact_guard.get("dsa_compact_get_rows_fused_records"),
+        "candidate_compact_get_rows_nodes": (candidate_ops.get("compact_get_rows") or {}).get("nodes"),
+        "candidate_compact_get_rows_us": (candidate_ops.get("compact_get_rows") or {}).get("elapsed_us"),
+        "candidate_compact_get_rows_share_of_total": candidate_ops.get("compact_get_rows_share_of_total"),
         "candidate_compact_mask_omission_records": compact_guard.get("execution_mask_omission_records"),
         "candidate_omitted_mla_kq_mask_records": compact_guard.get("omitted_mla_kq_mask_records"),
         "candidate_materialized_mla_kq_mask_records": compact_guard.get("materialized_mla_kq_mask_records"),
@@ -373,6 +378,17 @@ for case_dir in sorted(path for path in out_dir.iterdir() if path.is_dir()):
         failures.append(f"{case_dir.name}: compact flash proof failed: {compact_guard.get('failure_summary')}")
     if route == "compact_flash" and not row["candidate_flash_attn_ext_records"]:
         failures.append(f"{case_dir.name}: missing compact flash dispatch evidence")
+    if route == "compact_flash" and not (
+        row["candidate_compact_get_rows_records"]
+        or row["candidate_dsa_compact_get_rows_fused_records"]
+    ):
+        failures.append(f"{case_dir.name}: missing compact K/V gather evidence")
+    if (
+        route == "compact_flash"
+        and row["candidate_compact_get_rows_records"]
+        and not row["candidate_compact_get_rows_nodes"]
+    ):
+        failures.append(f"{case_dir.name}: missing compact K/V gather timing nodes")
     if route == "compact_flash" and not row["candidate_compact_mask_omission_records"]:
         failures.append(f"{case_dir.name}: missing compact MLA KQ mask-omission evidence")
     if route == "compact_flash" and row["candidate_materialized_mla_kq_mask_records"] not in (0, None):
@@ -404,6 +420,8 @@ for row in rows:
         f"{row['label']}: route={row['observed_route']} phase={row['observed_phase']} "
         f"reason={row['observed_reason']} sparse_mask={row['candidate_sparse_mask_nodes']} "
         f"dsa_dispatches={row['candidate_dsa_sparse_attn_dispatches']} "
-        f"flash_dispatches={row['candidate_flash_attn_ext_records']}{ratio_text}"
+        f"flash_dispatches={row['candidate_flash_attn_ext_records']} "
+        f"compact_get_rows_nodes={row['candidate_compact_get_rows_nodes']} "
+        f"compact_get_rows_us={row['candidate_compact_get_rows_us']}{ratio_text}"
     )
 PY

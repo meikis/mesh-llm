@@ -8554,6 +8554,8 @@ mod tests {
             sparse_mask_add_us: Some(0),
             dsa_sparse_attn_nodes: Some(0),
             dsa_sparse_attn_us: Some(0),
+            compact_get_rows_nodes: Some(0),
+            compact_get_rows_us: Some(0),
             mla_attention_nodes: 0,
             mla_attention_us: 0,
             routed_moe_nodes: 0,

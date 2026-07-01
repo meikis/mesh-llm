@@ -55,6 +55,8 @@ struct PhaseSummary {
     sparse_mask_add: Option<OpBucket>,
     #[serde(skip_serializing_if = "Option::is_none")]
     dsa_sparse_attn: Option<OpBucket>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compact_get_rows: Option<OpBucket>,
     mla_attention: OpBucket,
     routed_moe: OpBucket,
     shared_expert: OpBucket,
@@ -106,6 +108,8 @@ pub(crate) struct TimingRecord {
     pub(crate) sparse_mask_add_us: Option<u64>,
     pub(crate) dsa_sparse_attn_nodes: Option<u64>,
     pub(crate) dsa_sparse_attn_us: Option<u64>,
+    pub(crate) compact_get_rows_nodes: Option<u64>,
+    pub(crate) compact_get_rows_us: Option<u64>,
     pub(crate) mla_attention_nodes: u64,
     pub(crate) mla_attention_us: u64,
     pub(crate) routed_moe_nodes: u64,
@@ -1164,6 +1168,7 @@ fn parse_timing_fields(fields: &BTreeMap<&str, &str>) -> Result<TimingRecord> {
     let sparse_mask_topk = parse_optional_bucket(fields, "sparse_mask_topk")?;
     let sparse_mask_add = parse_optional_bucket(fields, "sparse_mask_add")?;
     let dsa_sparse_attn = parse_optional_bucket(fields, "dsa_sparse_attn")?;
+    let compact_get_rows = parse_optional_bucket(fields, "compact_get_rows")?;
     let routed_moe_route = parse_optional_bucket(fields, "routed_moe_route")?;
     let routed_moe_gate_up = parse_optional_bucket(fields, "routed_moe_gate_up")?;
     let routed_moe_gate = parse_optional_bucket(fields, "routed_moe_gate")?;
@@ -1192,6 +1197,8 @@ fn parse_timing_fields(fields: &BTreeMap<&str, &str>) -> Result<TimingRecord> {
         sparse_mask_add_us: sparse_mask_add.elapsed_us,
         dsa_sparse_attn_nodes: dsa_sparse_attn.nodes,
         dsa_sparse_attn_us: dsa_sparse_attn.elapsed_us,
+        compact_get_rows_nodes: compact_get_rows.nodes,
+        compact_get_rows_us: compact_get_rows.elapsed_us,
         mla_attention_nodes: parse_field(fields, "mla_attention_nodes")?,
         mla_attention_us: parse_field(fields, "mla_attention_us")?,
         routed_moe_nodes: parse_field(fields, "routed_moe_nodes")?,
@@ -1535,6 +1542,11 @@ fn add_timing_record(summary: &mut PhaseSummary, record: &TimingRecord) {
         record.dsa_sparse_attn_nodes,
         record.dsa_sparse_attn_us,
     );
+    add_optional_bucket(
+        &mut summary.compact_get_rows,
+        record.compact_get_rows_nodes,
+        record.compact_get_rows_us,
+    );
     add_bucket(
         &mut summary.mla_attention,
         record.mla_attention_nodes,
@@ -1669,6 +1681,7 @@ mod tests {
     const LINE_WITH_INDEXER_BREAKDOWN: &str = "skippy: glm_dsa_op_timing stage=1 tokens=128 total_us=1475800 indexer_topk_nodes=275 indexer_topk_us=129065 indexer_nodes=235 indexer_us=80000 top_k_nodes=40 top_k_us=49065 sparse_mask_nodes=235 sparse_mask_us=114543 mla_attention_nodes=47 mla_attention_us=35234 routed_moe_nodes=47 routed_moe_us=379574 shared_expert_nodes=47 shared_expert_us=817384";
     const LINE_WITH_SPARSE_BREAKDOWN: &str = "skippy: glm_dsa_op_timing stage=1 tokens=128 total_us=1475800 indexer_topk_nodes=275 indexer_topk_us=129065 sparse_mask_nodes=235 sparse_mask_us=114543 sparse_mask_fill_nodes=47 sparse_mask_fill_us=1000 sparse_mask_topk_nodes=47 sparse_mask_topk_us=2000 sparse_mask_add_nodes=47 sparse_mask_add_us=3000 mla_attention_nodes=47 mla_attention_us=35234 routed_moe_nodes=47 routed_moe_us=379574 shared_expert_nodes=47 shared_expert_us=817384";
     const LINE_WITH_DSA_SPARSE_ATTN: &str = "skippy: glm_dsa_op_timing stage=1 tokens=128 total_us=1475800 indexer_topk_nodes=275 indexer_topk_us=129065 sparse_mask_nodes=0 sparse_mask_us=0 dsa_sparse_attn_nodes=47 dsa_sparse_attn_us=114543 mla_attention_nodes=47 mla_attention_us=35234 routed_moe_nodes=47 routed_moe_us=379574 shared_expert_nodes=47 shared_expert_us=817384";
+    const LINE_WITH_COMPACT_GET_ROWS: &str = "skippy: glm_dsa_op_timing stage=1 tokens=1 total_us=24000 indexer_topk_nodes=0 indexer_topk_us=0 sparse_mask_nodes=0 sparse_mask_us=0 dsa_sparse_attn_nodes=0 dsa_sparse_attn_us=0 compact_get_rows_nodes=6 compact_get_rows_us=900 mla_attention_nodes=3 mla_attention_us=2100 routed_moe_nodes=54 routed_moe_us=18000 shared_expert_nodes=12 shared_expert_us=3000";
     const GROUP_LINE_LAYER_0: &str = "skippy: glm_dsa_group_timing stage=1 tokens=128 group=layer_0 total_us=600000 indexer_topk_nodes=100 indexer_topk_us=50000 indexer_nodes=80 indexer_us=30000 top_k_nodes=20 top_k_us=20000 sparse_mask_nodes=40 sparse_mask_us=1000 sparse_mask_fill_nodes=0 sparse_mask_fill_us=0 sparse_mask_topk_nodes=40 sparse_mask_topk_us=1000 sparse_mask_add_nodes=0 sparse_mask_add_us=0 dsa_sparse_attn_nodes=0 dsa_sparse_attn_us=0 mla_attention_nodes=1 mla_attention_us=9000 routed_moe_nodes=0 routed_moe_us=0 shared_expert_nodes=0 shared_expert_us=0";
     const GROUP_LINE_LAYER_1: &str = "skippy: glm_dsa_group_timing stage=1 tokens=128 group=layer_1 total_us=875800 indexer_topk_nodes=175 indexer_topk_us=79065 indexer_nodes=155 indexer_us=50000 top_k_nodes=20 top_k_us=29065 sparse_mask_nodes=195 sparse_mask_us=113543 sparse_mask_fill_nodes=47 sparse_mask_fill_us=1000 sparse_mask_topk_nodes=47 sparse_mask_topk_us=2000 sparse_mask_add_nodes=47 sparse_mask_add_us=3000 dsa_sparse_attn_nodes=0 dsa_sparse_attn_us=0 mla_attention_nodes=46 mla_attention_us=26234 routed_moe_nodes=47 routed_moe_us=379574 shared_expert_nodes=47 shared_expert_us=817384";
     const SIDEBAND_LINE: &str = "skippy: glm_dsa_top_k_sideband_forward stage=stage-0 request=1 session=2 kind=DecodeEmbd pos_start=718 tokens=1 hidden_bytes=24576 sideband_bytes=3072 sideband_i32=768";
@@ -1756,6 +1769,22 @@ mod tests {
             .get(&Phase::Prefill)
             .unwrap();
         assert_eq!(prefill.dsa_sparse_attn.as_ref().unwrap().elapsed_us, 114543);
+    }
+
+    #[test]
+    fn parses_optional_compact_get_rows_breakdown() {
+        let record = parse_timing_record(LINE_WITH_COMPACT_GET_ROWS).unwrap();
+        assert_eq!(record.compact_get_rows_nodes, Some(6));
+        assert_eq!(record.compact_get_rows_us, Some(900));
+
+        let summary = summarize_log("stage1.log".into(), &[record], &[], &[], &[], &[]);
+        let decode = summary
+            .stage_records
+            .get(&1)
+            .unwrap()
+            .get(&Phase::Decode)
+            .unwrap();
+        assert_eq!(decode.compact_get_rows.as_ref().unwrap().elapsed_us, 900);
     }
 
     #[test]
@@ -2404,6 +2433,7 @@ mod tests {
                 nodes: 1,
                 elapsed_us: dsa_sparse_attn_us,
             }),
+            compact_get_rows: None,
             shared_expert: OpBucket {
                 nodes: 1,
                 elapsed_us: shared_expert_us,

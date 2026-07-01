@@ -397,6 +397,7 @@ pub(crate) struct GlmDsaOpTimingSummary {
     pub(crate) top_k: TimingBucketSummary,
     pub(crate) sparse_mask: TimingBucketSummary,
     pub(crate) dsa_sparse_attn: TimingBucketSummary,
+    pub(crate) compact_get_rows: TimingBucketSummary,
     pub(crate) mla_attention: TimingBucketSummary,
     pub(crate) routed_moe: TimingBucketSummary,
     pub(crate) shared_expert: TimingBucketSummary,
@@ -406,6 +407,8 @@ pub(crate) struct GlmDsaOpTimingSummary {
     pub(crate) top_k_share_of_indexer_topk: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) dsa_sparse_attn_share_of_total: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) compact_get_rows_share_of_total: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) routed_moe_share_of_total: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -447,6 +450,11 @@ pub(crate) fn summarize_glm_dsa_op_timing(records: &[TimingRecord]) -> GlmDsaOpT
             record.dsa_sparse_attn_nodes,
             record.dsa_sparse_attn_us,
         );
+        add_optional_timing(
+            &mut summary.compact_get_rows,
+            record.compact_get_rows_nodes,
+            record.compact_get_rows_us,
+        );
         add_timing(
             &mut summary.mla_attention,
             record.mla_attention_nodes,
@@ -469,6 +477,7 @@ pub(crate) fn summarize_glm_dsa_op_timing(records: &[TimingRecord]) -> GlmDsaOpT
     finalize_timing_bucket(&mut summary.top_k);
     finalize_timing_bucket(&mut summary.sparse_mask);
     finalize_timing_bucket(&mut summary.dsa_sparse_attn);
+    finalize_timing_bucket(&mut summary.compact_get_rows);
     finalize_timing_bucket(&mut summary.mla_attention);
     finalize_timing_bucket(&mut summary.routed_moe);
     finalize_timing_bucket(&mut summary.shared_expert);
@@ -478,6 +487,8 @@ pub(crate) fn summarize_glm_dsa_op_timing(records: &[TimingRecord]) -> GlmDsaOpT
         ratio(summary.top_k.elapsed_us, summary.indexer_topk.elapsed_us);
     summary.dsa_sparse_attn_share_of_total =
         ratio(summary.dsa_sparse_attn.elapsed_us, summary.total_us);
+    summary.compact_get_rows_share_of_total =
+        ratio(summary.compact_get_rows.elapsed_us, summary.total_us);
     summary.routed_moe_share_of_total = ratio(summary.routed_moe.elapsed_us, summary.total_us);
     summary.shared_expert_share_of_total =
         ratio(summary.shared_expert.elapsed_us, summary.total_us);
@@ -911,6 +922,8 @@ mod tests {
         first.top_k_us = Some(30);
         first.dsa_sparse_attn_nodes = Some(1);
         first.dsa_sparse_attn_us = Some(150);
+        first.compact_get_rows_nodes = Some(2);
+        first.compact_get_rows_us = Some(80);
         first.mla_attention_nodes = 1;
         first.mla_attention_us = 100;
         first.shared_expert_nodes = 1;
@@ -925,6 +938,8 @@ mod tests {
         assert_eq!(summary.indexer_share_of_indexer_topk, Some(0.7));
         assert_eq!(summary.top_k_share_of_indexer_topk, Some(0.3));
         assert_eq!(summary.dsa_sparse_attn.elapsed_us, 150);
+        assert_eq!(summary.compact_get_rows.elapsed_us, 80);
+        assert_eq!(summary.compact_get_rows_share_of_total, Some(0.08));
         assert_eq!(summary.routed_moe.elapsed_us, 600);
         assert_eq!(summary.shared_expert.elapsed_us, 50);
         assert_eq!(summary.dsa_sparse_attn_share_of_total, Some(0.15));
@@ -958,6 +973,8 @@ mod tests {
             sparse_mask_add_us: None,
             dsa_sparse_attn_nodes: None,
             dsa_sparse_attn_us: None,
+            compact_get_rows_nodes: None,
+            compact_get_rows_us: None,
             mla_attention_nodes: 0,
             mla_attention_us: 0,
             routed_moe_nodes: 0,

@@ -199,16 +199,16 @@ elif [[ "$LONG_KV_ONLY" != "1" ]]; then
 fi
 
 if [[ "$LONG_KV" == "1" ]]; then
-  run_decode_case decode-middle-kv512 direct \
+  run_decode_case decode-middle-kv512 compact \
     --layer-start 30 \
     --layer-end 34 \
     --ctx-size 1024 \
     --tokens 1 \
     --position-start 512 \
     --kv-warmup-tokens 512 \
-    --kv-warmup-chunk-tokens 128 \
-    --n-batch 128 \
-    --n-ubatch 128
+    --kv-warmup-chunk-tokens 512 \
+    --n-batch 512 \
+    --n-ubatch 512
   run_decode_case decode-late-kv1024 compact \
     --layer-start 74 \
     --layer-end 78 \
@@ -216,9 +216,9 @@ if [[ "$LONG_KV" == "1" ]]; then
     --tokens 1 \
     --position-start 1024 \
     --kv-warmup-tokens 1024 \
-    --kv-warmup-chunk-tokens 128 \
-    --n-batch 128 \
-    --n-ubatch 128
+    --kv-warmup-chunk-tokens 1024 \
+    --n-batch 1024 \
+    --n-ubatch 1024
 fi
 
 python3 - "$OUT_DIR" <<'PY'

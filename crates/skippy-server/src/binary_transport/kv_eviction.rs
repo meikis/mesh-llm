@@ -82,7 +82,7 @@ pub(super) fn binary_proactive_eviction_required(
                 | WireMessageKind::DecodeReplayFinalEmbd
                 | WireMessageKind::DecodeReadout
                 | WireMessageKind::DecodeLightCtx
-                | WireMessageKind::VerifySpan
+                | WireMessageKind::VerifyWindow
         )
 }
 

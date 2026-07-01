@@ -988,7 +988,7 @@ fn handle_binary_connection(
             } else {
                 elapsed_ms(input_decode_started)
             };
-            if message.kind == WireMessageKind::VerifySpan
+            if message.kind == WireMessageKind::VerifyWindow
                 && (message.state.flags & state_flags::SKIP_VERIFY_CHECKPOINT) == 0
             {
                 let checkpoint_started = Instant::now();
@@ -996,7 +996,7 @@ fn handle_binary_connection(
                     let mut runtime = runtime.lock().expect("runtime lock poisoned");
                     runtime
                         .checkpoint_session(&session_key)
-                        .context("checkpoint binary stage session before verify span")?;
+                        .context("checkpoint binary stage session before verify window")?;
                 }
                 let checkpoint_us = elapsed_us(checkpoint_started);
                 record_session_control_timing(
@@ -1435,19 +1435,19 @@ fn handle_binary_connection(
             );
             message_reply_stats.merge(pending_reply_stats);
             pending_reply_stats = StageReplyStats::default();
-            record_verify_span_timing(
+            record_verify_window_timing(
                 &mut message_reply_stats,
                 &message,
                 compute_ms,
                 forward_write_ms,
                 downstream_wait_ms,
             );
-            let reply_kind = if message.kind == WireMessageKind::VerifySpan {
+            let reply_kind = if message.kind == WireMessageKind::VerifyWindow {
                 WireReplyKind::PredictedTokens
             } else {
                 WireReplyKind::PredictedToken
             };
-            let predicted_token_count = if message.kind == WireMessageKind::VerifySpan {
+            let predicted_token_count = if message.kind == WireMessageKind::VerifyWindow {
                 predicted_tokens.len()
             } else {
                 predicted_tokens.len().max(1)
@@ -1529,24 +1529,24 @@ fn handle_binary_connection(
 
         let message_end_unix_nanos = now_unix_nanos() as u64;
         let message_elapsed_ms = elapsed_ms(message_started);
-        let verify_span_pre_compute_ms = if message.kind == WireMessageKind::VerifySpan {
+        let verify_window_pre_compute_ms = if message.kind == WireMessageKind::VerifyWindow {
             nanos_delta_ms(message_start_unix_nanos, compute_start_unix_nanos)
         } else {
             0.0
         };
-        let verify_span_post_compute_ms = if message.kind == WireMessageKind::VerifySpan {
+        let verify_window_post_compute_ms = if message.kind == WireMessageKind::VerifyWindow {
             nanos_delta_ms(compute_end_unix_nanos, message_end_unix_nanos)
         } else {
             0.0
         };
-        let verify_span_pre_reply_ms = if message.kind == WireMessageKind::VerifySpan {
+        let verify_window_pre_reply_ms = if message.kind == WireMessageKind::VerifyWindow {
             upstream_reply_start_unix_nanos
                 .map(|reply_start| nanos_delta_ms(compute_end_unix_nanos, reply_start))
                 .unwrap_or(0.0)
         } else {
             0.0
         };
-        let verify_span_after_reply_ms = if message.kind == WireMessageKind::VerifySpan {
+        let verify_window_after_reply_ms = if message.kind == WireMessageKind::VerifyWindow {
             upstream_reply_end_unix_nanos
                 .map(|reply_end| nanos_delta_ms(reply_end, message_end_unix_nanos))
                 .unwrap_or(0.0)
@@ -1575,10 +1575,10 @@ fn handle_binary_connection(
             session_auto_align_count,
             session_auto_align_ms,
             session_auto_align_trimmed_tokens,
-            verify_span_pre_compute_ms,
-            verify_span_post_compute_ms,
-            verify_span_pre_reply_ms,
-            verify_span_after_reply_ms,
+            verify_window_pre_compute_ms,
+            verify_window_post_compute_ms,
+            verify_window_pre_reply_ms,
+            verify_window_after_reply_ms,
             upstream_message_wait_ms: recv_read_ms,
         });
 
@@ -1772,7 +1772,7 @@ fn message_allows_session_auto_align(message: &StageWireMessage) -> bool {
         WireMessageKind::DecodeEmbd
             | WireMessageKind::DecodeReadout
             | WireMessageKind::DecodeLightCtx
-            | WireMessageKind::VerifySpan
+            | WireMessageKind::VerifyWindow
     )
 }
 
@@ -2004,32 +2004,32 @@ fn record_prefill_edge_transport(
     );
 }
 
-fn record_verify_span_timing(
+fn record_verify_window_timing(
     stats: &mut StageReplyStats,
     message: &StageWireMessage,
     compute_ms: f64,
     forward_write_ms: f64,
     downstream_wait_ms: f64,
 ) {
-    if message.kind != WireMessageKind::VerifySpan {
+    if message.kind != WireMessageKind::VerifyWindow {
         return;
     }
     let compute_us = ms_to_us(compute_ms);
     let forward_write_us = ms_to_us(forward_write_ms);
     let downstream_wait_us = ms_to_us(downstream_wait_ms);
     let token_count = i64::from(message.token_count.max(0));
-    stats.verify_span_compute_us += compute_us;
-    stats.verify_span_forward_write_us += forward_write_us;
-    stats.verify_span_downstream_wait_us += downstream_wait_us;
-    stats.verify_span_total_us += compute_us + forward_write_us + downstream_wait_us;
-    stats.verify_span_stage_count += 1;
-    stats.verify_span_request_count += 1;
-    stats.verify_span_token_count += token_count;
-    stats.verify_span_max_tokens = stats.verify_span_max_tokens.max(token_count);
+    stats.verify_window_compute_us += compute_us;
+    stats.verify_window_forward_write_us += forward_write_us;
+    stats.verify_window_downstream_wait_us += downstream_wait_us;
+    stats.verify_window_total_us += compute_us + forward_write_us + downstream_wait_us;
+    stats.verify_window_stage_count += 1;
+    stats.verify_window_request_count += 1;
+    stats.verify_window_token_count += token_count;
+    stats.verify_window_max_tokens = stats.verify_window_max_tokens.max(token_count);
     if (message.state.flags & state_flags::SKIP_VERIFY_CHECKPOINT) == 0 {
-        stats.verify_span_checkpointed_requests += 1;
+        stats.verify_window_checkpointed_requests += 1;
     } else {
-        stats.verify_span_skip_checkpoint_requests += 1;
+        stats.verify_window_skip_checkpoint_requests += 1;
     }
 }
 
@@ -3241,21 +3241,21 @@ struct BinaryRequestSummary {
     session_auto_align_count: usize,
     session_auto_align_ms: f64,
     session_auto_align_trimmed_tokens: u64,
-    verify_span_count: usize,
-    verify_span_session_auto_align_count: usize,
-    verify_span_session_auto_align_ms: f64,
-    verify_span_session_auto_align_trimmed_tokens: u64,
-    verify_span_token_count: u64,
-    verify_span_max_tokens: u64,
-    verify_span_compute_ms: f64,
-    verify_span_input_activation_decode_ms: f64,
-    verify_span_runtime_lock_hold_ms: f64,
-    verify_span_upstream_reply_ms: f64,
-    verify_span_pre_compute_ms: f64,
-    verify_span_post_compute_ms: f64,
-    verify_span_pre_reply_ms: f64,
-    verify_span_after_reply_ms: f64,
-    verify_span_upstream_message_wait_ms: f64,
+    verify_window_count: usize,
+    verify_window_session_auto_align_count: usize,
+    verify_window_session_auto_align_ms: f64,
+    verify_window_session_auto_align_trimmed_tokens: u64,
+    verify_window_token_count: u64,
+    verify_window_max_tokens: u64,
+    verify_window_compute_ms: f64,
+    verify_window_input_activation_decode_ms: f64,
+    verify_window_runtime_lock_hold_ms: f64,
+    verify_window_upstream_reply_ms: f64,
+    verify_window_pre_compute_ms: f64,
+    verify_window_post_compute_ms: f64,
+    verify_window_pre_reply_ms: f64,
+    verify_window_after_reply_ms: f64,
+    verify_window_upstream_message_wait_ms: f64,
     reply_stats: StageReplyStats,
 }
 
@@ -3281,10 +3281,10 @@ struct BinaryMessageObservation<'a> {
     session_auto_align_count: usize,
     session_auto_align_ms: f64,
     session_auto_align_trimmed_tokens: u64,
-    verify_span_pre_compute_ms: f64,
-    verify_span_post_compute_ms: f64,
-    verify_span_pre_reply_ms: f64,
-    verify_span_after_reply_ms: f64,
+    verify_window_pre_compute_ms: f64,
+    verify_window_post_compute_ms: f64,
+    verify_window_pre_reply_ms: f64,
+    verify_window_after_reply_ms: f64,
     upstream_message_wait_ms: f64,
 }
 
@@ -3439,25 +3439,26 @@ impl BinaryRequestSummary {
         self.session_auto_align_trimmed_tokens = self
             .session_auto_align_trimmed_tokens
             .saturating_add(observation.session_auto_align_trimmed_tokens);
-        if message.kind == WireMessageKind::VerifySpan {
+        if message.kind == WireMessageKind::VerifyWindow {
             let token_count = message.token_count.max(0) as u64;
-            self.verify_span_count += 1;
-            self.verify_span_token_count = self.verify_span_token_count.saturating_add(token_count);
-            self.verify_span_max_tokens = self.verify_span_max_tokens.max(token_count);
-            self.verify_span_session_auto_align_count += observation.session_auto_align_count;
-            self.verify_span_session_auto_align_ms += observation.session_auto_align_ms;
-            self.verify_span_session_auto_align_trimmed_tokens = self
-                .verify_span_session_auto_align_trimmed_tokens
+            self.verify_window_count += 1;
+            self.verify_window_token_count =
+                self.verify_window_token_count.saturating_add(token_count);
+            self.verify_window_max_tokens = self.verify_window_max_tokens.max(token_count);
+            self.verify_window_session_auto_align_count += observation.session_auto_align_count;
+            self.verify_window_session_auto_align_ms += observation.session_auto_align_ms;
+            self.verify_window_session_auto_align_trimmed_tokens = self
+                .verify_window_session_auto_align_trimmed_tokens
                 .saturating_add(observation.session_auto_align_trimmed_tokens);
-            self.verify_span_compute_ms += observation.compute_ms;
-            self.verify_span_input_activation_decode_ms += observation.input_activation_decode_ms;
-            self.verify_span_runtime_lock_hold_ms += observation.runtime_lock_hold_ms;
-            self.verify_span_upstream_reply_ms += observation.upstream_reply_ms;
-            self.verify_span_pre_compute_ms += observation.verify_span_pre_compute_ms;
-            self.verify_span_post_compute_ms += observation.verify_span_post_compute_ms;
-            self.verify_span_pre_reply_ms += observation.verify_span_pre_reply_ms;
-            self.verify_span_after_reply_ms += observation.verify_span_after_reply_ms;
-            self.verify_span_upstream_message_wait_ms += observation.upstream_message_wait_ms;
+            self.verify_window_compute_ms += observation.compute_ms;
+            self.verify_window_input_activation_decode_ms += observation.input_activation_decode_ms;
+            self.verify_window_runtime_lock_hold_ms += observation.runtime_lock_hold_ms;
+            self.verify_window_upstream_reply_ms += observation.upstream_reply_ms;
+            self.verify_window_pre_compute_ms += observation.verify_window_pre_compute_ms;
+            self.verify_window_post_compute_ms += observation.verify_window_post_compute_ms;
+            self.verify_window_pre_reply_ms += observation.verify_window_pre_reply_ms;
+            self.verify_window_after_reply_ms += observation.verify_window_after_reply_ms;
+            self.verify_window_upstream_message_wait_ms += observation.upstream_message_wait_ms;
         }
         self.reply_stats.merge(observation.reply_stats);
     }
@@ -3584,115 +3585,115 @@ impl BinaryRequestSummary {
             );
         }
         attrs.insert(
-            "skippy.verify_span_count".to_string(),
-            json!(self.verify_span_count),
+            "skippy.verify_window_count".to_string(),
+            json!(self.verify_window_count),
         );
         attrs.insert(
-            "skippy.verify_span_token_count".to_string(),
-            json!(self.verify_span_token_count),
+            "skippy.verify_window_token_count".to_string(),
+            json!(self.verify_window_token_count),
         );
         attrs.insert(
-            "skippy.verify_span_max_tokens".to_string(),
-            json!(self.verify_span_max_tokens),
+            "skippy.verify_window_max_tokens".to_string(),
+            json!(self.verify_window_max_tokens),
         );
         attrs.insert(
-            "skippy.verify_span_session_auto_align_count".to_string(),
-            json!(self.verify_span_session_auto_align_count),
+            "skippy.verify_window_session_auto_align_count".to_string(),
+            json!(self.verify_window_session_auto_align_count),
         );
         attrs.insert(
-            "skippy.verify_span_session_auto_align_ms".to_string(),
-            json!(self.verify_span_session_auto_align_ms),
+            "skippy.verify_window_session_auto_align_ms".to_string(),
+            json!(self.verify_window_session_auto_align_ms),
         );
         attrs.insert(
-            "skippy.verify_span_session_auto_align_trimmed_tokens".to_string(),
-            json!(self.verify_span_session_auto_align_trimmed_tokens),
+            "skippy.verify_window_session_auto_align_trimmed_tokens".to_string(),
+            json!(self.verify_window_session_auto_align_trimmed_tokens),
         );
-        if self.verify_span_session_auto_align_count > 0 {
+        if self.verify_window_session_auto_align_count > 0 {
             attrs.insert(
-                "skippy.verify_span_session_auto_align_ms_avg".to_string(),
+                "skippy.verify_window_session_auto_align_ms_avg".to_string(),
                 json!(
-                    self.verify_span_session_auto_align_ms
-                        / self.verify_span_session_auto_align_count as f64
+                    self.verify_window_session_auto_align_ms
+                        / self.verify_window_session_auto_align_count as f64
                 ),
             );
         }
         attrs.insert(
-            "skippy.verify_span_pre_compute_ms".to_string(),
-            json!(self.verify_span_pre_compute_ms),
+            "skippy.verify_window_pre_compute_ms".to_string(),
+            json!(self.verify_window_pre_compute_ms),
         );
         attrs.insert(
-            "skippy.verify_span_compute_ms".to_string(),
-            json!(self.verify_span_compute_ms),
+            "skippy.verify_window_compute_ms".to_string(),
+            json!(self.verify_window_compute_ms),
         );
         attrs.insert(
-            "skippy.verify_span_input_activation_decode_ms".to_string(),
-            json!(self.verify_span_input_activation_decode_ms),
+            "skippy.verify_window_input_activation_decode_ms".to_string(),
+            json!(self.verify_window_input_activation_decode_ms),
         );
         attrs.insert(
-            "skippy.verify_span_runtime_lock_hold_ms".to_string(),
-            json!(self.verify_span_runtime_lock_hold_ms),
+            "skippy.verify_window_runtime_lock_hold_ms".to_string(),
+            json!(self.verify_window_runtime_lock_hold_ms),
         );
         attrs.insert(
-            "skippy.verify_span_upstream_reply_ms".to_string(),
-            json!(self.verify_span_upstream_reply_ms),
+            "skippy.verify_window_upstream_reply_ms".to_string(),
+            json!(self.verify_window_upstream_reply_ms),
         );
         attrs.insert(
-            "skippy.verify_span_post_compute_ms".to_string(),
-            json!(self.verify_span_post_compute_ms),
+            "skippy.verify_window_post_compute_ms".to_string(),
+            json!(self.verify_window_post_compute_ms),
         );
         attrs.insert(
-            "skippy.verify_span_pre_reply_ms".to_string(),
-            json!(self.verify_span_pre_reply_ms),
+            "skippy.verify_window_pre_reply_ms".to_string(),
+            json!(self.verify_window_pre_reply_ms),
         );
         attrs.insert(
-            "skippy.verify_span_after_reply_ms".to_string(),
-            json!(self.verify_span_after_reply_ms),
+            "skippy.verify_window_after_reply_ms".to_string(),
+            json!(self.verify_window_after_reply_ms),
         );
         attrs.insert(
-            "skippy.verify_span_upstream_message_wait_ms".to_string(),
-            json!(self.verify_span_upstream_message_wait_ms),
+            "skippy.verify_window_upstream_message_wait_ms".to_string(),
+            json!(self.verify_window_upstream_message_wait_ms),
         );
-        if self.verify_span_count > 0 {
-            let verify_span_count = self.verify_span_count as f64;
+        if self.verify_window_count > 0 {
+            let verify_window_count = self.verify_window_count as f64;
             attrs.insert(
-                "skippy.verify_span_pre_compute_ms_avg".to_string(),
-                json!(self.verify_span_pre_compute_ms / verify_span_count),
+                "skippy.verify_window_pre_compute_ms_avg".to_string(),
+                json!(self.verify_window_pre_compute_ms / verify_window_count),
             );
             attrs.insert(
-                "skippy.verify_span_compute_ms_avg".to_string(),
-                json!(self.verify_span_compute_ms / verify_span_count),
+                "skippy.verify_window_compute_ms_avg".to_string(),
+                json!(self.verify_window_compute_ms / verify_window_count),
             );
             attrs.insert(
-                "skippy.verify_span_input_activation_decode_ms_avg".to_string(),
-                json!(self.verify_span_input_activation_decode_ms / verify_span_count),
+                "skippy.verify_window_input_activation_decode_ms_avg".to_string(),
+                json!(self.verify_window_input_activation_decode_ms / verify_window_count),
             );
             attrs.insert(
-                "skippy.verify_span_runtime_lock_hold_ms_avg".to_string(),
-                json!(self.verify_span_runtime_lock_hold_ms / verify_span_count),
+                "skippy.verify_window_runtime_lock_hold_ms_avg".to_string(),
+                json!(self.verify_window_runtime_lock_hold_ms / verify_window_count),
             );
             attrs.insert(
-                "skippy.verify_span_upstream_reply_ms_avg".to_string(),
-                json!(self.verify_span_upstream_reply_ms / verify_span_count),
+                "skippy.verify_window_upstream_reply_ms_avg".to_string(),
+                json!(self.verify_window_upstream_reply_ms / verify_window_count),
             );
             attrs.insert(
-                "skippy.verify_span_tokens_avg".to_string(),
-                json!(self.verify_span_token_count as f64 / verify_span_count),
+                "skippy.verify_window_tokens_avg".to_string(),
+                json!(self.verify_window_token_count as f64 / verify_window_count),
             );
             attrs.insert(
-                "skippy.verify_span_post_compute_ms_avg".to_string(),
-                json!(self.verify_span_post_compute_ms / verify_span_count),
+                "skippy.verify_window_post_compute_ms_avg".to_string(),
+                json!(self.verify_window_post_compute_ms / verify_window_count),
             );
             attrs.insert(
-                "skippy.verify_span_pre_reply_ms_avg".to_string(),
-                json!(self.verify_span_pre_reply_ms / verify_span_count),
+                "skippy.verify_window_pre_reply_ms_avg".to_string(),
+                json!(self.verify_window_pre_reply_ms / verify_window_count),
             );
             attrs.insert(
-                "skippy.verify_span_after_reply_ms_avg".to_string(),
-                json!(self.verify_span_after_reply_ms / verify_span_count),
+                "skippy.verify_window_after_reply_ms_avg".to_string(),
+                json!(self.verify_window_after_reply_ms / verify_window_count),
             );
             attrs.insert(
-                "skippy.verify_span_upstream_message_wait_ms_avg".to_string(),
-                json!(self.verify_span_upstream_message_wait_ms / verify_span_count),
+                "skippy.verify_window_upstream_message_wait_ms_avg".to_string(),
+                json!(self.verify_window_upstream_message_wait_ms / verify_window_count),
             );
         }
         let lookups = self.reply_stats.kv_lookup_hits + self.reply_stats.kv_lookup_misses;
@@ -3872,7 +3873,7 @@ pub(crate) fn run_binary_stage_message(
                 output,
             ))
         }
-        WireMessageKind::VerifySpan => {
+        WireMessageKind::VerifyWindow => {
             let sampling = runtime_sampling_config(message.sampling.as_ref());
             let (predicted_tokens, output) = runtime.verify_frame_sampled(
                 session_id,

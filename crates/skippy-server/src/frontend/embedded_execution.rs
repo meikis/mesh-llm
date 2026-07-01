@@ -24,7 +24,7 @@ impl StageOpenAiBackend {
                 .map_err(|_| OpenAiError::backend("runtime lock poisoned"))?;
             let lock_wait_ms = lock_timer.elapsed_ms();
             let hold_timer = PhaseTimer::start();
-            if message.kind == WireMessageKind::VerifySpan
+            if message.kind == WireMessageKind::VerifyWindow
                 && (message.state.flags & state_flags::SKIP_VERIFY_CHECKPOINT) == 0
             {
                 let checkpoint_timer = PhaseTimer::start();
@@ -34,9 +34,9 @@ impl StageOpenAiBackend {
                 let checkpoint_us = ms_to_us(checkpoint_timer.elapsed_ms());
                 stats.checkpoint_local_us += checkpoint_us;
                 stats.checkpoint_total_us += checkpoint_us;
-                stats.verify_span_checkpointed_requests += 1;
-            } else if message.kind == WireMessageKind::VerifySpan {
-                stats.verify_span_skip_checkpoint_requests += 1;
+                stats.verify_window_checkpointed_requests += 1;
+            } else if message.kind == WireMessageKind::VerifyWindow {
+                stats.verify_window_skip_checkpoint_requests += 1;
             }
             let output = run_binary_stage_message(
                 &mut runtime,
@@ -90,16 +90,16 @@ impl StageOpenAiBackend {
         )?;
         let downstream_wait_ms = wait_timer.elapsed_ms();
         stats.merge(reply.stats);
-        if message.kind == WireMessageKind::VerifySpan {
-            stats.verify_span_compute_us += ms_to_us(stage0_compute_ms);
-            stats.verify_span_forward_write_us += ms_to_us(forward_write_ms);
-            stats.verify_span_downstream_wait_us += ms_to_us(downstream_wait_ms);
-            stats.verify_span_total_us += ms_to_us(timer.elapsed_ms());
-            stats.verify_span_stage_count += 1;
-            stats.verify_span_request_count += 1;
-            stats.verify_span_token_count += i64::from(message.token_count.max(0));
-            stats.verify_span_max_tokens = stats
-                .verify_span_max_tokens
+        if message.kind == WireMessageKind::VerifyWindow {
+            stats.verify_window_compute_us += ms_to_us(stage0_compute_ms);
+            stats.verify_window_forward_write_us += ms_to_us(forward_write_ms);
+            stats.verify_window_downstream_wait_us += ms_to_us(downstream_wait_ms);
+            stats.verify_window_total_us += ms_to_us(timer.elapsed_ms());
+            stats.verify_window_stage_count += 1;
+            stats.verify_window_request_count += 1;
+            stats.verify_window_token_count += i64::from(message.token_count.max(0));
+            stats.verify_window_max_tokens = stats
+                .verify_window_max_tokens
                 .max(i64::from(message.token_count.max(0)));
         }
         Ok(EmbeddedStageExecution {

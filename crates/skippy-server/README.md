@@ -147,7 +147,7 @@ unload or replan.
   `--openai-draft-model-path`, `--openai-speculative-window`, and
   `--openai-adaptive-speculative-window`. The draft model runs locally in the
   stage0 process as a complete model without stage tensor filtering, and
-  proposal windows are verified through the existing staged `VerifySpan` binary
+  proposal windows are verified through the existing staged `VerifyWindow` binary
   request, so acceptance, rejection, checkpoint, restore, draft-propose, and
   recovery costs are visible on OpenAI-path spans. The draft runner is
   single-session guarded; use this first as a depth-1 measurement knob before

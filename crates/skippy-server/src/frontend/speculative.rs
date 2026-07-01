@@ -52,7 +52,7 @@ pub(super) struct OpenAiSpeculativeStats {
 impl OpenAiSpeculativeStats {
     pub(super) fn observe_verify_decision(
         &mut self,
-        decision: VerifySpanDecision,
+        decision: VerifyWindowDecision,
         adaptive_window: &mut usize,
         adaptive_enabled: bool,
         max_speculative_window: usize,
@@ -65,7 +65,7 @@ impl OpenAiSpeculativeStats {
         self.adaptive_window_min = nonzero_min(self.adaptive_window_min, *adaptive_window);
         self.adaptive_window_max_seen = self.adaptive_window_max_seen.max(*adaptive_window);
         match decision.kind {
-            VerifySpanDecisionKind::FullAccept => {
+            VerifyWindowDecisionKind::FullAccept => {
                 self.full_accept_windows += 1;
                 self.grow_adaptive_window(
                     adaptive_window,
@@ -73,10 +73,10 @@ impl OpenAiSpeculativeStats {
                     max_speculative_window,
                 );
             }
-            VerifySpanDecisionKind::AcceptedStop => {
+            VerifyWindowDecisionKind::AcceptedStop => {
                 self.accepted_stop_windows += 1;
             }
-            VerifySpanDecisionKind::TailReject => {
+            VerifyWindowDecisionKind::TailReject => {
                 self.observe_reject(decision);
                 self.tail_reject_windows += 1;
                 self.grow_adaptive_window(
@@ -85,13 +85,13 @@ impl OpenAiSpeculativeStats {
                     max_speculative_window,
                 );
             }
-            VerifySpanDecisionKind::EarlyReject => {
+            VerifyWindowDecisionKind::EarlyReject => {
                 self.observe_reject(decision);
                 self.early_reject_windows += 1;
                 self.repair_required_windows += 1;
                 self.shrink_adaptive_window(adaptive_window, adaptive_enabled, decision);
             }
-            VerifySpanDecisionKind::EarlyRejectStop => {
+            VerifyWindowDecisionKind::EarlyRejectStop => {
                 self.observe_reject(decision);
                 self.early_reject_windows += 1;
                 self.early_reject_stop_windows += 1;
@@ -99,7 +99,7 @@ impl OpenAiSpeculativeStats {
         }
     }
 
-    pub(super) fn observe_reject(&mut self, decision: VerifySpanDecision) {
+    pub(super) fn observe_reject(&mut self, decision: VerifyWindowDecision) {
         if let Some(repair_input_count) = decision.repair_input_count {
             self.rejected_windows += 1;
             self.first_reject_position_sum += repair_input_count;
@@ -122,7 +122,7 @@ impl OpenAiSpeculativeStats {
         &mut self,
         adaptive_window: &mut usize,
         adaptive_enabled: bool,
-        decision: VerifySpanDecision,
+        decision: VerifyWindowDecision,
     ) {
         if !adaptive_enabled {
             return;
@@ -305,7 +305,7 @@ pub(super) fn verify_inputs_for_proposals(current: i32, proposals: &[i32]) -> Ve
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum VerifySpanDecisionKind {
+pub(super) enum VerifyWindowDecisionKind {
     FullAccept,
     AcceptedStop,
     TailReject,
@@ -314,41 +314,41 @@ pub(super) enum VerifySpanDecisionKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct VerifySpanDecision {
-    pub(super) kind: VerifySpanDecisionKind,
+pub(super) struct VerifyWindowDecision {
+    pub(super) kind: VerifyWindowDecisionKind,
     pub(super) accepted_before_reject: usize,
     pub(super) repair_input_count: Option<usize>,
     pub(super) commit_count: usize,
 }
 
-impl VerifySpanDecision {
+impl VerifyWindowDecision {
     pub(super) fn rejected(self) -> bool {
         matches!(
             self.kind,
-            VerifySpanDecisionKind::TailReject
-                | VerifySpanDecisionKind::EarlyReject
-                | VerifySpanDecisionKind::EarlyRejectStop
+            VerifyWindowDecisionKind::TailReject
+                | VerifyWindowDecisionKind::EarlyReject
+                | VerifyWindowDecisionKind::EarlyRejectStop
         )
     }
 
     pub(super) fn requires_repair(self) -> bool {
-        self.kind == VerifySpanDecisionKind::EarlyReject
+        self.kind == VerifyWindowDecisionKind::EarlyReject
     }
 }
 
-pub(super) fn classify_verify_span<F>(
+pub(super) fn classify_verify_window<F>(
     draft_tokens: &[i32],
     predicted_tokens: &[i32],
     generated_len: usize,
     max_new_tokens: usize,
     mut token_is_eog: F,
-) -> OpenAiResult<VerifySpanDecision>
+) -> OpenAiResult<VerifyWindowDecision>
 where
     F: FnMut(i32) -> OpenAiResult<bool>,
 {
     if predicted_tokens.len() < draft_tokens.len() {
         return Err(OpenAiError::backend(format!(
-            "verify span returned too few tokens: got {} expected {}",
+            "verify window returned too few tokens: got {} expected {}",
             predicted_tokens.len(),
             draft_tokens.len()
         )));
@@ -364,8 +364,8 @@ where
         if accepted {
             accepted_before_reject += 1;
             if (reached_eog || reached_limit) && commit_count < draft_tokens.len() {
-                return Ok(VerifySpanDecision {
-                    kind: VerifySpanDecisionKind::AcceptedStop,
+                return Ok(VerifyWindowDecision {
+                    kind: VerifyWindowDecisionKind::AcceptedStop,
                     accepted_before_reject,
                     repair_input_count: None,
                     commit_count,
@@ -376,13 +376,13 @@ where
 
         let repair_input_count = accepted_before_reject + 1;
         let kind = if repair_input_count == draft_tokens.len() {
-            VerifySpanDecisionKind::TailReject
+            VerifyWindowDecisionKind::TailReject
         } else if reached_eog || reached_limit {
-            VerifySpanDecisionKind::EarlyRejectStop
+            VerifyWindowDecisionKind::EarlyRejectStop
         } else {
-            VerifySpanDecisionKind::EarlyReject
+            VerifyWindowDecisionKind::EarlyReject
         };
-        return Ok(VerifySpanDecision {
+        return Ok(VerifyWindowDecision {
             kind,
             accepted_before_reject,
             repair_input_count: Some(repair_input_count),
@@ -390,8 +390,8 @@ where
         });
     }
 
-    Ok(VerifySpanDecision {
-        kind: VerifySpanDecisionKind::FullAccept,
+    Ok(VerifyWindowDecision {
+        kind: VerifyWindowDecisionKind::FullAccept,
         accepted_before_reject,
         repair_input_count: None,
         commit_count,

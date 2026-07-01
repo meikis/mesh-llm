@@ -232,6 +232,71 @@ mod tests {
     }
 
     #[test]
+    fn verify_window_message_round_trips_window_metadata() {
+        let mut state =
+            StageStateHeader::new(WireMessageKind::VerifyWindow, WireActivationDType::F32);
+        state.seq_id = 42;
+        state.prompt_token_count = 128;
+        state.decode_step = 7;
+        state.current_token = 1001;
+        state.flags |= state_flags::SKIP_VERIFY_CHECKPOINT;
+        let message = StageWireMessage {
+            kind: WireMessageKind::VerifyWindow,
+            pos_start: 135,
+            token_count: 4,
+            state,
+            request_id: 7,
+            session_id: 11,
+            sampling: None,
+            chat_sampling_metadata: None,
+            tokens: vec![1001, 1002, 1003, 1004],
+            positions: Vec::new(),
+            activation: Vec::new(),
+            raw_bytes: Vec::new(),
+        };
+
+        let mut bytes = Vec::new();
+        write_stage_message(&mut bytes, &message, WireActivationDType::F32).unwrap();
+        let decoded = read_stage_message(Cursor::new(bytes), 2).unwrap();
+
+        assert_eq!(decoded.kind, WireMessageKind::VerifyWindow);
+        assert_eq!(decoded.verify_window_id(), Some(42));
+        assert_eq!(decoded.verify_window_base_position(), Some(135));
+        assert_eq!(decoded.verify_window_token_count(), Some(4));
+        assert_eq!(decoded.tokens, vec![1001, 1002, 1003, 1004]);
+        assert_eq!(decoded.state.decode_step, 7);
+        assert_ne!(decoded.state.flags & state_flags::SKIP_VERIFY_CHECKPOINT, 0);
+    }
+
+    #[test]
+    fn stage_message_rejects_old_state_version() {
+        let mut state =
+            StageStateHeader::new(WireMessageKind::DecodeEmbd, WireActivationDType::F32);
+        state.version = STAGE_STATE_VERSION - 1;
+        let bytes = stage_frame_prefix(WireMessageKind::DecodeEmbd, 1, 0, 0, state);
+
+        assert_invalid_data(
+            read_stage_message(Cursor::new(bytes), 2),
+            "unsupported stage state version",
+        );
+    }
+
+    #[test]
+    fn stage_message_rejects_legacy_kind_10() {
+        let mut bytes = Vec::new();
+        push_i32(&mut bytes, 10);
+        push_i32(&mut bytes, 0);
+        push_i32(&mut bytes, 1);
+        push_i32(&mut bytes, 0);
+        push_i32(&mut bytes, 0);
+
+        assert_invalid_data(
+            read_stage_message(Cursor::new(bytes), 2),
+            "unknown stage message kind",
+        );
+    }
+
+    #[test]
     fn stage_message_estimates_full_wire_transfer_bytes() {
         let message = StageWireMessage {
             kind: WireMessageKind::PrefillEmbd,

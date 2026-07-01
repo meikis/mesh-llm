@@ -121,7 +121,8 @@ impl ReusableDecodeMessage {
     }
 }
 
-pub(super) struct VerifySpanMessageArgs<'a> {
+pub(super) struct VerifyWindowMessageArgs<'a> {
+    pub(super) window_id: i32,
     pub(super) request_id: u64,
     pub(super) session_id: u64,
     pub(super) prompt_token_count: usize,
@@ -132,17 +133,17 @@ pub(super) struct VerifySpanMessageArgs<'a> {
     pub(super) checkpoint: bool,
 }
 
-pub(super) fn embedded_verify_message(
+pub(super) fn embedded_verify_window_message(
     wire_dtype: WireActivationDType,
-    args: VerifySpanMessageArgs<'_>,
+    args: VerifyWindowMessageArgs<'_>,
 ) -> OpenAiResult<StageWireMessage> {
     if args.tokens.is_empty() {
         return Err(OpenAiError::backend(
-            "verify span requires at least one token",
+            "verify window requires at least one token",
         ));
     }
-    let mut state = StageStateHeader::new(WireMessageKind::VerifySpan, wire_dtype);
-    state.seq_id = 0;
+    let mut state = StageStateHeader::new(WireMessageKind::VerifyWindow, wire_dtype);
+    state.seq_id = args.window_id;
     state.prompt_token_count = i32::try_from(args.prompt_token_count)
         .map_err(|_| OpenAiError::backend("prompt token count exceeds i32"))?;
     state.decode_step = i32::try_from(args.decode_step)
@@ -153,11 +154,11 @@ pub(super) fn embedded_verify_message(
         state.flags |= state_flags::SKIP_VERIFY_CHECKPOINT;
     }
     Ok(StageWireMessage {
-        kind: WireMessageKind::VerifySpan,
+        kind: WireMessageKind::VerifyWindow,
         pos_start: i32::try_from(args.pos_start)
-            .map_err(|_| OpenAiError::backend("verify span position exceeds i32"))?,
+            .map_err(|_| OpenAiError::backend("verify window position exceeds i32"))?,
         token_count: i32::try_from(args.tokens.len())
-            .map_err(|_| OpenAiError::backend("verify span exceeds i32"))?,
+            .map_err(|_| OpenAiError::backend("verify window exceeds i32"))?,
         state,
         request_id: args.request_id,
         session_id: args.session_id,

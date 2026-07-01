@@ -64,22 +64,22 @@ fn native_mtp_enabled_flag_defaults_on_and_accepts_false_values() {
 }
 
 #[test]
-fn request_summary_tracks_verify_span_compute_ms() {
+fn request_summary_tracks_verify_window_compute_ms() {
     let config = prefix_cache_test_config();
     let mut summary = super::BinaryRequestSummary::default();
-    let verify = test_message(WireMessageKind::VerifySpan, 2);
+    let verify = test_message(WireMessageKind::VerifyWindow, 2);
     let decode = test_message(WireMessageKind::DecodeEmbd, 1);
 
     summary.observe(summary_observation(&config, &verify, 12.5));
     summary.observe(summary_observation(&config, &decode, 7.0));
 
-    assert_eq!(summary.verify_span_count, 1);
-    assert_eq!(summary.verify_span_token_count, 2);
-    assert_eq!(summary.verify_span_max_tokens, 2);
-    assert_eq!(summary.verify_span_compute_ms, 12.5);
-    assert_eq!(summary.verify_span_input_activation_decode_ms, 1.25);
-    assert_eq!(summary.verify_span_runtime_lock_hold_ms, 2.5);
-    assert_eq!(summary.verify_span_upstream_reply_ms, 0.75);
+    assert_eq!(summary.verify_window_count, 1);
+    assert_eq!(summary.verify_window_token_count, 2);
+    assert_eq!(summary.verify_window_max_tokens, 2);
+    assert_eq!(summary.verify_window_compute_ms, 12.5);
+    assert_eq!(summary.verify_window_input_activation_decode_ms, 1.25);
+    assert_eq!(summary.verify_window_runtime_lock_hold_ms, 2.5);
+    assert_eq!(summary.verify_window_upstream_reply_ms, 0.75);
     assert_eq!(summary.compute_ms, 19.5);
     assert_eq!(summary.input_activation_decode_ms, 2.5);
     assert_eq!(summary.runtime_lock_hold_ms, 5.0);
@@ -90,7 +90,7 @@ fn request_summary_tracks_verify_span_compute_ms() {
 fn request_summary_tracks_auto_align_totals() {
     let config = prefix_cache_test_config();
     let mut summary = super::BinaryRequestSummary::default();
-    let verify = test_message(WireMessageKind::VerifySpan, 2);
+    let verify = test_message(WireMessageKind::VerifyWindow, 2);
     let decode = test_message(WireMessageKind::DecodeEmbd, 1);
 
     let mut verify_observation = summary_observation(&config, &verify, 12.5);
@@ -108,9 +108,9 @@ fn request_summary_tracks_auto_align_totals() {
     assert_eq!(summary.session_auto_align_count, 2);
     assert_eq!(summary.session_auto_align_ms, 2.0);
     assert_eq!(summary.session_auto_align_trimmed_tokens, 3);
-    assert_eq!(summary.verify_span_session_auto_align_count, 1);
-    assert_eq!(summary.verify_span_session_auto_align_ms, 0.75);
-    assert_eq!(summary.verify_span_session_auto_align_trimmed_tokens, 1);
+    assert_eq!(summary.verify_window_session_auto_align_count, 1);
+    assert_eq!(summary.verify_window_session_auto_align_ms, 0.75);
+    assert_eq!(summary.verify_window_session_auto_align_trimmed_tokens, 1);
 }
 
 #[test]
@@ -285,10 +285,10 @@ fn summary_observation<'a>(
         session_auto_align_count: 0,
         session_auto_align_ms: 0.0,
         session_auto_align_trimmed_tokens: 0,
-        verify_span_pre_compute_ms: 0.25,
-        verify_span_post_compute_ms: 0.5,
-        verify_span_pre_reply_ms: 0.0,
-        verify_span_after_reply_ms: 0.0,
+        verify_window_pre_compute_ms: 0.25,
+        verify_window_post_compute_ms: 0.5,
+        verify_window_pre_reply_ms: 0.0,
+        verify_window_after_reply_ms: 0.0,
         upstream_message_wait_ms: 0.0,
     }
 }

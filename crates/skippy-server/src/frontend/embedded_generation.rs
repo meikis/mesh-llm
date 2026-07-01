@@ -646,6 +646,7 @@ impl StageOpenAiBackend {
             let mut native_mtp_counters = NativeMtpDecodeCounters::default();
             let mut native_mtp_reject_cooldown_remaining = 0usize;
             let mut native_mtp_suppress_cooldown_drafts_remaining = 0usize;
+            let mut decode_window_scheduler = DecodeWindowScheduler::new(1);
             if let Some(mut fused) = fused_first_decode.take() {
                 current = fused.predicted;
                 let mut fused_native_mtp_draft = fused.native_mtp_draft.take();
@@ -859,19 +860,26 @@ impl StageOpenAiBackend {
                     .then(|| native_mtp.take_pending_draft())
                     .flatten();
                 if let Some(pending_native_mtp_draft) = pending_native_mtp_draft {
+                    require_verify_window_direct_return(&request)?;
                     let batched_token_timer =
                         self.telemetry.is_debug_enabled().then(PhaseTimer::start);
                     let native_mtp_draft_token = pending_native_mtp_draft.token;
                     let native_mtp_draft_origin = pending_native_mtp_draft.origin;
                     let verify_inputs = [current, native_mtp_draft_token];
-                    let message = embedded_verify_message(
+                    let verify_window = decode_window_scheduler.open_window(
+                        prefill_token_count + decoded_tokens,
+                        decoded_tokens,
+                        verify_inputs.len(),
+                    )?;
+                    let message = embedded_verify_window_message(
                         request.wire_dtype,
-                        VerifySpanMessageArgs {
+                        VerifyWindowMessageArgs {
+                            window_id: verify_window.window_id,
                             request_id,
                             session_id,
                             prompt_token_count: request.prompt_token_ids.len(),
-                            pos_start: prefill_token_count + decoded_tokens,
-                            decode_step: decoded_tokens,
+                            pos_start: verify_window.base_position,
+                            decode_step: verify_window.decode_step,
                             tokens: &verify_inputs,
                             sampling: wire_sampling.clone(),
                             checkpoint: false,
@@ -887,7 +895,7 @@ impl StageOpenAiBackend {
                     )?;
                     if verify.reply.predicted_tokens.len() < verify_inputs.len() {
                         return Err(OpenAiError::backend(format!(
-                            "native MTP verify span returned too few tokens: got {} expected {}",
+                            "native MTP verify window returned too few tokens: got {} expected {}",
                             verify.reply.predicted_tokens.len(),
                             verify_inputs.len()
                         )));
@@ -905,6 +913,14 @@ impl StageOpenAiBackend {
                     );
                     let accepted =
                         matches!(native_mtp_decision, NativeMtpVerification::Accepted { .. });
+                    let window_completion = decode_window_scheduler.complete_window(
+                        verify_window.window_id,
+                        if accepted {
+                            DecodeWindowOutcome::accepted(verify_inputs.len())
+                        } else {
+                            DecodeWindowOutcome::rejected(1)
+                        },
+                    )?;
                     native_mtp_counters
                         .observe_batched_verification(native_mtp_draft_origin, accepted);
                     let commit_tokens = [target_token, after_draft_token];
@@ -926,7 +942,9 @@ impl StageOpenAiBackend {
                             break;
                         }
                     }
-                    if !accepted && native_mtp_options.reject_cooldown_tokens > 0 {
+                    if window_completion.provider_reset_required
+                        && native_mtp_options.reject_cooldown_tokens > 0
+                    {
                         native_mtp_reject_cooldown_remaining =
                             native_mtp_options.reject_cooldown_tokens;
                         native_mtp_suppress_cooldown_drafts_remaining =
@@ -995,8 +1013,10 @@ impl StageOpenAiBackend {
                         let mut token_attrs = self.openai_attrs(request.ids);
                         token_attrs
                             .insert("llama_stage.decode_step".to_string(), json!(decode_step));
-                        token_attrs
-                            .insert("llama_stage.message_kind".to_string(), json!("VerifySpan"));
+                        token_attrs.insert(
+                            "llama_stage.message_kind".to_string(),
+                            json!("VerifyWindow"),
+                        );
                         token_attrs.insert(
                             "llama_stage.native_mtp.batched_verification".to_string(),
                             json!(true),
@@ -1147,15 +1167,22 @@ impl StageOpenAiBackend {
                     let draft_propose_ms = propose_timer.elapsed_ms();
                     speculative_stats.draft_propose_ms += draft_propose_ms;
                     if !draft_tokens.is_empty() {
+                        require_verify_window_direct_return(&request)?;
                         let verify_inputs = verify_inputs_for_proposals(current, &draft_tokens);
-                        let message = embedded_verify_message(
+                        let verify_window = decode_window_scheduler.open_window(
+                            prefill_token_count + decoded_tokens,
+                            decoded_tokens,
+                            verify_inputs.len(),
+                        )?;
+                        let message = embedded_verify_window_message(
                             request.wire_dtype,
-                            VerifySpanMessageArgs {
+                            VerifyWindowMessageArgs {
+                                window_id: verify_window.window_id,
                                 request_id,
                                 session_id,
                                 prompt_token_count: request.prompt_token_ids.len(),
-                                pos_start: prefill_token_count + decoded_tokens,
-                                decode_step: decoded_tokens,
+                                pos_start: verify_window.base_position,
+                                decode_step: verify_window.decode_step,
                                 tokens: &verify_inputs,
                                 sampling: wire_sampling.clone(),
                                 checkpoint: true,
@@ -1211,7 +1238,7 @@ impl StageOpenAiBackend {
                         decode_downstream_wait_ms += verify.stats.downstream_wait_ms;
                         speculative_stats.checkpoint_ms +=
                             us_to_ms(verify.reply.stats.checkpoint_total_us);
-                        let decision = classify_verify_span(
+                        let decision = classify_verify_window(
                             &draft_tokens,
                             &verify.reply.predicted_tokens,
                             decoded_tokens,
@@ -1224,6 +1251,10 @@ impl StageOpenAiBackend {
                             request.adaptive_speculative_window,
                             max_speculative_window,
                         );
+                        let window_completion = decode_window_scheduler.complete_window(
+                            verify_window.window_id,
+                            DecodeWindowOutcome::from_verify_decision(decision),
+                        )?;
                         let mut commit_tokens =
                             verify.reply.predicted_tokens[..decision.commit_count].to_vec();
                         if decision.requires_repair() {
@@ -1288,14 +1319,21 @@ impl StageOpenAiBackend {
                                 speculative_stats.recovery_decode_elapsed_ms += repair.elapsed_ms;
                             } else {
                                 let repair_inputs = &verify_inputs[..repair_input_count];
-                                let repair_message = embedded_verify_message(
+                                require_verify_window_direct_return(&request)?;
+                                let repair_window = decode_window_scheduler.open_window(
+                                    prefill_token_count + decoded_tokens,
+                                    decoded_tokens,
+                                    repair_inputs.len(),
+                                )?;
+                                let repair_message = embedded_verify_window_message(
                                     request.wire_dtype,
-                                    VerifySpanMessageArgs {
+                                    VerifyWindowMessageArgs {
+                                        window_id: repair_window.window_id,
                                         request_id,
                                         session_id,
                                         prompt_token_count: request.prompt_token_ids.len(),
-                                        pos_start: prefill_token_count + decoded_tokens,
-                                        decode_step: decoded_tokens,
+                                        pos_start: repair_window.base_position,
+                                        decode_step: repair_window.decode_step,
                                         tokens: repair_inputs,
                                         sampling: wire_sampling.clone(),
                                         checkpoint: false,
@@ -1314,6 +1352,10 @@ impl StageOpenAiBackend {
                                     decision.accepted_before_reject,
                                     repair_input_count,
                                     &repair.reply.predicted_tokens,
+                                )?;
+                                let _repair_completion = decode_window_scheduler.complete_window(
+                                    repair_window.window_id,
+                                    DecodeWindowOutcome::accepted(commit_tokens.len()),
                                 )?;
                                 decode_stage0_compute_ms += repair.stats.stage0_compute_ms;
                                 decode_runtime_lock_wait_ms += repair.stats.runtime_lock_wait_ms;
@@ -1363,8 +1405,30 @@ impl StageOpenAiBackend {
                         let mut token_attrs = self.openai_attrs(request.ids);
                         token_attrs
                             .insert("llama_stage.decode_step".to_string(), json!(decode_step));
-                        token_attrs
-                            .insert("llama_stage.message_kind".to_string(), json!("VerifySpan"));
+                        token_attrs.insert(
+                            "llama_stage.message_kind".to_string(),
+                            json!("VerifyWindow"),
+                        );
+                        token_attrs.insert(
+                            "llama_stage.verify_window.id".to_string(),
+                            json!(window_completion.window_id),
+                        );
+                        token_attrs.insert(
+                            "llama_stage.verify_window.depth_after".to_string(),
+                            json!(window_completion.in_flight_after),
+                        );
+                        token_attrs.insert(
+                            "llama_stage.verify_window.accepted_len".to_string(),
+                            json!(window_completion.accepted_len),
+                        );
+                        token_attrs.insert(
+                            "llama_stage.verify_window.stale_discarded".to_string(),
+                            json!(window_completion.stale_discarded),
+                        );
+                        token_attrs.insert(
+                            "llama_stage.verify_window.stale_discard_count".to_string(),
+                            json!(decode_window_scheduler.stale_discard_count()),
+                        );
                         token_attrs.insert(
                             "llama_stage.spec.windows".to_string(),
                             json!(speculative_stats.windows),
@@ -1763,6 +1827,17 @@ impl StageOpenAiBackend {
         result?;
         Ok(cache_stats)
     }
+}
+
+fn require_verify_window_direct_return(
+    request: &EmbeddedStageZeroGeneration<'_>,
+) -> OpenAiResult<()> {
+    if request.prediction_return.is_some() {
+        return Ok(());
+    }
+    Err(OpenAiError::backend(
+        "verify-window decode requires direct prediction return",
+    ))
 }
 
 fn decode_uses_context_sideband(

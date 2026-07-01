@@ -550,7 +550,25 @@ pub struct StageReply {
     pub kind: WireReplyKind,
     pub predicted: i32,
     pub predicted_tokens: Vec<i32>,
+    pub window: StageReplyWindow,
     pub stats: StageReplyStats,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StageReplyWindow {
+    pub window_id: i32,
+    pub accepted_len: i32,
+    pub correction_token: i32,
+}
+
+impl Default for StageReplyWindow {
+    fn default() -> Self {
+        Self {
+            window_id: 0,
+            accepted_len: 0,
+            correction_token: LLAMA_TOKEN_NULL,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

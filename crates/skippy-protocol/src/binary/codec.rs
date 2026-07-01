@@ -4,8 +4,8 @@ use super::{
     MAX_STAGE_ACTIVATION_BYTES, MAX_STAGE_CHAT_SAMPLING_METADATA_BYTES,
     MAX_STAGE_DECODED_ACTIVATION_BYTES, MAX_STAGE_LOGIT_BIAS, MAX_STAGE_PREDICTED_TOKENS,
     MAX_STAGE_SIDEBAND_VALUES, MAX_STAGE_STATE_IMPORT_BYTES, READY_MAGIC, STAGE_STATE_VERSION,
-    StageLogitBias, StageReply, StageReplyStats, StageSamplingConfig, StageStateHeader,
-    StageWireMessage, WireActivationDType, WireMessageKind, WireReplyKind,
+    StageLogitBias, StageReply, StageReplyStats, StageReplyWindow, StageSamplingConfig,
+    StageStateHeader, StageWireMessage, WireActivationDType, WireMessageKind, WireReplyKind,
     activation::{
         activation_decoded_f32_bytes_with_state_flags, activation_wire_bytes_with_state_flags,
     },
@@ -29,10 +29,16 @@ pub fn send_reply_ack(mut writer: impl Write) -> io::Result<()> {
 }
 
 pub fn send_reply_ack_with_stats(mut writer: impl Write, stats: StageReplyStats) -> io::Result<()> {
-    write_i32(&mut writer, WireReplyKind::Ack as i32)?;
-    write_i32(&mut writer, 0)?;
-    write_i32(&mut writer, 0)?;
-    write_reply_stats(&mut writer, stats)
+    send_reply_message(
+        &mut writer,
+        &StageReply {
+            kind: WireReplyKind::Ack,
+            predicted: 0,
+            predicted_tokens: Vec::new(),
+            window: StageReplyWindow::default(),
+            stats,
+        },
+    )
 }
 
 pub fn send_reply_predicted(mut writer: impl Write, predicted: i32) -> io::Result<()> {
@@ -44,7 +50,13 @@ pub fn send_reply_predicted_with_stats(
     predicted: i32,
     stats: StageReplyStats,
 ) -> io::Result<()> {
-    send_reply_predicted_with_tokens_and_stats(&mut writer, predicted, &[predicted], stats)
+    send_reply_predicted_with_tokens_window_and_stats(
+        &mut writer,
+        predicted,
+        &[predicted],
+        StageReplyWindow::default(),
+        stats,
+    )
 }
 
 pub fn send_reply_predicted_with_tokens_and_stats(
@@ -53,19 +65,32 @@ pub fn send_reply_predicted_with_tokens_and_stats(
     predicted_tokens: &[i32],
     stats: StageReplyStats,
 ) -> io::Result<()> {
+    send_reply_predicted_with_tokens_window_and_stats(
+        &mut writer,
+        predicted,
+        predicted_tokens,
+        StageReplyWindow::default(),
+        stats,
+    )
+}
+
+pub fn send_reply_predicted_with_tokens_window_and_stats(
+    mut writer: impl Write,
+    predicted: i32,
+    predicted_tokens: &[i32],
+    window: StageReplyWindow,
+    stats: StageReplyStats,
+) -> io::Result<()> {
     if predicted_tokens.len() > MAX_STAGE_PREDICTED_TOKENS {
         return Err(invalid_input("too many predicted tokens"));
     }
-    write_i32(&mut writer, WireReplyKind::PredictedToken as i32)?;
-    write_i32(&mut writer, predicted)?;
-    write_i32(
+    write_reply_header(
         &mut writer,
-        i32::try_from(predicted_tokens.len())
-            .map_err(|_| invalid_input("too many predicted tokens"))?,
+        WireReplyKind::PredictedToken,
+        predicted,
+        predicted_tokens,
+        window,
     )?;
-    for token in predicted_tokens {
-        write_i32(&mut writer, *token)?;
-    }
     write_reply_stats(&mut writer, stats)
 }
 
@@ -74,21 +99,46 @@ pub fn send_reply_predicted_tokens_with_stats(
     predicted_tokens: &[i32],
     stats: StageReplyStats,
 ) -> io::Result<()> {
+    send_reply_predicted_tokens_with_window_and_stats(
+        &mut writer,
+        predicted_tokens,
+        StageReplyWindow::default(),
+        stats,
+    )
+}
+
+pub fn send_reply_predicted_tokens_with_window_and_stats(
+    mut writer: impl Write,
+    predicted_tokens: &[i32],
+    window: StageReplyWindow,
+    stats: StageReplyStats,
+) -> io::Result<()> {
     if predicted_tokens.len() > MAX_STAGE_PREDICTED_TOKENS {
         return Err(invalid_input("too many predicted tokens"));
     }
     let predicted = predicted_tokens.first().copied().unwrap_or(0);
-    write_i32(&mut writer, WireReplyKind::PredictedTokens as i32)?;
-    write_i32(&mut writer, predicted)?;
-    write_i32(
+    write_reply_header(
         &mut writer,
-        i32::try_from(predicted_tokens.len())
-            .map_err(|_| invalid_input("too many predicted tokens"))?,
+        WireReplyKind::PredictedTokens,
+        predicted,
+        predicted_tokens,
+        window,
     )?;
-    for token in predicted_tokens {
-        write_i32(&mut writer, *token)?;
-    }
     write_reply_stats(&mut writer, stats)
+}
+
+pub fn send_reply_message(mut writer: impl Write, reply: &StageReply) -> io::Result<()> {
+    if reply.predicted_tokens.len() > MAX_STAGE_PREDICTED_TOKENS {
+        return Err(invalid_input("too many predicted tokens"));
+    }
+    write_reply_header(
+        &mut writer,
+        reply.kind,
+        reply.predicted,
+        &reply.predicted_tokens,
+        reply.window,
+    )?;
+    write_reply_stats(&mut writer, reply.stats)
 }
 
 pub fn recv_reply(mut reader: impl Read) -> io::Result<StageReply> {
@@ -104,13 +154,35 @@ pub fn recv_reply(mut reader: impl Read) -> io::Result<StageReply> {
     for _ in 0..predicted_count {
         predicted_tokens.push(read_i32(&mut reader)?);
     }
+    let window = read_reply_window(&mut reader)?;
     let stats = read_reply_stats(&mut reader)?;
     Ok(StageReply {
         kind,
         predicted,
         predicted_tokens,
+        window,
         stats,
     })
+}
+
+fn write_reply_header(
+    mut writer: impl Write,
+    kind: WireReplyKind,
+    predicted: i32,
+    predicted_tokens: &[i32],
+    window: StageReplyWindow,
+) -> io::Result<()> {
+    write_i32(&mut writer, kind as i32)?;
+    write_i32(&mut writer, predicted)?;
+    write_i32(
+        &mut writer,
+        i32::try_from(predicted_tokens.len())
+            .map_err(|_| invalid_input("too many predicted tokens"))?,
+    )?;
+    for token in predicted_tokens {
+        write_i32(&mut writer, *token)?;
+    }
+    write_reply_window(&mut writer, window)
 }
 
 pub fn write_stage_message(
@@ -461,6 +533,20 @@ fn read_reply_stats(mut reader: impl Read) -> io::Result<StageReplyStats> {
         *field = i64::from_le_bytes(chunk.try_into().expect("i64 chunk size"));
     }
     Ok(reply_stats_from_fields(fields))
+}
+
+fn write_reply_window(mut writer: impl Write, window: StageReplyWindow) -> io::Result<()> {
+    write_i32(&mut writer, window.window_id)?;
+    write_i32(&mut writer, window.accepted_len)?;
+    write_i32(&mut writer, window.correction_token)
+}
+
+fn read_reply_window(mut reader: impl Read) -> io::Result<StageReplyWindow> {
+    Ok(StageReplyWindow {
+        window_id: read_i32(&mut reader)?,
+        accepted_len: read_i32(&mut reader)?,
+        correction_token: read_i32(&mut reader)?,
+    })
 }
 
 fn reply_stats_fields(stats: StageReplyStats) -> [i64; REPLY_STATS_FIELD_COUNT] {

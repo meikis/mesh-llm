@@ -9,9 +9,10 @@ pub use activation::{
 };
 pub use codec::{
     read_stage_message, recv_ready, recv_reply, send_ready, send_reply_ack,
-    send_reply_ack_with_stats, send_reply_predicted, send_reply_predicted_tokens_with_stats,
+    send_reply_ack_with_stats, send_reply_message, send_reply_predicted,
+    send_reply_predicted_tokens_with_stats, send_reply_predicted_tokens_with_window_and_stats,
     send_reply_predicted_with_stats, send_reply_predicted_with_tokens_and_stats,
-    write_stage_message,
+    send_reply_predicted_with_tokens_window_and_stats, write_stage_message,
 };
 pub use types::{
     ACTIVATION_FLAG_GEMMA3N_ALTUP, ACTIVATION_FLAG_RWKV7_V_FIRST, LLAMA_TOKEN_NULL,
@@ -20,8 +21,8 @@ pub use types::{
     MAX_STAGE_SIDEBAND_VALUES, MAX_STAGE_STATE_IMPORT_BYTES, READY_MAGIC,
     STAGE_LOGIT_BIAS_WIRE_BYTES, STAGE_SAMPLING_CONFIG_BASE_BYTES, STAGE_STATE_HEADER_BYTES,
     STAGE_STATE_VERSION, STAGE_WIRE_FIXED_HEADER_BYTES, StageLogitBias, StageReply,
-    StageReplyStats, StageRequestEpoch, StageSamplingConfig, StageStateHeader, StageWireMessage,
-    WireActivationDType, WireMessageKind, WireReplyKind, WireStagePhase,
+    StageReplyStats, StageReplyWindow, StageRequestEpoch, StageSamplingConfig, StageStateHeader,
+    StageWireMessage, WireActivationDType, WireMessageKind, WireReplyKind, WireStagePhase,
     activation_frame_flags_from_state_flags, activation_state_flags_from_frame_flags, state_flags,
 };
 
@@ -148,6 +149,29 @@ mod tests {
         assert_eq!(reply.kind, WireReplyKind::PredictedTokens);
         assert_eq!(reply.predicted, 1);
         assert_eq!(reply.predicted_tokens, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn reply_window_metadata_round_trips() {
+        let mut bytes = Vec::new();
+        send_reply_predicted_tokens_with_window_and_stats(
+            &mut bytes,
+            &[1, 2, 3],
+            StageReplyWindow {
+                window_id: 42,
+                accepted_len: 2,
+                correction_token: 9,
+            },
+            StageReplyStats::default(),
+        )
+        .unwrap();
+        let reply = recv_reply(Cursor::new(bytes)).unwrap();
+
+        assert_eq!(reply.kind, WireReplyKind::PredictedTokens);
+        assert_eq!(reply.predicted_tokens, vec![1, 2, 3]);
+        assert_eq!(reply.window.window_id, 42);
+        assert_eq!(reply.window.accepted_len, 2);
+        assert_eq!(reply.window.correction_token, 9);
     }
 
     #[test]

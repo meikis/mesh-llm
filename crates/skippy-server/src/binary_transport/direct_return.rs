@@ -17,9 +17,8 @@ use skippy_protocol::{
     StageConfig, StageTopology,
     binary::{
         StageReply, StageStateHeader, StageWireMessage, WireActivationDType, WireMessageKind,
-        WireReplyKind, read_stage_message, recv_ready, recv_reply, send_ready,
-        send_reply_ack_with_stats, send_reply_predicted_tokens_with_stats,
-        send_reply_predicted_with_tokens_and_stats, write_stage_message,
+        WireReplyKind, read_stage_message, recv_ready, recv_reply, send_ready, send_reply_message,
+        write_stage_message,
     },
 };
 
@@ -360,22 +359,7 @@ pub(crate) fn send_direct_prediction_return(
     stream: &mut TcpStream,
     reply: StageReply,
 ) -> Result<()> {
-    match reply.kind {
-        WireReplyKind::PredictedToken => send_reply_predicted_with_tokens_and_stats(
-            stream,
-            reply.predicted,
-            &reply.predicted_tokens,
-            reply.stats,
-        )
-        .context("send direct predicted-token return"),
-        WireReplyKind::PredictedTokens => {
-            send_reply_predicted_tokens_with_stats(stream, &reply.predicted_tokens, reply.stats)
-                .context("send direct predicted-tokens return")
-        }
-        WireReplyKind::Ack => {
-            send_reply_ack_with_stats(stream, reply.stats).context("send direct ACK return")
-        }
-    }
+    send_reply_message(stream, &reply).context("send direct prediction return")
 }
 
 fn driver_stage_endpoint<'a>(
@@ -468,6 +452,11 @@ mod tests {
             kind: WireReplyKind::PredictedToken,
             predicted: 42,
             predicted_tokens: vec![42, 43, 123],
+            window: skippy_protocol::binary::StageReplyWindow {
+                window_id: 7,
+                accepted_len: 2,
+                correction_token: 123,
+            },
             stats: Default::default(),
         };
         send_direct_prediction_return(&mut server, reply).unwrap();
@@ -476,6 +465,9 @@ mod tests {
         assert_eq!(received.kind, WireReplyKind::PredictedToken);
         assert_eq!(received.predicted, 42);
         assert_eq!(received.predicted_tokens, vec![42, 43, 123]);
+        assert_eq!(received.window.window_id, 7);
+        assert_eq!(received.window.accepted_len, 2);
+        assert_eq!(received.window.correction_token, 123);
     }
 
     #[test]

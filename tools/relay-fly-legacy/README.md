@@ -5,10 +5,16 @@ mesh-llm production relay operations use managed iroh relay infrastructure via
 
 | Relay | Region | URL |
 |-------|--------|-----|
+| USW1-1 | US West | `https://usw1-1.relay.michaelneale.mesh-llm.iroh.link./` |
 | USW1-2 | US West | `https://usw1-2.relay.michaelneale.mesh-llm.iroh.link./` |
 | APS1-1 | Asia-Pacific South | `https://aps1-1.relay.michaelneale.mesh-llm.iroh.link./` |
+| APS1-2 | Asia-Pacific South | `https://aps1-2.relay.michaelneale.mesh-llm.iroh.link./` |
 
-These are configured as defaults in `crates/mesh-llm/src/mesh/mod.rs`.
+These are configured as defaults in
+`crates/mesh-llm-host-runtime/src/mesh/mod.rs`. mesh-llm includes both managed
+relay aliases per region so clients can survive relay certificate rotations
+where one alias remains DNS-valid but the server presents the paired alias in
+its certificate.
 
 `mesh-llm-relay.fly.dev` is retained here as a Fly.io deployment reference.
 

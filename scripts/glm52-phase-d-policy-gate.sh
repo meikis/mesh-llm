@@ -207,7 +207,7 @@ run_case prefill-short prefill direct_sparse prefill short_prefill 0 \
   --n-batch 8 \
   --n-ubatch 8
 
-run_case prefill-long-safe-fallback dense-prefill dense_mask other direct_sparse_disabled 0 \
+run_case prefill-long-safe-fallback dense-prefill dense_mask other token_shape_not_allowed 0 \
   --layer-start 30 \
   --layer-end 34 \
   --ctx-size 512 \

@@ -37,6 +37,7 @@ SPARSE_ATTN_THREADS="${SPARSE_ATTN_THREADS:-}"
 SPARSE_ATTN_GROUP_HEADS="${SPARSE_ATTN_GROUP_HEADS:-}"
 METAL_DISPATCH_LOG="${METAL_DISPATCH_LOG:-0}"
 METAL_TOPK_MOE_ROUTE_FUSION="${METAL_TOPK_MOE_ROUTE_FUSION:-0}"
+METAL_TOPK_MOE_ROUTE_PACK="${METAL_TOPK_MOE_ROUTE_PACK:-0}"
 TRACE_ROUTE_TENSORS="${TRACE_ROUTE_TENSORS:-0}"
 TRACE_ROUTE_TENSOR_FILTER="${TRACE_ROUTE_TENSOR_FILTER:-}"
 OUT_DIR="${OUT_DIR:-/tmp}"
@@ -104,6 +105,12 @@ Options:
                            Enable native Metal top-k MoE route fusion during this run.
   --no-metal-topk-moe-route-fusion
                            Disable native Metal top-k MoE route fusion. Default for Phase B.
+  --metal-topk-moe-route-pack
+                           Enable experimental Metal top-k MoE route graph packing.
+                           Default is off so sparse-attention correctness gates are not
+                           contaminated by MoE route-pack experiments.
+  --no-metal-topk-moe-route-pack
+                           Disable experimental Metal top-k MoE route graph packing.
   --trace-route-tensors    Capture native route tensor digests and compare baseline/candidate traces.
   --trace-route-tensor-filter FILTER
                            Comma-separated tensor-name substrings to trace.
@@ -272,6 +279,14 @@ while [[ $# -gt 0 ]]; do
       METAL_TOPK_MOE_ROUTE_FUSION=0
       shift
       ;;
+    --metal-topk-moe-route-pack)
+      METAL_TOPK_MOE_ROUTE_PACK=1
+      shift
+      ;;
+    --no-metal-topk-moe-route-pack)
+      METAL_TOPK_MOE_ROUTE_PACK=0
+      shift
+      ;;
     --trace-route-tensors)
       TRACE_ROUTE_TENSORS=1
       shift
@@ -318,6 +333,8 @@ if [[ ! -d "$STAGE_MODEL" ]]; then
   echo "stage model package not found: $STAGE_MODEL" >&2
   exit 1
 fi
+
+export SKIPPY_GLM_DSA_ENABLE_METAL_TOPK_MOE_ROUTE_PACK="$METAL_TOPK_MOE_ROUTE_PACK"
 
 mkdir -p "$OUT_DIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"

@@ -207,7 +207,7 @@ run_case prefill-long-safe-fallback dense-prefill dense_mask other direct_sparse
   --dense-sparse-mask-max-bytes 1
 
 if [[ "$QUICK" != "1" ]]; then
-  run_case decode-compact-large-topk compact compact_flash decode decode_compact_large_top_k 0 \
+  run_case decode-compact-large-topk compact compact_flash decode decode_compact_mask_omitted 0 \
     --layer-start 74 \
     --layer-end 78 \
     --ctx-size 512 \

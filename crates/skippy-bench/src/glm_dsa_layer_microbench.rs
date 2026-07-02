@@ -300,9 +300,14 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
     let compact_flash_guard = args
         .require_compact_flash_proof
         .then(|| build_compact_flash_guard(&case));
-    let moe_weighted_sum_guard = args
-        .require_moe_weighted_sum_proof
-        .then(|| build_moe_weighted_sum_guard(&case));
+    let moe_weighted_sum_guard = args.require_moe_weighted_sum_proof.then(|| {
+        let requirement = MoeWeightedSumRequirement::from_flags(case.flags);
+        if matches!(requirement, MoeWeightedSumRequirement::AnyOptimizedPath) {
+            build_moe_weighted_sum_guard(&case)
+        } else {
+            build_moe_weighted_sum_guard_with_requirement(&case, requirement)
+        }
+    });
     let moe_motif_guard = args
         .require_moe_motif_proof
         .then(|| build_moe_motif_guard(&case, optimized_dispatch_probe.as_ref()));
@@ -5351,6 +5356,7 @@ struct CompactFlashGuardReport {
 struct MoeWeightedSumGuardReport {
     checked_case: &'static str,
     passed: bool,
+    required_path: &'static str,
     moe_weighted_sum_records: usize,
     moe_weighted_sum_f32x4_records: usize,
     moe_weighted_sum_already_weighted_records: usize,
@@ -5359,6 +5365,33 @@ struct MoeWeightedSumGuardReport {
     mul_mv_id_weighted_slots_records: usize,
     mul_mv_id_weighted_slots_q3_k_records: usize,
     failure_summary: String,
+}
+
+#[derive(Clone, Copy)]
+enum MoeWeightedSumRequirement {
+    AnyOptimizedPath,
+    FusedWeightedDown,
+    WeightedSlots,
+}
+
+impl MoeWeightedSumRequirement {
+    fn from_flags(flags: MicrobenchFlags) -> Self {
+        if flags.moe_down_weighted_fusion {
+            Self::FusedWeightedDown
+        } else if flags.moe_down_weighted_parallel || flags.moe_down_unweighted_slots {
+            Self::WeightedSlots
+        } else {
+            Self::AnyOptimizedPath
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AnyOptimizedPath => "any_optimized_path",
+            Self::FusedWeightedDown => "fused_weighted_down",
+            Self::WeightedSlots => "weighted_slots",
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -6095,6 +6128,16 @@ fn compact_get_rows_records(records: &[MetalDispatchRecord]) -> Vec<&MetalDispat
 }
 
 fn build_moe_weighted_sum_guard(candidate: &MicrobenchCaseSummary) -> MoeWeightedSumGuardReport {
+    build_moe_weighted_sum_guard_with_requirement(
+        candidate,
+        MoeWeightedSumRequirement::AnyOptimizedPath,
+    )
+}
+
+fn build_moe_weighted_sum_guard_with_requirement(
+    candidate: &MicrobenchCaseSummary,
+    requirement: MoeWeightedSumRequirement,
+) -> MoeWeightedSumGuardReport {
     let dispatch = &candidate.metal_dispatch_summary;
     let mut failures = Vec::new();
     let standalone_weighted_sum_ok = dispatch.moe_weighted_sum_records > 0
@@ -6107,50 +6150,35 @@ fn build_moe_weighted_sum_guard(candidate: &MicrobenchCaseSummary) -> MoeWeighte
             == dispatch.mul_mv_id_weighted_slots_records
         && dispatch.moe_weighted_sum_already_weighted_records > 0;
 
-    if !standalone_weighted_sum_ok && !fused_weighted_sum_ok && !parallel_weighted_slots_ok {
-        if dispatch.moe_weighted_sum_records == 0 {
-            failures.push("missing_moe_weighted_sum");
+    let passed = match requirement {
+        MoeWeightedSumRequirement::AnyOptimizedPath => {
+            standalone_weighted_sum_ok || fused_weighted_sum_ok || parallel_weighted_slots_ok
         }
-        if dispatch.moe_weighted_sum_f32x4_records == 0
-            && dispatch.moe_weighted_sum_already_weighted_records == 0
-        {
-            failures.push("missing_moe_weighted_sum_f32x4");
-        }
-        if dispatch.moe_weighted_sum_records > 0
-            && dispatch.moe_weighted_sum_f32x4_records != dispatch.moe_weighted_sum_records
-            && dispatch.moe_weighted_sum_already_weighted_records
-                != dispatch.moe_weighted_sum_records
-        {
-            failures.push("non_f32x4_moe_weighted_sum_present");
-        }
-        if dispatch.mul_mv_id_weighted_sum_fused_records == 0 {
-            failures.push("missing_mul_mv_id_weighted_sum_fused");
-        }
-        if dispatch.mul_mv_id_weighted_sum_fused_records > 0
-            && dispatch.mul_mv_id_weighted_sum_fused_q3_k_records
-                != dispatch.mul_mv_id_weighted_sum_fused_records
-        {
-            failures.push("non_q3_k_mul_mv_id_weighted_sum_fused_present");
-        }
-        if dispatch.mul_mv_id_weighted_slots_records == 0 {
-            failures.push("missing_mul_mv_id_weighted_slots");
-        }
-        if dispatch.mul_mv_id_weighted_slots_records > 0
-            && dispatch.mul_mv_id_weighted_slots_q3_k_records
-                != dispatch.mul_mv_id_weighted_slots_records
-        {
-            failures.push("non_q3_k_mul_mv_id_weighted_slots_present");
-        }
-        if dispatch.mul_mv_id_weighted_slots_records > 0
-            && dispatch.moe_weighted_sum_already_weighted_records == 0
-        {
-            failures.push("missing_already_weighted_moe_weighted_sum");
+        MoeWeightedSumRequirement::FusedWeightedDown => fused_weighted_sum_ok,
+        MoeWeightedSumRequirement::WeightedSlots => parallel_weighted_slots_ok,
+    };
+
+    if !passed {
+        match requirement {
+            MoeWeightedSumRequirement::AnyOptimizedPath => {
+                append_standalone_weighted_sum_failures(dispatch, &mut failures);
+                append_fused_weighted_down_failures(dispatch, &mut failures);
+                append_weighted_slots_failures(dispatch, &mut failures);
+            }
+            MoeWeightedSumRequirement::FusedWeightedDown => {
+                failures.push("required_fused_weighted_down");
+                append_fused_weighted_down_failures(dispatch, &mut failures);
+            }
+            MoeWeightedSumRequirement::WeightedSlots => {
+                failures.push("required_weighted_slots");
+                append_weighted_slots_failures(dispatch, &mut failures);
+            }
         }
     }
-    let passed = failures.is_empty();
     MoeWeightedSumGuardReport {
         checked_case: candidate.label,
         passed,
+        required_path: requirement.as_str(),
         moe_weighted_sum_records: dispatch.moe_weighted_sum_records,
         moe_weighted_sum_f32x4_records: dispatch.moe_weighted_sum_f32x4_records,
         moe_weighted_sum_already_weighted_records: dispatch
@@ -6165,6 +6193,59 @@ fn build_moe_weighted_sum_guard(candidate: &MicrobenchCaseSummary) -> MoeWeighte
         } else {
             failures.join(",")
         },
+    }
+}
+
+fn append_standalone_weighted_sum_failures(
+    dispatch: &GlmDsaDispatchSummary,
+    failures: &mut Vec<&'static str>,
+) {
+    if dispatch.moe_weighted_sum_records == 0 {
+        failures.push("missing_moe_weighted_sum");
+    }
+    if dispatch.moe_weighted_sum_f32x4_records == 0
+        && dispatch.moe_weighted_sum_already_weighted_records == 0
+    {
+        failures.push("missing_moe_weighted_sum_f32x4");
+    }
+    if dispatch.moe_weighted_sum_records > 0
+        && dispatch.moe_weighted_sum_f32x4_records != dispatch.moe_weighted_sum_records
+        && dispatch.moe_weighted_sum_already_weighted_records != dispatch.moe_weighted_sum_records
+    {
+        failures.push("non_f32x4_moe_weighted_sum_present");
+    }
+}
+
+fn append_fused_weighted_down_failures(
+    dispatch: &GlmDsaDispatchSummary,
+    failures: &mut Vec<&'static str>,
+) {
+    if dispatch.mul_mv_id_weighted_sum_fused_records == 0 {
+        failures.push("missing_mul_mv_id_weighted_sum_fused");
+    }
+    if dispatch.mul_mv_id_weighted_sum_fused_records > 0
+        && dispatch.mul_mv_id_weighted_sum_fused_q3_k_records
+            != dispatch.mul_mv_id_weighted_sum_fused_records
+    {
+        failures.push("non_q3_k_mul_mv_id_weighted_sum_fused_present");
+    }
+}
+
+fn append_weighted_slots_failures(
+    dispatch: &GlmDsaDispatchSummary,
+    failures: &mut Vec<&'static str>,
+) {
+    if dispatch.mul_mv_id_weighted_slots_records == 0 {
+        failures.push("missing_mul_mv_id_weighted_slots");
+    }
+    if dispatch.mul_mv_id_weighted_slots_records > 0
+        && dispatch.mul_mv_id_weighted_slots_q3_k_records
+            != dispatch.mul_mv_id_weighted_slots_records
+    {
+        failures.push("non_q3_k_mul_mv_id_weighted_slots_present");
+    }
+    if dispatch.moe_weighted_sum_already_weighted_records == 0 {
+        failures.push("missing_already_weighted_moe_weighted_sum");
     }
 }
 
@@ -7823,6 +7904,7 @@ mod tests {
         let guard = build_moe_weighted_sum_guard(&candidate);
 
         assert!(guard.passed);
+        assert_eq!(guard.required_path, "any_optimized_path");
         assert_eq!(guard.moe_weighted_sum_records, 4);
         assert_eq!(guard.moe_weighted_sum_f32x4_records, 4);
         assert_eq!(guard.mul_mv_id_weighted_sum_fused_records, 0);
@@ -7843,6 +7925,7 @@ mod tests {
         let guard = build_moe_weighted_sum_guard(&candidate);
 
         assert!(guard.passed);
+        assert_eq!(guard.required_path, "any_optimized_path");
         assert_eq!(guard.moe_weighted_sum_records, 0);
         assert_eq!(guard.moe_weighted_sum_f32x4_records, 0);
         assert_eq!(guard.mul_mv_id_weighted_sum_fused_records, 4);
@@ -7867,6 +7950,7 @@ mod tests {
         let guard = build_moe_weighted_sum_guard(&candidate);
 
         assert!(guard.passed);
+        assert_eq!(guard.required_path, "any_optimized_path");
         assert_eq!(guard.moe_weighted_sum_records, 4);
         assert_eq!(guard.moe_weighted_sum_already_weighted_records, 4);
         assert_eq!(guard.mul_mv_id_weighted_slots_records, 4);
@@ -7921,6 +8005,61 @@ mod tests {
             guard
                 .failure_summary
                 .contains("non_q3_k_mul_mv_id_weighted_sum_fused_present")
+        );
+    }
+
+    #[test]
+    fn moe_weighted_sum_guard_rejects_fallback_for_required_fused_down_path() {
+        let mut candidate = case_summary("candidate", 0, 0, 0);
+        candidate.metal_dispatch_summary.moe_weighted_sum_records = 4;
+        candidate
+            .metal_dispatch_summary
+            .moe_weighted_sum_f32x4_records = 4;
+
+        let guard = build_moe_weighted_sum_guard_with_requirement(
+            &candidate,
+            MoeWeightedSumRequirement::FusedWeightedDown,
+        );
+
+        assert!(!guard.passed);
+        assert_eq!(guard.required_path, "fused_weighted_down");
+        assert!(
+            guard
+                .failure_summary
+                .contains("required_fused_weighted_down")
+        );
+        assert!(
+            guard
+                .failure_summary
+                .contains("missing_mul_mv_id_weighted_sum_fused")
+        );
+    }
+
+    #[test]
+    fn moe_weighted_sum_guard_rejects_fallback_for_required_weighted_slots_path() {
+        let mut candidate = case_summary("candidate", 0, 0, 0);
+        candidate.metal_dispatch_summary.moe_weighted_sum_records = 4;
+        candidate
+            .metal_dispatch_summary
+            .moe_weighted_sum_f32x4_records = 4;
+
+        let guard = build_moe_weighted_sum_guard_with_requirement(
+            &candidate,
+            MoeWeightedSumRequirement::WeightedSlots,
+        );
+
+        assert!(!guard.passed);
+        assert_eq!(guard.required_path, "weighted_slots");
+        assert!(guard.failure_summary.contains("required_weighted_slots"));
+        assert!(
+            guard
+                .failure_summary
+                .contains("missing_mul_mv_id_weighted_slots")
+        );
+        assert!(
+            guard
+                .failure_summary
+                .contains("missing_already_weighted_moe_weighted_sum")
         );
     }
 

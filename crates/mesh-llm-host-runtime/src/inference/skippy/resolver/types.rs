@@ -36,6 +36,7 @@ pub(crate) struct ResolvedSkippyConfig {
     pub(crate) hardware: ResolvedHardwareConfig,
     pub(crate) throughput: ResolvedThroughputConfig,
     pub(crate) skippy: ResolvedSkippyExecutionConfig,
+    pub(crate) generation_policy: Option<ResolvedGenerationPolicyConfig>,
     pub(crate) speculative: ResolvedSpeculativeConfig,
     pub(crate) request_defaults: ResolvedRequestDefaultsConfig,
 }
@@ -85,6 +86,25 @@ pub(crate) struct ResolvedSkippyExecutionConfig {
     pub(crate) lifecycle_startup_timeout_ms: Option<u64>,
     pub(crate) lifecycle_readiness_interval_ms: Option<u64>,
     pub(crate) lifecycle_health_interval_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ResolvedGenerationPolicyConfig {
+    pub(crate) profile: String,
+    pub(crate) decode: String,
+    pub(crate) short_prefill: String,
+    pub(crate) long_prefill: String,
+    pub(crate) verify: String,
+    pub(crate) indexshare: Option<String>,
+    pub(crate) selected_row_flash: Option<String>,
+    pub(crate) thresholds: ResolvedGenerationThresholdsConfig,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ResolvedGenerationThresholdsConfig {
+    pub(crate) short_prefill_max_tokens: Option<u32>,
+    pub(crate) compact_flash_min_kv: Option<u32>,
+    pub(crate) dense_mask_max_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

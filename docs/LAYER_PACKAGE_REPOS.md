@@ -36,11 +36,13 @@ Required rules:
 - Production refs should use immutable `hf://namespace/repo@revision` pins.
 
 Model-specific generation policy defaults belong under the manifest
-`generation` section. For GLM-DSA packages, use `generation.glm_dsa` for the
-package-validated phase policy, such as decode `compact-flash`, short-prefill
-`dense`, long-prefill `sparse-chunked`, and IndexShare `required`. Runtime
-config may override these values for experiments, but the package manifest is
-the source of truth for validated defaults. See
+`generation` section. Use `generation.policy` for the package-validated phase
+policy and `generation.thresholds` for resolver thresholds. For GLM-DSA
+packages, set a stable profile such as `glm-dsa-v1` and declare phase choices
+such as decode `compact-flash`, short-prefill `dense`, long-prefill
+`sparse-chunked`, and IndexShare `required`. Runtime config may override these
+values for experiments, but the package manifest is the source of truth for
+validated defaults. See
 [specs/layer-package-repos.md](specs/layer-package-repos.md#generation-defaults).
 
 ## Local package tooling

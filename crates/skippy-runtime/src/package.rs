@@ -60,7 +60,32 @@ pub struct LayerPackageInfo {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct PackageGenerationInfo {
+    pub policy: Option<PackageGenerationPolicyInfo>,
+    pub thresholds: Option<PackageGenerationThresholdsInfo>,
     pub speculative_decoding: Option<PackageSpeculativeDecodingInfo>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PackageGenerationPolicyInfo {
+    pub profile: String,
+    pub decode: String,
+    pub short_prefill: String,
+    pub long_prefill: String,
+    pub verify: String,
+    pub indexshare: Option<String>,
+    pub experimental: Option<PackageGenerationExperimentalPolicyInfo>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PackageGenerationExperimentalPolicyInfo {
+    pub selected_row_flash: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PackageGenerationThresholdsInfo {
+    pub short_prefill_max_tokens: Option<u32>,
+    pub compact_flash_min_kv: Option<u32>,
+    pub dense_mask_max_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -206,7 +231,40 @@ struct PackageShared {
 #[derive(Debug, Deserialize)]
 struct PackageGeneration {
     #[serde(default)]
+    policy: Option<PackageGenerationPolicy>,
+    #[serde(default)]
+    thresholds: Option<PackageGenerationThresholds>,
+    #[serde(default)]
     speculative_decoding: Option<PackageSpeculativeDecoding>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PackageGenerationPolicy {
+    profile: String,
+    decode: String,
+    short_prefill: String,
+    long_prefill: String,
+    verify: String,
+    #[serde(default)]
+    indexshare: Option<String>,
+    #[serde(default)]
+    experimental: Option<PackageGenerationExperimentalPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PackageGenerationExperimentalPolicy {
+    #[serde(default)]
+    selected_row_flash: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PackageGenerationThresholds {
+    #[serde(default)]
+    short_prefill_max_tokens: Option<u32>,
+    #[serde(default)]
+    compact_flash_min_kv: Option<u32>,
+    #[serde(default)]
+    dense_mask_max_bytes: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -545,9 +603,39 @@ pub fn inspect_layer_package(package_ref: &str) -> Result<LayerPackageInfo> {
 
 fn package_generation_info(generation: PackageGeneration) -> PackageGenerationInfo {
     PackageGenerationInfo {
+        policy: generation.policy.map(package_generation_policy_info),
+        thresholds: generation
+            .thresholds
+            .map(package_generation_thresholds_info),
         speculative_decoding: generation
             .speculative_decoding
             .map(package_speculative_decoding_info),
+    }
+}
+
+fn package_generation_policy_info(policy: PackageGenerationPolicy) -> PackageGenerationPolicyInfo {
+    PackageGenerationPolicyInfo {
+        profile: policy.profile,
+        decode: policy.decode,
+        short_prefill: policy.short_prefill,
+        long_prefill: policy.long_prefill,
+        verify: policy.verify,
+        indexshare: policy.indexshare,
+        experimental: policy.experimental.map(|experimental| {
+            PackageGenerationExperimentalPolicyInfo {
+                selected_row_flash: experimental.selected_row_flash,
+            }
+        }),
+    }
+}
+
+fn package_generation_thresholds_info(
+    thresholds: PackageGenerationThresholds,
+) -> PackageGenerationThresholdsInfo {
+    PackageGenerationThresholdsInfo {
+        short_prefill_max_tokens: thresholds.short_prefill_max_tokens,
+        compact_flash_min_kv: thresholds.compact_flash_min_kv,
+        dense_mask_max_bytes: thresholds.dense_mask_max_bytes,
     }
 }
 
@@ -1308,6 +1396,14 @@ mod tests {
         manifest
     }
 
+    fn write_generation_to_manifest(dir: &Path, generation: serde_json::Value) {
+        let manifest_path = dir.join("model-package.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["generation"] = generation;
+        fs::write(manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    }
+
     fn package_stage_request(package_ref: &Path) -> PackageStageRequest {
         PackageStageRequest {
             model_id: "model-a".to_string(),
@@ -1497,6 +1593,54 @@ mod tests {
             dir.path().join("projectors/mmproj.gguf")
         );
         assert_eq!(info.manifest_sha256.len(), 64);
+    }
+
+    #[test]
+    fn inspect_layer_package_returns_generation_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        write_package_fixture(dir.path());
+        write_generation_to_manifest(
+            dir.path(),
+            serde_json::json!({
+                "policy": {
+                    "profile": "glm-dsa-v1",
+                    "decode": "compact-flash",
+                    "short_prefill": "dense",
+                    "long_prefill": "sparse-chunked",
+                    "verify": "auto",
+                    "indexshare": "required",
+                    "experimental": {
+                        "selected_row_flash": "off"
+                    }
+                },
+                "thresholds": {
+                    "short_prefill_max_tokens": 2048,
+                    "compact_flash_min_kv": 256,
+                    "dense_mask_max_bytes": 268435456
+                }
+            }),
+        );
+
+        let info = inspect_layer_package(&dir.path().to_string_lossy()).unwrap();
+
+        let generation = info.generation.expect("generation should be exposed");
+        let policy = generation.policy.expect("policy should be exposed");
+        assert_eq!(policy.profile, "glm-dsa-v1");
+        assert_eq!(policy.decode, "compact-flash");
+        assert_eq!(policy.short_prefill, "dense");
+        assert_eq!(policy.long_prefill, "sparse-chunked");
+        assert_eq!(policy.verify, "auto");
+        assert_eq!(policy.indexshare.as_deref(), Some("required"));
+        assert_eq!(
+            policy
+                .experimental
+                .and_then(|policy| policy.selected_row_flash),
+            Some("off".to_string())
+        );
+        let thresholds = generation.thresholds.expect("thresholds should be exposed");
+        assert_eq!(thresholds.short_prefill_max_tokens, Some(2048));
+        assert_eq!(thresholds.compact_flash_min_kv, Some(256));
+        assert_eq!(thresholds.dense_mask_max_bytes, Some(268435456));
     }
 
     #[test]

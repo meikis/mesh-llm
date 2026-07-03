@@ -3,8 +3,8 @@ use super::*;
 use crate::inference::skippy::SkippyTelemetryOptions;
 use skippy_protocol::LoadMode;
 use skippy_runtime::package::{
-    PackageGenerationInfo, PackageSpeculativeDecodingInfo, PackageSpeculativeStrategyInfo,
-    PackageWindowPolicyInfo,
+    PackageGenerationInfo, PackageGenerationPolicyInfo, PackageGenerationThresholdsInfo,
+    PackageSpeculativeDecodingInfo, PackageSpeculativeStrategyInfo, PackageWindowPolicyInfo,
 };
 use std::collections::BTreeMap;
 
@@ -26,6 +26,8 @@ fn native_mtp_generation() -> PackageGenerationInfo {
     );
 
     PackageGenerationInfo {
+        policy: None,
+        thresholds: None,
         speculative_decoding: Some(PackageSpeculativeDecodingInfo {
             default: "native-mtp-n1".to_string(),
             strategies,
@@ -58,7 +60,7 @@ fn speculative_strategy_auto_without_package_generation_disables_native_mtp() {
     let stage = resolved
         .to_stage_config(Some(fake_package_identity(24)), LoadMode::LayerPackage)
         .expect("stage config should build");
-    assert!(!stage.native_mtp_enabled);
+    assert_eq!(stage.model_id, "Qwen/Qwen3-0.6B:Q4_K_M");
     let openai = resolved
         .to_embedded_openai_args(4096, true)
         .expect("openai args should build");
@@ -91,7 +93,7 @@ fn speculative_strategy_auto_uses_package_native_mtp_default() {
     let stage = resolved
         .to_stage_config(Some(fake_package_identity(24)), LoadMode::LayerPackage)
         .expect("stage config should build");
-    assert!(stage.native_mtp_enabled);
+    assert_eq!(stage.model_id, "meshllm/GLM-4.7-Flash-MTP-GGUF");
     let openai = resolved
         .to_embedded_openai_args(4096, true)
         .expect("openai args should build");
@@ -108,6 +110,8 @@ strategy = "native-mtp-n1"
     );
     let model_file = temp_model_file();
     let generation = PackageGenerationInfo {
+        policy: None,
+        thresholds: None,
         speculative_decoding: None,
     };
 
@@ -124,6 +128,62 @@ strategy = "native-mtp-n1"
     .to_string();
 
     assert!(error.contains("requires package generation metadata advertising native-mtp-n1"));
+}
+
+fn glm_dsa_generation() -> PackageGenerationInfo {
+    PackageGenerationInfo {
+        policy: Some(PackageGenerationPolicyInfo {
+            profile: "glm-dsa-v1".to_string(),
+            decode: "compact-flash".to_string(),
+            short_prefill: "dense".to_string(),
+            long_prefill: "sparse-chunked".to_string(),
+            verify: "auto".to_string(),
+            indexshare: Some("required".to_string()),
+            experimental: Some(
+                skippy_runtime::package::PackageGenerationExperimentalPolicyInfo {
+                    selected_row_flash: Some("off".to_string()),
+                },
+            ),
+        }),
+        thresholds: Some(PackageGenerationThresholdsInfo {
+            short_prefill_max_tokens: Some(2048),
+            compact_flash_min_kv: Some(256),
+            dense_mask_max_bytes: Some(268435456),
+        }),
+        speculative_decoding: None,
+    }
+}
+
+#[test]
+fn resolver_exposes_package_generation_policy() {
+    let mesh_config = parse_config("");
+    let model_file = temp_model_file();
+    let generation = glm_dsa_generation();
+
+    let resolved = resolve_skippy_config(SkippyConfigResolveRequest {
+        mesh_config: &mesh_config,
+        model_id: "meshllm/GLM-5.2-Q2_K-MTP-Q8-layers",
+        model_path: model_file.path(),
+        model_bytes: 260 * 1024 * 1024 * 1024,
+        allocatable_memory_bytes: None,
+        request_defaults: None,
+        package_generation: Some(&generation),
+    })
+    .expect("GLM-DSA package policy should resolve");
+
+    let policy = resolved
+        .generation_policy
+        .expect("package policy should be carried into resolved config");
+    assert_eq!(policy.profile, "glm-dsa-v1");
+    assert_eq!(policy.decode, "compact-flash");
+    assert_eq!(policy.short_prefill, "dense");
+    assert_eq!(policy.long_prefill, "sparse-chunked");
+    assert_eq!(policy.verify, "auto");
+    assert_eq!(policy.indexshare.as_deref(), Some("required"));
+    assert_eq!(policy.selected_row_flash.as_deref(), Some("off"));
+    assert_eq!(policy.thresholds.short_prefill_max_tokens, Some(2048));
+    assert_eq!(policy.thresholds.compact_flash_min_kv, Some(256));
+    assert_eq!(policy.thresholds.dense_mask_max_bytes, Some(268435456));
 }
 
 #[test]
@@ -156,7 +216,7 @@ strategy = "disabled"
     let stage = resolved
         .to_stage_config(Some(fake_package_identity(24)), LoadMode::LayerPackage)
         .expect("stage config should build");
-    assert!(!stage.native_mtp_enabled);
+    assert_eq!(stage.model_id, "Qwen/Qwen3-0.6B:Q4_K_M");
     let openai = resolved
         .to_embedded_openai_args(4096, true)
         .expect("openai args should build");

@@ -287,6 +287,5 @@ mod tests {
             stage0.projector_path.as_deref(),
             Some("/models/mmproj.gguf")
         );
-        assert!(!stage0.native_mtp_enabled);
     }
 }

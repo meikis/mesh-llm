@@ -185,20 +185,21 @@ Minimal shape:
     }
   },
   "generation": {
-    "glm_dsa": {
-      "policy": {
-        "decode": "compact-flash",
-        "short_prefill": "dense",
-        "long_prefill": "sparse-chunked",
-        "verify": "auto",
-        "indexshare": "required",
-        "selected_row_flash": "experimental-off"
-      },
-      "thresholds": {
-        "short_prefill_max_tokens": 2048,
-        "compact_flash_min_kv": 256,
-        "dense_mask_max_bytes": 268435456
+    "policy": {
+      "profile": "glm-dsa-v1",
+      "decode": "compact-flash",
+      "short_prefill": "dense",
+      "long_prefill": "sparse-chunked",
+      "verify": "auto",
+      "indexshare": "required",
+      "experimental": {
+        "selected_row_flash": "off"
       }
+    },
+    "thresholds": {
+      "short_prefill_max_tokens": 2048,
+      "compact_flash_min_kv": 256,
+      "dense_mask_max_bytes": 268435456
     },
     "speculative_decoding": {
       "default": "native-mtp-n1",
@@ -294,36 +295,43 @@ speculative decoding strategy. Runtime config and explicit CLI/environment
 overrides MAY override these defaults for experiments, but consumers SHOULD log
 the final resolved policy and the package recommendation that was overridden.
 
-#### GLM-DSA Policy
+#### Execution Policy
 
-GLM-DSA packages MAY declare `generation.glm_dsa` to describe the
-package-validated sparse-attention policy profile. This profile is a model
-execution policy, not a backend implementation detail. It should use stable
-semantic path names such as `compact-flash` rather than Metal/CUDA kernel names.
+Packages MAY declare `generation.policy` to describe the package-validated
+execution profile. This profile is a model execution policy, not a backend
+implementation detail. It should use stable semantic path names such as
+`compact-flash` rather than Metal/CUDA kernel names.
 
 The current proposed shape is:
 
 ```json
 {
   "generation": {
-    "glm_dsa": {
-      "policy": {
-        "decode": "compact-flash",
-        "short_prefill": "dense",
-        "long_prefill": "sparse-chunked",
-        "verify": "auto",
-        "indexshare": "required",
-        "selected_row_flash": "experimental-off"
-      },
-      "thresholds": {
-        "short_prefill_max_tokens": 2048,
-        "compact_flash_min_kv": 256,
-        "dense_mask_max_bytes": 268435456
+    "policy": {
+      "profile": "glm-dsa-v1",
+      "decode": "compact-flash",
+      "short_prefill": "dense",
+      "long_prefill": "sparse-chunked",
+      "verify": "auto",
+      "indexshare": "required",
+      "experimental": {
+        "selected_row_flash": "off"
       }
+    },
+    "thresholds": {
+      "short_prefill_max_tokens": 2048,
+      "compact_flash_min_kv": 256,
+      "dense_mask_max_bytes": 268435456
     }
   }
 }
 ```
+
+`profile` names the policy family and version. For GLM-DSA packages, use
+`glm-dsa-v1` until a later profile intentionally changes the meaning of the
+phase fields or thresholds. Other model families SHOULD use their own stable
+profile names instead of adding model-family-specific top-level objects under
+`generation`.
 
 Policy values are intentionally phase-specific:
 
@@ -339,8 +347,8 @@ Policy values are intentionally phase-specific:
 - `indexshare`: whether Shared GLM-DSA layers require local IndexShare/top-k
   state. `required` means a consumer must not silently recompute shared-layer
   indexers unless an explicit fallback policy is selected and logged.
-- `selected_row_flash`: controls selected-row flash fusion. Use
-  `experimental-off` until the package has reproducible wins for that path.
+- `experimental.selected_row_flash`: controls selected-row flash fusion. Use
+  `off` until the package has reproducible wins for that path.
 
 Suggested semantic path values are:
 
@@ -352,11 +360,12 @@ Suggested semantic path values are:
 - `fallback`: named correctness fallback when a native sparse backend is not
   available.
 
-`thresholds` are package recommendations. Consumers SHOULD treat them as input
-to the runtime policy resolver, not as hard schema limits. Every GLM-DSA policy
-decision SHOULD emit telemetry containing the phase, selected path, rejected
-path or fallback reason, `n_kv`, `top_k`, IndexShare role, backend, and any
-dense sparse-mask allocation avoided.
+`generation.thresholds` are package recommendations. Consumers SHOULD treat
+them as input to the runtime policy resolver, not as hard schema limits. Every
+policy decision SHOULD emit telemetry containing the policy profile, phase,
+selected path, rejected path or fallback reason, `n_kv`, `top_k` when present,
+IndexShare role when present, backend, and any dense sparse-mask allocation
+avoided.
 
 #### Speculative Decoding
 

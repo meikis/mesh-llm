@@ -233,7 +233,40 @@ struct PackageShared {
 #[derive(Debug, Deserialize, Serialize)]
 struct PackageGeneration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    policy: Option<PackageGenerationPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thresholds: Option<PackageGenerationThresholds>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     speculative_decoding: Option<PackageSpeculativeDecoding>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PackageGenerationPolicy {
+    profile: String,
+    decode: String,
+    short_prefill: String,
+    long_prefill: String,
+    verify: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    indexshare: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    experimental: Option<PackageGenerationExperimentalPolicy>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PackageGenerationExperimentalPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selected_row_flash: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PackageGenerationThresholds {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    short_prefill_max_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compact_flash_min_kv: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dense_mask_max_bytes: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -2021,33 +2054,70 @@ fn layer_count(tensors: &[TensorInfo]) -> Result<u32> {
 
 fn package_generation(tensors: &[TensorInfo]) -> Option<PackageGeneration> {
     let mtp_layers = native_mtp_layer_indices(tensors);
-    if mtp_layers.is_empty() {
+    let policy = if is_glm_dsa_package(tensors) {
+        Some(PackageGenerationPolicy {
+            profile: "glm-dsa-v1".to_string(),
+            decode: "compact-flash".to_string(),
+            short_prefill: "dense".to_string(),
+            long_prefill: "sparse-chunked".to_string(),
+            verify: "auto".to_string(),
+            indexshare: Some("required".to_string()),
+            experimental: Some(PackageGenerationExperimentalPolicy {
+                selected_row_flash: Some("off".to_string()),
+            }),
+        })
+    } else {
+        None
+    };
+    let thresholds = policy.as_ref().map(|_| PackageGenerationThresholds {
+        short_prefill_max_tokens: Some(2048),
+        compact_flash_min_kv: Some(256),
+        dense_mask_max_bytes: Some(256 * 1024 * 1024),
+    });
+    if mtp_layers.is_empty() && policy.is_none() {
         return None;
     }
 
     let strategy_id = "native-mtp-n1".to_string();
     let mut strategies = BTreeMap::new();
-    strategies.insert(
-        strategy_id.clone(),
-        PackageSpeculativeStrategy {
-            strategy_type: "native-mtp".to_string(),
-            prediction_depth: Some(1),
-            layer_indices: mtp_layers,
-            window_policy: Some(PackageWindowPolicy {
-                default: "fixed".to_string(),
-                initial_window: 1,
-                min_window: 1,
-                max_window: 1,
-            }),
-        },
-    );
+    if !mtp_layers.is_empty() {
+        strategies.insert(
+            strategy_id.clone(),
+            PackageSpeculativeStrategy {
+                strategy_type: "native-mtp".to_string(),
+                prediction_depth: Some(1),
+                layer_indices: mtp_layers,
+                window_policy: Some(PackageWindowPolicy {
+                    default: "fixed".to_string(),
+                    initial_window: 1,
+                    min_window: 1,
+                    max_window: 1,
+                }),
+            },
+        );
+    }
 
     Some(PackageGeneration {
-        speculative_decoding: Some(PackageSpeculativeDecoding {
+        policy,
+        thresholds,
+        speculative_decoding: (!strategies.is_empty()).then_some(PackageSpeculativeDecoding {
             default: strategy_id,
             strategies,
         }),
     })
+}
+
+fn is_glm_dsa_package(tensors: &[TensorInfo]) -> bool {
+    let has_k_b = tensors
+        .iter()
+        .any(|tensor| tensor.name.contains(".attn_k_b."));
+    let has_v_b = tensors
+        .iter()
+        .any(|tensor| tensor.name.contains(".attn_v_b."));
+    let has_kv_a = tensors
+        .iter()
+        .any(|tensor| tensor.name.contains(".attn_kv_a_mqa."));
+    has_k_b && has_v_b && has_kv_a
 }
 
 fn native_mtp_layer_indices(tensors: &[TensorInfo]) -> Vec<u32> {
@@ -2237,9 +2307,9 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExplicitSourceIdentity, activation_width, local_artifact_files, model_distribution_id,
-        native_mtp_layer_indices, package_generation, resolve_gguf_shard_paths,
-        resolve_local_package_input,
+        ExplicitSourceIdentity, activation_width, is_glm_dsa_package, local_artifact_files,
+        model_distribution_id, native_mtp_layer_indices, package_generation,
+        resolve_gguf_shard_paths, resolve_local_package_input,
     };
     use skippy_ffi::TensorRole;
     use skippy_runtime::TensorInfo;
@@ -2298,6 +2368,40 @@ mod tests {
         let tensors = vec![tensor("blk.0.attn_norm.weight", Some(0))];
 
         assert!(package_generation(&tensors).is_none());
+    }
+
+    #[test]
+    fn package_generation_advertises_glm_dsa_policy() {
+        let tensors = vec![
+            tensor("blk.0.attn_k_b.weight", Some(0)),
+            tensor("blk.0.attn_v_b.weight", Some(0)),
+            tensor("blk.0.attn_kv_a_mqa.weight", Some(0)),
+        ];
+
+        assert!(is_glm_dsa_package(&tensors));
+        let generation =
+            package_generation(&tensors).expect("GLM-DSA tensors should enable generation policy");
+        let policy = generation.policy.expect("GLM-DSA should declare policy");
+        assert_eq!(policy.profile, "glm-dsa-v1");
+        assert_eq!(policy.decode, "compact-flash");
+        assert_eq!(policy.short_prefill, "dense");
+        assert_eq!(policy.long_prefill, "sparse-chunked");
+        assert_eq!(policy.verify, "auto");
+        assert_eq!(policy.indexshare.as_deref(), Some("required"));
+        assert_eq!(
+            policy
+                .experimental
+                .as_ref()
+                .and_then(|policy| policy.selected_row_flash.as_deref()),
+            Some("off")
+        );
+        let thresholds = generation
+            .thresholds
+            .expect("GLM-DSA should declare resolver thresholds");
+        assert_eq!(thresholds.short_prefill_max_tokens, Some(2048));
+        assert_eq!(thresholds.compact_flash_min_kv, Some(256));
+        assert_eq!(thresholds.dense_mask_max_bytes, Some(256 * 1024 * 1024));
+        assert!(generation.speculative_decoding.is_none());
     }
 
     #[test]

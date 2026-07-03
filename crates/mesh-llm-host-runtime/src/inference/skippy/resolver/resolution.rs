@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use super::super::{KvCachePolicy, StageWireDType, family_policy_for_model_path};
+use super::generation_policy::resolve_generation_policy_config;
 use super::request_defaults::resolve_request_defaults;
 use super::speculative::resolve_speculative_config;
 use super::support::{
@@ -35,6 +36,7 @@ pub(crate) fn resolve_skippy_config(
     let hardware = resolve_hardware_config(&context)?;
     let throughput = resolve_throughput_config(&context);
     let skippy = resolve_execution_config(&context, family_policy.activation_wire_dtype);
+    let generation_policy = resolve_generation_policy_config(context.request.package_generation);
     let speculative = resolve_speculative_config(
         context
             .model_entry
@@ -59,6 +61,7 @@ pub(crate) fn resolve_skippy_config(
         hardware,
         throughput,
         skippy,
+        generation_policy,
         speculative,
         request_defaults: resolved_request,
     })

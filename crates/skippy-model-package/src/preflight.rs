@@ -79,7 +79,40 @@ pub(crate) struct PreflightStage {
 #[derive(Debug, Serialize)]
 pub(crate) struct PreflightGeneration {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<PreflightGenerationPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thresholds: Option<PreflightGenerationThresholds>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub speculative_decoding: Option<PreflightSpeculativeDecoding>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PreflightGenerationPolicy {
+    pub profile: String,
+    pub decode: String,
+    pub short_prefill: String,
+    pub long_prefill: String,
+    pub verify: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indexshare: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub experimental: Option<PreflightGenerationExperimentalPolicy>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PreflightGenerationExperimentalPolicy {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_row_flash: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PreflightGenerationThresholds {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub short_prefill_max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compact_flash_min_kv: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dense_mask_max_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -143,7 +176,40 @@ struct PackageShared {
 #[derive(Debug, Deserialize)]
 struct PackageGeneration {
     #[serde(default)]
+    policy: Option<PackageGenerationPolicy>,
+    #[serde(default)]
+    thresholds: Option<PackageGenerationThresholds>,
+    #[serde(default)]
     speculative_decoding: Option<PackageSpeculativeDecoding>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PackageGenerationPolicy {
+    profile: String,
+    decode: String,
+    short_prefill: String,
+    long_prefill: String,
+    verify: String,
+    #[serde(default)]
+    indexshare: Option<String>,
+    #[serde(default)]
+    experimental: Option<PackageGenerationExperimentalPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PackageGenerationExperimentalPolicy {
+    #[serde(default)]
+    selected_row_flash: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PackageGenerationThresholds {
+    #[serde(default)]
+    short_prefill_max_tokens: Option<u32>,
+    #[serde(default)]
+    compact_flash_min_kv: Option<u32>,
+    #[serde(default)]
+    dense_mask_max_bytes: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -405,6 +471,14 @@ fn validate_generation(
     layer_count: u32,
     report: &mut PackagePreflightReport,
 ) {
+    if let Some(generation) = generation {
+        if let Some(policy) = generation.policy.as_ref() {
+            validate_generation_policy(policy, report);
+        }
+        if let Some(thresholds) = generation.thresholds.as_ref() {
+            validate_generation_thresholds(thresholds, report);
+        }
+    }
     let Some(speculative) =
         generation.and_then(|generation| generation.speculative_decoding.as_ref())
     else {
@@ -430,6 +504,81 @@ fn validate_generation(
     }
     for (name, strategy) in &speculative.strategies {
         validate_speculative_strategy(name, strategy, layer_count, report);
+    }
+}
+
+fn validate_generation_policy(
+    policy: &PackageGenerationPolicy,
+    report: &mut PackagePreflightReport,
+) {
+    for (field, value) in [
+        ("profile", &policy.profile),
+        ("decode", &policy.decode),
+        ("short_prefill", &policy.short_prefill),
+        ("long_prefill", &policy.long_prefill),
+        ("verify", &policy.verify),
+    ] {
+        if value.trim().is_empty() {
+            report.error(
+                "empty_generation_policy_field",
+                format!("generation.policy.{field} must not be empty"),
+                Some("model-package.json".to_string()),
+                "set a stable package execution policy value or remove generation.policy",
+            );
+        }
+    }
+    if let Some(indexshare) = &policy.indexshare
+        && indexshare.trim().is_empty()
+    {
+        report.error(
+            "empty_generation_policy_field",
+            "generation.policy.indexshare must not be empty when present",
+            Some("model-package.json".to_string()),
+            "set indexshare to a stable value such as required or remove the field",
+        );
+    }
+    if let Some(selected_row_flash) = policy
+        .experimental
+        .as_ref()
+        .and_then(|experimental| experimental.selected_row_flash.as_ref())
+        && selected_row_flash.trim().is_empty()
+    {
+        report.error(
+            "empty_generation_policy_field",
+            "generation.policy.experimental.selected_row_flash must not be empty when present",
+            Some("model-package.json".to_string()),
+            "set selected_row_flash to a stable value such as off or remove the field",
+        );
+    }
+}
+
+fn validate_generation_thresholds(
+    thresholds: &PackageGenerationThresholds,
+    report: &mut PackagePreflightReport,
+) {
+    if thresholds.short_prefill_max_tokens == Some(0) {
+        report.error(
+            "invalid_generation_threshold_zero",
+            "generation.thresholds.short_prefill_max_tokens must be greater than zero",
+            Some("model-package.json".to_string()),
+            "set a positive token threshold or remove the field",
+        );
+    }
+    if thresholds.compact_flash_min_kv == Some(0) {
+        report.error(
+            "invalid_generation_threshold_zero",
+            "generation.thresholds.compact_flash_min_kv must be greater than zero",
+            Some("model-package.json".to_string()),
+            "set a positive KV threshold or remove the field",
+        );
+    }
+    if thresholds.dense_mask_max_bytes == Some(0) {
+        report.error(
+            "invalid_generation_threshold_zero",
+            "generation.thresholds.dense_mask_max_bytes must be greater than zero",
+            Some("model-package.json".to_string()),
+            "set a positive byte threshold or remove the field",
+        );
     }
 }
 
@@ -546,10 +695,48 @@ fn validate_window_policy(
 
 fn preflight_generation(generation: &PackageGeneration) -> PreflightGeneration {
     PreflightGeneration {
+        policy: generation.policy.as_ref().map(preflight_generation_policy),
+        thresholds: generation
+            .thresholds
+            .as_ref()
+            .map(preflight_generation_thresholds),
         speculative_decoding: generation
             .speculative_decoding
             .as_ref()
             .map(preflight_speculative_decoding),
+    }
+}
+
+fn preflight_generation_policy(policy: &PackageGenerationPolicy) -> PreflightGenerationPolicy {
+    PreflightGenerationPolicy {
+        profile: policy.profile.clone(),
+        decode: policy.decode.clone(),
+        short_prefill: policy.short_prefill.clone(),
+        long_prefill: policy.long_prefill.clone(),
+        verify: policy.verify.clone(),
+        indexshare: policy.indexshare.clone(),
+        experimental: policy
+            .experimental
+            .as_ref()
+            .map(preflight_generation_experimental_policy),
+    }
+}
+
+fn preflight_generation_experimental_policy(
+    policy: &PackageGenerationExperimentalPolicy,
+) -> PreflightGenerationExperimentalPolicy {
+    PreflightGenerationExperimentalPolicy {
+        selected_row_flash: policy.selected_row_flash.clone(),
+    }
+}
+
+fn preflight_generation_thresholds(
+    thresholds: &PackageGenerationThresholds,
+) -> PreflightGenerationThresholds {
+    PreflightGenerationThresholds {
+        short_prefill_max_tokens: thresholds.short_prefill_max_tokens,
+        compact_flash_min_kv: thresholds.compact_flash_min_kv,
+        dense_mask_max_bytes: thresholds.dense_mask_max_bytes,
     }
 }
 
@@ -1259,6 +1446,94 @@ mod tests {
         assert_eq!(window_policy.initial_window, 1);
         assert_eq!(window_policy.min_window, 1);
         assert_eq!(window_policy.max_window, 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preflight_reports_generation_policy_and_thresholds() {
+        let dir = unique_test_dir("generation-policy");
+        let package = write_package_fixture(&dir, true);
+        write_generation_to_manifest(
+            &package,
+            serde_json::json!({
+                "policy": {
+                    "profile": "glm-dsa-v1",
+                    "decode": "compact-flash",
+                    "short_prefill": "dense",
+                    "long_prefill": "sparse-chunked",
+                    "verify": "auto",
+                    "indexshare": "required",
+                    "experimental": {
+                        "selected_row_flash": "off"
+                    }
+                },
+                "thresholds": {
+                    "short_prefill_max_tokens": 2048,
+                    "compact_flash_min_kv": 256,
+                    "dense_mask_max_bytes": 268435456
+                }
+            }),
+        );
+
+        let report = preflight_package(
+            &package,
+            &PackagePreflightOptions {
+                stages: None,
+                verify_sha256: false,
+            },
+        );
+
+        assert!(report.valid, "{:?}", report.issues);
+        let generation = report.generation.expect("generation should be reported");
+        let policy = generation.policy.expect("policy should be reported");
+        assert_eq!(policy.profile, "glm-dsa-v1");
+        assert_eq!(policy.decode, "compact-flash");
+        assert_eq!(policy.short_prefill, "dense");
+        assert_eq!(policy.long_prefill, "sparse-chunked");
+        assert_eq!(policy.verify, "auto");
+        assert_eq!(policy.indexshare.as_deref(), Some("required"));
+        assert_eq!(
+            policy
+                .experimental
+                .and_then(|policy| policy.selected_row_flash),
+            Some("off".to_string())
+        );
+        let thresholds = generation
+            .thresholds
+            .expect("thresholds should be reported");
+        assert_eq!(thresholds.short_prefill_max_tokens, Some(2048));
+        assert_eq!(thresholds.compact_flash_min_kv, Some(256));
+        assert_eq!(thresholds.dense_mask_max_bytes, Some(268435456));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preflight_rejects_empty_generation_policy_profile() {
+        let dir = unique_test_dir("empty-generation-policy");
+        let package = write_package_fixture(&dir, true);
+        write_generation_to_manifest(
+            &package,
+            serde_json::json!({
+                "policy": {
+                    "profile": "",
+                    "decode": "compact-flash",
+                    "short_prefill": "dense",
+                    "long_prefill": "sparse-chunked",
+                    "verify": "auto"
+                }
+            }),
+        );
+
+        let report = preflight_package(
+            &package,
+            &PackagePreflightOptions {
+                stages: None,
+                verify_sha256: false,
+            },
+        );
+
+        assert!(!report.valid);
+        assert_issue(&report, "empty_generation_policy_field");
         fs::remove_dir_all(dir).unwrap();
     }
 

@@ -119,6 +119,9 @@ pub(crate) struct GlmDsaDispatchSummary {
     pub(crate) get_rows_records: usize,
     pub(crate) get_rows_typed_records: usize,
     pub(crate) get_rows_promote_records: usize,
+    pub(crate) selected_row_flash_records: usize,
+    pub(crate) selected_row_flash_skip_records: usize,
+    pub(crate) selected_row_flash_contract_skip_records: usize,
     pub(crate) dsa_compact_get_rows_fused_records: usize,
     pub(crate) dsa_top1_attn_records: usize,
     pub(crate) dsa_sparse_attn_records: usize,
@@ -252,6 +255,13 @@ pub(crate) fn summarize_metal_dispatch(records: &[MetalDispatchRecord]) -> GlmDs
                 }
                 if record.kernel.as_deref() == Some("promote") {
                     summary.get_rows_promote_records += 1;
+                }
+            }
+            "selected_row_flash" => summary.selected_row_flash_records += 1,
+            "selected_row_flash_skip" => {
+                summary.selected_row_flash_skip_records += 1;
+                if record.reason.as_deref() == Some("deferred_compact_k_contract") {
+                    summary.selected_row_flash_contract_skip_records += 1;
                 }
             }
             "dsa_compact_get_rows_fused" => summary.dsa_compact_get_rows_fused_records += 1,

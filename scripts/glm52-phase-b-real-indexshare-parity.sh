@@ -23,6 +23,7 @@ REUSE_KV_WARMUP_STREAM="${REUSE_KV_WARMUP_STREAM:-0}"
 COMPACT_FLASH_ATTN="${COMPACT_FLASH_ATTN:-0}"
 ALLOW_COMPACT_FLASH_AUTO="${ALLOW_COMPACT_FLASH_AUTO:-0}"
 COMPACT_FLASH_NO_MASK="${COMPACT_FLASH_NO_MASK:-0}"
+SELECTED_ROW_FLASH="${SELECTED_ROW_FLASH:-0}"
 REQUIRE_COMPACT_FLASH_PROOF="${REQUIRE_COMPACT_FLASH_PROOF:-0}"
 DIRECT_SPARSE_ATTN="${DIRECT_SPARSE_ATTN:-0}"
 DIRECT_SPARSE_PREFILL="${DIRECT_SPARSE_PREFILL:-0}"
@@ -78,6 +79,7 @@ Options:
   --allow-compact-flash-auto
                            Allow llama.cpp's native compact flash policy to select the compact path without forcing it.
   --compact-flash-no-mask  Skip compact top-k mask gather for the compact flash candidate path.
+  --selected-row-flash     Enable the native Metal selected-row flash gather path.
   --require-compact-flash-proof
                            Fail unless compact flash eliminated the old sparse path.
   --direct-sparse-attn     Enable llama.cpp direct sparse-attention candidate path.
@@ -208,6 +210,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     --compact-flash-no-mask)
       COMPACT_FLASH_NO_MASK=1
+      COMPACT_FLASH_ATTN=1
+      METAL_DISPATCH_LOG=1
+      shift
+      ;;
+    --selected-row-flash)
+      SELECTED_ROW_FLASH=1
       COMPACT_FLASH_ATTN=1
       METAL_DISPATCH_LOG=1
       shift
@@ -407,6 +415,9 @@ fi
 if [[ "$COMPACT_FLASH_ATTN" == "1" ]]; then
   BENCH_ARGS+=(--compact-flash-attn true)
 fi
+if [[ "$SELECTED_ROW_FLASH" == "1" ]]; then
+  BENCH_ARGS+=(--selected-row-flash true)
+fi
 if [[ "$REQUIRE_DIRECT_SPARSE_DECODE_PROOF" == "1" ]]; then
   BENCH_ARGS+=(--require-direct-sparse-decode-proof)
 fi
@@ -442,6 +453,7 @@ if [[ "$COMPACT_FLASH_NO_MASK" == "1" ]]; then
   export SKIPPY_GLM_DSA_ENABLE_COMPACT_FLASH_NO_MASK=1
 fi
 export GLM52_EXPECT_COMPACT_FLASH_NO_MASK="$COMPACT_FLASH_NO_MASK"
+export GLM52_EXPECT_SELECTED_ROW_FLASH="$SELECTED_ROW_FLASH"
 export GLM52_SKIP_NATIVE_INDEXSHARE_POISON="$SKIP_NATIVE_INDEXSHARE_POISON"
 
 "$SKIPPY_BENCH_BIN" "${BENCH_ARGS[@]}" \
@@ -470,6 +482,7 @@ candidate_timing = candidate.get("timing_summary") or {}
 compact_guard = report.get("compact_flash_guard")
 direct_decode_guard = report.get("direct_sparse_decode_guard")
 expect_compact_no_mask = os.environ.get("GLM52_EXPECT_COMPACT_FLASH_NO_MASK") == "1"
+expect_selected_row_flash = os.environ.get("GLM52_EXPECT_SELECTED_ROW_FLASH") == "1"
 skip_native_indexshare_poison = os.environ.get("GLM52_SKIP_NATIVE_INDEXSHARE_POISON") == "1"
 
 def walk_dicts(obj):
@@ -545,6 +558,20 @@ if expect_compact_no_mask:
         failures.append(f"compact no-mask path still gathered mask rows: {mask_gathers[:3]}")
     if masked_flash:
         failures.append(f"compact no-mask path still used masked flash attention: {masked_flash[:3]}")
+if expect_selected_row_flash:
+    candidate_records = list(candidate_metal_records())
+    selected_flash = [
+        record for record in candidate_records
+        if record.get("op") == "selected_row_flash" and record.get("kernel") == "gather_vec"
+    ]
+    selected_skip = [
+        record for record in candidate_records
+        if record.get("op") == "selected_row_flash_skip"
+    ]
+    if not selected_flash:
+        failures.append("selected-row flash was requested but no selected_row_flash gather_vec dispatch was recorded")
+    if not selected_skip:
+        failures.append("selected-row flash was requested but compact GET_ROWS was not skipped/deferred")
 
 if failures:
     print("GLM-5.2 Phase-B real-artifact parity FAILED", file=sys.stderr)
@@ -576,6 +603,8 @@ if direct_decode_guard is not None:
     print(f"direct_sparse_decode_failure_summary={direct_decode_guard.get('failure_summary')}")
 if expect_compact_no_mask:
     print("compact_flash_no_mask_guard=True")
+if expect_selected_row_flash:
+    print("selected_row_flash_guard=True")
 if speedup:
     print(f"baseline_mean_ms={baseline_ms:.6f}")
     print(f"candidate_mean_ms={candidate_ms:.6f}")

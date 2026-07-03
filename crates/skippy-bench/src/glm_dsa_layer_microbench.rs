@@ -5826,6 +5826,9 @@ struct CompactFlashGuardReport {
     get_rows_records: usize,
     get_rows_typed_records: usize,
     get_rows_promote_records: usize,
+    selected_row_flash_records: usize,
+    selected_row_flash_skip_records: usize,
+    selected_row_flash_contract_skip_records: usize,
     compact_get_rows_records: usize,
     compact_get_rows_typed_records: usize,
     compact_get_rows_promote_records: usize,
@@ -6570,17 +6573,25 @@ fn build_compact_flash_guard(candidate: &MicrobenchCaseSummary) -> CompactFlashG
         && all_kv_flash_records > 0
         && compact_get_rows_records.is_empty()
         && dispatch.dsa_compact_get_rows_fused_records == 0;
+    let selected_row_flash_path = dispatch.selected_row_flash_records > 0
+        && dispatch.selected_row_flash_skip_records > 0
+        && compact_get_rows_records.is_empty()
+        && dispatch.dsa_compact_get_rows_fused_records == 0;
     let mut failures = Vec::new();
-    if !old_compact_flash_path && !fused_top1_path && !all_kv_flash_path {
-        if dispatch.flash_attn_ext_glm_dsa_shape_records == 0 {
+    if !old_compact_flash_path && !fused_top1_path && !all_kv_flash_path && !selected_row_flash_path
+    {
+        if dispatch.flash_attn_ext_glm_dsa_shape_records == 0
+            && dispatch.selected_row_flash_records == 0
+        {
             failures.push("missing_glm_shape_flash_attn_ext");
         }
-        if dispatch.flash_attn_ext_vec_records == 0 {
+        if dispatch.flash_attn_ext_vec_records == 0 && dispatch.selected_row_flash_records == 0 {
             failures.push("missing_vec_flash_attn_ext");
         }
         if compact_get_rows_typed_records == 0
             && dispatch.dsa_compact_get_rows_fused_records == 0
             && all_kv_flash_records == 0
+            && dispatch.selected_row_flash_skip_records == 0
         {
             failures.push("missing_compact_get_rows");
         }
@@ -6612,6 +6623,9 @@ fn build_compact_flash_guard(candidate: &MicrobenchCaseSummary) -> CompactFlashG
         get_rows_records: dispatch.get_rows_records,
         get_rows_typed_records: dispatch.get_rows_typed_records,
         get_rows_promote_records: dispatch.get_rows_promote_records,
+        selected_row_flash_records: dispatch.selected_row_flash_records,
+        selected_row_flash_skip_records: dispatch.selected_row_flash_skip_records,
+        selected_row_flash_contract_skip_records: dispatch.selected_row_flash_contract_skip_records,
         compact_get_rows_records: compact_get_rows_records.len(),
         compact_get_rows_typed_records,
         compact_get_rows_promote_records,
@@ -8381,6 +8395,41 @@ mod tests {
         assert_eq!(guard.all_kv_flash_records, 1);
         assert_eq!(guard.compact_get_rows_records, 0);
         assert_eq!(guard.dsa_sparse_attn_records, 0);
+        assert_eq!(guard.failure_summary, "none");
+    }
+
+    #[test]
+    fn compact_flash_guard_accepts_selected_row_flash_path() {
+        let mut candidate = case_summary("candidate", 0, 0, 0);
+        candidate.flags.compact_flash_attn = true;
+        candidate.flags.selected_row_flash = true;
+        candidate.metal_dispatch_summary.selected_row_flash_records = 3;
+        candidate
+            .metal_dispatch_summary
+            .selected_row_flash_skip_records = 3;
+        candidate
+            .metal_dispatch_summary
+            .selected_row_flash_contract_skip_records = 3;
+        candidate
+            .metal_dispatch_records
+            .push(selected_row_flash_dispatch("__fattn__-31"));
+        candidate
+            .metal_dispatch_records
+            .push(selected_row_flash_skip_dispatch(
+                "dsa_compact_k_topk_rows-31",
+                "deferred_compact_k_contract",
+            ));
+        candidate
+            .compact_flash_execution_mask_records
+            .push(compact_flash_mask_record(true));
+
+        let guard = build_compact_flash_guard(&candidate);
+
+        assert!(guard.passed);
+        assert_eq!(guard.selected_row_flash_records, 3);
+        assert_eq!(guard.selected_row_flash_skip_records, 3);
+        assert_eq!(guard.selected_row_flash_contract_skip_records, 3);
+        assert_eq!(guard.compact_get_rows_records, 0);
         assert_eq!(guard.failure_summary, "none");
     }
 
@@ -10493,6 +10542,25 @@ mod tests {
         record.op = "get_rows".to_string();
         record.kernel = Some(kernel.to_string());
         record.tensor = tensor.to_string();
+        record
+    }
+
+    fn selected_row_flash_dispatch(tensor: &str) -> MetalDispatchRecord {
+        let mut record = dsa_sparse_attn_dispatch_with_kv(1, 1280, 1025, 32);
+        record.op = "selected_row_flash".to_string();
+        record.kernel = Some("gather_vec".to_string());
+        record.tensor = tensor.to_string();
+        record.q_width = Some(576);
+        record.v_width = Some(512);
+        record
+    }
+
+    fn selected_row_flash_skip_dispatch(tensor: &str, reason: &str) -> MetalDispatchRecord {
+        let mut record = dsa_sparse_attn_dispatch_with_kv(1, 1, 1, 1);
+        record.op = "selected_row_flash_skip".to_string();
+        record.kernel = None;
+        record.tensor = tensor.to_string();
+        record.reason = Some(reason.to_string());
         record
     }
 

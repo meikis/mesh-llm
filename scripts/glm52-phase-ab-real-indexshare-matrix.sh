@@ -16,6 +16,12 @@ N_UBATCH="${N_UBATCH:-16}"
 KV_WARMUP_TOKENS="${KV_WARMUP_TOKENS:-16}"
 KV_WARMUP_CHUNK_TOKENS="${KV_WARMUP_CHUNK_TOKENS:-16}"
 SPANS="${SPANS:-2:6:initial,6:10:early,30:34:middle,74:78:late}"
+COMPACT_FLASH_ATTN="${COMPACT_FLASH_ATTN:-0}"
+ALLOW_COMPACT_FLASH_AUTO="${ALLOW_COMPACT_FLASH_AUTO:-0}"
+COMPACT_FLASH_NO_MASK="${COMPACT_FLASH_NO_MASK:-0}"
+SELECTED_ROW_FLASH="${SELECTED_ROW_FLASH:-0}"
+REQUIRE_COMPACT_FLASH_PROOF="${REQUIRE_COMPACT_FLASH_PROOF:-0}"
+METAL_DISPATCH_LOG="${METAL_DISPATCH_LOG:-0}"
 RUN_NEGATIVE="${RUN_NEGATIVE:-1}"
 
 usage() {
@@ -48,6 +54,14 @@ Options:
   --kv-warmup-tokens N    KV prefix tokens. Default: 16
   --kv-warmup-chunk-tokens N
                            KV warmup chunk size. Default: 16
+  --compact-flash-attn     Enable compact top-k K/V + flash-attention candidate path.
+  --allow-compact-flash-auto
+                           Allow native compact flash policy to select compact path.
+  --compact-flash-no-mask  Skip compact top-k mask gather for compact flash.
+  --selected-row-flash     Enable native Metal selected-row flash gather path.
+  --require-compact-flash-proof
+                           Fail unless compact flash eliminated the old sparse path.
+  --metal-dispatch-log     Capture Metal dispatch records.
   --skip-negative         Do not run the Shared-only missing-top-k negative case.
   -h, --help              Show this help.
 
@@ -108,6 +122,35 @@ while [[ $# -gt 0 ]]; do
     --kv-warmup-chunk-tokens)
       KV_WARMUP_CHUNK_TOKENS="$2"
       shift 2
+      ;;
+    --compact-flash-attn)
+      COMPACT_FLASH_ATTN=1
+      shift
+      ;;
+    --allow-compact-flash-auto)
+      ALLOW_COMPACT_FLASH_AUTO=1
+      shift
+      ;;
+    --compact-flash-no-mask)
+      COMPACT_FLASH_NO_MASK=1
+      COMPACT_FLASH_ATTN=1
+      METAL_DISPATCH_LOG=1
+      shift
+      ;;
+    --selected-row-flash)
+      SELECTED_ROW_FLASH=1
+      COMPACT_FLASH_ATTN=1
+      METAL_DISPATCH_LOG=1
+      shift
+      ;;
+    --require-compact-flash-proof)
+      REQUIRE_COMPACT_FLASH_PROOF=1
+      METAL_DISPATCH_LOG=1
+      shift
+      ;;
+    --metal-dispatch-log)
+      METAL_DISPATCH_LOG=1
+      shift
       ;;
     --skip-negative)
       RUN_NEGATIVE=0
@@ -194,7 +237,13 @@ for item in "${SPAN_ITEMS[@]}"; do
   log="$span_dir/run.log"
   REPORT="$report" LOG="$log" \
   KV_WARMUP_TOKENS="$KV_WARMUP_TOKENS" KV_WARMUP_CHUNK_TOKENS="$KV_WARMUP_CHUNK_TOKENS" \
-  DIRECT_SPARSE_ATTN=0 DIRECT_SPARSE_PREFILL=0 COMPACT_FLASH_ATTN=0 ALLOW_COMPACT_FLASH_AUTO=0 \
+  DIRECT_SPARSE_ATTN=0 DIRECT_SPARSE_PREFILL=0 \
+  COMPACT_FLASH_ATTN="$COMPACT_FLASH_ATTN" \
+  ALLOW_COMPACT_FLASH_AUTO="$ALLOW_COMPACT_FLASH_AUTO" \
+  COMPACT_FLASH_NO_MASK="$COMPACT_FLASH_NO_MASK" \
+  SELECTED_ROW_FLASH="$SELECTED_ROW_FLASH" \
+  REQUIRE_COMPACT_FLASH_PROOF="$REQUIRE_COMPACT_FLASH_PROOF" \
+  METAL_DISPATCH_LOG="$METAL_DISPATCH_LOG" \
   "$ROOT/scripts/glm52-phase-b-real-indexshare-parity.sh" \
     --stage-model "$STAGE_MODEL" \
     --model-id "$MODEL_ID" \

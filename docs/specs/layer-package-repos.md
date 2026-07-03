@@ -293,6 +293,19 @@ defaults that are specific to the artifact distribution, such as quant layout,
 preserved native tensors, validated sparse-attention paths, and native
 speculative decoding strategy.
 
+The `generation` object has two separate responsibilities:
+
+- `generation.policy` names the semantic execution profile and phase choices
+  that were validated for this artifact.
+- `generation.thresholds` supplies numeric resolver hints used to decide when a
+  phase choice applies.
+
+Keep these responsibilities separate. Policy fields should answer "which
+execution path is intended for this phase?" Threshold fields should answer
+"when should the runtime choose or reject that path?" For example,
+`decode: "compact-flash"` belongs under `generation.policy`, while
+`compact_flash_min_kv: 256` belongs under `generation.thresholds`.
+
 The `generation` object is intentionally generic. Do not add
 model-family-specific sub-objects such as `generation.glm_dsa`; use a stable
 `generation.policy.profile` instead. This keeps the manifest shape reusable for
@@ -304,6 +317,11 @@ defaults for experiments, but consumers SHOULD log the final resolved policy and
 the package recommendation that was overridden. If a consumer cannot execute the
 package-recommended path, it MUST choose a correctness-preserving fallback and
 emit the fallback reason.
+
+Package generation defaults are not a substitute for model correctness
+metadata. Architecture-specific GGUF metadata and tensor layout still define
+whether a runtime may execute the model at all; `generation.policy` only
+chooses among valid execution paths for that artifact.
 
 #### Execution Policy
 
@@ -343,6 +361,12 @@ phase fields or thresholds. Other model families SHOULD use their own stable
 profile names instead of adding model-family-specific top-level objects under
 `generation`.
 
+The profile is also the compatibility boundary for package tooling. Writers may
+infer a known profile from GGUF metadata and tensors, but they must not invent
+backend-specific field names for one model family. If a later GLM-DSA package
+needs different phase semantics, create a new profile such as `glm-dsa-v2`
+instead of changing the meaning of `glm-dsa-v1`.
+
 Policy values are intentionally phase-specific:
 
 - `decode`: preferred one-token generation path. For GLM-DSA this is expected
@@ -376,6 +400,12 @@ policy decision SHOULD emit telemetry containing the policy profile, phase,
 selected path, rejected path or fallback reason, `n_kv`, `top_k` when present,
 IndexShare role when present, backend, and any dense sparse-mask allocation
 avoided.
+
+Thresholds must be named for the resolver decision they inform, not for an
+implementation detail. For example, prefer `dense_mask_max_bytes` over a
+backend-specific allocation flag. This keeps the same package usable across
+Metal, CUDA, CPU, and future backends while still allowing each backend to make
+an evidence-based decision.
 
 #### Policy Resolution
 

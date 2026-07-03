@@ -16,7 +16,10 @@ The contract covers:
 - Conversion-time validation expected from `skippy-quantize`.
 
 Kernel policy and backend performance are intentionally out of scope here. They
-belong after this contract is enforceable.
+belong in layer-package `generation.policy` and `generation.thresholds` once
+this correctness contract is enforceable. Package generation policy may select
+between valid GLM-DSA execution paths; it must not relax the metadata, tensor,
+IndexShare, or sideband requirements in this contract.
 
 ## Required GGUF Metadata
 

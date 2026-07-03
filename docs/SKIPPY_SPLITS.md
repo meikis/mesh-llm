@@ -45,6 +45,16 @@ Use the same layer-package model on every serving node. Each node resolves the
 package and downloads only the shared artifacts plus the layer files needed for
 its assigned stage.
 
+Package-owned generation defaults travel with the layer package. If
+`model-package.json` declares `generation.policy` or `generation.thresholds`,
+the coordinator resolves those defaults before stage launch and passes the
+resolved policy into the embedded llama runtime. Per-run overrides are allowed
+for experiments, but the runtime must log the package recommendation and the
+selected override or fallback. GLM-DSA packages use
+`generation.policy.profile = "glm-dsa-v1"`; they must not require
+Skippy-specific prompt, thinking, sparse attention, or IndexShare behavior that
+is absent from llama.cpp itself.
+
 ```bash
 # node A: starts the private mesh and becomes the coordinator
 mesh-llm serve \

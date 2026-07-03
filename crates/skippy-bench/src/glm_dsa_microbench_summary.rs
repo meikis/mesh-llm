@@ -120,6 +120,7 @@ pub(crate) struct GlmDsaDispatchSummary {
     pub(crate) get_rows_typed_records: usize,
     pub(crate) get_rows_promote_records: usize,
     pub(crate) dsa_compact_get_rows_fused_records: usize,
+    pub(crate) dsa_top1_attn_records: usize,
     pub(crate) dsa_sparse_attn_records: usize,
     pub(crate) dsa_sparse_attn_selected_keys: u64,
     pub(crate) dsa_sparse_attn_q_read_bytes: u64,
@@ -139,6 +140,7 @@ pub(crate) struct GlmDsaDispatchSummary {
     pub(crate) mul_mv_id_weighted_sum_fused_q3_k_records: usize,
     pub(crate) mul_mv_id_weighted_slots_records: usize,
     pub(crate) mul_mv_id_weighted_slots_q3_k_records: usize,
+    pub(crate) mul_mv_id_q2_gate_up_swiglu_records: usize,
     pub(crate) routed_moe_gate_records: usize,
     pub(crate) routed_moe_up_records: usize,
     pub(crate) routed_moe_down_records: usize,
@@ -253,6 +255,7 @@ pub(crate) fn summarize_metal_dispatch(records: &[MetalDispatchRecord]) -> GlmDs
                 }
             }
             "dsa_compact_get_rows_fused" => summary.dsa_compact_get_rows_fused_records += 1,
+            "dsa_top1_attn" => summary.dsa_top1_attn_records += 1,
             "dsa_sparse_attn" => {
                 summary.dsa_sparse_attn_records += 1;
                 summary.dsa_sparse_attn_selected_keys += record.selected_keys.unwrap_or(0);
@@ -289,6 +292,9 @@ pub(crate) fn summarize_metal_dispatch(records: &[MetalDispatchRecord]) -> GlmDs
                 if record.kernel.as_deref() == Some("q3_K") {
                     summary.mul_mv_id_weighted_slots_q3_k_records += 1;
                 }
+            }
+            "mul_mv_id_q2_gate_up_swiglu" => {
+                summary.mul_mv_id_q2_gate_up_swiglu_records += 1;
             }
             _ => {}
         }
@@ -778,6 +784,12 @@ mod tests {
                 Some("q3_K"),
             ),
             dispatch(
+                "mul_mv_id_q2_gate_up_swiglu",
+                Some("q2_K"),
+                "ffn_moe_gate-45",
+                Some("q2_K"),
+            ),
+            dispatch(
                 "moe_weighted_sum",
                 Some("already_weighted"),
                 "ffn_moe_out",
@@ -787,7 +799,7 @@ mod tests {
 
         let summary = summarize_metal_dispatch(&records);
 
-        assert_eq!(summary.records, 12);
+        assert_eq!(summary.records, 13);
         assert_eq!(summary.topk_moe_route_fused_records, 1);
         assert_eq!(summary.topk_moe_route_encode_records, 2);
         assert_eq!(summary.topk_moe_route_pack_candidate_records, 0);
@@ -804,6 +816,7 @@ mod tests {
         assert_eq!(summary.mul_mv_id_weighted_sum_fused_q3_k_records, 1);
         assert_eq!(summary.mul_mv_id_weighted_slots_records, 1);
         assert_eq!(summary.mul_mv_id_weighted_slots_q3_k_records, 1);
+        assert_eq!(summary.mul_mv_id_q2_gate_up_swiglu_records, 1);
         assert_eq!(summary.routed_moe_gate_q2_k_records, 1);
         assert_eq!(summary.routed_moe_up_q2_k_records, 1);
         assert_eq!(summary.routed_moe_down_q3_k_records, 4);
@@ -816,7 +829,7 @@ mod tests {
         assert_eq!(summary.route_fusion_reasons[0].records, 1);
         assert_eq!(summary.route_fusion_reasons[1].reason, "shape_or_sequence");
         assert_eq!(summary.route_fusion_reasons[1].records, 1);
-        assert_eq!(summary.dispatch_shapes.len(), 11);
+        assert_eq!(summary.dispatch_shapes.len(), 12);
     }
 
     #[test]
@@ -863,6 +876,7 @@ mod tests {
                 "blk.30.dsa_compact_k_topk_rows",
                 None,
             ),
+            dispatch("dsa_top1_attn", None, "blk.30.dsa_top1_attn", None),
             direct_sparse,
         ];
 
@@ -876,6 +890,7 @@ mod tests {
         assert_eq!(summary.get_rows_typed_records, 2);
         assert_eq!(summary.get_rows_promote_records, 1);
         assert_eq!(summary.dsa_compact_get_rows_fused_records, 1);
+        assert_eq!(summary.dsa_top1_attn_records, 1);
         assert_eq!(summary.dsa_sparse_attn_records, 1);
         assert_eq!(summary.dsa_sparse_attn_selected_keys, 1_048_576);
         assert_eq!(summary.dsa_sparse_attn_q_read_bytes, 2_415_919_104);
@@ -1040,6 +1055,16 @@ mod tests {
             weighted_sum_gap: None,
             weighted_sum_graph_gap: None,
             parallel: None,
+            generic: None,
+            view: None,
+            get_rows_uses: None,
+            use_count: None,
+            consumer_count: None,
+            consumer_graph_idx: None,
+            consumer_op: None,
+            consumer_tensor: None,
+            consumer_src_slot: None,
+            flash_graph_idx: None,
             q_type: None,
             k_type: None,
             v_type: None,

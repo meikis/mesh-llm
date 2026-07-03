@@ -255,6 +255,16 @@ pub(crate) struct MetalDispatchRecord {
     pub(crate) weighted_sum_gap: Option<i64>,
     pub(crate) weighted_sum_graph_gap: Option<i64>,
     pub(crate) parallel: Option<bool>,
+    pub(crate) generic: Option<bool>,
+    pub(crate) view: Option<bool>,
+    pub(crate) get_rows_uses: Option<u64>,
+    pub(crate) use_count: Option<u64>,
+    pub(crate) consumer_count: Option<u64>,
+    pub(crate) consumer_graph_idx: Option<i64>,
+    pub(crate) consumer_op: Option<String>,
+    pub(crate) consumer_tensor: Option<String>,
+    pub(crate) consumer_src_slot: Option<i64>,
+    pub(crate) flash_graph_idx: Option<i64>,
     pub(crate) q_type: Option<String>,
     pub(crate) k_type: Option<String>,
     pub(crate) v_type: Option<String>,
@@ -1067,7 +1077,8 @@ fn parse_metal_dispatch_record(line: &str) -> Result<MetalDispatchRecord> {
         op: parse_string_field(&fields, "op")?,
         kernel: parse_optional_string_field(&fields, "kernel"),
         tensor: parse_string_field(&fields, "tensor")?,
-        next: parse_optional_string_field(&fields, "next"),
+        next: parse_optional_string_field(&fields, "next")
+            .or_else(|| parse_optional_string_field(&fields, "next_tensor")),
         next_op: parse_optional_string_field(&fields, "next_op"),
         shared_gate: parse_optional_string_field(&fields, "shared_gate"),
         shared_up: parse_optional_string_field(&fields, "shared_up"),
@@ -1087,6 +1098,16 @@ fn parse_metal_dispatch_record(line: &str) -> Result<MetalDispatchRecord> {
         weighted_sum_gap: parse_optional_field(&fields, "weighted_sum_gap")?,
         weighted_sum_graph_gap: parse_optional_field(&fields, "weighted_sum_graph_gap")?,
         parallel: parse_optional_bool_int_field(&fields, "parallel")?,
+        generic: parse_optional_bool_int_field(&fields, "generic")?,
+        view: parse_optional_bool_int_field(&fields, "view")?,
+        get_rows_uses: parse_optional_field(&fields, "get_rows_uses")?,
+        use_count: parse_optional_field(&fields, "use_count")?,
+        consumer_count: parse_optional_field(&fields, "consumer_count")?,
+        consumer_graph_idx: parse_optional_field(&fields, "consumer_graph_idx")?,
+        consumer_op: parse_optional_string_field(&fields, "consumer_op"),
+        consumer_tensor: parse_optional_string_field(&fields, "consumer_tensor"),
+        consumer_src_slot: parse_optional_field(&fields, "consumer_src_slot")?,
+        flash_graph_idx: parse_optional_field(&fields, "flash_graph_idx")?,
         q_type: parse_optional_string_field(&fields, "q_type"),
         k_type: parse_optional_string_field(&fields, "k_type"),
         v_type: parse_optional_string_field(&fields, "v_type"),
@@ -1696,6 +1717,7 @@ mod tests {
     const METAL_DECODE_VEC_REDUCE_DISPATCH_LINE: &str = "skippy: glm_dsa_metal_dispatch op=dsa_sparse_attn kernel=decode_vec_reduce tensor=blk.30.dsa_sparse_attn q_type=f32 k_type=f16 v_type=f16 mask_type=f32 top_k_type=i32 dst_type=f32 q_width=576 v_width=512 batch=4096 heads=64 stream=1 kv=4096 top_k=2048 top_stream=1 rows=262144 partial_bytes=536870912 softmax_bytes=4194304 tmp_bytes=541065216 grid_x=262144 grid_y=1 grid_z=1 threads_x=32 threads_y=2 nwg=2 tmp_f16=1 dst_partial=1";
     const METAL_MUL_MAT_ID_DISPATCH_LINE: &str = "skippy: glm_dsa_metal_dispatch op=mul_mat_id kernel=mul_mv_id tensor=ffn_moe_down-45 src0_type=q3_K src1_type=f32 ids_type=i32 dst_type=f32 ne00=5120 ne01=6144 experts=256 used_experts=8 tokens=1 min_tokens=128 nr0=2 nr1=1 nsg=1 grid_x=1536 grid_y=1 grid_z=8 threads_x=32 threads_y=2";
     const METAL_ROUTE_ENCODE_CANDIDATE_LINE: &str = "skippy: glm_dsa_metal_dispatch op=topk_moe_route_encode tensor=blk.45.ffn_moe_probs candidate=UNARY/blk.45.ffn_moe_probs,RESHAPE/view reason=fused filtered_nodes=65 graph_nodes=71 graph_idx=30 grid_x=1 grid_y=1 grid_z=1 threads_x=1";
+    const METAL_SELECTED_ROW_FLASH_CANDIDATE_LINE: &str = "skippy: glm_dsa_metal_dispatch op=selected_row_flash_candidate tensor=dsa_compact_k_topk_rows-30 reason=accepted_view next_tensor=__fattn__-30 generic=0 view=1 get_rows_uses=2 grid_x=0 grid_y=0 grid_z=0 threads_x=0";
     const METAL_WEIGHTED_DOWN_CANDIDATE_LINE: &str = "skippy: glm_dsa_metal_dispatch op=mul_mat_id_weighted_down_candidate tensor=ffn_moe_down-45 next=ffn_gate-45 next_op=MUL_MAT shared_gate=ffn_gate-45 shared_up=ffn_up-45 weighted_sum=ffn_moe_out-45 weighted_sum_op=MOE_WEIGHTED_SUM reason=full_motif shared_branch=1 weighted_sum_uses_down=1 pair_fusable=0 subgraph_fusable=1 filtered_gap=0 graph_gap=0 weighted_sum_gap=2 weighted_sum_graph_gap=2 src0_type=q3_K src1_type=f32 ids_type=i32 dst_type=f32 experts=256 used_experts=8 tokens=1 grid_x=1 grid_y=1 grid_z=1 threads_x=1";
     const METAL_GLM_DSA_MOE_MOTIF_CANDIDATE_LINE: &str = "skippy: glm_dsa_metal_dispatch op=glm_dsa_moe_motif_candidate tensor=ffn_moe_down-45 shared_gate=ffn_gate-45 shared_up=ffn_up-45 weighted_sum=ffn_moe_out-45 reason=full_motif natural_order=1 backend_candidate=1 subgraph_fusable=1 motif_nodes=4 fusion_outputs=3 weighted_sum_gap=2 weighted_sum_graph_gap=2 src0_type=q3_K src1_type=f32 ids_type=i32 dst_type=f32 experts=256 used_experts=8 tokens=1 grid_x=1 grid_y=1 grid_z=1 threads_x=1";
     const COMPUTE_BUFFER_LINES: &str = "~llama_context:       MTL0 compute buffer size is 2421.0264 MiB, matches expectation of 2421.0264 MiB\n~llama_context:       MTL0 compute buffer size of 667.8496 MiB, does not match expectation of 507.0029 MiB\n~llama_context:        CPU compute buffer size is  24.0059 MiB, matches expectation of  24.0059 MiB\n~llama_context:        CPU compute buffer size is   0.0000 MiB, matches expectation of   0.0000 MiB, trailing native detail";
@@ -1916,6 +1938,9 @@ mod tests {
         assert_eq!(record.top_k_read_bytes, Some(4_194_304));
         assert_eq!(record.scratch_per_tg_bytes, Some(1024));
         assert_eq!(record.score_fma, Some(603_979_776));
+        assert_eq!(record.generic, None);
+        assert_eq!(record.view, None);
+        assert_eq!(record.get_rows_uses, None);
         assert_eq!(record.value_fma, Some(536_870_912));
         assert_eq!(
             record.reduction_strategy.as_deref(),
@@ -1929,6 +1954,20 @@ mod tests {
         assert_eq!(record.dst_partial, Some(true));
         assert_eq!(record.threads_x, 256);
         assert_eq!(record.threads_y, None);
+    }
+
+    #[test]
+    fn parses_selected_row_flash_candidate_record() {
+        let records =
+            parse_metal_dispatch_records(METAL_SELECTED_ROW_FLASH_CANDIDATE_LINE).unwrap();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.op, "selected_row_flash_candidate");
+        assert_eq!(record.tensor, "dsa_compact_k_topk_rows-30");
+        assert_eq!(record.reason.as_deref(), Some("accepted_view"));
+        assert_eq!(record.generic, Some(false));
+        assert_eq!(record.view, Some(true));
+        assert_eq!(record.get_rows_uses, Some(2));
     }
 
     #[test]

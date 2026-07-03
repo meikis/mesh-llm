@@ -434,6 +434,8 @@ struct RawDispatchSummary {
     #[serde(default)]
     dsa_compact_get_rows_fused_records: usize,
     #[serde(default)]
+    dsa_top1_attn_records: usize,
+    #[serde(default)]
     get_rows_records: usize,
     #[serde(default)]
     get_rows_typed_records: usize,
@@ -461,6 +463,7 @@ impl RawDispatchSummary {
             flash_attn_ext_tile_records: self.flash_attn_ext_tile_records,
             flash_attn_ext_glm_dsa_shape_records: self.flash_attn_ext_glm_dsa_shape_records,
             dsa_compact_get_rows_fused_records: self.dsa_compact_get_rows_fused_records,
+            dsa_top1_attn_records: self.dsa_top1_attn_records,
             get_rows_records: self.get_rows_records,
             get_rows_typed_records: self.get_rows_typed_records,
             get_rows_promote_records: self.get_rows_promote_records,
@@ -484,11 +487,18 @@ impl RawDispatchSummary {
     }
 
     fn proves_compact_flash(&self) -> bool {
-        self.flash_attn_ext_glm_dsa_shape_records > 0
+        let compact_flash_path = self.flash_attn_ext_glm_dsa_shape_records > 0
             && self.flash_attn_ext_vec_records > 0
+            && (self.get_rows_typed_records > 0 || self.dsa_compact_get_rows_fused_records > 0);
+        let fused_top1_path = self.dsa_top1_attn_records > 0;
+        let all_kv_flash_path = self.flash_attn_ext_glm_dsa_shape_records > 0
+            && self.flash_attn_ext_vec_records > 0
+            && self.get_rows_records == 0
+            && self.dsa_compact_get_rows_fused_records == 0;
+
+        (compact_flash_path || fused_top1_path || all_kv_flash_path)
             && self.dsa_sparse_attn_records == 0
             && self.get_rows_promote_records == 0
-            && (self.get_rows_typed_records > 0 || self.dsa_compact_get_rows_fused_records > 0)
     }
 
     fn proves_sparse_mask_flash(&self) -> bool {
@@ -576,6 +586,7 @@ struct DispatchFamilySummary {
     flash_attn_ext_tile_records: usize,
     flash_attn_ext_glm_dsa_shape_records: usize,
     dsa_compact_get_rows_fused_records: usize,
+    dsa_top1_attn_records: usize,
     get_rows_records: usize,
     get_rows_typed_records: usize,
     get_rows_promote_records: usize,
@@ -594,6 +605,7 @@ impl DispatchFamilySummary {
             && summary.flash_attn_ext_records == 0
             && summary.flash_attn_ext_glm_dsa_shape_records == 0
             && summary.dsa_compact_get_rows_fused_records == 0
+            && summary.dsa_top1_attn_records == 0
             && summary.get_rows_typed_records == 0
             && summary.get_rows_promote_records == 0
             && summary.dsa_sparse_attn_records == 0
@@ -610,6 +622,7 @@ impl DispatchFamilySummary {
         self.flash_attn_ext_tile_records += other.flash_attn_ext_tile_records;
         self.flash_attn_ext_glm_dsa_shape_records += other.flash_attn_ext_glm_dsa_shape_records;
         self.dsa_compact_get_rows_fused_records += other.dsa_compact_get_rows_fused_records;
+        self.dsa_top1_attn_records += other.dsa_top1_attn_records;
         self.get_rows_records += other.get_rows_records;
         self.get_rows_typed_records += other.get_rows_typed_records;
         self.get_rows_promote_records += other.get_rows_promote_records;
@@ -896,6 +909,43 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_key_uses_dispatch_proof_for_fused_top1_attention() {
+        let report = report_with_dispatch_summary(RawDispatchSummary {
+            records: 24,
+            dsa_top1_attn_records: 24,
+            dsa_sparse_attn_records: 0,
+            get_rows_promote_records: 0,
+            ..RawDispatchSummary::default()
+        });
+        let selected = select_case(&report, GlmDsaAggregateReportCase::TopLevel).unwrap();
+        let key = AggregateKey::new(&report, &selected);
+
+        assert_eq!(key.path, "compact_flash_native");
+        assert!(!key.compact_flash_attn);
+        assert!(key.direct_sparse_attn);
+    }
+
+    #[test]
+    fn aggregate_key_uses_dispatch_proof_for_all_kv_flash() {
+        let report = report_with_dispatch_summary(RawDispatchSummary {
+            records: 12,
+            flash_attn_ext_records: 3,
+            flash_attn_ext_vec_records: 3,
+            flash_attn_ext_glm_dsa_shape_records: 3,
+            get_rows_records: 0,
+            dsa_sparse_attn_records: 0,
+            get_rows_promote_records: 0,
+            ..RawDispatchSummary::default()
+        });
+        let selected = select_case(&report, GlmDsaAggregateReportCase::TopLevel).unwrap();
+        let key = AggregateKey::new(&report, &selected);
+
+        assert_eq!(key.path, "compact_flash_native");
+        assert!(!key.compact_flash_attn);
+        assert!(key.direct_sparse_attn);
+    }
+
+    #[test]
     fn aggregate_key_marks_forced_compact_flash_fallback_without_dispatch_proof() {
         let report = RawMicrobenchReport {
             model_id: Some("meshllm/test".to_string()),
@@ -974,6 +1024,7 @@ mod tests {
             flash_attn_ext_tile_records: 3,
             flash_attn_ext_glm_dsa_shape_records: 2,
             get_rows_typed_records: 4,
+            dsa_top1_attn_records: 2,
             dsa_sparse_attn_records: 1,
             mul_mat_id_records: 4,
             moe_weighted_sum_records: 1,
@@ -1012,6 +1063,7 @@ mod tests {
             2
         );
         assert_eq!(finished.dispatch_family_summary.get_rows_typed_records, 4);
+        assert_eq!(finished.dispatch_family_summary.dsa_top1_attn_records, 2);
         assert_eq!(finished.dispatch_family_summary.dsa_sparse_attn_records, 1);
         assert_eq!(finished.dispatch_family_summary.mul_mat_id_records, 4);
         assert_eq!(finished.dispatch_family_summary.moe_weighted_sum_records, 1);

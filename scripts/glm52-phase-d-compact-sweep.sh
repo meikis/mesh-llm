@@ -210,7 +210,9 @@ for window in "${WINDOW_LIST[@]}"; do
         .comparison.parity.hidden_mismatches,
         .comparison.candidate.timing_summary.coefficient_of_variation,
         .metal_dispatch_summary.get_rows_typed_records,
+        (.metal_dispatch_summary.dsa_top1_attn_records // 0),
         .metal_dispatch_summary.dsa_sparse_attn_records,
+        (.compact_flash_guard.all_kv_flash_records // 0),
         .compact_flash_policy_summary.execution_use_compact
       ] | @tsv
     ' "$case_dir/compare.json" | tee -a "$OUT_DIR/results.tsv"
@@ -291,6 +293,9 @@ for path in paths:
         "hidden_mismatches": report["comparison"]["parity"].get("hidden_mismatches"),
         "candidate_cv": report["comparison"]["candidate"]["timing_summary"].get("coefficient_of_variation"),
         "typed_get_rows_records": report.get("metal_dispatch_summary", {}).get("get_rows_typed_records"),
+        "dsa_top1_attn_records": report.get("metal_dispatch_summary", {}).get("dsa_top1_attn_records", 0),
+        "dsa_compact_get_rows_fused_records": report.get("metal_dispatch_summary", {}).get("dsa_compact_get_rows_fused_records", 0),
+        "all_kv_flash_records": report.get("compact_flash_guard", {}).get("all_kv_flash_records", 0),
         "dsa_sparse_attn_records": report.get("metal_dispatch_summary", {}).get("dsa_sparse_attn_records"),
         "compact_execution_records": report.get("compact_flash_policy_summary", {}).get("execution_use_compact"),
         "baseline_op_total_us": baseline_ops.get("total_us"),
@@ -326,8 +331,13 @@ for path in paths:
         failures.append(f"{row['window']} pos={row['position_start']}: parity failed")
     if row["hidden_mismatches"] not in (0, None):
         failures.append(f"{row['window']} pos={row['position_start']}: hidden mismatches {row['hidden_mismatches']}")
-    if row["typed_get_rows_records"] in (0, None):
-        failures.append(f"{row['window']} pos={row['position_start']}: missing typed get-rows evidence")
+    if (
+        row["typed_get_rows_records"] in (0, None)
+        and row["dsa_compact_get_rows_fused_records"] in (0, None)
+        and row["dsa_top1_attn_records"] in (0, None)
+        and row["all_kv_flash_records"] in (0, None)
+    ):
+        failures.append(f"{row['window']} pos={row['position_start']}: missing compact get-rows, top-1, or all-KV flash evidence")
     if row["dsa_sparse_attn_records"] not in (0, None):
         failures.append(f"{row['window']} pos={row['position_start']}: dense sparse-attention dispatch present")
     if row["compact_execution_records"] in (0, None):

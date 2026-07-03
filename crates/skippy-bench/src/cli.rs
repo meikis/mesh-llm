@@ -313,6 +313,13 @@ pub struct GlmDsaLayerMicrobenchArgs {
         help = "Allow llama.cpp's native GLM-DSA compact flash-attention policy to select the compact path without forcing it on."
     )]
     pub allow_compact_flash_auto: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        action = ArgAction::Set,
+        help = "Enable the experimental native Metal GLM-DSA selected-row flash path that fuses compact GET_ROWS into flash attention."
+    )]
+    pub selected_row_flash: bool,
     #[arg(long, default_value_t = true, action = ArgAction::Set)]
     pub direct_sparse_prefill: bool,
     #[arg(
@@ -338,6 +345,27 @@ pub struct GlmDsaLayerMicrobenchArgs {
     pub fused_sparse_mask: bool,
     #[arg(long, default_value_t = false, action = ArgAction::Set)]
     pub parallel_lightning_indexer: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        action = ArgAction::Set,
+        help = "Set SKIPPY_GLM_DSA_EXPERIMENTAL_MASKED_TOP_K for candidate runs that fuse GLM-DSA indexer mask semantics into top-k."
+    )]
+    pub masked_top_k: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        action = ArgAction::Set,
+        help = "Set SKIPPY_GLM_DSA_EXPERIMENTAL_INDEXER_TOP_K for candidate runs that fuse GLM-DSA Lightning Indexer, mask add, and top-k."
+    )]
+    pub indexer_top_k: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        action = ArgAction::Set,
+        help = "Set SKIPPY_GLM_DSA_EXPERIMENTAL_DECODE_CLIP_TOP_K for candidate decode runs that clip indexer scores to visible KV before top-k."
+    )]
+    pub decode_clip_top_k: bool,
     #[arg(long, default_value_t = true, action = ArgAction::Set)]
     pub op_timing: bool,
     #[arg(
@@ -403,6 +431,13 @@ pub struct GlmDsaLayerMicrobenchArgs {
     pub moe_down_unweighted_slots: bool,
     #[arg(
         long,
+        default_value_t = false,
+        action = ArgAction::Set,
+        help = "Enable the experimental native Metal GLM-DSA q2_K routed gate/up SwigLU fusion."
+    )]
+    pub moe_q2_gate_up_swiglu: bool,
+    #[arg(
+        long,
         help = "Set SKIPPY_GLM_DSA_SPARSE_ATTN_THREADS for the candidate run. Use with --compare-metal-sparse-attn-threads-baseline to compare Metal sparse-attention thread counts."
     )]
     pub sparse_attn_threads: Option<u32>,
@@ -463,7 +498,7 @@ pub struct GlmDsaLayerMicrobenchArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Fail unless the candidate proves the compact GLM-DSA flash-attention path: GLM-shaped flash attention, typed get-rows, no promoted get-rows, and no old dsa_sparse_attn dispatch."
+        help = "Fail unless the candidate proves an optimized compact GLM-DSA decode path: either compact flash with typed/fused get-rows or fused top-1 attention, with no promoted get-rows and no old dsa_sparse_attn dispatch."
     )]
     pub require_compact_flash_proof: bool,
     #[arg(
@@ -516,6 +551,36 @@ pub struct GlmDsaLayerMicrobenchArgs {
     #[arg(
         long,
         default_value_t = false,
+        help = "Run the same GLM-DSA Metal compact-flash case with selected-row flash disabled as the baseline and enabled as the candidate."
+    )]
+    pub compare_selected_row_flash: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Run the same GLM-DSA case with parallel Lightning Indexer disabled as the baseline and enabled as the candidate."
+    )]
+    pub compare_parallel_lightning_indexer: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Compare baseline GLM-DSA indexer ADD+TOP_K against the experimental masked top-k fusion."
+    )]
+    pub compare_masked_top_k: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Compare baseline GLM-DSA indexer + mask ADD + TOP_K against the experimental fused indexer-top-k path."
+    )]
+    pub compare_indexer_top_k: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Compare baseline GLM-DSA indexer mask ADD+TOP_K against decode-only visible-KV score clipping before top-k."
+    )]
+    pub compare_decode_clip_top_k: bool,
+    #[arg(
+        long,
+        default_value_t = false,
         help = "Run the same GLM-DSA Metal case with routed down + weighted-sum fusion disabled as the baseline and enabled as the candidate."
     )]
     pub compare_moe_down_weighted_fusion: bool,
@@ -534,9 +599,21 @@ pub struct GlmDsaLayerMicrobenchArgs {
     #[arg(
         long,
         default_value_t = false,
+        help = "Run the same GLM-DSA Metal case with q2_K routed gate/up SwigLU fusion disabled as the baseline and enabled as the candidate."
+    )]
+    pub compare_moe_q2_gate_up_swiglu: bool,
+    #[arg(
+        long,
+        default_value_t = false,
         help = "Compare native in-graph GLM-DSA Full->Shared execution with a local producer stage feeding the Shared consumer stage."
     )]
     pub compare_native_indexshare_producer_consumer: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "When comparing native GLM-DSA IndexShare producer/consumer execution, skip the poisoned-sideband sensitivity rerun. Use only for faster timing gates after the poisoned proof has already passed."
+    )]
+    pub skip_native_indexshare_poison: bool,
     #[arg(long, default_value_t = 1.0e-3)]
     pub parity_atol: f32,
     #[arg(long, default_value_t = 1.0e-3)]
@@ -1245,6 +1322,7 @@ mod tests {
             "--require-native-indexshare-proof",
             "--require-direct-sparse-decode-proof",
             "--compare-native-indexshare-producer-consumer",
+            "--skip-native-indexshare-poison",
         ])
         .unwrap();
 
@@ -1274,6 +1352,7 @@ mod tests {
         assert!(args.require_native_indexshare_proof);
         assert!(args.require_direct_sparse_decode_proof);
         assert!(args.compare_native_indexshare_producer_consumer);
+        assert!(args.skip_native_indexshare_poison);
         assert!(!args.compare_dense_fallback);
         assert!(!args.compare_dense_flash_prefill);
         assert!(!args.compare_cpu_direct_sparse);

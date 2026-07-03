@@ -185,6 +185,21 @@ Minimal shape:
     }
   },
   "generation": {
+    "glm_dsa": {
+      "policy": {
+        "decode": "compact-flash",
+        "short_prefill": "dense",
+        "long_prefill": "sparse-chunked",
+        "verify": "auto",
+        "indexshare": "required",
+        "selected_row_flash": "experimental-off"
+      },
+      "thresholds": {
+        "short_prefill_max_tokens": 2048,
+        "compact_flash_min_kv": 256,
+        "dense_mask_max_bytes": 268435456
+      }
+    },
     "speculative_decoding": {
       "default": "native-mtp-n1",
       "strategies": {
@@ -272,7 +287,80 @@ configured.
 ### Generation Defaults
 
 `generation` is optional and defaults to no package-owned generation policy.
-When present, it may declare `speculative_decoding` defaults:
+When present, it may declare package-authored runtime defaults. The package owns
+defaults that are specific to the artifact distribution, such as quant layout,
+preserved native tensors, validated sparse-attention paths, and native
+speculative decoding strategy. Runtime config and explicit CLI/environment
+overrides MAY override these defaults for experiments, but consumers SHOULD log
+the final resolved policy and the package recommendation that was overridden.
+
+#### GLM-DSA Policy
+
+GLM-DSA packages MAY declare `generation.glm_dsa` to describe the
+package-validated sparse-attention policy profile. This profile is a model
+execution policy, not a backend implementation detail. It should use stable
+semantic path names such as `compact-flash` rather than Metal/CUDA kernel names.
+
+The current proposed shape is:
+
+```json
+{
+  "generation": {
+    "glm_dsa": {
+      "policy": {
+        "decode": "compact-flash",
+        "short_prefill": "dense",
+        "long_prefill": "sparse-chunked",
+        "verify": "auto",
+        "indexshare": "required",
+        "selected_row_flash": "experimental-off"
+      },
+      "thresholds": {
+        "short_prefill_max_tokens": 2048,
+        "compact_flash_min_kv": 256,
+        "dense_mask_max_bytes": 268435456
+      }
+    }
+  }
+}
+```
+
+Policy values are intentionally phase-specific:
+
+- `decode`: preferred one-token generation path. For GLM-DSA this is expected
+  to become `compact-flash` when compact selected-KV attention has parity on
+  the package.
+- `short_prefill`: preferred path below the short-prefill threshold. Packages
+  MAY select `dense` when sparse/indexer overhead is known to dominate.
+- `long_prefill`: preferred path above the short-prefill threshold. Packages
+  SHOULD avoid policies that materialize dense sparse masks for long context.
+- `verify`: preferred path for speculative verification spans. It MAY remain
+  `auto` until verifier-specific parity and performance are measured.
+- `indexshare`: whether Shared GLM-DSA layers require local IndexShare/top-k
+  state. `required` means a consumer must not silently recompute shared-layer
+  indexers unless an explicit fallback policy is selected and logged.
+- `selected_row_flash`: controls selected-row flash fusion. Use
+  `experimental-off` until the package has reproducible wins for that path.
+
+Suggested semantic path values are:
+
+- `auto`: runtime chooses using package thresholds and backend capability.
+- `dense`: dense attention path; useful for short prefill when measured faster.
+- `direct-sparse`: direct GLM-DSA sparse attention.
+- `compact-flash`: compact selected K/V followed by flash attention.
+- `sparse-chunked`: chunked sparse prefill path for long prompts.
+- `fallback`: named correctness fallback when a native sparse backend is not
+  available.
+
+`thresholds` are package recommendations. Consumers SHOULD treat them as input
+to the runtime policy resolver, not as hard schema limits. Every GLM-DSA policy
+decision SHOULD emit telemetry containing the phase, selected path, rejected
+path or fallback reason, `n_kv`, `top_k`, IndexShare role, backend, and any
+dense sparse-mask allocation avoided.
+
+#### Speculative Decoding
+
+When present, `generation` may also declare `speculative_decoding` defaults:
 
 - `default`: the strategy id the package recommends for this distribution.
 - `strategies`: a map of strategy id to strategy configuration.

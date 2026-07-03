@@ -35,6 +35,14 @@ Required rules:
 - Every artifact entry must include size and SHA-256.
 - Production refs should use immutable `hf://namespace/repo@revision` pins.
 
+Model-specific generation policy defaults belong under the manifest
+`generation` section. For GLM-DSA packages, use `generation.glm_dsa` for the
+package-validated phase policy, such as decode `compact-flash`, short-prefill
+`dense`, long-prefill `sparse-chunked`, and IndexShare `required`. Runtime
+config may override these values for experiments, but the package manifest is
+the source of truth for validated defaults. See
+[specs/layer-package-repos.md](specs/layer-package-repos.md#generation-defaults).
+
 ## Local package tooling
 
 `skippy-model-package` is the local inspection and writing tool. Current

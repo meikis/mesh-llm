@@ -461,14 +461,22 @@ contract is that packages expose enough policy and threshold information for
 the runtime to explain why it selected dense, direct sparse, compact-flash, or
 fallback execution.
 
-Current GLM-DSA decode tuning is grounded in the llama.cpp Metal backend
-fixture `GLM_DSA_SELECTED_ROW_FLASH(kv=257,top_k=64)`. On that one-head decode
-shape, compact selected-row flash measured `65.51 us/run`, direct sparse
-attention measured `107.53 us/run`, and dense masked flash measured
-`130.52 us/run`. That makes the compact selected-row path about `1.64x` faster
-than direct sparse and `1.99x` faster than dense masked flash for this fixture.
-Treat these as backend evidence for the current threshold defaults, not as
-portable constants across every device or quant.
+Current GLM-DSA tuning is grounded in llama.cpp Metal backend fixtures around
+`kv=257,top_k=64`. On the one-token decode shape, compact selected-row flash
+measured `63.40 us/run`, direct sparse attention measured `106.57 us/run`, and
+dense masked flash measured `71.72 us/run`. That makes the compact selected-row
+path about `1.68x` faster than direct sparse and about `1.13x` faster than dense
+masked flash for this fixture.
+
+Short phase fixtures measured the opposite shape for direct sparse prefill:
+dense masked flash stayed around `68.58-70.80 us/run` for 4-16 token batches,
+while direct sparse measured `461.98-473.75 us/run`. That makes dense masked
+flash roughly `6.5-6.9x` faster on those short phase fixtures. This is why
+`glm-dsa-v1` keeps `short_prefill: "dense"` and `verify: "auto"` as the package
+defaults, with direct sparse prefill reserved for explicit runtime/package
+policy after backend evidence exists. Treat these as backend evidence for the
+current threshold defaults, not as portable constants across every device or
+quant.
 
 #### Speculative Decoding
 

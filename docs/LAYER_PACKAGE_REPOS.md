@@ -59,11 +59,17 @@ dense mask is `512 KiB/token`. That size gap is why GLM-DSA packages should
 record dense-mask and compact-flash thresholds instead of leaving sparse policy
 implicit.
 
-For current GLM-DSA decode tuning, the llama.cpp Metal fixture
-`GLM_DSA_SELECTED_ROW_FLASH(kv=257,top_k=64)` measured compact selected-row
-flash at `65.51 us/run`, direct sparse attention at `107.53 us/run`, and dense
-masked flash at `130.52 us/run`. That is the evidence behind preferring
+For current GLM-DSA decode tuning, the llama.cpp Metal fixtures measured
+compact selected-row flash at `63.40 us/run` for
+`GLM_DSA_SELECTED_ROW_FLASH(kv=257,top_k=64)`, direct sparse attention at
+`106.57 us/run`, and dense masked flash at `71.72 us/run` on the comparable
+one-token shape. That is the evidence behind preferring
 `decode: "compact-flash"` once parity is proven on the target package/backend.
+The same fixture family measured dense masked flash much faster than direct
+sparse for short phase shapes (`68.58-70.80 us/run` versus
+`461.98-473.75 us/run` for 4-16 tokens), so GLM-DSA packages should keep
+short prefill and verification dense by default unless a backend-specific sparse
+path has its own evidence.
 
 ## Local package tooling
 

@@ -234,6 +234,52 @@ for path in paths:
     baseline = report["comparison"]["baseline"]["timing_summary"]["mean_ms"]
     candidate = report["comparison"]["candidate"]["timing_summary"]["mean_ms"]
     delta = (baseline - candidate) / baseline * 100.0
+
+    baseline_ops = report["comparison"]["baseline"].get("op_timing_summary") or {}
+    candidate_ops = report["comparison"]["candidate"].get("op_timing_summary") or {}
+
+    def elapsed_us(summary, name):
+        return (summary.get(name) or {}).get("elapsed_us")
+
+    def nodes(summary, name):
+        return (summary.get(name) or {}).get("nodes")
+
+    def op_delta_us(name):
+        before = elapsed_us(baseline_ops, name)
+        after = elapsed_us(candidate_ops, name)
+        if before is None or after is None:
+            return None
+        return before - after
+
+    op_delta_names = [
+        "indexer_topk",
+        "sparse_mask",
+        "dsa_sparse_attn",
+        "compact_get_rows",
+        "mla_attention",
+        "routed_moe",
+        "shared_expert",
+    ]
+    op_delta_map = {name: op_delta_us(name) for name in op_delta_names}
+    known_deltas = {name: value for name, value in op_delta_map.items() if value is not None}
+    top_savings = sorted(
+        (
+            {"op": name, "delta_us": value}
+            for name, value in known_deltas.items()
+            if value > 0
+        ),
+        key=lambda item: item["delta_us"],
+        reverse=True,
+    )[:3]
+    top_regressions = sorted(
+        (
+            {"op": name, "delta_us": value}
+            for name, value in known_deltas.items()
+            if value < 0
+        ),
+        key=lambda item: item["delta_us"],
+    )[:3]
+
     row = {
         "window": f"{report['layer_start']}..{report['layer_end']}",
         "position_start": report["position_start"],
@@ -247,11 +293,33 @@ for path in paths:
         "typed_get_rows_records": report.get("metal_dispatch_summary", {}).get("get_rows_typed_records"),
         "dsa_sparse_attn_records": report.get("metal_dispatch_summary", {}).get("dsa_sparse_attn_records"),
         "compact_execution_records": report.get("compact_flash_policy_summary", {}).get("execution_use_compact"),
-        "indexer_topk_us": (report.get("op_timing_summary", {}).get("indexer_topk") or {}).get("elapsed_us"),
-        "compact_get_rows_us": (report.get("op_timing_summary", {}).get("compact_get_rows") or {}).get("elapsed_us"),
-        "mla_attention_us": (report.get("op_timing_summary", {}).get("mla_attention") or {}).get("elapsed_us"),
-        "routed_moe_us": (report.get("op_timing_summary", {}).get("routed_moe") or {}).get("elapsed_us"),
-        "shared_expert_us": (report.get("op_timing_summary", {}).get("shared_expert") or {}).get("elapsed_us"),
+        "baseline_op_total_us": baseline_ops.get("total_us"),
+        "candidate_op_total_us": candidate_ops.get("total_us"),
+        "op_total_delta_us": (
+            baseline_ops.get("total_us") - candidate_ops.get("total_us")
+            if baseline_ops.get("total_us") is not None and candidate_ops.get("total_us") is not None
+            else None
+        ),
+        "baseline_indexer_topk_us": elapsed_us(baseline_ops, "indexer_topk"),
+        "candidate_indexer_topk_us": elapsed_us(candidate_ops, "indexer_topk"),
+        "indexer_topk_delta_us": op_delta_map["indexer_topk"],
+        "baseline_sparse_mask_nodes": nodes(baseline_ops, "sparse_mask"),
+        "candidate_sparse_mask_nodes": nodes(candidate_ops, "sparse_mask"),
+        "sparse_mask_delta_us": op_delta_map["sparse_mask"],
+        "baseline_compact_get_rows_nodes": nodes(baseline_ops, "compact_get_rows"),
+        "candidate_compact_get_rows_nodes": nodes(candidate_ops, "compact_get_rows"),
+        "compact_get_rows_delta_us": op_delta_map["compact_get_rows"],
+        "baseline_mla_attention_us": elapsed_us(baseline_ops, "mla_attention"),
+        "candidate_mla_attention_us": elapsed_us(candidate_ops, "mla_attention"),
+        "mla_attention_delta_us": op_delta_map["mla_attention"],
+        "baseline_routed_moe_us": elapsed_us(baseline_ops, "routed_moe"),
+        "candidate_routed_moe_us": elapsed_us(candidate_ops, "routed_moe"),
+        "routed_moe_delta_us": op_delta_map["routed_moe"],
+        "baseline_shared_expert_us": elapsed_us(baseline_ops, "shared_expert"),
+        "candidate_shared_expert_us": elapsed_us(candidate_ops, "shared_expert"),
+        "shared_expert_delta_us": op_delta_map["shared_expert"],
+        "top_op_savings": top_savings,
+        "top_op_regressions": top_regressions,
     }
     rows.append(row)
     if not row["parity_passed"]:
@@ -294,9 +362,22 @@ if failures:
 print("GLM-5.2 compact sweep passed")
 print(f"summary={summary_path}")
 for row in rows:
+    top_regression = row["top_op_regressions"][0] if row["top_op_regressions"] else None
+    top_saving = row["top_op_savings"][0] if row["top_op_savings"] else None
+    top_regression_text = (
+        f" top_regression={top_regression['op']}:{top_regression['delta_us']}us"
+        if top_regression
+        else ""
+    )
+    top_saving_text = (
+        f" top_saving={top_saving['op']}:{top_saving['delta_us']}us"
+        if top_saving
+        else ""
+    )
     print(
         f"{row['window']} pos={row['position_start']}: "
         f"dense={row['dense_mean_ms']:.3f}ms compact={row['compact_mean_ms']:.3f}ms "
         f"delta={row['delta_percent']:.2f}% cv={row['candidate_cv']:.3f}"
+        f"{top_saving_text}{top_regression_text}"
     )
 PY

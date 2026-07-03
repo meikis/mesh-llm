@@ -64,6 +64,17 @@ the coordinate through `model-ref`, `model-artifact`, and the `huggingface-hub`
 backed `model-hf` adapter, downloads the resolved source artifact, and records
 the resolved repo, revision, primary file, canonical ref, distribution id, and
 artifact file set in `model-package.json`.
+
+When the source artifact carries model-specific generation requirements,
+`write-package` should record them in the manifest's `generation` section.
+Use `generation.policy` for stable semantic execution choices such as
+`decode: "compact-flash"` or `indexshare: "required"`, and use
+`generation.thresholds` for numeric resolver inputs such as
+`short_prefill_max_tokens`, `compact_flash_min_kv`, and
+`dense_mask_max_bytes`. Do not add model-family-specific objects such as
+`generation.glm_dsa`; package writers should use a versioned policy profile
+such as `glm-dsa-v1`.
+
 Layer packages store input-boundary tensors in `shared/embeddings.gguf` and
 final-boundary tensors in `shared/output.gguf`; owned tensors should appear in
 exactly one package artifact.

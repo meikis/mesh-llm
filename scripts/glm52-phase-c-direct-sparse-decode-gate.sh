@@ -358,6 +358,7 @@ for case_dir in sorted(path for path in out_dir.iterdir() if path.is_dir()):
         "candidate_dsa_sparse_attn_dispatches": candidate_dispatch.get("dsa_sparse_attn_records"),
         "candidate_dense_sparse_mask_dispatches": dense_sparse_mask_dispatches,
         "candidate_flash_attn_ext_records": compact_guard.get("flash_attn_ext_records"),
+        "candidate_partial_kv_flash_records": compact_guard.get("partial_kv_flash_records"),
         "candidate_dsa_sparse_attn_kernels": sorted(
             {
                 record.get("kernel")
@@ -444,6 +445,8 @@ for case_dir in sorted(path for path in out_dir.iterdir() if path.is_dir()):
         failures.append(f"{case_dir.name}: dense parity baseline used DSA sparse attention")
     if proof_kind == "compact_flash" and not row["candidate_flash_attn_ext_records"]:
         failures.append(f"{case_dir.name}: missing compact flash attention dispatch evidence")
+    if proof_kind == "compact_flash" and not row["candidate_partial_kv_flash_records"]:
+        failures.append(f"{case_dir.name}: compact flash did not prove partial-KV sparse selection")
     if proof_kind == "compact_flash" and not row["candidate_compact_mask_omission_records"]:
         failures.append(f"{case_dir.name}: missing compact MLA KQ mask-omission evidence")
     if proof_kind == "compact_flash" and row["candidate_materialized_mla_kq_mask_records"] not in (0, None):

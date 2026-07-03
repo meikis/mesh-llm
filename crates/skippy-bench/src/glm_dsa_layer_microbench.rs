@@ -540,12 +540,13 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
         && !guard.passed
     {
         bail!(
-            "GLM-DSA compact flash proof failed for {}: flash_glm_shape={} typed_get_rows={} compact_get_rows_fused={} dsa_top1_attn={} all_kv_flash={} promoted_get_rows={} dsa_sparse_attn={} mask_omission_records={} materialized_mla_kq_mask_records={} failures={}",
+            "GLM-DSA compact flash proof failed for {}: flash_glm_shape={} typed_get_rows={} compact_get_rows_fused={} dsa_top1_attn={} partial_kv_flash={} all_kv_flash={} promoted_get_rows={} dsa_sparse_attn={} mask_omission_records={} materialized_mla_kq_mask_records={} failures={}",
             guard.checked_case,
             guard.flash_attn_ext_glm_dsa_shape_records,
             guard.get_rows_typed_records,
             guard.dsa_compact_get_rows_fused_records,
             guard.dsa_top1_attn_records,
+            guard.partial_kv_flash_records,
             guard.all_kv_flash_records,
             guard.get_rows_promote_records,
             guard.dsa_sparse_attn_records,
@@ -5852,6 +5853,7 @@ struct CompactFlashGuardReport {
     compact_get_rows_promote_records: usize,
     dsa_compact_get_rows_fused_records: usize,
     dsa_top1_attn_records: usize,
+    partial_kv_flash_records: usize,
     all_kv_flash_records: usize,
     dsa_sparse_attn_records: usize,
     sparse_mask_nodes: u64,
@@ -6582,6 +6584,12 @@ fn build_compact_flash_guard(candidate: &MicrobenchCaseSummary) -> CompactFlashG
             record.use_compact && record.no_mask == Some(true) && record.top_k >= record.visible_kv
         })
         .count();
+    let partial_kv_flash_records = policy_records
+        .iter()
+        .filter(|record| {
+            record.use_compact && record.no_mask == Some(true) && record.top_k < record.visible_kv
+        })
+        .count();
     let old_compact_flash_path = dispatch.flash_attn_ext_glm_dsa_shape_records > 0
         && dispatch.flash_attn_ext_vec_records > 0
         && (compact_get_rows_typed_records > 0 || dispatch.dsa_compact_get_rows_fused_records > 0);
@@ -6649,6 +6657,7 @@ fn build_compact_flash_guard(candidate: &MicrobenchCaseSummary) -> CompactFlashG
         compact_get_rows_promote_records,
         dsa_compact_get_rows_fused_records: dispatch.dsa_compact_get_rows_fused_records,
         dsa_top1_attn_records: dispatch.dsa_top1_attn_records,
+        partial_kv_flash_records,
         all_kv_flash_records,
         dsa_sparse_attn_records: dispatch.dsa_sparse_attn_records,
         sparse_mask_nodes: candidate.op_timing_summary.sparse_mask.nodes,
@@ -8297,6 +8306,7 @@ mod tests {
         assert_eq!(guard.compact_get_rows_typed_records, 2);
         assert_eq!(guard.compact_get_rows_promote_records, 0);
         assert_eq!(guard.dsa_sparse_attn_records, 0);
+        assert_eq!(guard.partial_kv_flash_records, 0);
         assert_eq!(guard.execution_mask_omission_records, 1);
         assert_eq!(guard.omitted_mla_kq_mask_records, 1);
         assert_eq!(guard.materialized_mla_kq_mask_records, 0);
@@ -8339,6 +8349,7 @@ mod tests {
 
         assert!(guard.passed);
         assert_eq!(guard.failure_summary, "none");
+        assert_eq!(guard.partial_kv_flash_records, 1);
         assert_eq!(guard.policy_phase.as_deref(), Some("decode"));
         assert_eq!(
             guard.policy_selector_reason.as_deref(),
@@ -8410,6 +8421,7 @@ mod tests {
         let guard = build_compact_flash_guard(&candidate);
 
         assert!(guard.passed);
+        assert_eq!(guard.partial_kv_flash_records, 0);
         assert_eq!(guard.all_kv_flash_records, 1);
         assert_eq!(guard.compact_get_rows_records, 0);
         assert_eq!(guard.dsa_sparse_attn_records, 0);

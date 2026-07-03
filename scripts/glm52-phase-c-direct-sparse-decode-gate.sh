@@ -130,6 +130,7 @@ run_decode_case() {
   fi
   local case_dir="$OUT_DIR/$name"
   mkdir -p "$case_dir"
+  echo "$proof_mode" >"$case_dir/proof-kind.txt"
   REPORT="$case_dir/report.json" LOG="$case_dir/run.log" \
     DIRECT_SPARSE_ATTN=1 \
     NATIVE_DEFAULT_DIRECT_SPARSE_ATTN=1 \
@@ -155,7 +156,40 @@ run_decode_case() {
       2>"$case_dir/stderr.txt"
 }
 
+run_dense_parity_case() {
+  local name="$1"
+  shift
+  local case_dir="$OUT_DIR/$name"
+  mkdir -p "$case_dir"
+  echo "dense_parity" >"$case_dir/proof-kind.txt"
+  "$SKIPPY_BENCH_BIN" glm-dsa-layer-microbench \
+    --stage-model "$STAGE_MODEL" \
+    --model-id "$MODEL_ID" \
+    --iterations "$ITERATIONS" \
+    --warmup "$WARMUP" \
+    --native-default-direct-sparse-attn \
+    --direct-sparse-prefill false \
+    --compare-dense-fallback \
+    --require-direct-sparse-decode-proof \
+    --metal-dispatch-log true \
+    --metal-topk-moe-route-fusion false \
+    --output "$case_dir/report.json" \
+    "$@" \
+    >"$case_dir/stdout.txt" \
+    2>"$case_dir/stderr.txt"
+}
+
 if [[ "$QUICK" == "1" ]]; then
+  run_dense_parity_case dense-parity-middle-quick \
+    --layer-start 30 \
+    --layer-end 34 \
+    --ctx-size 128 \
+    --tokens 1 \
+    --position-start 16 \
+    --kv-warmup-tokens 16 \
+    --kv-warmup-chunk-tokens 16 \
+    --n-batch 16 \
+    --n-ubatch 16
   run_decode_case decode-middle-quick direct \
     --layer-start 30 \
     --layer-end 34 \
@@ -167,6 +201,16 @@ if [[ "$QUICK" == "1" ]]; then
     --n-batch 16 \
     --n-ubatch 16
 elif [[ "$LONG_KV_ONLY" != "1" ]]; then
+  run_dense_parity_case dense-parity-middle \
+    --layer-start 30 \
+    --layer-end 34 \
+    --ctx-size 128 \
+    --tokens 1 \
+    --position-start 16 \
+    --kv-warmup-tokens 16 \
+    --kv-warmup-chunk-tokens 16 \
+    --n-batch 16 \
+    --n-ubatch 16
   run_decode_case decode-early direct \
     --layer-start 6 \
     --layer-end 10 \
@@ -250,7 +294,26 @@ for case_dir in sorted(path for path in out_dir.iterdir() if path.is_dir()):
     candidate_ops = candidate.get("op_timing_summary") or {}
     baseline_ops = baseline.get("op_timing_summary") or {}
     candidate_dispatch = candidate.get("metal_dispatch_summary") or {}
+    baseline_dispatch = baseline.get("metal_dispatch_summary") or {}
     candidate_dispatch_records = candidate.get("metal_dispatch_records") or []
+    baseline_dispatch_records = baseline.get("metal_dispatch_records") or []
+    dsa_sparse_dispatch_records = [
+        record
+        for record in candidate_dispatch_records
+        if isinstance(record, dict) and record.get("op") == "dsa_sparse_attn"
+    ]
+    compact_policy_records = (
+        candidate.get("compact_flash_execution_policy_records")
+        or candidate.get("compact_flash_policy_records")
+        or []
+    )
+    compact_policy = compact_policy_records[-1] if compact_policy_records else {}
+    compact_mask_records = (
+        candidate.get("compact_flash_execution_mask_records")
+        or candidate.get("compact_flash_mask_records")
+        or []
+    )
+    compact_mask = compact_mask_records[-1] if compact_mask_records else {}
     dense_sparse_mask_dispatches = guard.get("dense_sparse_mask_dispatches")
     if dense_sparse_mask_dispatches is None:
         dense_sparse_mask_dispatches = sum(
@@ -258,9 +321,22 @@ for case_dir in sorted(path for path in out_dir.iterdir() if path.is_dir()):
             for record in candidate_dispatch_records
             if isinstance(record, dict) and record.get("op") == "dsa_sparse_mask"
         )
+    baseline_dense_sparse_mask_dispatches = sum(
+        1
+        for record in baseline_dispatch_records
+        if isinstance(record, dict) and record.get("op") == "dsa_sparse_mask"
+    )
     baseline_timing = (baseline.get("timing_summary") or {}).get("mean_ms")
     candidate_timing = (candidate.get("timing_summary") or {}).get("mean_ms")
-    proof_kind = "compact_flash" if compact_guard else "direct_sparse"
+    proof_path = case_dir / "proof-kind.txt"
+    if proof_path.exists():
+        proof_kind = proof_path.read_text().strip()
+    else:
+        proof_kind = "compact" if compact_guard else "direct"
+    if proof_kind == "direct":
+        proof_kind = "direct_sparse"
+    elif proof_kind == "compact":
+        proof_kind = "compact_flash"
     row = {
         "label": case_dir.name,
         "report": str(report_path),
@@ -282,11 +358,46 @@ for case_dir in sorted(path for path in out_dir.iterdir() if path.is_dir()):
         "candidate_dsa_sparse_attn_dispatches": candidate_dispatch.get("dsa_sparse_attn_records"),
         "candidate_dense_sparse_mask_dispatches": dense_sparse_mask_dispatches,
         "candidate_flash_attn_ext_records": compact_guard.get("flash_attn_ext_records"),
+        "candidate_dsa_sparse_attn_kernels": sorted(
+            {
+                record.get("kernel")
+                for record in dsa_sparse_dispatch_records
+                if record.get("kernel")
+            }
+        ),
+        "candidate_dsa_sparse_attn_max_kv": max(
+            (record.get("kv") or 0 for record in dsa_sparse_dispatch_records),
+            default=0,
+        ),
+        "candidate_dsa_sparse_attn_max_top_k": max(
+            (record.get("top_k") or 0 for record in dsa_sparse_dispatch_records),
+            default=0,
+        ),
+        "candidate_dsa_sparse_attn_max_selected_keys": max(
+            (record.get("selected_keys") or 0 for record in dsa_sparse_dispatch_records),
+            default=0,
+        ),
+        "candidate_dsa_sparse_attn_threads_x": sorted(
+            {
+                record.get("threads_x")
+                for record in dsa_sparse_dispatch_records
+                if record.get("threads_x")
+            }
+        ),
         "candidate_compact_get_rows_records": compact_guard.get("compact_get_rows_records"),
         "candidate_dsa_compact_get_rows_fused_records": compact_guard.get("dsa_compact_get_rows_fused_records"),
         "candidate_compact_get_rows_nodes": (candidate_ops.get("compact_get_rows") or {}).get("nodes"),
         "candidate_compact_get_rows_us": (candidate_ops.get("compact_get_rows") or {}).get("elapsed_us"),
         "candidate_compact_get_rows_share_of_total": candidate_ops.get("compact_get_rows_share_of_total"),
+        "candidate_compact_policy_phase": compact_policy.get("phase"),
+        "candidate_compact_policy_visible_kv": compact_policy.get("visible_kv"),
+        "candidate_compact_policy_top_k": compact_policy.get("top_k"),
+        "candidate_compact_policy_kv_topk_ratio": compact_policy.get("kv_topk_ratio"),
+        "candidate_compact_policy_min_kv_topk_ratio": compact_policy.get("min_kv_topk_ratio"),
+        "candidate_compact_policy_no_mask": compact_policy.get("no_mask"),
+        "candidate_compact_policy_use_compact": compact_policy.get("use_compact"),
+        "candidate_compact_mask_visible_kv": compact_mask.get("visible_kv"),
+        "candidate_compact_mask_max_top_k": compact_mask.get("max_top_k"),
         "candidate_compact_mask_omission_records": compact_guard.get("execution_mask_omission_records"),
         "candidate_omitted_mla_kq_mask_records": compact_guard.get("omitted_mla_kq_mask_records"),
         "candidate_materialized_mla_kq_mask_records": compact_guard.get("materialized_mla_kq_mask_records"),
@@ -295,6 +406,9 @@ for case_dir in sorted(path for path in out_dir.iterdir() if path.is_dir()):
         "candidate_top_k_nodes": (candidate_ops.get("top_k") or {}).get("nodes"),
         "baseline_sparse_mask_nodes": (baseline_ops.get("sparse_mask") or {}).get("nodes"),
         "baseline_dsa_sparse_attn_nodes": (baseline_ops.get("dsa_sparse_attn") or {}).get("nodes"),
+        "baseline_dense_sparse_mask_dispatches": baseline_dense_sparse_mask_dispatches,
+        "baseline_dsa_sparse_attn_dispatches": baseline_dispatch.get("dsa_sparse_attn_records"),
+        "baseline_flash_attn_ext_records": baseline_dispatch.get("flash_attn_ext_records"),
         "baseline_mean_ms": baseline_timing,
         "candidate_mean_ms": candidate_timing,
     }
@@ -308,9 +422,9 @@ for case_dir in sorted(path for path in out_dir.iterdir() if path.is_dir()):
         failures.append(f"{case_dir.name}: hidden mismatches {row['hidden_mismatches']}")
     if row["sideband_mismatched_bytes"] not in (0, None):
         failures.append(f"{case_dir.name}: sideband mismatch {row['sideband_mismatched_bytes']}")
-    if not row["native_indexshare_guard_passed"]:
+    if proof_kind != "dense_parity" and not row["native_indexshare_guard_passed"]:
         failures.append(f"{case_dir.name}: native IndexShare guard failed")
-    if proof_kind == "direct_sparse" and not row["direct_sparse_decode_guard_passed"]:
+    if proof_kind in ("direct_sparse", "dense_parity") and not row["direct_sparse_decode_guard_passed"]:
         failures.append(f"{case_dir.name}: direct sparse decode guard failed: {row['direct_sparse_failure_summary']}")
     if proof_kind == "compact_flash" and not row["compact_flash_guard_passed"]:
         failures.append(f"{case_dir.name}: compact flash guard failed: {row['compact_flash_failure_summary']}")
@@ -322,6 +436,12 @@ for case_dir in sorted(path for path in out_dir.iterdir() if path.is_dir()):
         failures.append(f"{case_dir.name}: missing DSA sparse attention timing nodes")
     if proof_kind == "direct_sparse" and not row["candidate_dsa_sparse_attn_dispatches"]:
         failures.append(f"{case_dir.name}: missing DSA sparse attention Metal dispatches")
+    if proof_kind == "dense_parity" and not row["candidate_dsa_sparse_attn_dispatches"]:
+        failures.append(f"{case_dir.name}: dense parity candidate missing DSA sparse attention Metal dispatches")
+    if proof_kind == "dense_parity" and not row["baseline_dense_sparse_mask_dispatches"]:
+        failures.append(f"{case_dir.name}: dense parity baseline did not materialize sparse masks")
+    if proof_kind == "dense_parity" and row["baseline_dsa_sparse_attn_dispatches"] not in (0, None):
+        failures.append(f"{case_dir.name}: dense parity baseline used DSA sparse attention")
     if proof_kind == "compact_flash" and not row["candidate_flash_attn_ext_records"]:
         failures.append(f"{case_dir.name}: missing compact flash attention dispatch evidence")
     if proof_kind == "compact_flash" and not row["candidate_compact_mask_omission_records"]:
@@ -339,11 +459,11 @@ for case_dir in sorted(path for path in out_dir.iterdir() if path.is_dir()):
         and not row["candidate_compact_get_rows_nodes"]
     ):
         failures.append(f"{case_dir.name}: missing compact K/V gather timing nodes")
-    if row["candidate_indexer_topk_nodes"] not in (0, None):
+    if proof_kind != "dense_parity" and row["candidate_indexer_topk_nodes"] not in (0, None):
         failures.append(f"{case_dir.name}: candidate recomputed indexer_topk")
-    if row["candidate_indexer_nodes"] not in (0, None):
+    if proof_kind != "dense_parity" and row["candidate_indexer_nodes"] not in (0, None):
         failures.append(f"{case_dir.name}: candidate recomputed indexer")
-    if row["candidate_top_k_nodes"] not in (0, None):
+    if proof_kind != "dense_parity" and row["candidate_top_k_nodes"] not in (0, None):
         failures.append(f"{case_dir.name}: candidate recomputed top_k")
 
 summary = {

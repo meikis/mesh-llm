@@ -621,14 +621,7 @@ fn run_dense_fallback_comparison(
     candidate_flags: MicrobenchFlags,
     deferred_model_drops: &mut Vec<StageModel>,
 ) -> Result<MicrobenchComparison> {
-    let baseline_flags = MicrobenchFlags {
-        direct_sparse_attn: false,
-        compact_flash_attn: false,
-        direct_sparse_prefill: false,
-        enable_unproven_large_direct_sparse_prefill: false,
-        direct_sparse_prefill_max_tokens: None,
-        ..candidate_flags
-    };
+    let baseline_flags = dense_fallback_baseline_flags(candidate_flags);
     let baseline = run_microbench_case_with_warmup(
         "dense_fallback",
         selected_paths,
@@ -681,21 +674,8 @@ fn run_dense_flash_prefill_comparison(
     candidate_flags: MicrobenchFlags,
     deferred_model_drops: &mut Vec<StageModel>,
 ) -> Result<MicrobenchComparison> {
-    let baseline_flags = MicrobenchFlags {
-        direct_sparse_attn: true,
-        compact_flash_attn: false,
-        direct_sparse_prefill: false,
-        enable_unproven_large_direct_sparse_prefill: false,
-        direct_sparse_prefill_max_tokens: None,
-        dense_sparse_mask_max_bytes: None,
-        direct_sparse_prefill_min_kv_topk_ratio: None,
-        ..candidate_flags
-    };
-    let candidate_flags = MicrobenchFlags {
-        direct_sparse_attn: true,
-        direct_sparse_prefill: true,
-        ..candidate_flags
-    };
+    let baseline_flags = dense_flash_prefill_baseline_flags(candidate_flags);
+    let candidate_flags = direct_sparse_prefill_candidate_flags(candidate_flags);
     let baseline = run_microbench_case(
         "dense_flash_prefill",
         selected_paths,
@@ -733,6 +713,50 @@ fn run_dense_flash_prefill_comparison(
         poisoned_parity: None,
         sideband_sensitivity: None,
     })
+}
+
+fn dense_fallback_baseline_flags(candidate_flags: MicrobenchFlags) -> MicrobenchFlags {
+    MicrobenchFlags {
+        direct_sparse_attn: false,
+        native_default_direct_sparse_attn: false,
+        compact_flash_attn: false,
+        allow_compact_flash_auto: false,
+        selected_row_flash: false,
+        direct_sparse_prefill: false,
+        native_default_direct_sparse_prefill: false,
+        enable_unproven_large_direct_sparse_prefill: false,
+        direct_sparse_prefill_max_tokens: None,
+        dense_sparse_mask_max_bytes: None,
+        direct_sparse_prefill_min_kv_topk_ratio: None,
+        ..candidate_flags
+    }
+}
+
+fn dense_flash_prefill_baseline_flags(candidate_flags: MicrobenchFlags) -> MicrobenchFlags {
+    MicrobenchFlags {
+        direct_sparse_attn: true,
+        native_default_direct_sparse_attn: false,
+        compact_flash_attn: false,
+        allow_compact_flash_auto: false,
+        selected_row_flash: false,
+        direct_sparse_prefill: false,
+        native_default_direct_sparse_prefill: false,
+        enable_unproven_large_direct_sparse_prefill: false,
+        direct_sparse_prefill_max_tokens: None,
+        dense_sparse_mask_max_bytes: None,
+        direct_sparse_prefill_min_kv_topk_ratio: None,
+        ..candidate_flags
+    }
+}
+
+fn direct_sparse_prefill_candidate_flags(candidate_flags: MicrobenchFlags) -> MicrobenchFlags {
+    MicrobenchFlags {
+        direct_sparse_attn: true,
+        native_default_direct_sparse_attn: false,
+        direct_sparse_prefill: true,
+        native_default_direct_sparse_prefill: false,
+        ..candidate_flags
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2494,7 +2518,7 @@ fn configure_env_flags(
         "SKIPPY_GLM_DSA_EXPERIMENTAL_SELECTED_ROW_FLASH",
         flags.selected_row_flash,
     );
-    if args.native_default_direct_sparse_prefill {
+    if flags.native_default_direct_sparse_prefill {
         clear_env("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_PREFILL");
         clear_env("SKIPPY_GLM_DSA_DISABLE_DIRECT_SPARSE_PREFILL");
     } else {
@@ -10676,6 +10700,70 @@ mod tests {
             threads_x,
             threads_y: Some(1),
         }
+    }
+
+    #[test]
+    fn dense_fallback_baseline_flags_force_true_dense_path() {
+        let mut candidate = test_microbench_flags();
+        candidate.native_default_direct_sparse_attn = true;
+        candidate.compact_flash_attn = true;
+        candidate.allow_compact_flash_auto = true;
+        candidate.selected_row_flash = true;
+        candidate.direct_sparse_prefill = true;
+        candidate.native_default_direct_sparse_prefill = true;
+        candidate.enable_unproven_large_direct_sparse_prefill = true;
+        candidate.direct_sparse_prefill_max_tokens = Some(4096);
+        candidate.dense_sparse_mask_max_bytes = Some(1024);
+        candidate.direct_sparse_prefill_min_kv_topk_ratio = Some(2);
+
+        let baseline = dense_fallback_baseline_flags(candidate);
+
+        assert!(!baseline.direct_sparse_attn);
+        assert!(!baseline.native_default_direct_sparse_attn);
+        assert!(!baseline.compact_flash_attn);
+        assert!(!baseline.allow_compact_flash_auto);
+        assert!(!baseline.selected_row_flash);
+        assert!(!baseline.direct_sparse_prefill);
+        assert!(!baseline.native_default_direct_sparse_prefill);
+        assert!(!baseline.enable_unproven_large_direct_sparse_prefill);
+        assert_eq!(baseline.direct_sparse_prefill_max_tokens, None);
+        assert_eq!(baseline.dense_sparse_mask_max_bytes, None);
+        assert_eq!(baseline.direct_sparse_prefill_min_kv_topk_ratio, None);
+    }
+
+    #[test]
+    fn dense_flash_prefill_comparison_flags_split_dense_and_direct_prefill() {
+        let mut candidate = test_microbench_flags();
+        candidate.native_default_direct_sparse_attn = true;
+        candidate.compact_flash_attn = true;
+        candidate.allow_compact_flash_auto = true;
+        candidate.selected_row_flash = true;
+        candidate.direct_sparse_prefill = false;
+        candidate.native_default_direct_sparse_prefill = true;
+        candidate.enable_unproven_large_direct_sparse_prefill = true;
+        candidate.direct_sparse_prefill_max_tokens = Some(4096);
+        candidate.dense_sparse_mask_max_bytes = Some(1024);
+        candidate.direct_sparse_prefill_min_kv_topk_ratio = Some(2);
+
+        let baseline = dense_flash_prefill_baseline_flags(candidate);
+        let direct_prefill = direct_sparse_prefill_candidate_flags(candidate);
+
+        assert!(baseline.direct_sparse_attn);
+        assert!(!baseline.native_default_direct_sparse_attn);
+        assert!(!baseline.compact_flash_attn);
+        assert!(!baseline.allow_compact_flash_auto);
+        assert!(!baseline.selected_row_flash);
+        assert!(!baseline.direct_sparse_prefill);
+        assert!(!baseline.native_default_direct_sparse_prefill);
+        assert!(!baseline.enable_unproven_large_direct_sparse_prefill);
+        assert_eq!(baseline.direct_sparse_prefill_max_tokens, None);
+        assert_eq!(baseline.dense_sparse_mask_max_bytes, None);
+        assert_eq!(baseline.direct_sparse_prefill_min_kv_topk_ratio, None);
+
+        assert!(direct_prefill.direct_sparse_attn);
+        assert!(!direct_prefill.native_default_direct_sparse_attn);
+        assert!(direct_prefill.direct_sparse_prefill);
+        assert!(!direct_prefill.native_default_direct_sparse_prefill);
     }
 
     fn test_microbench_flags() -> MicrobenchFlags {

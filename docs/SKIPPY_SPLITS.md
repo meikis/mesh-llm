@@ -55,6 +55,15 @@ selected override or fallback. GLM-DSA packages use
 Skippy-specific prompt, thinking, sparse attention, or IndexShare behavior that
 is absent from llama.cpp itself.
 
+For GLM-DSA split runs, treat `generation.policy` as a package-owned execution
+hint and llama.cpp as the source of truth for correctness. A package may prefer
+decode `compact-flash`, short-prefill `dense`, long-prefill `sparse-chunked`,
+and IndexShare `required`, but Skippy should only select those paths when the
+embedded llama runtime reports support and should log any fallback. Current
+Metal backend evidence for one-token decode shows compact selected-row flash at
+`65.51 us/run` versus direct sparse at `107.53 us/run` and dense masked flash at
+`130.52 us/run` on the `kv=257,top_k=64` fixture.
+
 ```bash
 # node A: starts the private mesh and becomes the coordinator
 mesh-llm serve \

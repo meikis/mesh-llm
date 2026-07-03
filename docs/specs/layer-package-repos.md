@@ -193,7 +193,7 @@ Minimal shape:
       "verify": "auto",
       "indexshare": "required",
       "experimental": {
-        "selected_row_flash": "off"
+        "selected_row_flash": "evidence-gated"
       }
     },
     "thresholds": {
@@ -382,7 +382,8 @@ Policy values are intentionally phase-specific:
   state. `required` means a consumer must not silently recompute shared-layer
   indexers unless an explicit fallback policy is selected and logged.
 - `experimental.selected_row_flash`: controls selected-row flash fusion. Use
-  `off` until the package has reproducible wins for that path.
+  `evidence-gated` until the package has reproducible wins for that path on the
+  target backend.
 
 Suggested semantic path values are:
 
@@ -433,7 +434,7 @@ For `glm-dsa-v1`, the current phase intent is:
 | `long_prefill` | `sparse-chunked` | Keep long-context prefill away from huge dense sparse masks. |
 | `verify` | `auto` | Let the runtime select a verifier path until verifier-specific parity is proven. |
 | `indexshare` | `required` | Reuse Full-layer top-k/index state for Shared GLM-DSA layers instead of silent recompute. |
-| `experimental.selected_row_flash` | `off` | Keep experimental selected-row flash disabled until package evidence enables it. |
+| `experimental.selected_row_flash` | `evidence-gated` | Enable compact selected-row flash only when package/backend evidence proves parity and a win. |
 
 For `glm-dsa-v1`, the current threshold intent is:
 
@@ -459,6 +460,15 @@ wire dtype, or context target will produce different thresholds. The important
 contract is that packages expose enough policy and threshold information for
 the runtime to explain why it selected dense, direct sparse, compact-flash, or
 fallback execution.
+
+Current GLM-DSA decode tuning is grounded in the llama.cpp Metal backend
+fixture `GLM_DSA_SELECTED_ROW_FLASH(kv=257,top_k=64)`. On that one-head decode
+shape, compact selected-row flash measured `65.51 us/run`, direct sparse
+attention measured `107.53 us/run`, and dense masked flash measured
+`130.52 us/run`. That makes the compact selected-row path about `1.64x` faster
+than direct sparse and `1.99x` faster than dense masked flash for this fixture.
+Treat these as backend evidence for the current threshold defaults, not as
+portable constants across every device or quant.
 
 #### Speculative Decoding
 

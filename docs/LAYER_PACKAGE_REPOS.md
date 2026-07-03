@@ -59,6 +59,12 @@ dense mask is `512 KiB/token`. That size gap is why GLM-DSA packages should
 record dense-mask and compact-flash thresholds instead of leaving sparse policy
 implicit.
 
+For current GLM-DSA decode tuning, the llama.cpp Metal fixture
+`GLM_DSA_SELECTED_ROW_FLASH(kv=257,top_k=64)` measured compact selected-row
+flash at `65.51 us/run`, direct sparse attention at `107.53 us/run`, and dense
+masked flash at `130.52 us/run`. That is the evidence behind preferring
+`decode: "compact-flash"` once parity is proven on the target package/backend.
+
 ## Local package tooling
 
 `skippy-model-package` is the local inspection and writing tool. Current

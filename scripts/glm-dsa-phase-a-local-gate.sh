@@ -276,14 +276,14 @@ build_local_tools() {
     return
   fi
 
-  phase "build Rust tools"
-  (cd "$ROOT" && just skippy-quantize-build)
-  (cd "$ROOT" && just with-lld cargo build -p skippy-bench)
-
   phase "build llama.cpp GLM-DSA test binaries"
   cmake --build "$LLAMA_ARCHS_BUILD_DIR" --target test-llama-archs -j "$JOBS"
   cmake --build "$LLAMA_BENCH_BUILD_DIR" --target llama-bench -j "$JOBS"
   cmake --build "$BACKEND_OPS_BUILD_DIR" --target test-backend-ops -j "$JOBS"
+
+  phase "build Rust tools"
+  (cd "$ROOT" && just skippy-quantize-build)
+  (cd "$ROOT" && just with-lld cargo build -p skippy-bench)
 }
 
 run_llama_archs_contract_test() {

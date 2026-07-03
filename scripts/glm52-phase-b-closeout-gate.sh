@@ -19,7 +19,7 @@ Runs the strict Phase-B closeout gate for GLM-5.2 native IndexShare:
 
   1. Tiny fresh fixture proof with Full -> Shared parity and Shared-only failure.
   2. Real GLM-5.2 representative layer matrix.
-  3. Real warmed decode cases with KV prefix and chunked warmup.
+  3. Real warmed decode cases with KV prefix and exact-width top-k warmup.
   4. Real prefill-shaped multi-token case.
 
 This gate deliberately disables direct sparse attention and compact flash. It
@@ -190,9 +190,9 @@ else
     --tokens 1 \
     --position-start 64 \
     --kv-warmup-tokens 64 \
-    --kv-warmup-chunk-tokens 32 \
-    --n-batch 32 \
-    --n-ubatch 32
+    --kv-warmup-chunk-tokens 64 \
+    --n-batch 64 \
+    --n-ubatch 64
   run_phase_b_parity_case warmed-decode-late \
     --layer-start 74 \
     --layer-end 78 \
@@ -200,9 +200,9 @@ else
     --tokens 1 \
     --position-start 128 \
     --kv-warmup-tokens 128 \
-    --kv-warmup-chunk-tokens 64 \
-    --n-batch 64 \
-    --n-ubatch 64
+    --kv-warmup-chunk-tokens 128 \
+    --n-batch 128 \
+    --n-ubatch 128
   run_phase_b_parity_case prefill-shaped-middle \
     --layer-start 30 \
     --layer-end 34 \

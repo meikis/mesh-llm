@@ -19,8 +19,11 @@ INDEX_SKIP_TOPK_OFFSET="${INDEX_SKIP_TOPK_OFFSET:-2}"
 LAYER_START="${LAYER_START:-1}"
 LAYER_END="${LAYER_END:-}"
 TOKENS="${TOKENS:-1}"
-N_BATCH="${N_BATCH:-$TOKENS}"
-N_UBATCH="${N_UBATCH:-$TOKENS}"
+POSITION_START="${POSITION_START:-2}"
+KV_WARMUP_TOKENS="${KV_WARMUP_TOKENS:-$POSITION_START}"
+KV_WARMUP_CHUNK_TOKENS="${KV_WARMUP_CHUNK_TOKENS:-$KV_WARMUP_TOKENS}"
+N_BATCH="${N_BATCH:-$KV_WARMUP_CHUNK_TOKENS}"
+N_UBATCH="${N_UBATCH:-$KV_WARMUP_CHUNK_TOKENS}"
 
 usage() {
   cat <<'EOF'
@@ -47,8 +50,11 @@ Options:
   --layer-start N              Microbench layer start. Default: 1.
   --layer-end N                Microbench layer end. Default: role count.
   --tokens N                   Tokens per measured run. Default: 1.
-  --n-batch N                  Batch size. Default: TOKENS.
-  --n-ubatch N                 Microbatch size. Default: TOKENS.
+  --position-start N           Decode position. Default: 2.
+  --kv-warmup-tokens N         KV prefix tokens. Default: POSITION_START.
+  --kv-warmup-chunk-tokens N   KV warmup chunk size. Default: KV_WARMUP_TOKENS.
+  --n-batch N                  Batch size. Default: KV_WARMUP_CHUNK_TOKENS.
+  --n-ubatch N                 Microbatch size. Default: KV_WARMUP_CHUNK_TOKENS.
   --skip-build                 Do not build local Rust tools first.
   -h, --help                   Show this help.
 
@@ -56,7 +62,8 @@ Environment overrides mirror option names:
   WORK_DIR, SOURCE_DIR, MODEL, PACKAGE_DIR, REPORT, MODEL_ID,
   SKIPPY_QUANTIZE_BIN, SKIPPY_MODEL_PACKAGE_BIN, SKIPPY_BENCH_BIN,
   LLAMA_STAGE_BACKEND, LLAMA_STAGE_BUILD_DIR, INDEXER_TYPES, INDEX_TOPK_FREQ,
-  INDEX_SKIP_TOPK_OFFSET, LAYER_START, LAYER_END, TOKENS, N_BATCH, N_UBATCH.
+  INDEX_SKIP_TOPK_OFFSET, LAYER_START, LAYER_END, TOKENS, POSITION_START,
+  KV_WARMUP_TOKENS, KV_WARMUP_CHUNK_TOKENS, N_BATCH, N_UBATCH.
 EOF
 }
 
@@ -105,6 +112,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --tokens)
       TOKENS="$2"
+      shift 2
+      ;;
+    --position-start)
+      POSITION_START="$2"
+      shift 2
+      ;;
+    --kv-warmup-tokens)
+      KV_WARMUP_TOKENS="$2"
+      shift 2
+      ;;
+    --kv-warmup-chunk-tokens)
+      KV_WARMUP_CHUNK_TOKENS="$2"
       shift 2
       ;;
     --n-batch)
@@ -230,6 +249,9 @@ env \
     --layer-start "$LAYER_START" \
     --layer-end "$LAYER_END" \
     --tokens "$TOKENS" \
+    --position-start "$POSITION_START" \
+    --kv-warmup-tokens "$KV_WARMUP_TOKENS" \
+    --kv-warmup-chunk-tokens "$KV_WARMUP_CHUNK_TOKENS" \
     --ctx-size 128 \
     --activation-width 4 \
     --iterations 1 \
@@ -261,6 +283,9 @@ if [[ -n "$FIRST_SHARED_LAYER" ]]; then
       --layer-start "$FIRST_SHARED_LAYER" \
       --layer-end "$missing_topk_end" \
       --tokens "$TOKENS" \
+      --position-start "$POSITION_START" \
+      --kv-warmup-tokens "$KV_WARMUP_TOKENS" \
+      --kv-warmup-chunk-tokens "$KV_WARMUP_CHUNK_TOKENS" \
       --ctx-size 128 \
       --activation-width 4 \
       --iterations 1 \

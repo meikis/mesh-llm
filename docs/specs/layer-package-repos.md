@@ -291,9 +291,19 @@ configured.
 When present, it may declare package-authored runtime defaults. The package owns
 defaults that are specific to the artifact distribution, such as quant layout,
 preserved native tensors, validated sparse-attention paths, and native
-speculative decoding strategy. Runtime config and explicit CLI/environment
-overrides MAY override these defaults for experiments, but consumers SHOULD log
-the final resolved policy and the package recommendation that was overridden.
+speculative decoding strategy.
+
+The `generation` object is intentionally generic. Do not add
+model-family-specific sub-objects such as `generation.glm_dsa`; use a stable
+`generation.policy.profile` instead. This keeps the manifest shape reusable for
+future sparse attention, native prediction, and verifier policies without
+creating one schema branch per model family.
+
+Runtime config and explicit CLI/environment overrides MAY override these
+defaults for experiments, but consumers SHOULD log the final resolved policy and
+the package recommendation that was overridden. If a consumer cannot execute the
+package-recommended path, it MUST choose a correctness-preserving fallback and
+emit the fallback reason.
 
 #### Execution Policy
 
@@ -366,6 +376,42 @@ policy decision SHOULD emit telemetry containing the policy profile, phase,
 selected path, rejected path or fallback reason, `n_kv`, `top_k` when present,
 IndexShare role when present, backend, and any dense sparse-mask allocation
 avoided.
+
+#### Policy Resolution
+
+Consumers resolve generation policy in this order:
+
+1. Request/runtime override, when explicitly configured for an experiment.
+2. Package `generation.policy` and `generation.thresholds`.
+3. Runtime built-in default for the architecture.
+4. Correctness fallback when the preferred path is unsupported.
+
+The resolved policy is a runtime contract. Package tools may infer and write
+the policy from GGUF tensor shape, but serving code must not re-infer a
+different policy silently. For example, a GLM-DSA package with split
+`attn_k_b`, `attn_v_b`, and `attn_kv_a_mqa` tensors may advertise
+`glm-dsa-v1`; the runtime may still fall back from `compact-flash` to `dense`
+on a backend that lacks compact selected-KV attention, but it must log that
+fallback.
+
+For `glm-dsa-v1`, the current phase intent is:
+
+| Phase | Recommended value | Intent |
+| --- | --- | --- |
+| `decode` | `compact-flash` | Avoid dense sparse-mask materialization during one-token decode. |
+| `short_prefill` | `dense` | Avoid paying sparse/indexer overhead when prompts are below the package threshold. |
+| `long_prefill` | `sparse-chunked` | Keep long-context prefill away from huge dense sparse masks. |
+| `verify` | `auto` | Let the runtime select a verifier path until verifier-specific parity is proven. |
+| `indexshare` | `required` | Reuse Full-layer top-k/index state for Shared GLM-DSA layers instead of silent recompute. |
+| `experimental.selected_row_flash` | `off` | Keep experimental selected-row flash disabled until package evidence enables it. |
+
+For `glm-dsa-v1`, the current threshold intent is:
+
+| Threshold | Meaning |
+| --- | --- |
+| `short_prefill_max_tokens` | Maximum prompt/window length that should prefer the short-prefill policy. |
+| `compact_flash_min_kv` | Minimum KV length where compact selected-KV flash attention is worth considering. |
+| `dense_mask_max_bytes` | Maximum dense sparse-mask allocation the runtime should permit before forcing a sparse fallback. |
 
 #### Speculative Decoding
 

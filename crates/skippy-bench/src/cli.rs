@@ -206,6 +206,11 @@ pub struct GlmDsaOpReportArgs {
         help = "Fail unless local Apple Metal/CPU backend evidence and GLM-DSA fallback support are explicit."
     )]
     pub require_local_backend_evidence: bool,
+    #[arg(
+        long,
+        help = "Fail unless Metal dispatch logs prove compact top-k get_rows plus no-mask flash attention."
+    )]
+    pub require_metal_compact_dispatch: bool,
     #[arg(long)]
     pub output: Option<PathBuf>,
 }

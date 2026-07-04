@@ -109,6 +109,8 @@ struct BackendEvidenceSummary {
     compute_buffer_devices: BTreeMap<String, BackendComputeBufferDeviceSummary>,
     metal_dispatch_records: usize,
     metal_dispatch_ops: BTreeMap<String, usize>,
+    metal_compact_get_rows_records: usize,
+    metal_compact_flash_no_mask_records: usize,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -671,6 +673,9 @@ fn build_report(args: &GlmDsaOpReportArgs) -> Result<GlmDsaOpReport> {
         if args.require_local_backend_evidence {
             require_local_backend_evidence(path, &summary)?;
         }
+        if args.require_metal_compact_dispatch {
+            require_metal_compact_dispatch(path, &summary)?;
+        }
         logs.push(summary);
     }
     Ok(GlmDsaOpReport { logs })
@@ -1167,6 +1172,27 @@ fn require_local_backend_evidence(path: &Path, summary: &LogSummary) -> Result<(
         missing.join(","),
         backend,
         policy
+    )
+}
+
+fn require_metal_compact_dispatch(path: &Path, summary: &LogSummary) -> Result<()> {
+    let backend = &summary.backend;
+    let mut missing = Vec::new();
+    if backend.metal_compact_get_rows_records == 0 {
+        missing.push("metal_compact_get_rows");
+    }
+    if backend.metal_compact_flash_no_mask_records == 0 {
+        missing.push("metal_compact_flash_no_mask");
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    bail!(
+        "{} does not prove Metal compact GLM-DSA dispatch; missing {}; backend={:?}",
+        path.display(),
+        missing.join(","),
+        backend
     )
 }
 
@@ -1877,8 +1903,22 @@ fn summarize_backend_evidence(
             .metal_dispatch_ops
             .entry(record.op.clone())
             .or_default() += 1;
+        if is_metal_compact_get_rows(record) {
+            summary.metal_compact_get_rows_records += 1;
+        }
+        if is_metal_compact_flash_no_mask(record) {
+            summary.metal_compact_flash_no_mask_records += 1;
+        }
     }
     summary
+}
+
+fn is_metal_compact_get_rows(record: &MetalDispatchRecord) -> bool {
+    record.op == "get_rows" && record.tensor.starts_with("dsa_compact_k_topk_rows")
+}
+
+fn is_metal_compact_flash_no_mask(record: &MetalDispatchRecord) -> bool {
+    record.op == "flash_attn_ext" && record.mask_type.as_deref() == Some("none")
 }
 
 fn add_backend_runtime_line(summary: &mut BackendEvidenceSummary, line: &str) {
@@ -2417,7 +2457,8 @@ mod tests {
         parse_timing_records, require_compact_decode_policy_evidence,
         require_compact_decode_without_sparse_mask, require_glm52_runtime_contract,
         require_indexshare_producer_consumer_trace, require_local_backend_evidence,
-        summarize_backend_evidence, summarize_comparison_rows, summarize_log,
+        require_metal_compact_dispatch, summarize_backend_evidence, summarize_comparison_rows,
+        summarize_log,
     };
 
     const LINE: &str = "skippy: glm_dsa_op_timing stage=1 tokens=128 total_us=1475800 indexer_topk_nodes=275 indexer_topk_us=129065 sparse_mask_nodes=235 sparse_mask_us=114543 mla_attention_nodes=47 mla_attention_us=35234 routed_moe_nodes=47 routed_moe_us=379574 shared_expert_nodes=47 shared_expert_us=817384";
@@ -2443,6 +2484,8 @@ mod tests {
     const METAL_DISPATCH_LINE: &str = "skippy: glm_dsa_metal_dispatch op=dsa_sparse_attn kernel=decode_vec tensor=blk.30.dsa_sparse_attn q_type=f32 k_type=f16 v_type=f16 mask_type=f32 top_k_type=i32 dst_type=f32 q_width=576 v_width=512 batch=32 heads=4 stream=1 kv=32 top_k=1024 top_stream=1 selected_keys=1048576 q_read_bytes=2415919104 k_read_bytes=1207959552 v_read_bytes=1073741824 mask_read_bytes=4194304 top_k_read_bytes=4194304 scratch_per_tg_bytes=1024 score_fma=603979776 value_fma=536870912 reduction_strategy=threadgroup_direct grid_x=32 grid_y=4 grid_z=8 threads_x=256 nwg=8 tmp_f16=1 dst_partial=1";
     const METAL_DECODE_VEC_REDUCE_DISPATCH_LINE: &str = "skippy: glm_dsa_metal_dispatch op=dsa_sparse_attn kernel=decode_vec_reduce tensor=blk.30.dsa_sparse_attn q_type=f32 k_type=f16 v_type=f16 mask_type=f32 top_k_type=i32 dst_type=f32 q_width=576 v_width=512 batch=4096 heads=64 stream=1 kv=4096 top_k=2048 top_stream=1 rows=262144 partial_bytes=536870912 softmax_bytes=4194304 tmp_bytes=541065216 grid_x=262144 grid_y=1 grid_z=1 threads_x=32 threads_y=2 nwg=2 tmp_f16=1 dst_partial=1";
     const METAL_MUL_MAT_ID_DISPATCH_LINE: &str = "skippy: glm_dsa_metal_dispatch op=mul_mat_id kernel=mul_mv_id tensor=ffn_moe_down-45 src0_type=q3_K src1_type=f32 ids_type=i32 dst_type=f32 ne00=5120 ne01=6144 experts=256 used_experts=8 tokens=1 min_tokens=128 nr0=2 nr1=1 nsg=1 grid_x=1536 grid_y=1 grid_z=8 threads_x=32 threads_y=2";
+    const METAL_COMPACT_GET_ROWS_LINE: &str = "skippy: glm_dsa_metal_dispatch op=get_rows kernel=typed_vec4 tensor=dsa_compact_k_topk_rows-75 src_type=f16 top_k_type=i32 dst_type=f16 rows=17 grid_x=17 grid_y=1 grid_z=1 threads_x=144";
+    const METAL_COMPACT_FLASH_NO_MASK_LINE: &str = "skippy: glm_dsa_metal_dispatch op=flash_attn_ext kernel=vec tensor=__fattn__-75 q_type=f32 k_type=f16 v_type=f16 mask_type=none dst_type=f32 q_width=576 v_width=512 batch=1 heads=64 stream=1 kv=17 grid_x=1 grid_y=64 grid_z=32 threads_x=32 threads_y=1 nwg=32";
     const METAL_ROUTE_ENCODE_CANDIDATE_LINE: &str = "skippy: glm_dsa_metal_dispatch op=topk_moe_route_encode tensor=blk.45.ffn_moe_probs candidate=UNARY/blk.45.ffn_moe_probs,RESHAPE/view reason=fused filtered_nodes=65 graph_nodes=71 graph_idx=30 grid_x=1 grid_y=1 grid_z=1 threads_x=1";
     const METAL_SELECTED_ROW_FLASH_CANDIDATE_LINE: &str = "skippy: glm_dsa_metal_dispatch op=selected_row_flash_candidate tensor=dsa_compact_k_topk_rows-30 reason=accepted_view next_tensor=__fattn__-30 generic=0 view=1 get_rows_uses=2 grid_x=0 grid_y=0 grid_z=0 threads_x=0";
     const METAL_WEIGHTED_DOWN_CANDIDATE_LINE: &str = "skippy: glm_dsa_metal_dispatch op=mul_mat_id_weighted_down_candidate tensor=ffn_moe_down-45 next=ffn_gate-45 next_op=MUL_MAT shared_gate=ffn_gate-45 shared_up=ffn_up-45 weighted_sum=ffn_moe_out-45 weighted_sum_op=MOE_WEIGHTED_SUM reason=full_motif shared_branch=1 weighted_sum_uses_down=1 pair_fusable=0 subgraph_fusable=1 filtered_gap=0 graph_gap=0 weighted_sum_gap=2 weighted_sum_graph_gap=2 src0_type=q3_K src1_type=f32 ids_type=i32 dst_type=f32 experts=256 used_experts=8 tokens=1 grid_x=1 grid_y=1 grid_z=1 threads_x=1";
@@ -2829,6 +2872,84 @@ llama_context: n_ctx_seq     = 256";
         assert_eq!(backend.metal_dispatch_records, 1);
         assert_eq!(backend.metal_dispatch_ops.get("dsa_sparse_attn"), Some(&1));
         assert_eq!(backend.cuda_records, 0);
+    }
+
+    #[test]
+    fn summarizes_metal_compact_dispatch_evidence() {
+        let runtime_contract = parse_runtime_contract_summary(BACKEND_EVIDENCE_LINES);
+        let compute_buffers = parse_compute_buffer_records(BACKEND_EVIDENCE_LINES).unwrap();
+        let metal_dispatch = parse_metal_dispatch_records(&format!(
+            "{METAL_COMPACT_GET_ROWS_LINE}\n{METAL_COMPACT_FLASH_NO_MASK_LINE}"
+        ))
+        .unwrap();
+        let backend = summarize_backend_evidence(
+            BACKEND_EVIDENCE_LINES,
+            &runtime_contract,
+            &compute_buffers,
+            &metal_dispatch,
+        );
+
+        assert_eq!(backend.metal_dispatch_records, 2);
+        assert_eq!(backend.metal_dispatch_ops.get("get_rows"), Some(&1));
+        assert_eq!(backend.metal_dispatch_ops.get("flash_attn_ext"), Some(&1));
+        assert_eq!(backend.metal_compact_get_rows_records, 1);
+        assert_eq!(backend.metal_compact_flash_no_mask_records, 1);
+    }
+
+    #[test]
+    fn accepts_metal_compact_dispatch_guard() {
+        let timing = parse_timing_records(LINE_WITH_COMPACT_GET_ROWS).unwrap();
+        let runtime_contract = parse_runtime_contract_summary(BACKEND_EVIDENCE_LINES);
+        let compute_buffers = parse_compute_buffer_records(BACKEND_EVIDENCE_LINES).unwrap();
+        let metal_dispatch = parse_metal_dispatch_records(&format!(
+            "{METAL_COMPACT_GET_ROWS_LINE}\n{METAL_COMPACT_FLASH_NO_MASK_LINE}"
+        ))
+        .unwrap();
+        let backend = summarize_backend_evidence(
+            BACKEND_EVIDENCE_LINES,
+            &runtime_contract,
+            &compute_buffers,
+            &metal_dispatch,
+        );
+        let summary = summarize_log(
+            "stage1.log".into(),
+            LogRecordInputs::new(&timing)
+                .with_runtime_contract(&runtime_contract)
+                .with_backend(&backend),
+        );
+
+        require_metal_compact_dispatch(Path::new("stage1.log"), &summary).unwrap();
+    }
+
+    #[test]
+    fn rejects_metal_compact_dispatch_guard_without_compact_metal() {
+        let timing = parse_timing_records(LINE_WITH_COMPACT_GET_ROWS).unwrap();
+        let runtime_contract = parse_runtime_contract_summary(BACKEND_EVIDENCE_LINES);
+        let compute_buffers = parse_compute_buffer_records(BACKEND_EVIDENCE_LINES).unwrap();
+        let metal_dispatch = parse_metal_dispatch_records(METAL_DISPATCH_LINE).unwrap();
+        let backend = summarize_backend_evidence(
+            BACKEND_EVIDENCE_LINES,
+            &runtime_contract,
+            &compute_buffers,
+            &metal_dispatch,
+        );
+        let summary = summarize_log(
+            "stage1.log".into(),
+            LogRecordInputs::new(&timing)
+                .with_runtime_contract(&runtime_contract)
+                .with_backend(&backend),
+        );
+
+        let error = require_metal_compact_dispatch(Path::new("stage1.log"), &summary).unwrap_err();
+
+        assert!(
+            error.to_string().contains("metal_compact_get_rows"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            error.to_string().contains("metal_compact_flash_no_mask"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]

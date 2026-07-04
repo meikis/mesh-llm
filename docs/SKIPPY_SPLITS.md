@@ -86,36 +86,36 @@ At the configured GLM-5.2 `top_k=768` width, compact selected-row flash measured
 `984.50-988.95 us/run` on the same shapes.
 After those phase decisions, measured GLM-5.2 FFN decode cost is dominated by
 MoE expert execution, not route/top-k overhead. The gated Metal fixture
-estimates `390.11 us` per routed FFN decode layer, with `374.30 us` (`95.9%`)
-in routed gate/up/down matmuls, `5.17 us` (`1.3%`) in routed fused SwiGLU, and
-only `10.64 us` (`2.7%`) in route/top-k plus weighted sum. A
-production-shaped fused GLU shared expert plus final add measured `409.60 us`,
-making the routed+shared FFN estimate `799.71 us`; shared expert execution is
-`51.2%` of that estimate. The isolated shared fused SwiGLU split row is only
-`4.19 us`; the earlier unfused activation/mul diagnostic measured `295.07 us`,
+estimates `390.31 us` per routed FFN decode layer, with `374.01 us` (`95.8%`)
+in routed gate/up/down matmuls, `5.85 us` (`1.5%`) in routed fused SwiGLU, and
+only `10.45 us` (`2.7%`) in route/top-k plus weighted sum. A
+production-shaped fused GLU shared expert plus final add measured `402.14 us`,
+making the routed+shared FFN estimate `792.45 us`; shared expert execution is
+`50.7%` of that estimate. The isolated shared fused SwiGLU split row is only
+`4.33 us`; the earlier unfused activation/mul diagnostic measured `293.79 us`,
 but that path does not represent the normal llama.cpp shared expert graph
 because `build_ffn()` already uses `ggml_swiglu_split()`. The remaining MoE
 optimization target is therefore routed/shared expert matmul and whole-graph
 execution, not a reason to add a Skippy-specific generation schema.
 The extended fixture measured a merged q2_K routed gate/up shape at `1.02x`
 faster for the routed estimate, a merged shared gate/up fused GLU shape at
-`1.02x` faster for the shared expert, a weighted-down MoE graph shape at
-`1.02x` on the small quantized whole-graph fixture, and a q2_K down-projection
-alternative at `1.14x` faster before quality is measured. That keeps the
+only `1.01x` faster for the shared expert, no weighted-down speedup on the
+small quantized whole-graph fixture (`0.99x`), and a q2_K down-projection
+alternative at `1.14x` faster before quality is measured. Shared-expert q3_K
+was slower (`0.92x` versus q4_K), while shared-expert q2_K was essentially tied
+(`1.00x` versus q4_K), so lowering shared-expert quant is not a Metal
+throughput lever. That keeps the
 split-layer contract unchanged and points local llama.cpp work at expert matmul
-kernels, shared-expert whole execution, and controlled down-projection quant
-experiments. Merged shared gate/up may be recorded as an evidence-gated
-`generation.policy.experimental` option by packages that actually contain that
-validated artifact shape.
+kernels and controlled down-projection quant experiments.
 The Phase E report can be made a hard evidence gate with
 `GLM52_PHASE_E_REQUIRE_GATES=1`; when the optional kernel sweep is enabled it
 also proves the dispatch alternatives are present. That sweep showed generic
 dispatch tuning is not the lever: forcing one-token q3_K routed down through
-`mul_mm_id` measured `834.08 us` versus `163.99 us` on the default `mul_mv_id`
+`mul_mm_id` measured `849.60 us` versus `164.65 us` on the default `mul_mv_id`
 path, q3_K `mul_mv_id` simdgroup tuning stayed within measurement noise
-(`163.99 us` default versus `163.64 us` best), q3_K row-height tuning found
-no faster row than default `nr0=4` at `163.57 us`, and a fixed `k=2048`
-GLM-down specialization only reached `162.99 us` (`1.01x` versus ordinary
+(`164.65 us` default versus `163.70 us` best), q3_K row-height tuning found
+no faster row than default `nr0=4` at `164.85 us`, and a fixed `k=2048`
+GLM-down specialization only reached `162.52 us` (`1.01x` versus ordinary
 default q3_K `mul_mv_id`).
 
 The main split-serving implication is that Skippy should pass through the

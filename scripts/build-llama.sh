@@ -141,12 +141,19 @@ CMAKE_ARGS=(
   -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-Release}"
   -DBUILD_SHARED_LIBS="$(if [[ "$LLAMA_LINK_MODE" == "dynamic" ]]; then echo ON; else echo OFF; fi)"
   -DGGML_NATIVE="${LLAMA_STAGE_GGML_NATIVE:-${SKIPPY_GGML_NATIVE:-OFF}}"
+  -DGGML_CUDA=OFF
+  -DGGML_HIP=OFF
+  -DGGML_VULKAN=OFF
   -DLLAMA_BUILD_EXAMPLES=OFF
   -DLLAMA_BUILD_SERVER=OFF
   -DLLAMA_BUILD_TESTS=OFF
   -DLLAMA_CURL=OFF
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON
 )
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  CMAKE_ARGS+=(-DGGML_METAL=OFF)
+fi
 
 if command -v ninja >/dev/null 2>&1; then
   CMAKE_ARGS=(-G Ninja "${CMAKE_ARGS[@]}")
@@ -210,7 +217,11 @@ if [[ "$#" -gt 0 ]]; then
   CMAKE_ARGS+=("$@")
 fi
 
-PATCHED_SHA="$(tr -d '[:space:]' < "$LLAMA_WORKDIR/.mesh-llm-patched-sha" 2>/dev/null || git -C "$LLAMA_WORKDIR" rev-parse HEAD)"
+if [[ -f "$LLAMA_WORKDIR/.mesh-llm-patched-sha" ]]; then
+  PATCHED_SHA="$(tr -d '[:space:]' < "$LLAMA_WORKDIR/.mesh-llm-patched-sha")"
+else
+  PATCHED_SHA="$(git -C "$LLAMA_WORKDIR" rev-parse HEAD)"
+fi
 BUILD_STAMP="$LLAMA_BUILD_DIR/.mesh-llm-build-stamp"
 CURRENT_BUILD_STAMP="$(
   printf 'stamp-version=1\n'

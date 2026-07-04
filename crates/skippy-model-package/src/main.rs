@@ -19,6 +19,7 @@ use skippy_ffi::TensorRole;
 use skippy_runtime::{ModelInfo, TensorInfo, write_gguf_from_parts};
 
 mod glm_dsa_contract;
+mod glm_dsa_generation_policy;
 mod preflight;
 mod progress;
 
@@ -104,6 +105,11 @@ enum Command {
         path: PathBuf,
     },
     RepairGlmDsaIndexshareMetadata {
+        package: PathBuf,
+        #[arg(long)]
+        in_place: bool,
+    },
+    RepairGlmDsaGenerationPolicy {
         package: PathBuf,
         #[arg(long)]
         in_place: bool,
@@ -485,6 +491,9 @@ fn main() -> Result<()> {
         } => run_glm_dsa_contract(path, require_generation_policy),
         Command::RepairGlmDsaIndexshareMetadata { package, in_place } => {
             repair_glm_dsa_indexshare_metadata(package, in_place)
+        }
+        Command::RepairGlmDsaGenerationPolicy { package, in_place } => {
+            glm_dsa_generation_policy::repair_package(&package, in_place)
         }
     }
 }

@@ -66,6 +66,7 @@ struct PhaseSummary {
 struct LogSummary {
     path: PathBuf,
     records: usize,
+    runtime_contract: RuntimeContractSummary,
     stage_records: BTreeMap<i32, BTreeMap<Phase, PhaseSummary>>,
     group_records: BTreeMap<i32, BTreeMap<String, BTreeMap<Phase, PhaseSummary>>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -78,6 +79,19 @@ struct LogSummary {
 #[derive(Debug, Deserialize, Serialize)]
 struct GlmDsaOpReport {
     logs: Vec<LogSummary>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct RuntimeContractSummary {
+    model_kv: BTreeMap<String, RuntimeValueSummary>,
+    print_info: BTreeMap<String, RuntimeValueSummary>,
+    context: BTreeMap<String, RuntimeValueSummary>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct RuntimeValueSummary {
+    records: usize,
+    values: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -124,6 +138,7 @@ struct LogRecordInputs<'a> {
     indexshare_contract_records: &'a [IndexShareContractRecord],
     direct_sparse_policy_records: &'a [DirectSparseDecisionRecord],
     compact_flash_policy_records: &'a [CompactFlashPolicyRecord],
+    runtime_contract: Option<&'a RuntimeContractSummary>,
 }
 
 impl<'a> LogRecordInputs<'a> {
@@ -136,6 +151,7 @@ impl<'a> LogRecordInputs<'a> {
             indexshare_contract_records: &[],
             direct_sparse_policy_records: &[],
             compact_flash_policy_records: &[],
+            runtime_contract: None,
         }
     }
 
@@ -166,6 +182,11 @@ impl<'a> LogRecordInputs<'a> {
     ) -> Self {
         self.direct_sparse_policy_records = direct_sparse_records;
         self.compact_flash_policy_records = compact_flash_records;
+        self
+    }
+
+    fn with_runtime_contract(mut self, runtime_contract: &'a RuntimeContractSummary) -> Self {
+        self.runtime_contract = Some(runtime_contract);
         self
     }
 }
@@ -567,6 +588,7 @@ fn build_report(args: &GlmDsaOpReportArgs) -> Result<GlmDsaOpReport> {
             .with_context(|| format!("parse GLM-DSA direct sparse policy in {}", path.display()))?;
         let compact_flash_policy_records = parse_compact_flash_policy_records(&text)
             .with_context(|| format!("parse GLM-DSA compact flash policy in {}", path.display()))?;
+        let runtime_contract = parse_runtime_contract_summary(&text);
         let records = match args.first_records {
             Some(limit) => records.into_iter().take(limit).collect::<Vec<_>>(),
             None => records,
@@ -588,7 +610,8 @@ fn build_report(args: &GlmDsaOpReportArgs) -> Result<GlmDsaOpReport> {
                 .with_group_records(&group_records)
                 .with_sideband_records(&sideband_records)
                 .with_indexshare_records(&indexshare_records, &indexshare_contract_records)
-                .with_policy_records(&direct_sparse_policy_records, &compact_flash_policy_records),
+                .with_policy_records(&direct_sparse_policy_records, &compact_flash_policy_records)
+                .with_runtime_contract(&runtime_contract),
         );
         if args.require_indexshare_producer_consumer {
             require_indexshare_producer_consumer_trace(path, &summary)?;
@@ -598,6 +621,9 @@ fn build_report(args: &GlmDsaOpReportArgs) -> Result<GlmDsaOpReport> {
         }
         if args.require_compact_decode_policy_evidence {
             require_compact_decode_policy_evidence(path, &summary)?;
+        }
+        if args.require_glm52_runtime_contract {
+            require_glm52_runtime_contract(path, &summary)?;
         }
         logs.push(summary);
     }
@@ -949,6 +975,151 @@ fn require_compact_decode_policy_evidence(path: &Path, summary: &LogSummary) -> 
         missing.join(","),
         summary.policy
     )
+}
+
+fn require_glm52_runtime_contract(path: &Path, summary: &LogSummary) -> Result<()> {
+    let runtime = &summary.runtime_contract;
+    let mut missing = Vec::new();
+    require_runtime_u64(
+        &mut missing,
+        runtime,
+        RuntimeSection::ModelKv,
+        "glm-dsa.context_length",
+        1_048_576,
+    );
+    require_runtime_u64(
+        &mut missing,
+        runtime,
+        RuntimeSection::ModelKv,
+        "glm-dsa.block_count",
+        79,
+    );
+    require_runtime_u64(
+        &mut missing,
+        runtime,
+        RuntimeSection::ModelKv,
+        "glm-dsa.attention.indexer.top_k",
+        2048,
+    );
+    require_runtime_u64(
+        &mut missing,
+        runtime,
+        RuntimeSection::ModelKv,
+        "glm-dsa.attention.indexer.top_k_frequency",
+        4,
+    );
+    require_runtime_u64(
+        &mut missing,
+        runtime,
+        RuntimeSection::ModelKv,
+        "glm-dsa.attention.indexer.skip_top_k_offset",
+        3,
+    );
+    require_runtime_u64(
+        &mut missing,
+        runtime,
+        RuntimeSection::ModelKv,
+        "glm-dsa.nextn_predict_layers",
+        1,
+    );
+    require_runtime_u64(
+        &mut missing,
+        runtime,
+        RuntimeSection::PrintInfo,
+        "n_ctx_train",
+        1_048_576,
+    );
+    require_runtime_u64(
+        &mut missing,
+        runtime,
+        RuntimeSection::PrintInfo,
+        "n_layer",
+        78,
+    );
+    require_runtime_u64(
+        &mut missing,
+        runtime,
+        RuntimeSection::PrintInfo,
+        "n_layer_all",
+        79,
+    );
+    require_runtime_u64(
+        &mut missing,
+        runtime,
+        RuntimeSection::PrintInfo,
+        "n_layer_dense_lead",
+        3,
+    );
+    if runtime_value_u64(runtime, RuntimeSection::Context, "n_ctx").is_none() {
+        missing.push("context.n_ctx".to_string());
+    }
+    if summary.indexshare_trace.contract_nextn_layers != Some(1) {
+        missing.push("indexshare.nextn_layers=1".to_string());
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    bail!(
+        "{} does not prove the expected GLM-5.2 runtime contract; missing {}; runtime={:?}; indexshare={:?}",
+        path.display(),
+        missing.join(","),
+        runtime,
+        summary.indexshare_trace
+    )
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeSection {
+    ModelKv,
+    PrintInfo,
+    Context,
+}
+
+fn require_runtime_u64(
+    missing: &mut Vec<String>,
+    runtime: &RuntimeContractSummary,
+    section: RuntimeSection,
+    key: &str,
+    expected: u64,
+) {
+    if runtime_value_u64(runtime, section, key) != Some(expected) {
+        missing.push(format!("{}={expected}", runtime_section_key(section, key)));
+    }
+}
+
+fn runtime_value_u64(
+    runtime: &RuntimeContractSummary,
+    section: RuntimeSection,
+    key: &str,
+) -> Option<u64> {
+    runtime_values(runtime, section)
+        .get(key)?
+        .values
+        .first()?
+        .parse::<u64>()
+        .ok()
+}
+
+fn runtime_values(
+    runtime: &RuntimeContractSummary,
+    section: RuntimeSection,
+) -> &BTreeMap<String, RuntimeValueSummary> {
+    match section {
+        RuntimeSection::ModelKv => &runtime.model_kv,
+        RuntimeSection::PrintInfo => &runtime.print_info,
+        RuntimeSection::Context => &runtime.context,
+    }
+}
+
+fn runtime_section_key(section: RuntimeSection, key: &str) -> String {
+    let prefix = match section {
+        RuntimeSection::ModelKv => "model_kv",
+        RuntimeSection::PrintInfo => "print_info",
+        RuntimeSection::Context => "context",
+    };
+    format!("{prefix}.{key}")
 }
 
 fn optional_nodes(bucket: &Option<OpBucket>) -> u64 {
@@ -1561,6 +1732,66 @@ fn parse_optional_string_field(fields: &BTreeMap<&str, &str>, name: &str) -> Opt
     fields.get(name).map(ToString::to_string)
 }
 
+fn parse_runtime_contract_summary(text: &str) -> RuntimeContractSummary {
+    let mut summary = RuntimeContractSummary::default();
+    for line in text.lines() {
+        if let Some((key, value)) = parse_model_kv_runtime_line(line) {
+            add_runtime_value(&mut summary.model_kv, key, value);
+            continue;
+        }
+        if let Some((key, value)) = parse_prefixed_runtime_assignment(line, "print_info:") {
+            add_runtime_value(&mut summary.print_info, key, value);
+            continue;
+        }
+        if let Some((key, value)) = parse_prefixed_runtime_assignment(line, "llama_context:") {
+            add_runtime_value(&mut summary.context, key, value);
+        }
+    }
+    summary
+}
+
+fn parse_model_kv_runtime_line(line: &str) -> Option<(String, String)> {
+    if !line.contains("llama_model_loader: - kv") {
+        return None;
+    }
+    let (left, right) = line.split_once('=')?;
+    let key = left
+        .split_whitespace()
+        .find(|field| field.starts_with("glm-dsa."))?;
+    Some((key.to_string(), first_runtime_value(right)?))
+}
+
+fn parse_prefixed_runtime_assignment(line: &str, prefix: &str) -> Option<(String, String)> {
+    let (_, rest) = line.split_once(prefix)?;
+    let (key, right) = rest.split_once('=')?;
+    let key = key.trim();
+    if key.is_empty() {
+        return None;
+    }
+    Some((key.to_string(), first_runtime_value(right)?))
+}
+
+fn first_runtime_value(value: &str) -> Option<String> {
+    value
+        .split_whitespace()
+        .next()
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn add_runtime_value(
+    values: &mut BTreeMap<String, RuntimeValueSummary>,
+    key: String,
+    value: String,
+) {
+    let summary = values.entry(key).or_default();
+    summary.records += 1;
+    if !summary.values.contains(&value) {
+        summary.values.push(value);
+        summary.values.sort();
+    }
+}
+
 fn summarize_log(path: PathBuf, inputs: LogRecordInputs<'_>) -> LogSummary {
     let mut stage_records: BTreeMap<i32, BTreeMap<Phase, PhaseSummary>> = BTreeMap::new();
     for record in inputs.timing_records {
@@ -1602,9 +1833,11 @@ fn summarize_log(path: PathBuf, inputs: LogRecordInputs<'_>) -> LogSummary {
         inputs.direct_sparse_policy_records,
         inputs.compact_flash_policy_records,
     );
+    let runtime_contract = inputs.runtime_contract.cloned().unwrap_or_default();
     LogSummary {
         path,
         records: inputs.timing_records.len(),
+        runtime_contract,
         stage_records,
         group_records: grouped_records,
         hottest_group_records,
@@ -2000,9 +2233,10 @@ mod tests {
         compare_phase, parse_compact_flash_mask_records, parse_compact_flash_policy_records,
         parse_compute_buffer_records, parse_direct_sparse_decision_records,
         parse_indexshare_contract_records, parse_indexshare_trace_records,
-        parse_metal_dispatch_records, parse_sideband_record, parse_sideband_records,
-        parse_timing_group_records, parse_timing_record, parse_timing_records,
-        require_compact_decode_policy_evidence, require_compact_decode_without_sparse_mask,
+        parse_metal_dispatch_records, parse_runtime_contract_summary, parse_sideband_record,
+        parse_sideband_records, parse_timing_group_records, parse_timing_record,
+        parse_timing_records, require_compact_decode_policy_evidence,
+        require_compact_decode_without_sparse_mask, require_glm52_runtime_contract,
         require_indexshare_producer_consumer_trace, summarize_comparison_rows, summarize_log,
     };
 
@@ -2035,10 +2269,23 @@ mod tests {
     const METAL_GLM_DSA_MOE_MOTIF_CANDIDATE_LINE: &str = "skippy: glm_dsa_metal_dispatch op=glm_dsa_moe_motif_candidate tensor=ffn_moe_down-45 shared_gate=ffn_gate-45 shared_up=ffn_up-45 weighted_sum=ffn_moe_out-45 reason=full_motif natural_order=1 backend_candidate=1 subgraph_fusable=1 motif_nodes=4 fusion_outputs=3 weighted_sum_gap=2 weighted_sum_graph_gap=2 src0_type=q3_K src1_type=f32 ids_type=i32 dst_type=f32 experts=256 used_experts=8 tokens=1 grid_x=1 grid_y=1 grid_z=1 threads_x=1";
     const COMPUTE_BUFFER_LINES: &str = "~llama_context:       MTL0 compute buffer size is 2421.0264 MiB, matches expectation of 2421.0264 MiB\n~llama_context:       MTL0 compute buffer size of 667.8496 MiB, does not match expectation of 507.0029 MiB\n~llama_context:        CPU compute buffer size is  24.0059 MiB, matches expectation of  24.0059 MiB\n~llama_context:        CPU compute buffer size is   0.0000 MiB, matches expectation of   0.0000 MiB, trailing native detail";
     const INDEXSHARE_CONTRACT_LINE: &str = "llama_glm_dsa_log_indexshare_contract: GLM_DSA IndexShare source=metadata_types full_layers=21 shared_layers=57 indexer_tensor_layers=1 filtered_indexer_groups=0 out_of_stage_indexer_groups=76 stage_filtered=1 layer_start=30 layer_end=32 top_k=2048 top_k_frequency=0 skip_top_k_offset=0";
+    const GLM52_INDEXSHARE_CONTRACT_LINE: &str = "llama_glm_dsa_log_indexshare_contract: GLM_DSA IndexShare source=metadata_types full_layers=21 shared_layers=57 indexer_tensor_layers=8 target_indexer_tensor_layers=8 filtered_indexer_groups=8 out_of_stage_indexer_groups=13 stage_filtered=1 layer_start=0 layer_end=26 top_k=2048 top_k_frequency=4 skip_top_k_offset=3 nextn_layers=1";
     const INDEXSHARE_EXEC_FULL_LINE: &str = "llama_model_glm_dsa::graph::graph: GLM_DSA IndexShare exec layer=30 role=full input_top_k=0 stage_filtered=1 layer_start=30 layer_end=34";
     const INDEXSHARE_TOP_K_LINE: &str = "llama_model_glm_dsa::graph::graph: GLM_DSA IndexShare top_k layer=30 source=indexer width=1024 score_width=4096";
     const INDEXSHARE_EXEC_SHARED_LINE: &str = "llama_model_glm_dsa::graph::graph: GLM_DSA IndexShare exec layer=31 role=shared input_top_k=1 stage_filtered=1 layer_start=30 layer_end=34";
     const INDEXSHARE_CONSUME_LINE: &str = "llama_model_glm_dsa::graph::graph: GLM_DSA IndexShare consume layer=31 source=last_top_k width=1024 batch=1 stream=1";
+    const GLM52_RUNTIME_CONTRACT_LINES: &str = "llama_model_loader: - kv   5:                     glm-dsa.context_length u32              = 1048576
+llama_model_loader: - kv   7:                        glm-dsa.block_count u32              = 79
+llama_model_loader: - kv  21:            glm-dsa.attention.indexer.top_k u32              = 2048
+llama_model_loader: - kv  22:  glm-dsa.attention.indexer.top_k_frequency u32              = 4
+llama_model_loader: - kv  23: glm-dsa.attention.indexer.skip_top_k_offset u32              = 3
+llama_model_loader: - kv  45:               glm-dsa.nextn_predict_layers u32              = 1
+print_info: n_ctx_train           = 1048576
+print_info: n_layer               = 78
+print_info: n_layer_all           = 79
+print_info: n_layer_dense_lead    = 3
+llama_context: n_ctx         = 256
+llama_context: n_ctx_seq     = 256";
 
     #[test]
     fn parses_timing_record_with_prefix() {
@@ -2367,6 +2614,71 @@ mod tests {
         assert_eq!(records[3].size_mib, 0.0);
         assert_eq!(records[3].expected_mib, 0.0);
         assert!(records[3].matches_expectation);
+    }
+
+    #[test]
+    fn parses_glm52_runtime_contract_summary() {
+        let summary = parse_runtime_contract_summary(GLM52_RUNTIME_CONTRACT_LINES);
+
+        assert_eq!(
+            summary.model_kv["glm-dsa.context_length"].values,
+            vec!["1048576".to_string()]
+        );
+        assert_eq!(
+            summary.model_kv["glm-dsa.block_count"].values,
+            vec!["79".to_string()]
+        );
+        assert_eq!(
+            summary.model_kv["glm-dsa.attention.indexer.top_k"].values,
+            vec!["2048".to_string()]
+        );
+        assert_eq!(
+            summary.model_kv["glm-dsa.nextn_predict_layers"].values,
+            vec!["1".to_string()]
+        );
+        assert_eq!(
+            summary.print_info["n_layer_all"].values,
+            vec!["79".to_string()]
+        );
+        assert_eq!(summary.context["n_ctx"].values, vec!["256".to_string()]);
+    }
+
+    #[test]
+    fn accepts_glm52_runtime_contract_guard() {
+        let timing = parse_timing_records(LINE).unwrap();
+        let runtime_contract = parse_runtime_contract_summary(GLM52_RUNTIME_CONTRACT_LINES);
+        let contract_records =
+            parse_indexshare_contract_records(GLM52_INDEXSHARE_CONTRACT_LINE).unwrap();
+        let summary = summarize_log(
+            "stage1.log".into(),
+            LogRecordInputs::new(&timing)
+                .with_indexshare_records(&[], &contract_records)
+                .with_runtime_contract(&runtime_contract),
+        );
+
+        require_glm52_runtime_contract(Path::new("stage1.log"), &summary).unwrap();
+    }
+
+    #[test]
+    fn rejects_glm52_runtime_contract_guard_without_nextn() {
+        let timing = parse_timing_records(LINE).unwrap();
+        let runtime_contract = parse_runtime_contract_summary(
+            &GLM52_RUNTIME_CONTRACT_LINES.replace("glm-dsa.nextn_predict_layers", "glm-dsa.nope"),
+        );
+        let contract_records = parse_indexshare_contract_records(INDEXSHARE_CONTRACT_LINE).unwrap();
+        let summary = summarize_log(
+            "stage1.log".into(),
+            LogRecordInputs::new(&timing)
+                .with_indexshare_records(&[], &contract_records)
+                .with_runtime_contract(&runtime_contract),
+        );
+
+        let error = require_glm52_runtime_contract(Path::new("stage1.log"), &summary).unwrap_err();
+
+        assert!(
+            error.to_string().contains("nextn"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]

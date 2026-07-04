@@ -196,6 +196,11 @@ pub struct GlmDsaOpReportArgs {
         help = "Fail unless decode policy logs prove compact fallback was selected with backend support evidence."
     )]
     pub require_compact_decode_policy_evidence: bool,
+    #[arg(
+        long,
+        help = "Fail unless runtime metadata proves the expected GLM-5.2 GLM-DSA contract."
+    )]
+    pub require_glm52_runtime_contract: bool,
     #[arg(long)]
     pub output: Option<PathBuf>,
 }

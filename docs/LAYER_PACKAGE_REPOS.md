@@ -122,19 +122,26 @@ short prefill and verification dense by default unless a backend-specific sparse
 path has its own evidence.
 After those phase gates, the next measured local bottleneck is routed expert
 decode rather than top-k routing. The current Metal MoE fixture estimates one
-GLM-5.2 routed FFN decode layer at `391.75 us`, with expert matmuls accounting
-for `380.28 us` (`97.1%`). Route/top-k plus weighted sum is only `11.47 us`
-(`2.9%`). That evidence should inform runtime optimization order, but it does
+GLM-5.2 routed FFN decode layer at `387.92 us`, with expert matmuls accounting
+for `377.05 us` (`97.2%`). Route/top-k plus weighted sum is only `10.87 us`
+(`2.8%`). That evidence should inform runtime optimization order, but it does
 not add new manifest schema: package policy still belongs under
 `generation.policy`, and numeric resolver hints still belong under
 `generation.thresholds`.
 The extended MoE fixture keeps that conclusion intact: a merged q2_K gate+up
-tensor shape estimates `382.84 us` (`1.02x`), moving MoE weights before the
-down projection measured `7.74 us` versus `7.93 us` (`1.02x`) on the small
+tensor shape estimates `381.17 us` (`1.02x`), moving MoE weights before the
+down projection measured `7.07 us` versus `6.97 us` (`0.99x`) on the small
 quantized whole-graph fixture, and a q2_K down-projection alternative
-estimates `343.23 us` (`1.14x`) before quality is measured. That makes q3_K
+estimates `339.00 us` (`1.14x`) before quality is measured. That makes q3_K
 routed down the more interesting performance/quality tradeoff than gate/up
 tensor merging or weighted-down graph shape alone.
+The optional Phase E kernel sweep also rules out two tempting kernel-policy
+shortcuts: forcing one-token MoE through Metal `mul_mm_id` measured `850.64 us`
+for q3_K routed down versus `165.86 us` on the default `mul_mv_id` path, while
+q3_K `mul_mv_id` simdgroup tuning was noise-level (`165.86 us` default versus
+`165.26 us` best measured). The next meaningful local target is therefore a
+real q3_K routed-down specialization or a quality-tested down-projection quant
+change, not generic matrix-matrix cutoff tuning.
 
 In practice, this means the package's `generation` block is the phase-aware
 contract: decode prefers compact flash, short prefill prefers dense, long

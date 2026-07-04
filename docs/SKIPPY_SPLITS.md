@@ -78,9 +78,9 @@ At the configured GLM-5.2 `top_k=768` width, compact selected-row flash measured
 `55.11-55.62 us/run` for `kv=1024..2048`, while direct sparse measured
 `984.50-988.95 us/run` on the same shapes.
 After those phase decisions, measured GLM-5.2 routed FFN decode cost is
-dominated by expert matmuls: the current Metal fixture estimates `391.75 us`
-per routed FFN decode layer, with `380.28 us` (`97.1%`) in routed
-gate/up/down matmuls and only `11.47 us` (`2.9%`) in route/top-k plus weighted
+dominated by expert matmuls: the current Metal fixture estimates `387.92 us`
+per routed FFN decode layer, with `377.05 us` (`97.2%`) in routed
+gate/up/down matmuls and only `10.87 us` (`2.8%`) in route/top-k plus weighted
 sum. That is an optimization target for llama.cpp backend kernels, not a
 reason to add a Skippy-specific generation schema.
 The extended fixture measured a merged q2_K gate+up shape at only `1.02x`
@@ -89,6 +89,10 @@ faster for the per-layer estimate, a weighted-down MoE graph shape at only
 down-projection alternative at `1.14x` faster before quality is measured. That
 keeps the split-layer contract unchanged and points local llama.cpp work at
 expert matmul kernels and controlled down-projection quant experiments.
+The Phase E kernel sweep also showed that generic dispatch tuning is not the
+lever: forcing one-token q3_K routed down through `mul_mm_id` measured
+`850.64 us` versus `165.86 us` on the default `mul_mv_id` path, and q3_K
+`mul_mv_id` simdgroup tuning stayed within measurement noise.
 
 The main split-serving implication is that Skippy should pass through the
 resolved `generation.policy` and `generation.thresholds` contract, not add a

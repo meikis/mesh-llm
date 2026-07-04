@@ -532,21 +532,29 @@ quant.
 
 Once those attention phase gates are in place, the measured local GLM-5.2
 bottleneck shifts to routed expert matmuls. The current Metal MoE fixture
-estimates a routed FFN decode layer at `391.75 us`: routed gate/up/down matmuls
-account for `380.28 us` (`97.1%`), while route/top-k plus weighted sum accounts
-for `11.47 us` (`2.9%`). These numbers justify prioritizing backend
+estimates a routed FFN decode layer at `387.92 us`: routed gate/up/down matmuls
+account for `377.05 us` (`97.2%`), while route/top-k plus weighted sum accounts
+for `10.87 us` (`2.8%`). These numbers justify prioritizing backend
 `MUL_MAT_ID`/expert matmul work after sparse-attention correctness, but they do
 not require a new manifest object. Policy remains the semantic phase contract
 under `generation.policy`; performance cutoffs and byte/token limits remain
 numeric resolver inputs under `generation.thresholds`.
 The extended fixture measured a merged q2_K gate+up tensor shape at
-`382.84 us` (`1.02x`), a weighted-down MoE graph shape at `7.74 us` versus
-`7.93 us` (`1.02x`) on the small quantized whole-graph fixture, and a q2_K
-down-projection alternative at `343.23 us` (`1.14x`, quality not measured by
+`381.17 us` (`1.02x`), a weighted-down MoE graph shape at `7.07 us` versus
+`6.97 us` (`0.99x`) on the small quantized whole-graph fixture, and a q2_K
+down-projection alternative at `339.00 us` (`1.14x`, quality not measured by
 that microbench). Treat those as optimization-priority evidence, not as a new
 model-family schema branch: a package may record validated runtime policy under
 `generation.policy`, but quality-bearing quant changes still need separate
 evaluation.
+An optional Phase E kernel sweep records dispatch-policy evidence for these
+same shapes. Forcing one-token q3_K routed down through Metal `mul_mm_id`
+measured `850.64 us`, compared with `165.86 us` on the default `mul_mv_id`
+path. q3_K `mul_mv_id` simdgroup tuning measured `165.86 us` at the default
+`nsg=2` and `165.26 us` for the best sampled row, which is noise-level rather
+than a real policy win. That rules out generic matrix-matrix cutoff tuning as
+the next lever; q3_K routed down needs either a specialized kernel or a
+quality-tested quantization change.
 
 The IndexShare numbers are why `generation.policy.indexshare` is a first-class
 policy field instead of an implementation note. For GLM-5.2-style DSA with a

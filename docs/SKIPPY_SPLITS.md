@@ -88,20 +88,20 @@ After those phase decisions, measured GLM-5.2 FFN decode cost is dominated by
 MoE expert execution, not route/top-k overhead. The current Metal fixture
 estimates `392.99 us` per routed FFN decode layer, with `381.89 us` (`97.2%`)
 in routed gate/up/down matmuls and only `11.10 us` (`2.8%`) in route/top-k plus
-weighted sum. The q4_K shared expert plus final add measured `439.59 us`,
-making the routed+shared FFN estimate `832.58 us`; shared expert execution is
-`52.8%` of that estimate. A later component breakdown measured the shared
-expert plus final add at `429.18 us`, with shared gate/up/down q4_K matmuls at
-only `66.26 us` combined and the shared activation/mul whole-graph row plus
-final add at `344.64 us`. That is an optimization target for llama.cpp backend
-fusion and graph shape, not a reason to add a Skippy-specific generation
-schema.
+weighted sum. A production-shaped fused GLU shared expert plus final add
+measured `401.81 us`, making the routed+shared FFN estimate `791.18 us`; shared
+expert execution is `50.8%` of that estimate. The isolated fused SwiGLU split
+row is only `4.46 us`; the earlier unfused activation/mul diagnostic measured
+`341.15 us`, but that path does not represent the normal llama.cpp shared
+expert graph because `build_ffn()` already uses `ggml_swiglu_split()`. The
+remaining MoE optimization target is therefore routed/shared expert matmul and
+whole-graph execution, not a reason to add a Skippy-specific generation schema.
 The extended fixture measured a merged q2_K gate+up shape at only `1.03x`
 faster for the routed estimate, a weighted-down MoE graph shape at `0.97x` on
 the small quantized whole-graph fixture, and a q2_K down-projection alternative
-at `1.14x` faster before quality is measured. That keeps the split-layer
+at `1.14-1.15x` faster before quality is measured. That keeps the split-layer
 contract unchanged and points local llama.cpp work at expert matmul kernels,
-shared-expert execution, and controlled down-projection quant experiments.
+shared-expert whole execution, and controlled down-projection quant experiments.
 The Phase E kernel sweep also showed that generic dispatch tuning is not the
 lever: forcing one-token q3_K routed down through `mul_mm_id` measured
 `850.64 us` versus `165.86 us` on the default `mul_mv_id` path, and q3_K

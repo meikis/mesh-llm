@@ -563,22 +563,24 @@ quant.
 
 Once those attention phase gates are in place, the measured local GLM-5.2
 bottleneck shifts to MoE expert execution. The current Metal MoE fixture
-estimates a routed FFN decode layer at `392.99 us`: routed gate/up/down matmuls
-account for `381.89 us` (`97.2%`), while route/top-k plus weighted sum accounts
-for `11.10 us` (`2.8%`). The shared expert is equally important: q4_K shared
-expert plus final add measured `439.59 us`, making the routed+shared FFN
-estimate `832.58 us` with the shared expert at `52.8%`. These numbers justify
-prioritizing backend `MUL_MAT_ID`/expert matmul and shared-expert work after
-sparse-attention correctness, but they do not require a new manifest object.
-Policy remains the semantic phase contract under `generation.policy`;
-performance cutoffs and byte/token limits remain numeric resolver inputs under
-`generation.thresholds`.
-A component breakdown sharpened the shared-expert target: the q4_K shared
-expert plus final add measured `429.18 us`, but shared gate/up/down q4_K
-matmuls accounted for only `66.26 us` combined (`16.1%` of the component row
-sum). The shared activation/mul whole-graph row plus final add accounted for
-`344.64 us`. Treat this as evidence to attack shared-expert fusion and graph
-shape before chasing generic q4_K shared matmul throughput.
+estimates a routed FFN decode layer at `389.37 us`: routed gate/up/down matmuls
+account for `378.94 us` (`97.3%`), while route/top-k plus weighted sum accounts
+for `10.43 us` (`2.7%`). The shared expert is equally important: a
+production-shaped fused GLU shared expert plus final add measured `401.81 us`,
+making the routed+shared FFN estimate `791.18 us` with the shared expert at
+`50.8%`. These numbers justify prioritizing backend `MUL_MAT_ID`/expert matmul
+and shared-expert work after sparse-attention correctness, but they do not
+require a new manifest object. Policy remains the semantic phase contract under
+`generation.policy`; performance cutoffs and byte/token limits remain numeric
+resolver inputs under `generation.thresholds`.
+A component breakdown also corrected a bad diagnostic path: the unfused
+`silu(gate) * up` whole-graph row measured `341.15 us`, but the normal
+llama.cpp shared expert path already uses `ggml_swiglu_split()`. The fused
+SwiGLU split row measured only `4.46 us` (`8.69 us` including final add), so
+custom activation fusion is not the next local target. Treat the fused GLU
+numbers as the production-shaped evidence and keep optimization pressure on
+routed q2/q3 `MUL_MAT_ID`, q2_K down quality experiments, and shared-expert
+whole execution.
 The extended fixture measured a merged q2_K gate+up tensor shape at
 `383.05 us` (`1.03x`), a weighted-down MoE graph shape at `7.93 us` versus
 `7.72 us` (`0.97x`) on the small quantized whole-graph fixture, and a q2_K

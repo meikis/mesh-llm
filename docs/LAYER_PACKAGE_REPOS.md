@@ -147,22 +147,24 @@ After those phase gates, the next measured local bottleneck is the MoE FFN
 rather than top-k routing. The current Metal MoE fixture estimates one GLM-5.2
 routed FFN decode layer at `392.99 us`, with expert matmuls accounting for
 `381.89 us` (`97.2%`). Route/top-k plus weighted sum is only `11.10 us`
-(`2.8%`). The shared expert is not small: the q4_K shared expert plus final add
-measured `429.18 us`, making the routed+shared FFN estimate `820.51 us` with
-the shared expert at `52.3%`. A component breakdown measured the shared
-gate/up/down q4_K matmuls at only `66.26 us` combined (`16.1%` of the component
-row sum), while the shared activation/mul whole-graph row plus final add was
-`344.64 us`. That evidence should inform runtime optimization order, but it
-does not add new manifest schema: package policy still belongs under
+(`2.8%`). The shared expert is not small. A production-shaped fused GLU shared
+expert plus final add measured `401.81 us`, making the routed+shared FFN
+estimate `791.18 us` with the shared expert at `50.8%`. The fused SwiGLU row
+itself is cheap (`4.46 us`, or `8.69 us` including final add); the earlier
+unfused `silu(gate) * up` diagnostic row measured `341.15 us` but does not
+represent the normal llama.cpp `build_ffn()` path, which already uses
+`ggml_swiglu_split()`. That evidence should inform runtime optimization order,
+but it does not add new manifest schema: package policy still belongs under
 `generation.policy`, and numeric resolver hints still belong under
 `generation.thresholds`.
 The extended MoE fixture keeps that conclusion intact: a merged q2_K gate+up
 tensor shape estimates `383.05 us` (`1.03x`), moving MoE weights before the
 down projection measured `7.93 us` versus `7.72 us` (`0.97x`) on the small
 quantized whole-graph fixture, and a q2_K down-projection alternative
-estimates `344.33 us` (`1.14x`) before quality is measured. That makes q3_K
-routed down and shared-expert execution more interesting than gate/up tensor
-merging or weighted-down graph shape alone.
+estimates `339.64-344.33 us` (`1.14-1.15x`) before quality is measured. That
+makes q3_K routed down, q2_K down quality testing, and shared-expert whole
+execution more interesting than gate/up tensor merging, weighted-down graph
+shape, or custom activation fusion.
 The optional Phase E kernel sweep also rules out two tempting kernel-policy
 shortcuts: forcing one-token MoE through Metal `mul_mm_id` measured `850.64 us`
 for q3_K routed down versus `165.86 us` on the default `mul_mv_id` path, while

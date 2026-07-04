@@ -318,6 +318,13 @@ the package recommendation that was overridden. If a consumer cannot execute the
 package-recommended path, it MUST choose a correctness-preserving fallback and
 emit the fallback reason.
 
+Consumers MUST NOT silently reinterpret unknown policy values as a supported
+path. Unknown profiles, phase values, or experimental policy switches should be
+reported as unsupported unless the runtime has an explicit compatibility rule
+for that value. Numeric threshold fields are hints and may be ignored by older
+consumers, but policy fields describe execution semantics and must be handled
+deliberately.
+
 Package generation defaults are not a substitute for model correctness
 metadata. Architecture-specific GGUF metadata and tensor layout still define
 whether a runtime may execute the model at all; `generation.policy` only
@@ -408,6 +415,14 @@ backend-specific allocation flag. This keeps the same package usable across
 Metal, CUDA, CPU, and future backends while still allowing each backend to make
 an evidence-based decision.
 
+Threshold units are part of the field contract:
+
+| Threshold | Unit | Resolver use |
+| --- | --- | --- |
+| `short_prefill_max_tokens` | tokens | Selects the short-prefill policy when the prompt/window is at or below this size. |
+| `compact_flash_min_kv` | KV rows | Rejects compact selected-KV flash below the minimum useful KV history. |
+| `dense_mask_max_bytes` | bytes | Rejects dense sparse-mask materialization when the estimated mask would exceed this budget. |
+
 #### Policy Resolution
 
 Consumers resolve generation policy in this order:
@@ -424,6 +439,13 @@ different policy silently. For example, a GLM-DSA package with split
 `glm-dsa-v1`; the runtime may still fall back from `compact-flash` to `dense`
 on a backend that lacks compact selected-KV attention, but it must log that
 fallback.
+
+Policy resolution telemetry SHOULD include the package profile and the exact
+decision inputs that changed the selected path: phase, backend, `n_tokens`,
+`n_kv`, `top_k`, estimated dense-mask bytes, selected threshold, selected path,
+fallback path, and fallback reason. This is required evidence for tuning
+package defaults; without it, benchmark results cannot explain whether a run
+used the intended GLM-DSA path or a correctness fallback.
 
 For `glm-dsa-v1`, the current phase intent is:
 

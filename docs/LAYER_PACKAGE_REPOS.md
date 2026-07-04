@@ -41,6 +41,12 @@ semantics and `generation.thresholds` for numeric runtime resolver hints. Do
 not add model-family-specific objects such as `generation.glm_dsa`; model
 families use stable policy profiles instead.
 
+The split matters. Policy values are portable names for phase behavior:
+`decode`, `short_prefill`, `long_prefill`, `verify`, and `indexshare`.
+Threshold values are numbers the resolver uses to decide whether a policy is
+appropriate on the current request/backend. A package should not encode Metal,
+CUDA, or Skippy implementation names in either place.
+
 For GLM-DSA packages, set `generation.policy.profile` to `glm-dsa-v1` and
 declare phase choices such as decode `compact-flash`, short-prefill `dense`,
 long-prefill `sparse-chunked`, and IndexShare `required`. The policy values
@@ -49,6 +55,31 @@ config may override these values for experiments, but the package manifest is
 the source of truth for validated defaults and consumers must log any override
 or fallback. See
 [specs/layer-package-repos.md](specs/layer-package-repos.md#generation-defaults).
+
+Minimal GLM-DSA shape:
+
+```json
+{
+  "generation": {
+    "policy": {
+      "profile": "glm-dsa-v1",
+      "decode": "compact-flash",
+      "short_prefill": "dense",
+      "long_prefill": "sparse-chunked",
+      "verify": "auto",
+      "indexshare": "required",
+      "experimental": {
+        "selected_row_flash": "evidence-gated"
+      }
+    },
+    "thresholds": {
+      "short_prefill_max_tokens": 2048,
+      "compact_flash_min_kv": 1,
+      "dense_mask_max_bytes": 268435456
+    }
+  }
+}
+```
 
 The threshold values should be grounded in tensor sizes. For example, a
 GLM-DSA top-k sideband costs `tokens * top_k * 4` bytes, while a dense sparse

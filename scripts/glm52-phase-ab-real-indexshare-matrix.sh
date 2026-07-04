@@ -30,7 +30,8 @@ Usage: scripts/glm52-phase-ab-real-indexshare-matrix.sh [options]
 
 Runs the real GLM-5.2 A/B-only IndexShare proof matrix:
 
-  A. Validate the llama-native GLM-DSA runtime contract from the real layer package.
+  A. Validate the llama-native GLM-DSA runtime contract and generation policy
+     from the real layer package.
   B. Validate representative Full producer -> Shared consumer spans with parity.
   B-. Validate that starting on a Shared layer without top-k sideband fails.
 
@@ -185,7 +186,7 @@ mkdir -p "$OUT_DIR"
 CONTRACT_JSON="$OUT_DIR/contract.json"
 MATRIX_JSON="$OUT_DIR/matrix.json"
 
-"$SKIPPY_MODEL_PACKAGE_BIN" glm-dsa-contract "$STAGE_MODEL" >"$CONTRACT_JSON"
+"$SKIPPY_MODEL_PACKAGE_BIN" glm-dsa-contract --require-generation-policy "$STAGE_MODEL" >"$CONTRACT_JSON"
 
 python3 - "$CONTRACT_JSON" <<'PY'
 import json
@@ -197,6 +198,8 @@ contract = json.loads(path.read_text())
 failures = []
 if not contract.get("valid"):
     failures.append("contract valid=false")
+if not contract.get("generation_policy_required"):
+    failures.append("generation_policy_required=false")
 if contract.get("architecture") != "glm-dsa":
     failures.append(f"unexpected architecture {contract.get('architecture')!r}")
 if contract.get("role_source") != "metadata_types":
@@ -215,6 +218,33 @@ if contract.get("tensor_errors"):
     failures.append(f"tensor_errors={contract.get('tensor_errors')}")
 if contract.get("warnings"):
     failures.append(f"warnings={contract.get('warnings')}")
+policy = contract.get("generation_policy") or {}
+expected_policy = {
+    "profile": "glm-dsa-v1",
+    "decode": "compact-flash",
+    "short_prefill": "dense",
+    "long_prefill": "sparse-chunked",
+    "verify": "auto",
+    "indexshare": "required",
+    "selected_row_flash": "evidence-gated",
+}
+for key, expected in expected_policy.items():
+    if policy.get(key) != expected:
+        failures.append(f"generation_policy.{key}={policy.get(key)!r}, expected {expected!r}")
+thresholds = contract.get("generation_thresholds") or {}
+expected_thresholds = {
+    "short_prefill_max_tokens": 2048,
+    "direct_sparse_decode_max_top_k": 256,
+    "compact_flash_min_kv": 1,
+    "dense_mask_max_bytes": 268435456,
+}
+for key, expected in expected_thresholds.items():
+    if thresholds.get(key) != expected:
+        failures.append(f"generation_thresholds.{key}={thresholds.get(key)!r}, expected {expected!r}")
+if contract.get("generation_policy_errors"):
+    failures.append(f"generation_policy_errors={contract.get('generation_policy_errors')}")
+if contract.get("generation_threshold_errors"):
+    failures.append(f"generation_threshold_errors={contract.get('generation_threshold_errors')}")
 if failures:
     print("GLM-5.2 contract validation failed", file=sys.stderr)
     for failure in failures:
@@ -385,6 +415,9 @@ summary = {
         "nextn_predict_layers": contract.get("nextn_predict_layers"),
         "full_layers": contract.get("full_layers"),
         "shared_layers": contract.get("shared_layers"),
+        "generation_policy_required": contract.get("generation_policy_required"),
+        "generation_policy": contract.get("generation_policy"),
+        "generation_thresholds": contract.get("generation_thresholds"),
     },
     "rows": rows,
     "negative_missing_top_k": {

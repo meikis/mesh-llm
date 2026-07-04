@@ -75,6 +75,11 @@ Use `generation.policy` for stable semantic execution choices such as
 `generation.glm_dsa`; package writers should use a versioned policy profile
 such as `glm-dsa-v1`.
 
+Generation defaults should be grounded in gated package/backend evidence, not
+single diagnostic microbench rows. For GLM-DSA MoE tuning, production-shaped
+routed whole-graph consumer probes are sanity checks only unless they are
+physically plausible against isolated routed FFN estimates.
+
 Layer packages store input-boundary tensors in `shared/embeddings.gguf` and
 final-boundary tensors in `shared/output.gguf`; owned tensors should appear in
 exactly one package artifact.

@@ -564,33 +564,33 @@ quant.
 
 Once those attention phase gates are in place, the measured local GLM-5.2
 bottleneck shifts to MoE expert execution. The gated Metal MoE fixture
-estimates a routed FFN decode layer at `390.31 us`: routed gate/up/down matmuls
-account for `374.01 us` (`95.8%`), routed fused SwiGLU accounts for `5.85 us`
-(`1.5%`), and route/top-k plus weighted sum accounts for `10.45 us` (`2.7%`).
+estimates a routed FFN decode layer at `390.23 us`: routed gate/up/down matmuls
+account for `374.44 us` (`96.0%`), routed fused SwiGLU accounts for `5.34 us`
+(`1.4%`), and route/top-k plus weighted sum accounts for `10.45 us` (`2.7%`).
 The shared expert is equally important: a production-shaped fused GLU shared
-expert plus final add measured `402.14 us`, making the routed+shared FFN
-estimate `792.45 us` with the shared expert at `50.7%`. These numbers justify
+expert plus final add measured `393.95 us`, making the routed+shared FFN
+estimate `784.18 us` with the shared expert at `50.2%`. These numbers justify
 prioritizing backend `MUL_MAT_ID`/expert matmul and shared-expert work after
 sparse-attention correctness, but they do not require a new manifest object.
 Policy remains the semantic phase contract under `generation.policy`;
 performance cutoffs and byte/token limits remain numeric resolver inputs under
 `generation.thresholds`.
 A component breakdown also corrected a bad diagnostic path: the unfused
-`silu(gate) * up` whole-graph row measured `293.79 us`, but the normal
+`silu(gate) * up` whole-graph row measured `296.63 us`, but the normal
 llama.cpp shared expert path already uses `ggml_swiglu_split()`. The fused
-SwiGLU split row measured only `4.33 us` (`8.55 us` including final add), so
+SwiGLU split row measured only `4.35 us` (`8.37 us` including final add), so
 custom activation fusion is not the next local target. Treat the fused GLU
 numbers as the production-shaped evidence and keep optimization pressure on
 routed q2/q3 `MUL_MAT_ID`, q2_K down quality experiments, and deeper expert
 matmul/layout work.
 The extended fixture measured a merged q2_K routed gate/up tensor shape at
-`382.47 us` (`1.02x` faster than the current routed estimate), a merged shared
-gate/up fused GLU shape at `398.98 us` (`1.01x` faster than separate shared
-gate/up), a weighted-down MoE graph shape at `7.30 us` versus `7.24 us`
-(`0.99x`) on the small quantized whole-graph fixture, and a q2_K
-down-projection alternative at `342.04 us` (`1.14x`, quality not measured by
-that microbench). Shared-expert q3_K measured `435.18 us` (`0.92x` versus
-q4_K), and shared-expert q2_K measured `401.88 us` (`1.00x` versus q4_K), so
+`382.79 us` (`1.02x` faster than the current routed estimate), a merged shared
+gate/up fused GLU shape at `384.98 us` (`1.02x` faster than separate shared
+gate/up), a weighted-down MoE graph shape at `7.20 us` versus `7.28 us`
+(`1.01x`) on the small quantized whole-graph fixture, and a q2_K
+down-projection alternative at `341.80 us` (`1.14x`, quality not measured by
+that microbench). Shared-expert q3_K measured `421.79 us` (`0.93x` versus
+q4_K), and shared-expert q2_K measured `388.74 us` (`1.01x` versus q4_K), so
 lowering shared-expert quant is not a Metal throughput lever. Treat those as
 optimization-priority evidence, not as a new model-family schema branch:
 quality-bearing quant changes still need separate evaluation under the normal
@@ -599,17 +599,26 @@ The Phase E report can be run with `GLM52_PHASE_E_REQUIRE_GATES=1` to fail
 loudly when production-shaped MoE evidence is missing. With
 `GLM52_PHASE_E_KERNEL_SWEEP=1`, the same gate also requires the dispatch-policy
 sweep rows. Forcing one-token q3_K routed down through Metal `mul_mm_id`
-measured `849.60 us`, compared with `164.65 us` on the default `mul_mv_id`
-path. q3_K `mul_mv_id` simdgroup tuning measured `164.65 us` at the default
-`nsg=2` and `163.70 us` for the best sampled row, which is noise-level rather
+measured `860.96 us`, compared with `164.46 us` on the default `mul_mv_id`
+path. q3_K `mul_mv_id` simdgroup tuning measured `164.46 us` at the default
+`nsg=2` and `163.92 us` for the best sampled row, which is noise-level rather
 than a real policy win. The row-height sweep kept that conclusion intact:
-default `nr0=4` measured `164.85 us`, which was also the best sampled row;
-`nr0=1` and `nr0=2` were both around `195-197 us`, and `nr0=8` was `167.07 us`.
-A fixed `k=2048` q3_K GLM-down specialization measured `162.52 us` at default
-`nsg=2` and `162.57 us` at `nsg=4`, only `1.01x` faster than ordinary default
+default `nr0=4` measured `163.98 us`, which was also the best sampled row;
+`nr0=1` and `nr0=2` were both around `195-196 us`, and `nr0=8` was `166.20 us`.
+A fixed `k=2048` q3_K GLM-down specialization measured `164.04 us` at default
+`nsg=2` and `162.67 us` at `nsg=4`, only `1.01x` faster than ordinary default
 q3_K `mul_mv_id`. Keep q3_K down work focused on a deeper expert matmul/layout
 specialization or a quality-tested q2_K down alternative, not generic
 matrix-matrix cutoff, simdgroup, row-height, or fixed-block knobs.
+Production-shaped routed whole-graph consumer rows are optional sanity probes,
+not policy evidence by themselves. The Phase E report exposes them through
+`GLM52_PHASE_E_ROUTED_WHOLE_GRAPH_SANITY=1` and accepts the row only when it is
+physically plausible against the isolated routed FFN estimate. The first
+production-shaped sanity probe reported q3_K down at `7.14 us` and q2_K down at
+`6.97 us`, both below 25% of the `391.14 us` isolated routed FFN estimate, so
+the report rejects those rows. Until that backend timing behavior is understood,
+generation policy should continue to use the isolated matmul and gated
+component evidence for routed-MoE decisions.
 
 The IndexShare numbers are why `generation.policy.indexshare` is a first-class
 policy field instead of an implementation note. For GLM-5.2-style DSA with a

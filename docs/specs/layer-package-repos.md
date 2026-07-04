@@ -194,7 +194,8 @@ Minimal shape:
       "indexshare": "required",
       "experimental": {
         "selected_row_flash": "evidence-gated",
-        "moe_weighted_down": "evidence-gated"
+        "moe_weighted_down": "evidence-gated",
+        "moe_merged_shared_gate_up": "evidence-gated"
       }
     },
     "thresholds": {
@@ -306,7 +307,7 @@ Use this split consistently:
 | Location | Meaning | Typical fields |
 | --- | --- | --- |
 | `generation.policy` | Portable, semantic execution decisions for this artifact. | `profile`, `decode`, `short_prefill`, `long_prefill`, `verify`, `indexshare` |
-| `generation.policy.experimental` | Named experimental policy paths that are valid only with explicit evidence and logging. | `selected_row_flash`, `moe_weighted_down` |
+| `generation.policy.experimental` | Named experimental policy paths that are valid only with explicit evidence and logging. | `selected_row_flash`, `moe_weighted_down`, `moe_merged_shared_gate_up` |
 | `generation.thresholds` | Numeric decision inputs for the policy resolver. | token limits, byte limits, minimum KV sizes |
 | GGUF metadata | Architecture and tensor-layout correctness contract. | attention dimensions, IndexShare roles, native MTP tensor layout |
 
@@ -563,32 +564,36 @@ quant.
 
 Once those attention phase gates are in place, the measured local GLM-5.2
 bottleneck shifts to MoE expert execution. The current Metal MoE fixture
-estimates a routed FFN decode layer at `389.37 us`: routed gate/up/down matmuls
-account for `378.94 us` (`97.3%`), while route/top-k plus weighted sum accounts
-for `10.43 us` (`2.7%`). The shared expert is equally important: a
-production-shaped fused GLU shared expert plus final add measured `401.81 us`,
-making the routed+shared FFN estimate `791.18 us` with the shared expert at
-`50.8%`. These numbers justify prioritizing backend `MUL_MAT_ID`/expert matmul
+estimates a routed FFN decode layer at `391.43 us`: routed gate/up/down matmuls
+account for `380.86 us` (`97.3%`), while route/top-k plus weighted sum accounts
+for `10.57 us` (`2.7%`). The shared expert is equally important: a
+production-shaped fused GLU shared expert plus final add measured `415.61 us`,
+making the routed+shared FFN estimate `807.04 us` with the shared expert at
+`51.5%`. These numbers justify prioritizing backend `MUL_MAT_ID`/expert matmul
 and shared-expert work after sparse-attention correctness, but they do not
 require a new manifest object. Policy remains the semantic phase contract under
 `generation.policy`; performance cutoffs and byte/token limits remain numeric
 resolver inputs under `generation.thresholds`.
 A component breakdown also corrected a bad diagnostic path: the unfused
-`silu(gate) * up` whole-graph row measured `341.15 us`, but the normal
+`silu(gate) * up` whole-graph row measured `318.69 us`, but the normal
 llama.cpp shared expert path already uses `ggml_swiglu_split()`. The fused
-SwiGLU split row measured only `4.46 us` (`8.69 us` including final add), so
+SwiGLU split row measured only `4.91 us` (`9.17 us` including final add), so
 custom activation fusion is not the next local target. Treat the fused GLU
 numbers as the production-shaped evidence and keep optimization pressure on
 routed q2/q3 `MUL_MAT_ID`, q2_K down quality experiments, and shared-expert
 whole execution.
-The extended fixture measured a merged q2_K gate+up tensor shape at
-`383.05 us` (`1.03x`), a weighted-down MoE graph shape at `7.93 us` versus
-`7.72 us` (`0.97x`) on the small quantized whole-graph fixture, and a q2_K
-down-projection alternative at `344.33 us` (`1.14x`, quality not measured by
+The extended fixture measured a merged q2_K routed gate/up tensor shape at
+`380.80 us` (`1.03x` faster than the current routed estimate), a merged shared
+gate/up fused GLU shape at `403.58 us` (`1.03x` faster than separate shared
+gate/up), a weighted-down MoE graph shape at `7.28 us` versus `7.39 us`
+(`1.02x`) on the small quantized whole-graph fixture, and a q2_K
+down-projection alternative at `342.65 us` (`1.14x`, quality not measured by
 that microbench). Treat those as optimization-priority evidence, not as a new
 model-family schema branch: a package may record validated runtime policy under
 `generation.policy`, but quality-bearing quant changes still need separate
-evaluation.
+evaluation. Merged shared gate/up is valid as an evidence-gated experimental
+policy only for packages that actually contain and validate that artifact
+shape.
 An optional Phase E kernel sweep records dispatch-policy evidence for these
 same shapes. Forcing one-token q3_K routed down through Metal `mul_mm_id`
 measured `850.64 us`, compared with `165.86 us` on the default `mul_mv_id`

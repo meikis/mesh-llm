@@ -70,7 +70,8 @@ Minimal GLM-DSA shape:
       "indexshare": "required",
       "experimental": {
         "selected_row_flash": "evidence-gated",
-        "moe_weighted_down": "evidence-gated"
+        "moe_weighted_down": "evidence-gated",
+        "moe_merged_shared_gate_up": "evidence-gated"
       }
     },
     "thresholds": {
@@ -87,7 +88,7 @@ Authoring rule of thumb:
 | Put it here | Use it for | Examples |
 | --- | --- | --- |
 | `generation.policy` | Stable semantic execution choices validated for the package. | `profile`, `decode`, `short_prefill`, `long_prefill`, `verify`, `indexshare` |
-| `generation.policy.experimental` | Named opt-in paths that need package/backend evidence before becoming defaults. | `selected_row_flash`, `moe_weighted_down` |
+| `generation.policy.experimental` | Named opt-in paths that need package/backend evidence before becoming defaults. | `selected_row_flash`, `moe_weighted_down`, `moe_merged_shared_gate_up` |
 | `generation.thresholds` | Numeric resolver inputs used to accept, reject, or fall back from a policy. | `short_prefill_max_tokens`, `compact_flash_min_kv`, `dense_mask_max_bytes` |
 | GGUF metadata | Architecture correctness and tensor layout requirements. | GLM-DSA q/k/v split dimensions, IndexShare roles, MTP tensor presence |
 
@@ -145,26 +146,29 @@ short prefill and verification dense by default unless a backend-specific sparse
 path has its own evidence.
 After those phase gates, the next measured local bottleneck is the MoE FFN
 rather than top-k routing. The current Metal MoE fixture estimates one GLM-5.2
-routed FFN decode layer at `392.99 us`, with expert matmuls accounting for
-`381.89 us` (`97.2%`). Route/top-k plus weighted sum is only `11.10 us`
-(`2.8%`). The shared expert is not small. A production-shaped fused GLU shared
-expert plus final add measured `401.81 us`, making the routed+shared FFN
-estimate `791.18 us` with the shared expert at `50.8%`. The fused SwiGLU row
-itself is cheap (`4.46 us`, or `8.69 us` including final add); the earlier
-unfused `silu(gate) * up` diagnostic row measured `341.15 us` but does not
+routed FFN decode layer at `391.43 us`, with expert matmuls accounting for
+`380.86 us` (`97.3%`). Route/top-k plus weighted sum is only `10.57 us`
+(`2.7%`). The shared expert is not small. A production-shaped fused GLU shared
+expert plus final add measured `415.61 us`, making the routed+shared FFN
+estimate `807.04 us` with the shared expert at `51.5%`. The fused SwiGLU row
+itself is cheap (`4.91 us`, or `9.17 us` including final add); the earlier
+unfused `silu(gate) * up` diagnostic row measured `318.69 us` but does not
 represent the normal llama.cpp `build_ffn()` path, which already uses
 `ggml_swiglu_split()`. That evidence should inform runtime optimization order,
 but it does not add new manifest schema: package policy still belongs under
 `generation.policy`, and numeric resolver hints still belong under
 `generation.thresholds`.
-The extended MoE fixture keeps that conclusion intact: a merged q2_K gate+up
-tensor shape estimates `383.05 us` (`1.03x`), moving MoE weights before the
-down projection measured `7.93 us` versus `7.72 us` (`0.97x`) on the small
+The extended MoE fixture keeps that conclusion intact: a merged q2_K routed
+gate/up tensor shape estimates `380.80 us` (`1.03x` faster than the current
+routed estimate), a merged shared gate/up fused GLU shape measured `403.58 us`
+(`1.03x` faster than separate shared gate/up), moving MoE weights before the
+down projection measured `7.28 us` versus `7.39 us` (`1.02x`) on the small
 quantized whole-graph fixture, and a q2_K down-projection alternative
-estimates `339.64-344.33 us` (`1.14-1.15x`) before quality is measured. That
-makes q3_K routed down, q2_K down quality testing, and shared-expert whole
-execution more interesting than gate/up tensor merging, weighted-down graph
-shape, or custom activation fusion.
+estimates `342.65 us` (`1.14x`) before quality is measured. That makes q3_K
+routed down, q2_K down quality testing, and shared-expert whole execution more
+interesting than custom activation fusion. Merged shared gate/up is worth
+keeping as an evidence-gated package/runtime option, but it is a small win on
+this fixture rather than a reason to create a GLM-specific generation schema.
 The optional Phase E kernel sweep also rules out two tempting kernel-policy
 shortcuts: forcing one-token MoE through Metal `mul_mm_id` measured `850.64 us`
 for q3_K routed down versus `165.86 us` on the default `mul_mv_id` path, while

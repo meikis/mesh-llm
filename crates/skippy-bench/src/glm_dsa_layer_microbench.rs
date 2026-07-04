@@ -82,6 +82,7 @@ const INPUT_FRAME_CACHE_MAGIC: &[u8; 16] = b"SKPGLMDSAFRM1\0\0\0";
 const GGML_TYPE_F32_ID: u32 = 0;
 const GGML_TYPE_F16_ID: u32 = 1;
 const GLM_DSA_F16_K_ROW_BYTES: u32 = 1152;
+const GLM_DSA_INDEXER_TOP_K: usize = 2048;
 
 pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
     validate_args(&args)?;
@@ -1948,18 +1949,43 @@ fn warm_session_kv_prefix_for_case(
     warmup_source: Option<&NativeIndexShareWarmupSource>,
     deferred_model_drops: &mut Vec<StageModel>,
 ) -> Result<()> {
-    if let Some(source) = warmup_source {
-        return warm_session_kv_prefix_from_top_k_source(
-            session,
-            args,
-            flags,
-            layer_start,
-            layer_end,
-            source,
-            deferred_model_drops,
-        );
+    match kv_warmup_plan_for_case(args, warmup_source.is_some()) {
+        KvWarmupPlan::SyntheticImport | KvWarmupPlan::RangePrefill => {
+            warm_session_kv_prefix_for_range(session, args, flags, layer_start, layer_end)
+        }
+        KvWarmupPlan::TopKSource => {
+            let source = warmup_source.expect("top-k source plan requires warmup source");
+            warm_session_kv_prefix_from_top_k_source(
+                session,
+                args,
+                flags,
+                layer_start,
+                layer_end,
+                source,
+                deferred_model_drops,
+            )
+        }
     }
-    warm_session_kv_prefix_for_range(session, args, flags, layer_start, layer_end)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KvWarmupPlan {
+    SyntheticImport,
+    TopKSource,
+    RangePrefill,
+}
+
+fn kv_warmup_plan_for_case(
+    args: &GlmDsaLayerMicrobenchArgs,
+    warmup_source_present: bool,
+) -> KvWarmupPlan {
+    if args.synthetic_kv_warmup {
+        return KvWarmupPlan::SyntheticImport;
+    }
+    if warmup_source_present {
+        return KvWarmupPlan::TopKSource;
+    }
+    KvWarmupPlan::RangePrefill
 }
 
 fn warm_session_kv_prefix_from_top_k_source(
@@ -3696,7 +3722,61 @@ fn validate_real_top_k_frame_for_range(
             frame.payload.len()
         );
     }
+    validate_real_top_k_sideband_width(args, frame, source_layer_start, source_layer_end)?;
     Ok(())
+}
+
+fn validate_real_top_k_sideband_width(
+    args: &GlmDsaLayerMicrobenchArgs,
+    frame: &ActivationFrame,
+    source_layer_start: u32,
+    source_layer_end: u32,
+) -> Result<()> {
+    let hidden_bytes = hidden_payload_bytes(args)?;
+    let sideband = &frame.payload[hidden_bytes..];
+    if !sideband.len().is_multiple_of(std::mem::size_of::<i32>()) {
+        bail!(
+            "real top-k source {}..{} sideband payload is not i32-aligned",
+            source_layer_start,
+            source_layer_end
+        );
+    }
+    let actual_width =
+        sideband_i32_per_token(sideband.len() / std::mem::size_of::<i32>(), args.tokens)
+            .context("real top-k source sideband is not token-major i32")?;
+    let expected_width = expected_real_top_k_sideband_width(args)?;
+    if !real_top_k_sideband_width_is_valid(args.tokens, actual_width, expected_width) {
+        bail!(
+            "real top-k source {}..{} produced wrong GLM-DSA top-k sideband width: expected={} actual={} tokens={} sideband_bytes={}",
+            source_layer_start,
+            source_layer_end,
+            expected_width,
+            actual_width,
+            args.tokens,
+            sideband.len()
+        );
+    }
+    Ok(())
+}
+
+fn expected_real_top_k_sideband_width(args: &GlmDsaLayerMicrobenchArgs) -> Result<usize> {
+    let position_start =
+        usize::try_from(args.position_start).context("position_start is negative")?;
+    position_start
+        .checked_add(args.tokens)
+        .map(|n_kv| n_kv.clamp(1, GLM_DSA_INDEXER_TOP_K))
+        .context("real top-k expected sideband width overflow")
+}
+
+fn real_top_k_sideband_width_is_valid(
+    tokens: usize,
+    actual_width: usize,
+    expected_width: usize,
+) -> bool {
+    if tokens > 1 {
+        return actual_width <= expected_width;
+    }
+    actual_width == expected_width
 }
 
 fn poison_top_k_sideband(
@@ -9075,6 +9155,35 @@ mod tests {
     }
 
     #[test]
+    fn real_top_k_frame_validation_rejects_high_position_width_one_sideband() {
+        let mut args = test_args();
+        args.activation_width = 4;
+        args.tokens = 1;
+        args.position_start = 65536;
+        let frame = top_k_frame_for_test(&args, 1);
+
+        let error = validate_real_top_k_frame_for_range(&args, &frame, 6, 7)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("wrong GLM-DSA top-k sideband width: expected=2048 actual=1"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn real_top_k_frame_validation_accepts_expected_high_position_sideband_width() {
+        let mut args = test_args();
+        args.activation_width = 4;
+        args.tokens = 1;
+        args.position_start = 65536;
+        let frame = top_k_frame_for_test(&args, GLM_DSA_INDEXER_TOP_K);
+
+        validate_real_top_k_frame_for_range(&args, &frame, 6, 7).unwrap();
+    }
+
+    #[test]
     fn optimized_dispatch_probe_runs_for_diagnostic_reports() {
         let flags = MicrobenchFlags {
             direct_sparse_attn: true,
@@ -10205,6 +10314,17 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_kv_warmup_plan_bypasses_top_k_source_replay() {
+        let mut args = test_args();
+        args.synthetic_kv_warmup = true;
+        args.compare_native_indexshare_producer_consumer = true;
+
+        let plan = kv_warmup_plan_for_case(&args, true);
+
+        assert_eq!(plan, KvWarmupPlan::SyntheticImport);
+    }
+
+    #[test]
     fn validate_args_rejects_both_kv_reuse_modes() {
         let mut args = test_args();
         args.reuse_kv_warmup_checkpoint = true;
@@ -11005,5 +11125,27 @@ mod tests {
             .iter()
             .flat_map(|value| value.to_ne_bytes())
             .collect()
+    }
+
+    fn top_k_frame_for_test(args: &GlmDsaLayerMicrobenchArgs, width: usize) -> ActivationFrame {
+        let hidden_bytes = hidden_payload_bytes(args).unwrap();
+        let mut payload = vec![0_u8; hidden_bytes];
+        let values: Vec<_> = (0..width).map(|index| index as i32).collect();
+        payload.extend_from_slice(&i32_sideband_bytes(&values));
+        ActivationFrame {
+            desc: ActivationDesc {
+                version: 1,
+                dtype: RuntimeActivationDType::F32,
+                layout: RuntimeActivationLayout::TokenMajor,
+                producer_stage_index: 0,
+                layer_start: 6,
+                layer_end: 7,
+                token_count: args.tokens as u32,
+                sequence_count: 1,
+                payload_bytes: payload.len() as u64,
+                flags: ACTIVATION_FLAG_GLM_DSA_TOP_K,
+            },
+            payload,
+        }
     }
 }

@@ -67,6 +67,7 @@ struct LogSummary {
     path: PathBuf,
     records: usize,
     runtime_contract: RuntimeContractSummary,
+    backend: BackendEvidenceSummary,
     stage_records: BTreeMap<i32, BTreeMap<Phase, PhaseSummary>>,
     group_records: BTreeMap<i32, BTreeMap<String, BTreeMap<Phase, PhaseSummary>>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -92,6 +93,29 @@ struct RuntimeContractSummary {
 struct RuntimeValueSummary {
     records: usize,
     values: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct BackendEvidenceSummary {
+    metal_device_init_records: usize,
+    metal_init_records: usize,
+    metal_device_names: Vec<String>,
+    metal_unified_memory: Option<bool>,
+    metal_bfloat: Option<bool>,
+    metal_tensor: Option<bool>,
+    cuda_records: usize,
+    backend_ptrs_size: Option<u64>,
+    compute_buffer_records: usize,
+    compute_buffer_devices: BTreeMap<String, BackendComputeBufferDeviceSummary>,
+    metal_dispatch_records: usize,
+    metal_dispatch_ops: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct BackendComputeBufferDeviceSummary {
+    records: usize,
+    mismatched_records: usize,
+    max_size_mib: f64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -139,6 +163,7 @@ struct LogRecordInputs<'a> {
     direct_sparse_policy_records: &'a [DirectSparseDecisionRecord],
     compact_flash_policy_records: &'a [CompactFlashPolicyRecord],
     runtime_contract: Option<&'a RuntimeContractSummary>,
+    backend: Option<&'a BackendEvidenceSummary>,
 }
 
 impl<'a> LogRecordInputs<'a> {
@@ -152,6 +177,7 @@ impl<'a> LogRecordInputs<'a> {
             direct_sparse_policy_records: &[],
             compact_flash_policy_records: &[],
             runtime_contract: None,
+            backend: None,
         }
     }
 
@@ -187,6 +213,11 @@ impl<'a> LogRecordInputs<'a> {
 
     fn with_runtime_contract(mut self, runtime_contract: &'a RuntimeContractSummary) -> Self {
         self.runtime_contract = Some(runtime_contract);
+        self
+    }
+
+    fn with_backend(mut self, backend: &'a BackendEvidenceSummary) -> Self {
+        self.backend = Some(backend);
         self
     }
 }
@@ -589,6 +620,17 @@ fn build_report(args: &GlmDsaOpReportArgs) -> Result<GlmDsaOpReport> {
         let compact_flash_policy_records = parse_compact_flash_policy_records(&text)
             .with_context(|| format!("parse GLM-DSA compact flash policy in {}", path.display()))?;
         let runtime_contract = parse_runtime_contract_summary(&text);
+        let compute_buffer_records = parse_compute_buffer_records(&text)
+            .with_context(|| format!("parse compute buffer records in {}", path.display()))?;
+        let metal_dispatch_records = parse_metal_dispatch_records(&text).with_context(|| {
+            format!("parse GLM-DSA Metal dispatch records in {}", path.display())
+        })?;
+        let backend = summarize_backend_evidence(
+            &text,
+            &runtime_contract,
+            &compute_buffer_records,
+            &metal_dispatch_records,
+        );
         let records = match args.first_records {
             Some(limit) => records.into_iter().take(limit).collect::<Vec<_>>(),
             None => records,
@@ -611,7 +653,8 @@ fn build_report(args: &GlmDsaOpReportArgs) -> Result<GlmDsaOpReport> {
                 .with_sideband_records(&sideband_records)
                 .with_indexshare_records(&indexshare_records, &indexshare_contract_records)
                 .with_policy_records(&direct_sparse_policy_records, &compact_flash_policy_records)
-                .with_runtime_contract(&runtime_contract),
+                .with_runtime_contract(&runtime_contract)
+                .with_backend(&backend),
         );
         if args.require_indexshare_producer_consumer {
             require_indexshare_producer_consumer_trace(path, &summary)?;
@@ -624,6 +667,9 @@ fn build_report(args: &GlmDsaOpReportArgs) -> Result<GlmDsaOpReport> {
         }
         if args.require_glm52_runtime_contract {
             require_glm52_runtime_contract(path, &summary)?;
+        }
+        if args.require_local_backend_evidence {
+            require_local_backend_evidence(path, &summary)?;
         }
         logs.push(summary);
     }
@@ -1067,6 +1113,60 @@ fn require_glm52_runtime_contract(path: &Path, summary: &LogSummary) -> Result<(
         missing.join(","),
         runtime,
         summary.indexshare_trace
+    )
+}
+
+fn require_local_backend_evidence(path: &Path, summary: &LogSummary) -> Result<()> {
+    let backend = &summary.backend;
+    let policy = &summary.policy;
+    let mut missing = Vec::new();
+    if backend.metal_device_init_records == 0 {
+        missing.push("metal_device_init");
+    }
+    if backend.metal_init_records == 0 {
+        missing.push("metal_init");
+    }
+    if backend.metal_device_names.is_empty() {
+        missing.push("metal_device_name");
+    }
+    if backend.metal_unified_memory != Some(true) {
+        missing.push("metal_unified_memory");
+    }
+    if backend.backend_ptrs_size.unwrap_or(0) == 0 {
+        missing.push("backend_ptrs_size");
+    }
+    if !backend.compute_buffer_devices.contains_key("CPU") {
+        missing.push("cpu_compute_buffer");
+    }
+    if !backend.compute_buffer_devices.contains_key("MTL0") {
+        missing.push("metal_compute_buffer");
+    }
+    if policy
+        .compact_flash
+        .decode_backend_compact_supported
+        .true_records
+        == 0
+    {
+        missing.push("compact_backend_supported");
+    }
+    if policy
+        .direct_sparse
+        .decode_backend_sparse_supported
+        .false_records
+        == 0
+    {
+        missing.push("direct_sparse_backend_fallback");
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    bail!(
+        "{} does not prove local backend/fallback evidence; missing {}; backend={:?}; policy={:?}",
+        path.display(),
+        missing.join(","),
+        backend,
+        policy
     )
 }
 
@@ -1750,6 +1850,83 @@ fn parse_runtime_contract_summary(text: &str) -> RuntimeContractSummary {
     summary
 }
 
+fn summarize_backend_evidence(
+    text: &str,
+    runtime_contract: &RuntimeContractSummary,
+    compute_buffer_records: &[ComputeBufferRecord],
+    metal_dispatch_records: &[MetalDispatchRecord],
+) -> BackendEvidenceSummary {
+    let mut summary = BackendEvidenceSummary {
+        backend_ptrs_size: runtime_value_u64(
+            runtime_contract,
+            RuntimeSection::Context,
+            "backend_ptrs.size()",
+        ),
+        compute_buffer_records: compute_buffer_records.len(),
+        metal_dispatch_records: metal_dispatch_records.len(),
+        ..BackendEvidenceSummary::default()
+    };
+    for line in text.lines() {
+        add_backend_runtime_line(&mut summary, line);
+    }
+    for record in compute_buffer_records {
+        add_compute_buffer_summary(&mut summary, record);
+    }
+    for record in metal_dispatch_records {
+        *summary
+            .metal_dispatch_ops
+            .entry(record.op.clone())
+            .or_default() += 1;
+    }
+    summary
+}
+
+fn add_backend_runtime_line(summary: &mut BackendEvidenceSummary, line: &str) {
+    if line.contains("ggml_metal_device_init:") {
+        summary.metal_device_init_records += 1;
+        if let Some((_, value)) = line.split_once("GPU name:") {
+            push_unique_string(&mut summary.metal_device_names, value.trim());
+        }
+        if let Some(value) = parse_bool_runtime_line(line, "has unified memory") {
+            summary.metal_unified_memory = Some(value);
+        }
+        if let Some(value) = parse_bool_runtime_line(line, "has bfloat") {
+            summary.metal_bfloat = Some(value);
+        }
+        if let Some(value) = parse_bool_runtime_line(line, "has tensor") {
+            summary.metal_tensor = Some(value);
+        }
+    }
+    if line.contains("ggml_metal_init:") {
+        summary.metal_init_records += 1;
+    }
+    if line.contains("CUDA") || line.contains("CUBLAS") || line.contains("ggml_cuda") {
+        summary.cuda_records += 1;
+    }
+}
+
+fn parse_bool_runtime_line(line: &str, key: &str) -> Option<bool> {
+    let (_, value) = line.split_once(key)?;
+    let (_, value) = value.split_once('=')?;
+    match value.trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn add_compute_buffer_summary(summary: &mut BackendEvidenceSummary, record: &ComputeBufferRecord) {
+    let device = summary
+        .compute_buffer_devices
+        .entry(record.device.clone())
+        .or_default();
+    device.records += 1;
+    if !record.matches_expectation {
+        device.mismatched_records += 1;
+    }
+    device.max_size_mib = device.max_size_mib.max(record.size_mib);
+}
+
 fn parse_model_kv_runtime_line(line: &str) -> Option<(String, String)> {
     if !line.contains("llama_model_loader: - kv") {
         return None;
@@ -1834,10 +2011,12 @@ fn summarize_log(path: PathBuf, inputs: LogRecordInputs<'_>) -> LogSummary {
         inputs.compact_flash_policy_records,
     );
     let runtime_contract = inputs.runtime_contract.cloned().unwrap_or_default();
+    let backend = inputs.backend.cloned().unwrap_or_default();
     LogSummary {
         path,
         records: inputs.timing_records.len(),
         runtime_contract,
+        backend,
         stage_records,
         group_records: grouped_records,
         hottest_group_records,
@@ -2237,7 +2416,8 @@ mod tests {
         parse_sideband_records, parse_timing_group_records, parse_timing_record,
         parse_timing_records, require_compact_decode_policy_evidence,
         require_compact_decode_without_sparse_mask, require_glm52_runtime_contract,
-        require_indexshare_producer_consumer_trace, summarize_comparison_rows, summarize_log,
+        require_indexshare_producer_consumer_trace, require_local_backend_evidence,
+        summarize_backend_evidence, summarize_comparison_rows, summarize_log,
     };
 
     const LINE: &str = "skippy: glm_dsa_op_timing stage=1 tokens=128 total_us=1475800 indexer_topk_nodes=275 indexer_topk_us=129065 sparse_mask_nodes=235 sparse_mask_us=114543 mla_attention_nodes=47 mla_attention_us=35234 routed_moe_nodes=47 routed_moe_us=379574 shared_expert_nodes=47 shared_expert_us=817384";
@@ -2268,6 +2448,14 @@ mod tests {
     const METAL_WEIGHTED_DOWN_CANDIDATE_LINE: &str = "skippy: glm_dsa_metal_dispatch op=mul_mat_id_weighted_down_candidate tensor=ffn_moe_down-45 next=ffn_gate-45 next_op=MUL_MAT shared_gate=ffn_gate-45 shared_up=ffn_up-45 weighted_sum=ffn_moe_out-45 weighted_sum_op=MOE_WEIGHTED_SUM reason=full_motif shared_branch=1 weighted_sum_uses_down=1 pair_fusable=0 subgraph_fusable=1 filtered_gap=0 graph_gap=0 weighted_sum_gap=2 weighted_sum_graph_gap=2 src0_type=q3_K src1_type=f32 ids_type=i32 dst_type=f32 experts=256 used_experts=8 tokens=1 grid_x=1 grid_y=1 grid_z=1 threads_x=1";
     const METAL_GLM_DSA_MOE_MOTIF_CANDIDATE_LINE: &str = "skippy: glm_dsa_metal_dispatch op=glm_dsa_moe_motif_candidate tensor=ffn_moe_down-45 shared_gate=ffn_gate-45 shared_up=ffn_up-45 weighted_sum=ffn_moe_out-45 reason=full_motif natural_order=1 backend_candidate=1 subgraph_fusable=1 motif_nodes=4 fusion_outputs=3 weighted_sum_gap=2 weighted_sum_graph_gap=2 src0_type=q3_K src1_type=f32 ids_type=i32 dst_type=f32 experts=256 used_experts=8 tokens=1 grid_x=1 grid_y=1 grid_z=1 threads_x=1";
     const COMPUTE_BUFFER_LINES: &str = "~llama_context:       MTL0 compute buffer size is 2421.0264 MiB, matches expectation of 2421.0264 MiB\n~llama_context:       MTL0 compute buffer size of 667.8496 MiB, does not match expectation of 507.0029 MiB\n~llama_context:        CPU compute buffer size is  24.0059 MiB, matches expectation of  24.0059 MiB\n~llama_context:        CPU compute buffer size is   0.0000 MiB, matches expectation of   0.0000 MiB, trailing native detail";
+    const BACKEND_EVIDENCE_LINES: &str = "ggml_metal_device_init: GPU name:   MTL0 (Apple M1 Ultra)
+ggml_metal_device_init: has unified memory    = true
+ggml_metal_device_init: has bfloat            = true
+ggml_metal_device_init: has tensor            = false
+ggml_metal_init: allocating
+llama_context: backend_ptrs.size() = 3
+~llama_context:       MTL0 compute buffer size is 2421.0264 MiB, matches expectation of 2421.0264 MiB
+~llama_context:        CPU compute buffer size is  24.0059 MiB, matches expectation of  24.0059 MiB";
     const INDEXSHARE_CONTRACT_LINE: &str = "llama_glm_dsa_log_indexshare_contract: GLM_DSA IndexShare source=metadata_types full_layers=21 shared_layers=57 indexer_tensor_layers=1 filtered_indexer_groups=0 out_of_stage_indexer_groups=76 stage_filtered=1 layer_start=30 layer_end=32 top_k=2048 top_k_frequency=0 skip_top_k_offset=0";
     const GLM52_INDEXSHARE_CONTRACT_LINE: &str = "llama_glm_dsa_log_indexshare_contract: GLM_DSA IndexShare source=metadata_types full_layers=21 shared_layers=57 indexer_tensor_layers=8 target_indexer_tensor_layers=8 filtered_indexer_groups=8 out_of_stage_indexer_groups=13 stage_filtered=1 layer_start=0 layer_end=26 top_k=2048 top_k_frequency=4 skip_top_k_offset=3 nextn_layers=1";
     const INDEXSHARE_EXEC_FULL_LINE: &str = "llama_model_glm_dsa::graph::graph: GLM_DSA IndexShare exec layer=30 role=full input_top_k=0 stage_filtered=1 layer_start=30 layer_end=34";
@@ -2614,6 +2802,89 @@ llama_context: n_ctx_seq     = 256";
         assert_eq!(records[3].size_mib, 0.0);
         assert_eq!(records[3].expected_mib, 0.0);
         assert!(records[3].matches_expectation);
+    }
+
+    #[test]
+    fn summarizes_local_backend_evidence() {
+        let runtime_contract = parse_runtime_contract_summary(BACKEND_EVIDENCE_LINES);
+        let compute_buffers = parse_compute_buffer_records(BACKEND_EVIDENCE_LINES).unwrap();
+        let metal_dispatch = parse_metal_dispatch_records(METAL_DISPATCH_LINE).unwrap();
+        let backend = summarize_backend_evidence(
+            BACKEND_EVIDENCE_LINES,
+            &runtime_contract,
+            &compute_buffers,
+            &metal_dispatch,
+        );
+
+        assert_eq!(backend.metal_device_init_records, 4);
+        assert_eq!(backend.metal_init_records, 1);
+        assert_eq!(backend.metal_device_names, vec!["MTL0 (Apple M1 Ultra)"]);
+        assert_eq!(backend.metal_unified_memory, Some(true));
+        assert_eq!(backend.metal_bfloat, Some(true));
+        assert_eq!(backend.metal_tensor, Some(false));
+        assert_eq!(backend.backend_ptrs_size, Some(3));
+        assert_eq!(backend.compute_buffer_records, 2);
+        assert_eq!(backend.compute_buffer_devices["MTL0"].records, 1);
+        assert_eq!(backend.compute_buffer_devices["CPU"].records, 1);
+        assert_eq!(backend.metal_dispatch_records, 1);
+        assert_eq!(backend.metal_dispatch_ops.get("dsa_sparse_attn"), Some(&1));
+        assert_eq!(backend.cuda_records, 0);
+    }
+
+    #[test]
+    fn accepts_local_backend_evidence_guard() {
+        let timing = parse_timing_records(LINE_WITH_COMPACT_GET_ROWS).unwrap();
+        let direct_policy =
+            parse_direct_sparse_decision_records(DIRECT_SPARSE_DECISION_BACKEND_UNSUPPORTED_LINE)
+                .unwrap();
+        let compact_policy =
+            parse_compact_flash_policy_records(COMPACT_FLASH_POLICY_BACKEND_SUPPORTED_LINE)
+                .unwrap();
+        let runtime_contract = parse_runtime_contract_summary(BACKEND_EVIDENCE_LINES);
+        let compute_buffers = parse_compute_buffer_records(BACKEND_EVIDENCE_LINES).unwrap();
+        let backend = summarize_backend_evidence(
+            BACKEND_EVIDENCE_LINES,
+            &runtime_contract,
+            &compute_buffers,
+            &[],
+        );
+        let summary = summarize_log(
+            "stage1.log".into(),
+            LogRecordInputs::new(&timing)
+                .with_policy_records(&direct_policy, &compact_policy)
+                .with_runtime_contract(&runtime_contract)
+                .with_backend(&backend),
+        );
+
+        require_local_backend_evidence(Path::new("stage1.log"), &summary).unwrap();
+    }
+
+    #[test]
+    fn rejects_local_backend_evidence_guard_without_metal() {
+        let timing = parse_timing_records(LINE_WITH_COMPACT_GET_ROWS).unwrap();
+        let direct_policy =
+            parse_direct_sparse_decision_records(DIRECT_SPARSE_DECISION_BACKEND_UNSUPPORTED_LINE)
+                .unwrap();
+        let compact_policy =
+            parse_compact_flash_policy_records(COMPACT_FLASH_POLICY_BACKEND_SUPPORTED_LINE)
+                .unwrap();
+        let runtime_contract =
+            parse_runtime_contract_summary("llama_context: backend_ptrs.size() = 3");
+        let backend = summarize_backend_evidence("", &runtime_contract, &[], &[]);
+        let summary = summarize_log(
+            "stage1.log".into(),
+            LogRecordInputs::new(&timing)
+                .with_policy_records(&direct_policy, &compact_policy)
+                .with_runtime_contract(&runtime_contract)
+                .with_backend(&backend),
+        );
+
+        let error = require_local_backend_evidence(Path::new("stage1.log"), &summary).unwrap_err();
+
+        assert!(
+            error.to_string().contains("metal_device_init"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]

@@ -201,6 +201,11 @@ pub struct GlmDsaOpReportArgs {
         help = "Fail unless runtime metadata proves the expected GLM-5.2 GLM-DSA contract."
     )]
     pub require_glm52_runtime_contract: bool,
+    #[arg(
+        long,
+        help = "Fail unless local Apple Metal/CPU backend evidence and GLM-DSA fallback support are explicit."
+    )]
+    pub require_local_backend_evidence: bool,
     #[arg(long)]
     pub output: Option<PathBuf>,
 }

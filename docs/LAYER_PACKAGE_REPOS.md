@@ -82,6 +82,22 @@ Minimal GLM-DSA shape:
 }
 ```
 
+Authoring rule of thumb:
+
+| Put it here | Use it for | Examples |
+| --- | --- | --- |
+| `generation.policy` | Stable semantic execution choices validated for the package. | `profile`, `decode`, `short_prefill`, `long_prefill`, `verify`, `indexshare` |
+| `generation.policy.experimental` | Named opt-in paths that need package/backend evidence before becoming defaults. | `selected_row_flash`, `moe_weighted_down` |
+| `generation.thresholds` | Numeric resolver inputs used to accept, reject, or fall back from a policy. | `short_prefill_max_tokens`, `compact_flash_min_kv`, `dense_mask_max_bytes` |
+| GGUF metadata | Architecture correctness and tensor layout requirements. | GLM-DSA q/k/v split dimensions, IndexShare roles, MTP tensor presence |
+
+Do not put backend names, implementation flags, or model-family-specific
+objects in `generation`. A GLM-DSA package should not introduce
+`generation.glm_dsa`; a CUDA/Metal-specific runtime should not introduce
+backend-specific manifest fields to select a kernel. Backend support is runtime
+capability evidence. The manifest records the package's validated semantic
+policy and the numeric thresholds needed to explain resolver decisions.
+
 The threshold values should be grounded in tensor sizes. For example, a
 GLM-DSA top-k sideband costs `tokens * top_k * 4` bytes, while a dense sparse
 mask costs roughly `tokens * visible_kv * 4` bytes. With a representative

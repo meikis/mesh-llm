@@ -301,6 +301,15 @@ The `generation` object has two separate responsibilities:
 - `generation.thresholds` supplies numeric resolver hints used to decide when a
   phase choice applies.
 
+Use this split consistently:
+
+| Location | Meaning | Typical fields |
+| --- | --- | --- |
+| `generation.policy` | Portable, semantic execution decisions for this artifact. | `profile`, `decode`, `short_prefill`, `long_prefill`, `verify`, `indexshare` |
+| `generation.policy.experimental` | Named experimental policy paths that are valid only with explicit evidence and logging. | `selected_row_flash`, `moe_weighted_down` |
+| `generation.thresholds` | Numeric decision inputs for the policy resolver. | token limits, byte limits, minimum KV sizes |
+| GGUF metadata | Architecture and tensor-layout correctness contract. | attention dimensions, IndexShare roles, native MTP tensor layout |
+
 Keep these responsibilities separate. Policy fields should answer "which
 execution path is intended for this phase?" Threshold fields should answer
 "when should the runtime choose or reject that path?" For example,
@@ -318,6 +327,12 @@ defaults for experiments, but consumers SHOULD log the final resolved policy and
 the package recommendation that was overridden. If a consumer cannot execute the
 package-recommended path, it MUST choose a correctness-preserving fallback and
 emit the fallback reason.
+
+Generation policy is not a backend feature switch. Package authors MUST NOT use
+backend-specific fields to select Metal, CUDA, CPU, Vulkan, or Skippy kernels.
+Backends advertise capability and performance evidence to the resolver; the
+manifest records the package-level semantic policy and thresholds that make the
+resolver decision explainable.
 
 Consumers MUST NOT silently reinterpret unknown policy values as a supported
 path. Unknown profiles, phase values, or experimental policy switches should be

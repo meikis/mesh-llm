@@ -59,10 +59,17 @@ For GLM-DSA split runs, treat `generation.policy` as a package-owned execution
 hint and llama.cpp as the source of truth for correctness. A package may prefer
 decode `compact-flash`, short-prefill `dense`, long-prefill `sparse-chunked`,
 and IndexShare `required`, but Skippy should only select those paths when the
-embedded llama runtime reports support and should log any fallback. Current
-Metal backend evidence for one-token decode shows compact selected-row flash at
-`63.40 us/run` versus direct sparse at `106.57 us/run` and dense masked flash at
-`71.72 us/run` on the `kv=257,top_k=64` fixture family. Exact-boundary
+embedded llama runtime reports support and should log any fallback.
+Skippy-specific compatibility code must not override prompt parsing, thinking
+mode, sparse attention, or IndexShare semantics; those behaviors come from the
+embedded llama runtime. Skippy's job is to pass the resolved package policy and
+the package layers into that runtime, then surface resolver decisions in logs
+or telemetry.
+
+Current Metal backend evidence for one-token decode shows compact selected-row
+flash at `63.40 us/run` versus direct sparse at `106.57 us/run` and dense
+masked flash at `71.72 us/run` on the `kv=257,top_k=64` fixture family.
+Exact-boundary
 fixtures where selected KV equals visible KV measured compact selected-row
 flash at `57.99-61.90 us/run` across `kv=128..513`, while direct sparse
 measured `137.15-711.10 us/run` on the same shapes. The literal
@@ -83,8 +90,12 @@ estimates `392.99 us` per routed FFN decode layer, with `381.89 us` (`97.2%`)
 in routed gate/up/down matmuls and only `11.10 us` (`2.8%`) in route/top-k plus
 weighted sum. The q4_K shared expert plus final add measured `439.59 us`,
 making the routed+shared FFN estimate `832.58 us`; shared expert execution is
-`52.8%` of that estimate. That is an optimization target for llama.cpp backend
-kernels, not a reason to add a Skippy-specific generation schema.
+`52.8%` of that estimate. A later component breakdown measured the shared
+expert plus final add at `429.18 us`, with shared gate/up/down q4_K matmuls at
+only `66.26 us` combined and the shared activation/mul whole-graph row plus
+final add at `344.64 us`. That is an optimization target for llama.cpp backend
+fusion and graph shape, not a reason to add a Skippy-specific generation
+schema.
 The extended fixture measured a merged q2_K gate+up shape at only `1.03x`
 faster for the routed estimate, a weighted-down MoE graph shape at `0.97x` on
 the small quantized whole-graph fixture, and a q2_K down-projection alternative

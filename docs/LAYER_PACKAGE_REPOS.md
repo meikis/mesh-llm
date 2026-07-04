@@ -91,6 +91,13 @@ Authoring rule of thumb:
 | `generation.thresholds` | Numeric resolver inputs used to accept, reject, or fall back from a policy. | `short_prefill_max_tokens`, `compact_flash_min_kv`, `dense_mask_max_bytes` |
 | GGUF metadata | Architecture correctness and tensor layout requirements. | GLM-DSA q/k/v split dimensions, IndexShare roles, MTP tensor presence |
 
+Writers should emit a profile only after the artifact actually matches that
+profile. For `glm-dsa-v1`, that means the package writer has validated the
+GLM-DSA attention tensor shape, routed/shared MoE tensors, IndexShare role
+evidence, and preserved native MTP tensors when present. Serving code should
+then resolve the policy by phase and backend capability, not by hard-coding
+model-family branches in Skippy or Mesh.
+
 Do not put backend names, implementation flags, or model-family-specific
 objects in `generation`. A GLM-DSA package should not introduce
 `generation.glm_dsa`; a CUDA/Metal-specific runtime should not introduce
@@ -141,10 +148,13 @@ rather than top-k routing. The current Metal MoE fixture estimates one GLM-5.2
 routed FFN decode layer at `392.99 us`, with expert matmuls accounting for
 `381.89 us` (`97.2%`). Route/top-k plus weighted sum is only `11.10 us`
 (`2.8%`). The shared expert is not small: the q4_K shared expert plus final add
-measured `439.59 us`, making the routed+shared FFN estimate `832.58 us` with
-the shared expert at `52.8%`. That evidence should inform runtime optimization
-order, but it does not add new manifest schema: package policy still belongs
-under `generation.policy`, and numeric resolver hints still belong under
+measured `429.18 us`, making the routed+shared FFN estimate `820.51 us` with
+the shared expert at `52.3%`. A component breakdown measured the shared
+gate/up/down q4_K matmuls at only `66.26 us` combined (`16.1%` of the component
+row sum), while the shared activation/mul whole-graph row plus final add was
+`344.64 us`. That evidence should inform runtime optimization order, but it
+does not add new manifest schema: package policy still belongs under
+`generation.policy`, and numeric resolver hints still belong under
 `generation.thresholds`.
 The extended MoE fixture keeps that conclusion intact: a merged q2_K gate+up
 tensor shape estimates `383.05 us` (`1.03x`), moving MoE weights before the

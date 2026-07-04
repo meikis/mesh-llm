@@ -21,6 +21,11 @@ this correctness contract is enforceable. Package generation policy may select
 between valid GLM-DSA execution paths; it must not relax the metadata, tensor,
 IndexShare, or sideband requirements in this contract.
 
+In other words, this document answers whether a GLM-DSA artifact is executable
+at all. The layer-package generation defaults answer which validated execution
+path to prefer for decode, prefill, verification, and IndexShare once this
+contract is satisfied.
+
 ## Required GGUF Metadata
 
 For `general.architecture = glm-dsa`, conversion must emit the following keys:

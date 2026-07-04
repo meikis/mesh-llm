@@ -341,6 +341,22 @@ for that value. Numeric threshold fields are hints and may be ignored by older
 consumers, but policy fields describe execution semantics and must be handled
 deliberately.
 
+Package writers SHOULD only emit a `generation.policy.profile` after they have
+validated the artifact shape that profile requires. For GLM-DSA this means the
+writer has found the GLM-DSA attention tensors, routed/shared MoE tensors,
+IndexShare metadata or equivalent role evidence, and any preserved native MTP
+tensors before advertising `glm-dsa-v1`. The writer may infer the default
+policy from GGUF metadata and tensor names, but it should not infer a more
+specific policy than the artifact can actually support.
+
+Serving resolvers SHOULD treat `generation` as input to a phase resolver, not
+as direct kernel wiring. A resolver first identifies the request phase, such as
+decode, short prefill, long prefill, or speculative verification. It then
+combines the package policy, thresholds, backend capability evidence, and
+request shape to select a path. The selected path, rejected package path, and
+fallback reason should be visible in logs or telemetry whenever the resolver
+does not use the package recommendation.
+
 Package generation defaults are not a substitute for model correctness
 metadata. Architecture-specific GGUF metadata and tensor layout still define
 whether a runtime may execute the model at all; `generation.policy` only
@@ -557,6 +573,12 @@ sparse-attention correctness, but they do not require a new manifest object.
 Policy remains the semantic phase contract under `generation.policy`;
 performance cutoffs and byte/token limits remain numeric resolver inputs under
 `generation.thresholds`.
+A component breakdown sharpened the shared-expert target: the q4_K shared
+expert plus final add measured `429.18 us`, but shared gate/up/down q4_K
+matmuls accounted for only `66.26 us` combined (`16.1%` of the component row
+sum). The shared activation/mul whole-graph row plus final add accounted for
+`344.64 us`. Treat this as evidence to attack shared-expert fusion and graph
+shape before chasing generic q4_K shared matmul throughput.
 The extended fixture measured a merged q2_K gate+up tensor shape at
 `383.05 us` (`1.03x`), a weighted-down MoE graph shape at `7.93 us` versus
 `7.72 us` (`0.97x`) on the small quantized whole-graph fixture, and a q2_K

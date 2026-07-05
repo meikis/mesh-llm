@@ -37,8 +37,8 @@ PACKAGE_SOURCE_REVISION="${PACKAGE_SOURCE_REVISION:-local}"
 
 BUILD_ROOT="${BUILD_ROOT:-/tmp/mesh-llm-build}"
 BUILD_DIR="${BUILD_DIR:-$BUILD_ROOT/source}"
-CARGO_HOME="${CARGO_HOME:-$BUILD_ROOT/cargo-home}"
-RUSTUP_HOME="${RUSTUP_HOME:-$BUILD_ROOT/rustup-home}"
+CARGO_HOME="${CARGO_HOME:-}"
+RUSTUP_HOME="${RUSTUP_HOME:-}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$BUILD_ROOT/cargo-target}"
 PACKAGE_DIR="${PACKAGE_DIR:-$WORK_ROOT/package/GLM-5.2-Q2_K-RoutedDown-MTP-Q8-layers}"
 TARGET_ROOT="${TARGET_ROOT:-$WORK_ROOT/quant-scratch}"
@@ -48,7 +48,13 @@ RECORD_DIR="${RECORD_DIR:-$WORK_ROOT/records}"
 SPOOL_DIR="${SPOOL_DIR:-$WORK_ROOT/spool}"
 NTHREADS="${NTHREADS:-}"
 
-export CARGO_HOME RUSTUP_HOME CARGO_TARGET_DIR
+export CARGO_TARGET_DIR
+if [[ -n "$CARGO_HOME" ]]; then
+  export CARGO_HOME
+fi
+if [[ -n "$RUSTUP_HOME" ]]; then
+  export RUSTUP_HOME
+fi
 
 log_step() {
   echo
@@ -88,6 +94,23 @@ install_system_deps() {
     apt-get clean
     rm -rf /var/lib/apt/lists/*
   fi
+}
+
+ensure_rust_toolchain() {
+  # HF Jobs often enters the container through a login shell; keep the Rust
+  # image's installed toolchain visible even if /etc/profile rewrites PATH.
+  export PATH="/usr/local/cargo/bin:$HOME/.cargo/bin:$PATH"
+  if ! command -v cargo >/dev/null 2>&1 && [[ -f /usr/local/cargo/env ]]; then
+    # shellcheck disable=SC1091
+    source /usr/local/cargo/env
+  fi
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "cargo not found; expected rust image toolchain under /usr/local/cargo/bin" >&2
+    echo "PATH=$PATH" >&2
+    exit 127
+  fi
+  cargo --version
+  rustc --version
 }
 
 checkout_mesh_llm() {
@@ -177,6 +200,8 @@ main() {
   log_storage "start"
   log_step "Installing system deps"
   install_system_deps
+  log_step "Checking Rust toolchain"
+  ensure_rust_toolchain
   log_step "Cloning mesh-llm"
   checkout_mesh_llm
   log_step "Building skippy tools"

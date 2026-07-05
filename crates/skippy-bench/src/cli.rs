@@ -219,6 +219,12 @@ pub struct GlmDsaOpReportArgs {
     pub first_records: Option<usize>,
     #[arg(
         long,
+        value_enum,
+        help = "Override timing and sideband phase buckets for an explicitly windowed report, for example --timing-phase verify with --from-marker phase=verify."
+    )]
+    pub timing_phase: Option<GlmDsaReportTimingPhase>,
+    #[arg(
+        long,
         help = "Fail unless IndexShare trace proves Full producer top-k generation and Shared consumer reuse."
     )]
     pub require_indexshare_producer_consumer: bool,
@@ -264,6 +270,13 @@ pub struct GlmDsaOpReportArgs {
     pub require_local_apple_backend_matrix: bool,
     #[arg(long)]
     pub output: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum GlmDsaReportTimingPhase {
+    Prefill,
+    Decode,
+    Verify,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

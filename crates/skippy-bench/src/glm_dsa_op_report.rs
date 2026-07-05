@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{GlmDsaOpCompareArgs, GlmDsaOpReportArgs};
+use crate::cli::{GlmDsaOpCompareArgs, GlmDsaOpReportArgs, GlmDsaReportTimingPhase};
 
 const OP_TIMING_PREFIX: &str = "skippy: glm_dsa_op_timing ";
 const GROUP_TIMING_PREFIX: &str = "skippy: glm_dsa_group_timing ";
@@ -26,6 +26,17 @@ const INDEXSHARE_TRACE_MARKER: &str = "GLM_DSA IndexShare ";
 enum Phase {
     Prefill,
     Decode,
+    Verify,
+}
+
+impl From<GlmDsaReportTimingPhase> for Phase {
+    fn from(value: GlmDsaReportTimingPhase) -> Self {
+        match value {
+            GlmDsaReportTimingPhase::Prefill => Self::Prefill,
+            GlmDsaReportTimingPhase::Decode => Self::Decode,
+            GlmDsaReportTimingPhase::Verify => Self::Verify,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -184,6 +195,7 @@ struct LogRecordInputs<'a> {
     compact_flash_policy_records: &'a [CompactFlashPolicyRecord],
     runtime_contract: Option<&'a RuntimeContractSummary>,
     backend: Option<&'a BackendEvidenceSummary>,
+    timing_phase_override: Option<Phase>,
 }
 
 impl<'a> LogRecordInputs<'a> {
@@ -198,6 +210,7 @@ impl<'a> LogRecordInputs<'a> {
             compact_flash_policy_records: &[],
             runtime_contract: None,
             backend: None,
+            timing_phase_override: None,
         }
     }
 
@@ -238,6 +251,11 @@ impl<'a> LogRecordInputs<'a> {
 
     fn with_backend(mut self, backend: &'a BackendEvidenceSummary) -> Self {
         self.backend = Some(backend);
+        self
+    }
+
+    fn with_timing_phase_override(mut self, phase: Option<Phase>) -> Self {
+        self.timing_phase_override = phase;
         self
     }
 }
@@ -676,7 +694,8 @@ fn build_report(args: &GlmDsaOpReportArgs) -> Result<GlmDsaOpReport> {
                 .with_indexshare_records(&indexshare_records, &indexshare_contract_records)
                 .with_policy_records(&direct_sparse_policy_records, &compact_flash_policy_records)
                 .with_runtime_contract(&runtime_contract)
-                .with_backend(&backend),
+                .with_backend(&backend)
+                .with_timing_phase_override(args.timing_phase.map(Phase::from)),
         );
         if args.require_indexshare_producer_consumer {
             require_indexshare_producer_consumer_trace(path, &summary)?;
@@ -987,6 +1006,7 @@ fn summarize_comparison_rows(rows: &[GlmDsaOpComparisonRow]) -> GlmDsaOpComparis
                     summary.decode_faster_rows += 1;
                 }
             }
+            Phase::Verify => {}
         }
     }
     summary
@@ -2263,7 +2283,7 @@ fn summarize_log(path: PathBuf, inputs: LogRecordInputs<'_>) -> LogSummary {
         let summary = stage_records
             .entry(record.stage)
             .or_default()
-            .entry(timing_phase(record))
+            .entry(timing_phase(record, inputs.timing_phase_override))
             .or_default();
         add_timing_record(summary, record);
     }
@@ -2278,7 +2298,7 @@ fn summarize_log(path: PathBuf, inputs: LogRecordInputs<'_>) -> LogSummary {
             .or_default()
             .entry(record.group.clone())
             .or_default()
-            .entry(timing_phase(timing))
+            .entry(timing_phase(timing, inputs.timing_phase_override))
             .or_default();
         add_timing_record(summary, timing);
     }
@@ -2289,7 +2309,8 @@ fn summarize_log(path: PathBuf, inputs: LogRecordInputs<'_>) -> LogSummary {
     }
     let hottest_group_records = summarize_hottest_groups(&grouped_records);
 
-    let sideband_records = summarize_sideband_records(inputs.sideband_records);
+    let sideband_records =
+        summarize_sideband_records(inputs.sideband_records, inputs.timing_phase_override);
     let indexshare_trace = summarize_indexshare_trace_records(
         inputs.indexshare_records,
         inputs.indexshare_contract_records,
@@ -2549,7 +2570,10 @@ fn summarize_hottest_groups(
     hottest.into_values().collect()
 }
 
-fn timing_phase(record: &TimingRecord) -> Phase {
+fn timing_phase(record: &TimingRecord, override_phase: Option<Phase>) -> Phase {
+    if let Some(phase) = override_phase {
+        return phase;
+    }
     if record.tokens == 1 {
         Phase::Decode
     } else {
@@ -2634,10 +2658,11 @@ fn finalize_phase_summary_map(phases: &mut BTreeMap<Phase, PhaseSummary>) {
 
 fn summarize_sideband_records(
     records: &[SidebandRecord],
+    override_phase: Option<Phase>,
 ) -> BTreeMap<String, BTreeMap<Phase, SidebandSummary>> {
     let mut stages: BTreeMap<String, BTreeMap<Phase, SidebandSummary>> = BTreeMap::new();
     for record in records {
-        let phase = sideband_phase(&record.kind, record.tokens);
+        let phase = sideband_phase(&record.kind, record.tokens, override_phase);
         let summary = stages
             .entry(record.stage.clone())
             .or_default()
@@ -2691,7 +2716,13 @@ fn causal_visible_sideband_i32(record: &SidebandRecord) -> u64 {
         .sum()
 }
 
-fn sideband_phase(kind: &str, tokens: u64) -> Phase {
+fn sideband_phase(kind: &str, tokens: u64, override_phase: Option<Phase>) -> Phase {
+    if let Some(phase) = override_phase {
+        return phase;
+    }
+    if kind == "VerifySpan" {
+        return Phase::Verify;
+    }
     if kind == "DecodeEmbd" || tokens == 1 {
         Phase::Decode
     } else {
@@ -2749,6 +2780,7 @@ mod tests {
     const GROUP_LINE_LAYER_1: &str = "skippy: glm_dsa_group_timing stage=1 tokens=128 group=layer_1 total_us=875800 indexer_topk_nodes=175 indexer_topk_us=79065 indexer_nodes=155 indexer_us=50000 top_k_nodes=20 top_k_us=29065 sparse_mask_nodes=195 sparse_mask_us=113543 sparse_mask_fill_nodes=47 sparse_mask_fill_us=1000 sparse_mask_topk_nodes=47 sparse_mask_topk_us=2000 sparse_mask_add_nodes=47 sparse_mask_add_us=3000 dsa_sparse_attn_nodes=0 dsa_sparse_attn_us=0 mla_attention_nodes=46 mla_attention_us=26234 routed_moe_nodes=47 routed_moe_us=379574 shared_expert_nodes=47 shared_expert_us=817384";
     const SIDEBAND_LINE: &str = "skippy: glm_dsa_top_k_sideband_forward stage=stage-0 request=1 session=2 kind=DecodeEmbd pos_start=718 tokens=1 hidden_bytes=24576 sideband_bytes=3072 sideband_i32=768";
     const SIDEBAND_RECEIVE_LINE: &str = "skippy: glm_dsa_top_k_sideband_receive stage=stage-1 request=1 session=2 kind=DecodeEmbd pos_start=718 tokens=1 hidden_bytes=24576 sideband_bytes=3072 sideband_i32=768";
+    const VERIFY_SPAN_SIDEBAND_LINE: &str = "skippy: glm_dsa_top_k_sideband_forward stage=stage-0 request=1 session=2 kind=VerifySpan pos_start=2049 tokens=2 hidden_bytes=49152 sideband_bytes=16384 sideband_i32=4096";
     const PADDED_PREFILL_SIDEBAND_LINE: &str = "skippy: glm_dsa_top_k_sideband_forward stage=stage-0 request=1 session=2 kind=PrefillEmbd pos_start=512 tokens=128 hidden_bytes=3145728 sideband_bytes=393216 sideband_i32=98304";
     const DIRECT_SPARSE_DECISION_LINE: &str = "skippy: glm_dsa_direct_sparse_decision layer=30 ubatch_tokens=33 sparse_batch=33 sparse_streams=1 prefill_cap=32 dense_mask_bytes=270336 dense_mask_limit=536870912 direct_enabled=1 prefill_enabled=1 decode_shape=0 prefill_shape=0 large_prefill_shape=0 token_shape_allowed=0 kq_b_ok=1 sinks_ok=1 alibi_ok=1 soft_cap_ok=1 use_direct=0";
     const DIRECT_SPARSE_DECISION_LINE_WITH_REASON: &str = "skippy: glm_dsa_direct_sparse_decision layer=30 ubatch_tokens=1024 sparse_batch=1024 sparse_streams=1 prefill_cap=32 sparse_kv=99328 sparse_top_k=1024 min_kv_topk_ratio=32 kv_topk_ratio=97 dense_mask_bytes=203423744 dense_mask_limit=268435456 phase=prefill selector_reason=dense_mask_guard_large_prefill direct_enabled=1 prefill_enabled=1 decode_shape=0 prefill_shape=0 large_prefill_shape=1 token_shape_allowed=1 kq_b_ok=1 sinks_ok=1 alibi_ok=1 soft_cap_ok=1 use_direct=1";
@@ -2810,6 +2842,7 @@ llama_context: n_ctx_seq     = 256";
             request_id: None,
             session_id: None,
             first_records: None,
+            timing_phase: None,
             require_indexshare_producer_consumer: false,
             require_compact_decode_no_sparse_mask: false,
             require_compact_decode_policy_evidence: false,
@@ -3922,6 +3955,20 @@ llama_context: n_ctx_seq     = 256";
     }
 
     #[test]
+    fn summarizes_verify_timing_with_explicit_phase_override() {
+        let timing = parse_timing_records(&LINE.replace("tokens=128", "tokens=2")).unwrap();
+        let summary = summarize_log(
+            "stage1.log".into(),
+            LogRecordInputs::new(&timing).with_timing_phase_override(Some(Phase::Verify)),
+        );
+        let stages = summary.stage_records.get(&1).unwrap();
+
+        assert!(!stages.contains_key(&Phase::Prefill));
+        assert!(!stages.contains_key(&Phase::Decode));
+        assert_eq!(stages.get(&Phase::Verify).unwrap().tokens, 2);
+    }
+
+    #[test]
     fn parses_group_timing_records_with_parent_index() {
         let text = format!(
             "{LINE}\n{GROUP_LINE_LAYER_0}\n{GROUP_LINE_LAYER_1}\n{LINE_WITH_DSA_SPARSE_ATTN}"
@@ -4029,6 +4076,24 @@ llama_context: n_ctx_seq     = 256";
         );
         assert_eq!(decode.sideband_padding_ratio, Some(49.0 / 768.0));
         assert_eq!(decode.sideband_to_hidden_ratio, Some(0.125));
+    }
+
+    #[test]
+    fn summarizes_verify_span_sideband_as_verify_phase() {
+        let timing = parse_timing_records(LINE).unwrap();
+        let sideband = parse_sideband_records(VERIFY_SPAN_SIDEBAND_LINE).unwrap();
+        let summary = summarize_log(
+            "stage0.log".into(),
+            LogRecordInputs::new(&timing).with_sideband_records(&sideband),
+        );
+        let stages = summary.sideband_records.get("stage-0").unwrap();
+        let verify = stages.get(&Phase::Verify).unwrap();
+
+        assert_eq!(verify.records, 1);
+        assert_eq!(verify.tokens, 2);
+        assert_eq!(verify.sideband_i32, 4096);
+        assert!(!stages.contains_key(&Phase::Prefill));
+        assert!(!stages.contains_key(&Phase::Decode));
     }
 
     #[test]

@@ -1023,11 +1023,15 @@ fn require_compact_decode_policy_evidence(path: &Path, summary: &LogSummary) -> 
     if compact.decode_backend_compact_supported.true_records == 0 {
         missing.push("backend_compact_supported");
     }
-    if direct.decode_backend_sparse_supported.false_records == 0 {
-        missing.push("backend_sparse_unsupported_or_explicit_fallback");
+    let direct_routed_to_compact = direct
+        .selector_reasons
+        .contains_key("compact_flash_selected");
+    let direct_sparse_fallback = direct.decode_backend_sparse_supported.false_records != 0;
+    if !direct_routed_to_compact && !direct_sparse_fallback {
+        missing.push("direct_sparse_compact_route_or_backend_fallback");
     }
     if direct.decode_use_direct_records != 0 {
-        missing.push("direct_sparse_not_selected_for_compact_fallback");
+        missing.push("direct_sparse_not_selected_for_compact_decode");
     }
 
     if missing.is_empty() {
@@ -2537,6 +2541,7 @@ mod tests {
     const DIRECT_SPARSE_DECISION_LINE: &str = "skippy: glm_dsa_direct_sparse_decision layer=30 ubatch_tokens=33 sparse_batch=33 sparse_streams=1 prefill_cap=32 dense_mask_bytes=270336 dense_mask_limit=536870912 direct_enabled=1 prefill_enabled=1 decode_shape=0 prefill_shape=0 large_prefill_shape=0 token_shape_allowed=0 kq_b_ok=1 sinks_ok=1 alibi_ok=1 soft_cap_ok=1 use_direct=0";
     const DIRECT_SPARSE_DECISION_LINE_WITH_REASON: &str = "skippy: glm_dsa_direct_sparse_decision layer=30 ubatch_tokens=1024 sparse_batch=1024 sparse_streams=1 prefill_cap=32 sparse_kv=99328 sparse_top_k=1024 min_kv_topk_ratio=32 kv_topk_ratio=97 dense_mask_bytes=203423744 dense_mask_limit=268435456 phase=prefill selector_reason=dense_mask_guard_large_prefill direct_enabled=1 prefill_enabled=1 decode_shape=0 prefill_shape=0 large_prefill_shape=1 token_shape_allowed=1 kq_b_ok=1 sinks_ok=1 alibi_ok=1 soft_cap_ok=1 use_direct=1";
     const DIRECT_SPARSE_DECISION_BACKEND_UNSUPPORTED_LINE: &str = "skippy: glm_dsa_direct_sparse_decision layer=30 ubatch_tokens=1 sparse_batch=1 sparse_streams=1 prefill_cap=8 decode_max_top_k=256 sparse_kv=256 sparse_top_k=129 min_kv_topk_ratio=0 kv_topk_ratio=1 dense_mask_bytes=512 dense_mask_limit=536870912 phase=decode selector_reason=backend_sparse_unsupported direct_enabled=1 prefill_enabled=1 decode_shape=1 verify_shape=0 prefill_shape=1 large_prefill_shape=0 token_shape_allowed=1 backend_sparse_supported=0 kq_b_ok=1 sinks_ok=1 alibi_ok=1 soft_cap_ok=1 use_direct=0";
+    const DIRECT_SPARSE_DECISION_COMPACT_SELECTED_LINE: &str = "skippy: glm_dsa_direct_sparse_decision layer=30 ubatch_tokens=1 sparse_batch=1 sparse_streams=1 prefill_cap=8 decode_max_top_k=256 sparse_kv=2304 sparse_top_k=2048 min_kv_topk_ratio=0 kv_topk_ratio=1 dense_mask_bytes=4608 dense_mask_limit=536870912 phase=decode selector_reason=compact_flash_selected direct_enabled=1 prefill_enabled=1 decode_shape=1 verify_shape=0 prefill_shape=1 large_prefill_shape=0 token_shape_allowed=1 backend_sparse_supported=1 kq_b_ok=1 sinks_ok=1 alibi_ok=1 soft_cap_ok=1 use_direct=0";
     const LARGE_PREFILL_DIRECT_SPARSE_DECISION_LINE: &str = "skippy: glm_dsa_direct_sparse_decision layer=30 ubatch_tokens=4096 sparse_batch=4096 sparse_streams=1 prefill_cap=32 dense_mask_bytes=2147483648 dense_mask_limit=536870912 direct_enabled=1 prefill_enabled=1 decode_shape=0 prefill_shape=0 large_prefill_shape=1 token_shape_allowed=1 kq_b_ok=1 sinks_ok=1 alibi_ok=1 soft_cap_ok=1 use_direct=1";
     const COMPACT_FLASH_POLICY_LINE: &str = "skippy: glm_dsa_compact_flash_policy layer=30 ubatch_tokens=1 visible_kv=8192 top_k=2048 kv_topk_ratio=4 min_kv_topk_ratio=2 forced=0 disabled=0 ratio_ok=1 enabled=1 flash_attn=1 phase=decode decode_shape=1 kq_b_ok=1 sinks_ok=1 alibi_ok=1 soft_cap_ok=1 no_mask=1 use_compact=1 selector_reason=decode_compact";
     const COMPACT_FLASH_POLICY_BACKEND_SUPPORTED_LINE: &str = "skippy: glm_dsa_compact_flash_policy layer=30 ubatch_tokens=1 visible_kv=256 top_k=256 decode_max_top_k=4 compact_min_kv=1 kv_topk_ratio=1 forced=0 disabled=0 large_decode_top_k=1 kv_ok=1 enabled=1 backend_compact_supported=1 flash_attn=1 phase=decode decode_shape=1 kq_b_ok=1 sinks_ok=1 alibi_ok=1 soft_cap_ok=1 no_mask=1 use_compact=1 selector_reason=decode_compact_mask_omitted";
@@ -3370,6 +3375,23 @@ llama_context: n_ctx_seq     = 256";
         let timing = parse_timing_records(LINE_WITH_COMPACT_GET_ROWS).unwrap();
         let direct_policy =
             parse_direct_sparse_decision_records(DIRECT_SPARSE_DECISION_BACKEND_UNSUPPORTED_LINE)
+                .unwrap();
+        let compact_policy =
+            parse_compact_flash_policy_records(COMPACT_FLASH_POLICY_BACKEND_SUPPORTED_LINE)
+                .unwrap();
+        let summary = summarize_log(
+            "stage1.log".into(),
+            LogRecordInputs::new(&timing).with_policy_records(&direct_policy, &compact_policy),
+        );
+
+        require_compact_decode_policy_evidence(Path::new("stage1.log"), &summary).unwrap();
+    }
+
+    #[test]
+    fn accepts_native_compact_decode_policy_evidence_guard() {
+        let timing = parse_timing_records(LINE_WITH_COMPACT_GET_ROWS).unwrap();
+        let direct_policy =
+            parse_direct_sparse_decision_records(DIRECT_SPARSE_DECISION_COMPACT_SELECTED_LINE)
                 .unwrap();
         let compact_policy =
             parse_compact_flash_policy_records(COMPACT_FLASH_POLICY_BACKEND_SUPPORTED_LINE)

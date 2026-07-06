@@ -21,6 +21,7 @@ work_dir="${WORK_DIR:-/mnt/work/glm52-q2-routed-down/native-work}"
 spool_dir="${SPOOL_DIR:-/mnt/work/glm52-q2-routed-down/spool}"
 record_dir="${RECORD_DIR:-/mnt/work/glm52-q2-routed-down/records}"
 status_file="${JSON_EVENT_FILE:-/mnt/work/glm52-q2-routed-down/status.json}"
+shard_scratch_dir="${SHARD_SCRATCH_DIR:-$work_dir/shard-scratch}"
 stages="${STAGES:-2}"
 nthreads="${NTHREADS:-}"
 dry_run="${DRY_RUN:-0}"
@@ -75,6 +76,8 @@ fi
 if [[ "$dry_run" == "1" ]]; then
   exec "$skippy_quantize_bin" quant-job "${common_args[@]}" --preflight-only
 fi
+
+export SKIPPY_MODEL_PACKAGE_SHARD_SCRATCH_DIR="$shard_scratch_dir"
 
 exec "$skippy_quantize_bin" quantize-layer-package \
   "${common_args[@]}" \

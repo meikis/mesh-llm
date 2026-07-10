@@ -1,7 +1,7 @@
 use super::{
     binary_full_prefill_record_identities, decode_record_tokens_sideband,
     is_decode_frame_batch_candidate, native_mtp_enabled_from, prepare_binary_stage_connection,
-    restore_prefill_decode_as_decode_message, token_sideband_or_fill,
+    reply_window_for_message, restore_prefill_decode_as_decode_message, token_sideband_or_fill,
 };
 use std::{
     io,
@@ -84,6 +84,19 @@ fn request_summary_tracks_verify_window_compute_ms() {
     assert_eq!(summary.input_activation_decode_ms, 2.5);
     assert_eq!(summary.runtime_lock_hold_ms, 5.0);
     assert_eq!(summary.upstream_reply_ms, 1.5);
+}
+
+#[test]
+fn verify_window_reply_reports_accepted_prefix_and_correction() {
+    let mut message = test_message(WireMessageKind::VerifyWindow, 3);
+    message.state.seq_id = 42;
+    message.tokens = vec![10, 11, 12];
+
+    let reply = reply_window_for_message(&message, &[10, 99, 100]);
+
+    assert_eq!(reply.window_id, 42);
+    assert_eq!(reply.accepted_len, 1);
+    assert_eq!(reply.correction_token, 99);
 }
 
 #[test]
@@ -215,6 +228,8 @@ fn prefix_cache_test_config() -> StageConfig {
         n_batch: None,
         n_ubatch: None,
         n_gpu_layers: 0,
+        mmap: None,
+        mlock: false,
         cache_type_k: "f16".to_string(),
         cache_type_v: "f16".to_string(),
         flash_attn_type: Default::default(),

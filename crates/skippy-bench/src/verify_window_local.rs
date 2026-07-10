@@ -11,7 +11,7 @@ use skippy_runtime::{
     parse_cache_type,
 };
 
-use crate::cli::VerifySpanLocalArgs;
+use crate::cli::VerifyWindowLocalArgs;
 
 #[derive(Debug, Serialize)]
 struct TimingStats {
@@ -35,7 +35,7 @@ struct TimingShape {
 }
 
 #[derive(Debug, Serialize)]
-struct VerifySpanLocalReport {
+struct VerifyWindowLocalReport {
     mode: &'static str,
     model_path: PathBuf,
     layer_end: u32,
@@ -90,7 +90,7 @@ struct SplitTimingDiagnostics {
     serial_stage1: TimingShape,
 }
 
-pub fn verify_span_local(args: VerifySpanLocalArgs) -> Result<()> {
+pub fn verify_window_local(args: VerifyWindowLocalArgs) -> Result<()> {
     validate_args(&args)?;
     let output = args.output.clone();
     let full = run_full_model_samples(&args)?;
@@ -115,7 +115,7 @@ pub fn verify_span_local(args: VerifySpanLocalArgs) -> Result<()> {
     Ok(())
 }
 
-fn validate_args(args: &VerifySpanLocalArgs) -> Result<()> {
+fn validate_args(args: &VerifyWindowLocalArgs) -> Result<()> {
     if args.layer_end == 0 {
         bail!("layer_end must be greater than zero");
     }
@@ -130,7 +130,7 @@ fn validate_args(args: &VerifySpanLocalArgs) -> Result<()> {
     Ok(())
 }
 
-fn full_runtime_config(args: &VerifySpanLocalArgs) -> Result<RuntimeConfig> {
+fn full_runtime_config(args: &VerifyWindowLocalArgs) -> Result<RuntimeConfig> {
     Ok(RuntimeConfig {
         stage_index: 0,
         layer_start: 0,
@@ -142,6 +142,8 @@ fn full_runtime_config(args: &VerifySpanLocalArgs) -> Result<RuntimeConfig> {
         n_threads: None,
         n_threads_batch: None,
         n_gpu_layers: args.n_gpu_layers,
+        mmap: None,
+        mlock: false,
         selected_backend_device: None,
         cache_type_k: parse_cache_type(&args.cache_type_k)?,
         cache_type_v: parse_cache_type(&args.cache_type_v)?,
@@ -160,7 +162,7 @@ struct FullModelSamples {
     samples: SampleSet,
 }
 
-fn run_full_model_samples(args: &VerifySpanLocalArgs) -> Result<FullModelSamples> {
+fn run_full_model_samples(args: &VerifyWindowLocalArgs) -> Result<FullModelSamples> {
     let config = full_runtime_config(args)?;
     let model = StageModel::open(&args.model_path, &config)
         .with_context(|| format!("failed to open {}", args.model_path.display()))?;
@@ -211,7 +213,7 @@ fn choose_verify_tokens(
         .first()
         .context("prompt produced no token for verify-token seed")?;
     let (_after_current, native_mtp, _frame) = session
-        .decode_step_frame_sampled_mtp_n1(current, Some(&SamplingConfig::default()), None, 0)
+        .decode_step_frame_sampled_mtp(current, Some(&SamplingConfig::default()), None, 0, 1)
         .with_context(|| {
             format!(
                 "failed to get native MTP draft from {} after prompt {:?}",
@@ -225,7 +227,12 @@ fn choose_verify_tokens(
     session
         .trim_session(base_token_count)
         .context("failed to trim session after choosing verify tokens")?;
-    Ok(vec![current, draft.token_id])
+    let draft_token = draft
+        .token_ids
+        .first()
+        .copied()
+        .context("native MTP draft did not include a token")?;
+    Ok(vec![current, draft_token])
 }
 
 fn run_samples(
@@ -357,7 +364,7 @@ fn measure_batched(
     let start = Instant::now();
     let prediction = session
         .verify_tokens_frame_sampled(verify_tokens, Some(&SamplingConfig::default()), None, 0)
-        .context("batched width-2 VerifySpan failed")?
+        .context("batched width-2 VerifyWindow failed")?
         .0;
     Ok((start.elapsed(), prediction))
 }
@@ -376,7 +383,7 @@ fn measure_serial(
 }
 
 fn run_split_inprocess_samples(
-    args: &VerifySpanLocalArgs,
+    args: &VerifyWindowLocalArgs,
     split_layer: u32,
     tokens: &[i32],
     verify_tokens: &[i32],
@@ -409,7 +416,7 @@ fn run_split_inprocess_samples(
 }
 
 fn split_runtime_configs(
-    args: &VerifySpanLocalArgs,
+    args: &VerifyWindowLocalArgs,
     split_layer: u32,
 ) -> Result<(RuntimeConfig, RuntimeConfig)> {
     let cache_type_k = parse_cache_type(&args.cache_type_k)?;
@@ -425,6 +432,8 @@ fn split_runtime_configs(
         n_threads: None,
         n_threads_batch: None,
         n_gpu_layers: args.n_gpu_layers,
+        mmap: None,
+        mlock: false,
         selected_backend_device: None,
         cache_type_k,
         cache_type_v,
@@ -446,6 +455,8 @@ fn split_runtime_configs(
         n_threads: None,
         n_threads_batch: None,
         n_gpu_layers: args.n_gpu_layers,
+        mmap: None,
+        mlock: false,
         selected_backend_device: None,
         cache_type_k,
         cache_type_v,
@@ -556,11 +567,11 @@ fn measure_split_batched(
     let stage0_start = Instant::now();
     let (_stage0_prediction, boundary) = session0
         .verify_tokens_frame_sampled(verify_tokens, Some(&SamplingConfig::default()), None, 0)
-        .context("in-process split stage 0 VerifySpan failed")?;
+        .context("in-process split stage 0 VerifyWindow failed")?;
     let stage0 = stage0_start.elapsed();
     let boundary_payload_bytes = boundary.payload.len();
     if boundary_payload_bytes == 0 {
-        bail!("in-process split stage 0 produced an empty VerifySpan activation frame");
+        bail!("in-process split stage 0 produced an empty VerifyWindow activation frame");
     }
 
     let stage1_start = Instant::now();
@@ -571,7 +582,7 @@ fn measure_split_batched(
             Some(&boundary),
             0,
         )
-        .context("in-process split stage 1 VerifySpan failed")?
+        .context("in-process split stage 1 VerifyWindow failed")?
         .0;
     let stage1 = stage1_start.elapsed();
     Ok(SplitSample {
@@ -607,7 +618,7 @@ fn measure_split_serial(
     for token_id in verify_tokens {
         let stage0_start = Instant::now();
         let (_stage0_prediction, _stage0_draft, boundary) = session0
-            .decode_step_frame_sampled_mtp_n1(*token_id, Some(&SamplingConfig::default()), None, 0)
+            .decode_step_frame_sampled_mtp(*token_id, Some(&SamplingConfig::default()), None, 0, 1)
             .context("in-process split stage 0 serial decode failed")?;
         stage0_total += stage0_start.elapsed();
         if boundary.payload.is_empty() {
@@ -617,11 +628,12 @@ fn measure_split_serial(
 
         let stage1_start = Instant::now();
         let (predicted, native_mtp, _output) = session1
-            .decode_step_frame_sampled_mtp_n1(
+            .decode_step_frame_sampled_mtp(
                 *token_id,
                 Some(&SamplingConfig::default()),
                 Some(&boundary),
                 0,
+                1,
             )
             .context("in-process split stage 1 serial decode failed")?;
         stage1_total += stage1_start.elapsed();
@@ -632,7 +644,9 @@ fn measure_split_serial(
     }
 
     if let Some(draft) = last_draft {
-        prediction.push(draft.token_id);
+        if let Some(token) = draft.token_ids.first().copied() {
+            prediction.push(token);
+        }
         prediction.push(i32::try_from(draft.proposal_compute_us.max(0)).unwrap_or(i32::MAX));
     }
 
@@ -650,7 +664,7 @@ fn serial_decode_mtp_n1(session: &mut StageSession, verify_tokens: &[i32]) -> Re
     let mut last_draft = None;
     for token_id in verify_tokens {
         let (predicted, native_mtp, _frame) = session
-            .decode_step_frame_sampled_mtp_n1(*token_id, Some(&SamplingConfig::default()), None, 0)
+            .decode_step_frame_sampled_mtp(*token_id, Some(&SamplingConfig::default()), None, 0, 1)
             .context("serial native MTP n=1 decode failed")?;
         if predicted >= 0 {
             predicted_tokens.push(predicted);
@@ -658,7 +672,9 @@ fn serial_decode_mtp_n1(session: &mut StageSession, verify_tokens: &[i32]) -> Re
         last_draft = native_mtp;
     }
     if let Some(draft) = last_draft {
-        predicted_tokens.push(draft.token_id);
+        if let Some(token) = draft.token_ids.first().copied() {
+            predicted_tokens.push(token);
+        }
         predicted_tokens.push(i32::try_from(draft.proposal_compute_us.max(0)).unwrap_or(i32::MAX));
     }
     Ok(predicted_tokens)
@@ -742,16 +758,16 @@ impl SampleSet {
 }
 
 fn build_report(
-    args: VerifySpanLocalArgs,
+    args: VerifyWindowLocalArgs,
     full: FullModelSamples,
     split_inprocess_width2: Option<SplitInprocessReport>,
-) -> Result<VerifySpanLocalReport> {
+) -> Result<VerifyWindowLocalReport> {
     let batched_width2 = timing_stats(&full.samples.batched)?;
     let serial_two_decode_mtp_n1 = timing_stats(&full.samples.serial)?;
     let batched_avg = batched_width2.avg_us;
     let serial_avg = serial_two_decode_mtp_n1.avg_us;
-    Ok(VerifySpanLocalReport {
-        mode: "verify-span-local",
+    Ok(VerifyWindowLocalReport {
+        mode: "verify-window-local",
         model_path: args.model_path,
         layer_end: args.layer_end,
         split_layer: args.split_layer,

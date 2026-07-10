@@ -27,8 +27,8 @@ use skippy_metrics::{attr, metric};
 use skippy_protocol::{
     MessageBase, SCHEMA_VERSION, StageConfig, StageTopology,
     binary::{
-        READY_MAGIC, StageReply, StageReplyStats, StageSamplingConfig, StageStateHeader,
-        StageWireMessage, WireActivationDType, WireMessageKind, WireReplyKind,
+        LLAMA_TOKEN_NULL, READY_MAGIC, StageReply, StageReplyStats, StageSamplingConfig,
+        StageStateHeader, StageWireMessage, WireActivationDType, WireMessageKind, WireReplyKind,
         activation_frame_flags_from_state_flags, read_stage_message, recv_reply, send_ready,
         send_reply_ack, send_reply_ack_with_stats, send_reply_message, state_flags,
     },
@@ -271,7 +271,12 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
                 speculative_window: openai_options.speculative_window,
                 adaptive_speculative_window: openai_options.adaptive_speculative_window,
                 draft_n_gpu_layers: openai_options.draft_n_gpu_layers,
+                ngram_min: openai_options.ngram_min,
+                ngram_max: openai_options.ngram_max,
                 native_mtp_enabled,
+                native_mtp_draft_model_path: None,
+                native_mtp_max_tokens: openai_options.native_mtp_max_tokens,
+                native_mtp_min_tokens: openai_options.native_mtp_min_tokens,
                 activation_width,
                 wire_dtype,
                 reply_credit_limit,
@@ -1454,11 +1459,12 @@ fn handle_binary_connection(
             let reply_start_unix_nanos = now_unix_nanos() as u64;
             upstream_reply_start_unix_nanos.get_or_insert(reply_start_unix_nanos);
             let reply_started = Instant::now();
+            let reply_window = reply_window_for_message(&message, &predicted_tokens);
             let reply = StageReply {
                 kind: reply_kind,
                 predicted: predicted_token,
                 predicted_tokens,
-                window: reply_window_for_message(&message),
+                window: reply_window,
                 stats: message_reply_stats,
             };
             if let Some(return_stream) =
@@ -1744,11 +1750,13 @@ fn native_mtp_prediction_tokens(predicted: i32, draft: Option<NativeMtpDraft>) -
     let Some(draft) = draft else {
         return vec![predicted];
     };
-    vec![
-        predicted,
-        draft.token_id,
-        draft.proposal_compute_us.clamp(0, i64::from(i32::MAX)) as i32,
-    ]
+    let token_count = i32::try_from(draft.token_ids.len()).unwrap_or(i32::MAX);
+    let mut tokens = Vec::with_capacity(draft.token_ids.len() + 3);
+    tokens.push(predicted);
+    tokens.push(token_count);
+    tokens.extend(draft.token_ids);
+    tokens.push(draft.proposal_compute_us.clamp(0, i64::from(i32::MAX)) as i32);
+    tokens
 }
 
 fn binary_auto_align_session_enabled() -> bool {
@@ -2596,11 +2604,22 @@ fn send_stage_reply(stream: &mut TcpStream, reply: StageReply) -> Result<()> {
 
 fn reply_window_for_message(
     message: &StageWireMessage,
+    predicted_tokens: &[i32],
 ) -> skippy_protocol::binary::StageReplyWindow {
     if message.kind == WireMessageKind::VerifyWindow {
+        let accepted_len = message
+            .tokens
+            .iter()
+            .zip(predicted_tokens)
+            .take_while(|(input, predicted)| input == predicted)
+            .count();
         skippy_protocol::binary::StageReplyWindow {
             window_id: message.state.seq_id,
-            ..Default::default()
+            accepted_len: i32::try_from(accepted_len).unwrap_or(i32::MAX),
+            correction_token: predicted_tokens
+                .get(accepted_len)
+                .copied()
+                .unwrap_or(LLAMA_TOKEN_NULL),
         }
     } else {
         Default::default()
@@ -3788,6 +3807,7 @@ pub(crate) struct BinaryStageExecutionOptions {
     pub(crate) sample_final_prefill: bool,
     pub(crate) output_capacity: usize,
     pub(crate) native_mtp_enabled: bool,
+    pub(crate) native_mtp_max_tokens: usize,
 }
 
 impl BinaryStageExecutionOptions {
@@ -3800,7 +3820,13 @@ impl BinaryStageExecutionOptions {
             sample_final_prefill,
             output_capacity,
             native_mtp_enabled,
+            native_mtp_max_tokens: 1,
         }
+    }
+
+    pub(crate) fn with_native_mtp_max_tokens(mut self, value: usize) -> Self {
+        self.native_mtp_max_tokens = value.max(1);
+        self
     }
 }
 
@@ -3862,12 +3888,13 @@ pub(crate) fn run_binary_stage_message(
                 )?;
                 return Ok((predicted, vec![predicted], output));
             }
-            let (predicted, native_mtp, output) = runtime.decode_frame_sampled_mtp_n1(
+            let (predicted, native_mtp, output) = runtime.decode_frame_sampled_mtp(
                 session_id,
                 token_id,
                 sampling.as_ref(),
                 input,
                 options.output_capacity,
+                options.native_mtp_max_tokens,
             )?;
             Ok((
                 predicted,

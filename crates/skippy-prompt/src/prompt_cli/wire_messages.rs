@@ -4,7 +4,7 @@ struct DecodeStepReply {
     elapsed_ms: f64,
 }
 
-struct VerifySpanReply {
+struct VerifyWindowReply {
     predicted_tokens: Vec<i32>,
     stats: StageReplyStats,
     write_ms: f64,
@@ -65,10 +65,9 @@ fn send_decode_step(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn send_verify_span(
+fn send_verify_window(
     stream: &mut TcpStream,
     wire_dtype: WireActivationDType,
-    prompt_index: usize,
     request_id: u64,
     session_id: u64,
     prompt_token_count: usize,
@@ -76,13 +75,13 @@ fn send_verify_span(
     decode_index: usize,
     tokens: &[i32],
     checkpoint: bool,
-) -> Result<VerifySpanReply> {
+) -> Result<VerifyWindowReply> {
     if tokens.is_empty() {
-        bail!("verify span requires at least one token");
+        bail!("verify window requires at least one token");
     }
     let verify_started = Instant::now();
-    let mut state = StageStateHeader::new(WireMessageKind::VerifySpan, wire_dtype);
-    state.seq_id = i32::try_from(prompt_index).context("prompt index exceeds i32")?;
+    let mut state = StageStateHeader::new(WireMessageKind::VerifyWindow, wire_dtype);
+    state.seq_id = i32::try_from(decode_index).context("decode step exceeds i32")?;
     state.prompt_token_count =
         i32::try_from(prompt_token_count).context("prompt token count exceeds i32")?;
     state.decode_step = i32::try_from(decode_index).context("decode step exceeds i32")?;
@@ -92,9 +91,9 @@ fn send_verify_span(
         state.flags |= state_flags::SKIP_VERIFY_CHECKPOINT;
     }
     let message = StageWireMessage {
-        kind: WireMessageKind::VerifySpan,
-        pos_start: i32::try_from(pos_start).context("verify span position exceeds i32")?,
-        token_count: i32::try_from(tokens.len()).context("verify span exceeds i32")?,
+        kind: WireMessageKind::VerifyWindow,
+        pos_start: i32::try_from(pos_start).context("verify window position exceeds i32")?,
+        token_count: i32::try_from(tokens.len()).context("verify window exceeds i32")?,
         state,
         request_id,
         session_id,
@@ -107,14 +106,14 @@ fn send_verify_span(
     };
     let write_started = Instant::now();
     write_stage_message(&mut *stream, &message, wire_dtype)
-        .with_context(|| format!("send verify span at decode step {decode_index}"))?;
+        .with_context(|| format!("send verify window at decode step {decode_index}"))?;
     let write_ms = elapsed_ms(write_started);
     let wait_started = Instant::now();
     let reply = recv_reply(&mut *stream)
-        .with_context(|| format!("receive verify span {decode_index} reply"))?;
+        .with_context(|| format!("receive verify window {decode_index} reply"))?;
     ensure_reply_kind(&reply, WireReplyKind::PredictedTokens)?;
     let wait_ms = elapsed_ms(wait_started);
-    Ok(VerifySpanReply {
+    Ok(VerifyWindowReply {
         predicted_tokens: reply.predicted_tokens,
         stats: reply.stats,
         write_ms,
@@ -417,8 +416,8 @@ fn print_stats(stats: Stats) {
                 stats.reply_stats.restore_prefill_drained_replies
             );
         }
-        if stats.reply_stats.verify_span_total_us > 0 {
-            let verify_total_ms = us_to_ms(stats.reply_stats.verify_span_total_us);
+        if stats.reply_stats.verify_window_total_us > 0 {
+            let verify_total_ms = us_to_ms(stats.reply_stats.verify_window_total_us);
             let verify_tok_s = if verify_total_ms > 0.0 {
                 1000.0 * stats.speculative_stats.draft_tokens as f64 / verify_total_ms
             } else {
@@ -427,26 +426,26 @@ fn print_stats(stats: Stats) {
             eprintln!(
                 "  spec     verify_breakdown_ms total={:.2} compute={:.2} forward={:.2} downstream_wait={:.2} stages={} proposed_tok_s={:.2}",
                 verify_total_ms,
-                us_to_ms(stats.reply_stats.verify_span_compute_us),
-                us_to_ms(stats.reply_stats.verify_span_forward_write_us),
-                us_to_ms(stats.reply_stats.verify_span_downstream_wait_us),
-                stats.reply_stats.verify_span_stage_count,
+                us_to_ms(stats.reply_stats.verify_window_compute_us),
+                us_to_ms(stats.reply_stats.verify_window_forward_write_us),
+                us_to_ms(stats.reply_stats.verify_window_downstream_wait_us),
+                stats.reply_stats.verify_window_stage_count,
                 verify_tok_s
             );
-            let protocol_avg_span = if stats.reply_stats.verify_span_request_count > 0 {
-                stats.reply_stats.verify_span_token_count as f64
-                    / stats.reply_stats.verify_span_request_count as f64
+            let protocol_avg_span = if stats.reply_stats.verify_window_request_count > 0 {
+                stats.reply_stats.verify_window_token_count as f64
+                    / stats.reply_stats.verify_window_request_count as f64
             } else {
                 0.0
             };
             eprintln!(
                 "  spec     verify_batch_stats protocol_requests={} protocol_tokens={} max_span={} avg_span={:.2} checkpointed_requests={} skip_checkpoint_requests={}",
-                stats.reply_stats.verify_span_request_count,
-                stats.reply_stats.verify_span_token_count,
-                stats.reply_stats.verify_span_max_tokens,
+                stats.reply_stats.verify_window_request_count,
+                stats.reply_stats.verify_window_token_count,
+                stats.reply_stats.verify_window_max_tokens,
                 protocol_avg_span,
-                stats.reply_stats.verify_span_checkpointed_requests,
-                stats.reply_stats.verify_span_skip_checkpoint_requests
+                stats.reply_stats.verify_window_checkpointed_requests,
+                stats.reply_stats.verify_window_skip_checkpoint_requests
             );
         }
         if stats.speculative_stats.recovery_reverify_elapsed_ms > 0.0 {

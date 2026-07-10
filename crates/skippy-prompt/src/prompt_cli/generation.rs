@@ -368,10 +368,9 @@ fn run_prompt(run: PromptRun<'_>) -> Result<()> {
             .max(adaptive_window);
         let decode_index = generated.len();
         let verify_inputs = verify_inputs_for_proposals(current, &draft_tokens);
-        let reply = send_verify_span(
+        let reply = send_verify_window(
             stream,
             wire_dtype,
-            prompt_index,
             request_id,
             wire_session_id,
             token_ids.len(),
@@ -386,7 +385,7 @@ fn run_prompt(run: PromptRun<'_>) -> Result<()> {
         speculative_stats.observe_primary_verify(&reply, verify_inputs.len());
         reply_stats.merge(reply.stats);
         first_time_to_token_ms.get_or_insert_with(|| elapsed_ms(wall_started));
-        let decision = classify_verify_span(
+        let decision = classify_verify_window(
             &draft_tokens,
             &reply.predicted_tokens,
             generated.len(),
@@ -442,10 +441,9 @@ fn run_prompt(run: PromptRun<'_>) -> Result<()> {
                 speculative_stats.recovery_decode_elapsed_ms += repair.elapsed_ms;
             } else {
                 let repair_inputs = &verify_inputs[..repair_input_count];
-                let repair = send_verify_span(
+                let repair = send_verify_window(
                     stream,
                     wire_dtype,
-                    prompt_index,
                     request_id,
                     wire_session_id,
                     token_ids.len(),
@@ -469,13 +467,13 @@ fn run_prompt(run: PromptRun<'_>) -> Result<()> {
                 speculative_stats.recovery_reverify_write_ms += repair.write_ms;
                 speculative_stats.recovery_reverify_wait_ms += repair.wait_ms;
                 speculative_stats.recovery_reverify_compute_us +=
-                    repair.stats.verify_span_compute_us;
+                    repair.stats.verify_window_compute_us;
                 speculative_stats.recovery_reverify_forward_write_us +=
-                    repair.stats.verify_span_forward_write_us;
+                    repair.stats.verify_window_forward_write_us;
                 speculative_stats.recovery_reverify_downstream_wait_us +=
-                    repair.stats.verify_span_downstream_wait_us;
+                    repair.stats.verify_window_downstream_wait_us;
                 speculative_stats.recovery_reverify_stage_count +=
-                    repair.stats.verify_span_stage_count;
+                    repair.stats.verify_window_stage_count;
             }
         }
         let mut reached_eog = false;

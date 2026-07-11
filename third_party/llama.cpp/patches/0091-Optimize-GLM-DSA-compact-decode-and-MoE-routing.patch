@@ -1,4 +1,4 @@
-From dfd163084256f769a9c7a4e16aad60434c9e93e2 Mon Sep 17 00:00:00 2001
+From da7b3b8f2f62592c9745c08f879088c97d9de580 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sat, 11 Jul 2026 09:24:15 +1000
 Subject: [PATCH 91/93] Optimize GLM DSA compact decode and MoE routing
@@ -3724,7 +3724,7 @@ index 5a173f03c..d28d94acf 100644
      std::fill(hparams.xielu_alpha_n.begin(), hparams.xielu_alpha_n.end(), 0.0f);
      std::fill(hparams.xielu_alpha_p.begin(), hparams.xielu_alpha_p.end(), 0.0f);
 diff --git a/src/models/glm-dsa.cpp b/src/models/glm-dsa.cpp
-index 2a466f3e7..dcd7f00dc 100644
+index b5aba2db0..b596af77e 100644
 --- a/src/models/glm-dsa.cpp
 +++ b/src/models/glm-dsa.cpp
 @@ -2,13 +2,27 @@

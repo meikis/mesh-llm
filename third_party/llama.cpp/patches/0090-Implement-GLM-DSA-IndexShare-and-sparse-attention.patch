@@ -1,4 +1,4 @@
-From b3e14925c30edb6016d0b202a8a0583d525c814d Mon Sep 17 00:00:00 2001
+From 2139b070038e0041a43303590141aa6bbbf0bdb9 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sat, 11 Jul 2026 09:23:49 +1000
 Subject: [PATCH 90/93] Implement GLM DSA IndexShare and sparse attention
@@ -27,11 +27,11 @@ Consolidates patches 0108 through 0151: fused KV tensors, DSA KV cache, lightnin
  src/llama-kv-cache.cpp                    |   5 +-
  src/llama-model.cpp                       |  53 +-
  src/models/deepseek2.cpp                  |  26 +-
- src/models/glm-dsa.cpp                    | 410 +++++++++-
+ src/models/glm-dsa.cpp                    | 412 +++++++++-
  src/models/models.h                       |   5 +-
  src/skippy.cpp                            | 882 +++++++++++++++++++++-
  tests/test-backend-ops.cpp                | 658 ++++++++++++++++
- 26 files changed, 4361 insertions(+), 57 deletions(-)
+ 26 files changed, 4363 insertions(+), 57 deletions(-)
 
 diff --git a/ggml/include/ggml-rpc.h b/ggml/include/ggml-rpc.h
 index 5ad121ae5..9089c1575 100644
@@ -3054,7 +3054,7 @@ index 180fb0829..3e96b113e 100644
          cb(q_nope, "mtp_q_nope_perm", il);
  
 diff --git a/src/models/glm-dsa.cpp b/src/models/glm-dsa.cpp
-index d70673471..2a466f3e7 100644
+index d70673471..b5aba2db0 100644
 --- a/src/models/glm-dsa.cpp
 +++ b/src/models/glm-dsa.cpp
 @@ -1,5 +1,36 @@
@@ -3130,7 +3130,7 @@ index d70673471..2a466f3e7 100644
          if (i < (int) hparams.n_layer_dense_lead) {
              layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", i), {n_embd,   n_ff}, flags);
              layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {  n_ff, n_embd}, flags);
-@@ -141,6 +178,361 @@ void llama_model_glm_dsa::load_arch_tensors(llama_model_loader &) {
+@@ -141,6 +178,363 @@ void llama_model_glm_dsa::load_arch_tensors(llama_model_loader &) {
      }
  }
  
@@ -3456,6 +3456,8 @@ index d70673471..2a466f3e7 100644
 +
 +    if (stage_filtered && stage_filter.layer_end < effective_n_layers && last_top_k != nullptr) {
 +        res->t_skippy_glm_dsa_top_k = last_top_k;
++        // The all-KV flash route can bypass top_k locally, but a split stage still exports it.
++        ggml_build_forward_expand(gf, last_top_k);
 +    }
 +
 +    if (stage_filtered && !stage_filter.include_output) {

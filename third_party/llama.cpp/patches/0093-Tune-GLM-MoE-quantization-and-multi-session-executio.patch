@@ -1,4 +1,4 @@
-From a3db738abd0cf9d2781ae103df26d4e94df6442c Mon Sep 17 00:00:00 2001
+From d9e576d2675fccd6704c6a05ab7fa6fc99e6d668 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sat, 11 Jul 2026 09:25:24 +1000
 Subject: [PATCH 93/93] Tune GLM MoE, quantization, and multi-session execution
@@ -2742,7 +2742,7 @@ index d4e7738a9..6a485427f 100644
          }
          return std::make_pair(i_layer, n_layer);
 diff --git a/src/models/glm-dsa.cpp b/src/models/glm-dsa.cpp
-index 617777690..9d7b92877 100644
+index aab9f5e2c..39ce41c6a 100644
 --- a/src/models/glm-dsa.cpp
 +++ b/src/models/glm-dsa.cpp
 @@ -498,9 +498,17 @@ void llama_model_glm_dsa::load_arch_hparams(llama_model_loader & ml) {

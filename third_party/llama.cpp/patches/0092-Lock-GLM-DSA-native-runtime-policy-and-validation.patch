@@ -1,4 +1,4 @@
-From 725f2555cccface8a9add5f3ee2cb1fd8705916d Mon Sep 17 00:00:00 2001
+From 0ab6ea17fdb127500967f20d6ea378ca236fdd15 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Sat, 11 Jul 2026 09:24:47 +1000
 Subject: [PATCH 92/93] Lock GLM DSA native runtime policy and validation
@@ -1822,7 +1822,7 @@ index 4c8bab6f1..4a7420b1b 100644
  
  struct skippy_activation_tokens {
 diff --git a/src/models/glm-dsa.cpp b/src/models/glm-dsa.cpp
-index dcd7f00dc..617777690 100644
+index b596af77e..aab9f5e2c 100644
 --- a/src/models/glm-dsa.cpp
 +++ b/src/models/glm-dsa.cpp
 @@ -173,11 +173,10 @@ static void llama_glm_dsa_validate_indexer_type_frequency_consistency(const llam

@@ -115,6 +115,22 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
     let input_frame = stage_wire_roundtrip
         .as_ref()
         .map_or(&input.frame, |roundtrip| &roundtrip.frame);
+    if args.branch_batch_parity {
+        return run_glm_dsa_branch_batch_parity(
+            &args,
+            &selected.absolute_paths,
+            &runtime_config,
+            input_frame,
+        );
+    }
+    if args.multi_session_batch_parity {
+        return crate::glm_dsa_multi_session_batch::run_glm_dsa_multi_session_batch_parity(
+            &args,
+            &selected.absolute_paths,
+            &runtime_config,
+            input_frame,
+        );
+    }
     let candidate_warmup_source = native_indexshare_candidate_warmup_source(&args)?;
     let comparison = if args.compare_native_indexshare_producer_consumer {
         Some(run_native_indexshare_producer_consumer_comparison(
@@ -182,8 +198,41 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
             flags,
             &mut deferred_model_drops,
         )?)
+    } else if args.compare_glm_packed_gather {
+        Some(run_glm_packed_gather_comparison(
+            &args,
+            &selected.absolute_paths,
+            &runtime_config,
+            input_frame,
+            &token_ids,
+            &positions,
+            flags,
+            &mut deferred_model_drops,
+        )?)
+    } else if args.compare_metal_topk_moe_route_fusion {
+        Some(run_metal_topk_moe_route_fusion_comparison(
+            &args,
+            &selected.absolute_paths,
+            &runtime_config,
+            input_frame,
+            &token_ids,
+            &positions,
+            flags,
+            &mut deferred_model_drops,
+        )?)
     } else if args.compare_parallel_lightning_indexer {
         Some(run_parallel_lightning_indexer_comparison(
+            &args,
+            &selected.absolute_paths,
+            &runtime_config,
+            input_frame,
+            &token_ids,
+            &positions,
+            flags,
+            &mut deferred_model_drops,
+        )?)
+    } else if args.compare_staged_lightning_indexer {
+        Some(run_staged_lightning_indexer_comparison(
             &args,
             &selected.absolute_paths,
             &runtime_config,
@@ -226,9 +275,22 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
             flags,
             &mut deferred_model_drops,
         )?)
+    } else if args.compare_moe_motif_coencode {
+        Some(run_moe_motif_coencode_comparison(
+            &args,
+            &selected.absolute_paths,
+            &runtime_config,
+            input_frame,
+            &token_ids,
+            &positions,
+            flags,
+            &mut deferred_model_drops,
+        )?)
     } else if args.compare_moe_down_weighted_fusion
         || args.compare_moe_down_weighted_parallel
         || args.compare_moe_down_unweighted_slots
+        || args.compare_moe_q2_down_weighted_slots
+        || args.compare_moe_q2_down_weighted_reduce_direct
     {
         Some(run_moe_down_weighted_fusion_comparison(
             &args,
@@ -242,6 +304,108 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
         )?)
     } else if args.compare_moe_q2_gate_up_swiglu {
         Some(run_moe_q2_gate_up_swiglu_comparison(
+            &args,
+            &selected.absolute_paths,
+            &runtime_config,
+            input_frame,
+            &token_ids,
+            &positions,
+            flags,
+            &mut deferred_model_drops,
+        )?)
+    } else if args.compare_glm_moe_two_phase {
+        Some(run_glm_moe_phase_comparison(
+            &args,
+            &selected.absolute_paths,
+            &runtime_config,
+            input_frame,
+            &token_ids,
+            &positions,
+            flags,
+            &mut deferred_model_drops,
+            GlmMoePhaseComparison {
+                env: "GGML_METAL_EXPERIMENTAL_GLM_MOE_TWO_PHASE",
+                baseline_name: "glm_moe_two_phase_off",
+                candidate_name: "glm_moe_two_phase_on",
+                dispatch_op: "glm_moe_two_phase",
+                baseline_native_down: false,
+            },
+        )?)
+    } else if args.compare_glm_moe_dual_lane {
+        Some(run_glm_moe_phase_comparison(
+            &args,
+            &selected.absolute_paths,
+            &runtime_config,
+            input_frame,
+            &token_ids,
+            &positions,
+            flags,
+            &mut deferred_model_drops,
+            GlmMoePhaseComparison {
+                env: "GGML_METAL_EXPERIMENTAL_GLM_MOE_DUAL_LANE",
+                baseline_name: "glm_moe_dual_lane_off",
+                candidate_name: "glm_moe_dual_lane_on",
+                dispatch_op: "glm_moe_dual_lane",
+                baseline_native_down: true,
+            },
+        )?)
+    } else if args.compare_glm_compact_flash_nwg {
+        Some(run_glm_compact_flash_nwg_comparison(
+            &args,
+            &selected.absolute_paths,
+            &runtime_config,
+            input_frame,
+            &token_ids,
+            &positions,
+            flags,
+            &mut deferred_model_drops,
+        )?)
+    } else if args.compare_glm_compact_multihead_flash {
+        Some(run_glm_compact_multihead_flash_comparison(
+            &args,
+            &selected.absolute_paths,
+            &runtime_config,
+            input_frame,
+            &token_ids,
+            &positions,
+            flags,
+            &mut deferred_model_drops,
+        )?)
+    } else if args.compare_glm_compact_split_exact {
+        Some(run_glm_compact_split_exact_comparison(
+            &args,
+            &selected.absolute_paths,
+            &runtime_config,
+            input_frame,
+            &token_ids,
+            &positions,
+            flags,
+            &mut deferred_model_drops,
+        )?)
+    } else if args.compare_glm_projection_nsg_policy {
+        Some(run_glm_projection_nsg_policy_comparison(
+            &args,
+            &selected.absolute_paths,
+            &runtime_config,
+            input_frame,
+            &token_ids,
+            &positions,
+            flags,
+            &mut deferred_model_drops,
+        )?)
+    } else if args.compare_glm_retained_composition {
+        Some(run_glm_retained_composition_comparison(
+            &args,
+            &selected.absolute_paths,
+            &runtime_config,
+            input_frame,
+            &token_ids,
+            &positions,
+            flags,
+            &mut deferred_model_drops,
+        )?)
+    } else if args.compare_glm_absorbed_qkv_phases {
+        Some(run_glm_absorbed_qkv_phase_comparison(
             &args,
             &selected.absolute_paths,
             &runtime_config,
@@ -373,16 +537,20 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
         || args.compare_moe_down_weighted_parallel
         || args.compare_moe_down_unweighted_slots;
     let moe_weighted_sum_guard = require_moe_weighted_sum_proof.then(|| {
+        let proof_case = optimized_dispatch_probe.as_ref().unwrap_or(&case);
         let requirement = MoeWeightedSumRequirement::from_flags(case.flags);
         if matches!(requirement, MoeWeightedSumRequirement::AnyOptimizedPath) {
-            build_moe_weighted_sum_guard(&case)
+            build_moe_weighted_sum_guard(proof_case)
         } else {
-            build_moe_weighted_sum_guard_with_requirement(&case, requirement)
+            build_moe_weighted_sum_guard_with_requirement(proof_case, requirement)
         }
     });
+    let moe_q2_routed_down_guard = args
+        .require_moe_q2_routed_down_proof
+        .then(|| build_moe_q2_routed_down_guard(&case));
     let moe_q2_gate_up_swiglu_guard = args
         .compare_moe_q2_gate_up_swiglu
-        .then(|| build_moe_q2_gate_up_swiglu_guard(&case));
+        .then(|| build_moe_q2_gate_up_swiglu_guard(&case, optimized_dispatch_probe.as_ref()));
     let moe_motif_guard = args
         .require_moe_motif_proof
         .then(|| build_moe_motif_guard(&case, optimized_dispatch_probe.as_ref()));
@@ -414,6 +582,7 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
         ctx_size: args.ctx_size,
         activation_width: args.activation_width,
         tokens: args.tokens,
+        verification_batch: args.verification_batch,
         position_start: args.position_start,
         kv_warmup_tokens: args.kv_warmup_tokens,
         kv_warmup_chunk_tokens: report_kv_warmup_chunk_tokens,
@@ -456,6 +625,7 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
         partial_top_k_guard,
         compact_flash_guard,
         moe_weighted_sum_guard,
+        moe_q2_routed_down_guard,
         moe_q2_gate_up_swiglu_guard,
         moe_motif_guard,
         native_indexshare_guard,
@@ -575,6 +745,18 @@ pub fn glm_dsa_layer_microbench(args: GlmDsaLayerMicrobenchArgs) -> Result<()> {
             guard.moe_weighted_sum_records,
             guard.moe_weighted_sum_f32x4_records,
             guard.mul_mv_id_weighted_slots_records,
+            guard.failure_summary,
+        );
+    }
+    if let Some(guard) = &report.moe_q2_routed_down_guard
+        && !guard.passed
+    {
+        bail!(
+            "GLM-DSA MoE q2 routed-down proof failed for {}: q2_down={} q3_down={} down_records={} failures={}",
+            guard.checked_case,
+            guard.routed_moe_down_q2_k_records,
+            guard.routed_moe_down_q3_k_records,
+            guard.routed_moe_down_records,
             guard.failure_summary,
         );
     }
@@ -745,11 +927,14 @@ fn dense_fallback_baseline_flags(candidate_flags: MicrobenchFlags) -> Microbench
         compact_flash_attn: false,
         allow_compact_flash_auto: false,
         selected_row_flash: false,
+        native_default_selected_row_flash: false,
         direct_sparse_prefill: false,
         native_default_direct_sparse_prefill: false,
         enable_unproven_large_direct_sparse_prefill: false,
         direct_sparse_prefill_max_tokens: None,
         dense_sparse_mask_max_bytes: None,
+        direct_sparse_decode_max_top_k: None,
+        compact_flash_min_kv: None,
         direct_sparse_prefill_min_kv_topk_ratio: None,
         ..candidate_flags
     }
@@ -762,11 +947,14 @@ fn dense_flash_prefill_baseline_flags(candidate_flags: MicrobenchFlags) -> Micro
         compact_flash_attn: false,
         allow_compact_flash_auto: false,
         selected_row_flash: false,
+        native_default_selected_row_flash: false,
         direct_sparse_prefill: false,
         native_default_direct_sparse_prefill: false,
         enable_unproven_large_direct_sparse_prefill: false,
         direct_sparse_prefill_max_tokens: None,
         dense_sparse_mask_max_bytes: None,
+        direct_sparse_decode_max_top_k: None,
+        compact_flash_min_kv: None,
         direct_sparse_prefill_min_kv_topk_ratio: None,
         ..candidate_flags
     }
@@ -914,14 +1102,17 @@ fn run_selected_row_flash_comparison(
     candidate_flags: MicrobenchFlags,
     deferred_model_drops: &mut Vec<StageModel>,
 ) -> Result<MicrobenchComparison> {
+    let compact_runtime_config = runtime_config_with_compact_flash(runtime_config);
     let baseline_flags = MicrobenchFlags {
         selected_row_flash: false,
+        native_default_selected_row_flash: false,
         compact_flash_attn: true,
         allow_compact_flash_auto: true,
         ..candidate_flags
     };
     let candidate_flags = MicrobenchFlags {
         selected_row_flash: true,
+        native_default_selected_row_flash: false,
         compact_flash_attn: true,
         allow_compact_flash_auto: true,
         metal_dispatch_log: true,
@@ -930,6 +1121,68 @@ fn run_selected_row_flash_comparison(
 
     let baseline = run_microbench_case(
         "selected_row_flash_off",
+        selected_paths,
+        &compact_runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        baseline_flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+    let candidate = run_microbench_case(
+        "selected_row_flash_on",
+        selected_paths,
+        &compact_runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        candidate_flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+    let parity = compare_case_outputs(&baseline.outputs, &candidate.outputs, args)?;
+    Ok(MicrobenchComparison {
+        baseline,
+        candidate,
+        parity,
+        poisoned_candidate: None,
+        poisoned_parity: None,
+        sideband_sensitivity: None,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_metal_topk_moe_route_fusion_comparison(
+    args: &GlmDsaLayerMicrobenchArgs,
+    selected_paths: &[PathBuf],
+    runtime_config: &RuntimeConfig,
+    input: &ActivationFrame,
+    token_ids: &[i32],
+    positions: &[i32],
+    candidate_flags: MicrobenchFlags,
+    deferred_model_drops: &mut Vec<StageModel>,
+) -> Result<MicrobenchComparison> {
+    let baseline_flags = MicrobenchFlags {
+        metal_topk_moe_route_fusion: false,
+        metal_topk_moe_route_fusion_native_default: false,
+        ..candidate_flags
+    };
+    let candidate_flags = MicrobenchFlags {
+        metal_topk_moe_route_fusion: true,
+        metal_topk_moe_route_fusion_native_default: false,
+        metal_dispatch_log: true,
+        ..candidate_flags
+    };
+
+    let baseline = run_microbench_case(
+        "metal_topk_moe_route_fusion_off",
         selected_paths,
         runtime_config,
         args,
@@ -943,7 +1196,7 @@ fn run_selected_row_flash_comparison(
         deferred_model_drops,
     )?;
     let candidate = run_microbench_case(
-        "selected_row_flash_on",
+        "metal_topk_moe_route_fusion_on",
         selected_paths,
         runtime_config,
         args,
@@ -1011,6 +1264,67 @@ fn run_parallel_lightning_indexer_comparison(
         args.layer_start,
         args.layer_end,
         candidate_flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+    let parity = compare_case_outputs(&baseline.outputs, &candidate.outputs, args)?;
+    Ok(MicrobenchComparison {
+        baseline,
+        candidate,
+        parity,
+        poisoned_candidate: None,
+        poisoned_parity: None,
+        sideband_sensitivity: None,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_staged_lightning_indexer_comparison(
+    args: &GlmDsaLayerMicrobenchArgs,
+    selected_paths: &[PathBuf],
+    runtime_config: &RuntimeConfig,
+    input: &ActivationFrame,
+    token_ids: &[i32],
+    positions: &[i32],
+    flags: MicrobenchFlags,
+    deferred_model_drops: &mut Vec<StageModel>,
+) -> Result<MicrobenchComparison> {
+    const STAGED_Q_ENV: &str = "LLAMA_GLM_DSA_EXPERIMENTAL_LIGHTNING_INDEXER_STAGED_Q";
+    let _restore_staged_q = ScopedEnvRemoval::remove(STAGED_Q_ENV);
+    let comparison_flags = MicrobenchFlags {
+        parallel_lightning_indexer: false,
+        lightning_indexer_threads: None,
+        metal_dispatch_log: true,
+        ..flags
+    };
+    let baseline = run_microbench_case(
+        "lightning_indexer_staged_q_off",
+        selected_paths,
+        runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        comparison_flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+    unsafe {
+        std::env::set_var(STAGED_Q_ENV, "1");
+    }
+    let candidate = run_microbench_case(
+        "lightning_indexer_staged_q_on",
+        selected_paths,
+        runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        comparison_flags,
         input,
         token_ids,
         positions,
@@ -1235,7 +1549,7 @@ fn run_decode_clip_top_k_comparison(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_moe_down_weighted_fusion_comparison(
+fn run_moe_motif_coencode_comparison(
     args: &GlmDsaLayerMicrobenchArgs,
     selected_paths: &[PathBuf],
     runtime_config: &RuntimeConfig,
@@ -1246,21 +1560,93 @@ fn run_moe_down_weighted_fusion_comparison(
     deferred_model_drops: &mut Vec<StageModel>,
 ) -> Result<MicrobenchComparison> {
     let baseline_flags = MicrobenchFlags {
-        moe_motif_coencode: true,
-        moe_down_weighted_fusion: false,
-        moe_down_weighted_parallel: false,
-        moe_down_unweighted_slots: false,
+        moe_motif_coencode: false,
         ..candidate_flags
     };
     let candidate_flags = MicrobenchFlags {
         moe_motif_coencode: true,
+        metal_dispatch_log: true,
+        ..candidate_flags
+    };
+    let baseline = run_microbench_case(
+        "moe_motif_coencode_off",
+        selected_paths,
+        runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        baseline_flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+    let candidate = run_microbench_case(
+        "moe_motif_coencode_on",
+        selected_paths,
+        runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        candidate_flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+    let parity = compare_case_outputs(&baseline.outputs, &candidate.outputs, args)?;
+    Ok(MicrobenchComparison {
+        baseline,
+        candidate,
+        parity,
+        poisoned_candidate: None,
+        poisoned_parity: None,
+        sideband_sensitivity: None,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_moe_down_weighted_fusion_comparison(
+    args: &GlmDsaLayerMicrobenchArgs,
+    selected_paths: &[PathBuf],
+    runtime_config: &RuntimeConfig,
+    input: &ActivationFrame,
+    token_ids: &[i32],
+    positions: &[i32],
+    candidate_flags: MicrobenchFlags,
+    deferred_model_drops: &mut Vec<StageModel>,
+) -> Result<MicrobenchComparison> {
+    let motif_coencode =
+        !(args.compare_moe_down_weighted_fusion || args.compare_moe_down_weighted_parallel);
+    let baseline_flags = MicrobenchFlags {
+        moe_motif_coencode: motif_coencode,
+        moe_down_weighted_fusion: false,
+        moe_down_weighted_parallel: false,
+        moe_down_unweighted_slots: false,
+        moe_q2_down_weighted_slots: false,
+        moe_q2_down_weighted_reduce_direct: false,
+        ..candidate_flags
+    };
+    let candidate_moe_q2_down_weighted_slots = args.compare_moe_q2_down_weighted_slots
+        || (args.compare_moe_q2_down_weighted_reduce_direct
+            && candidate_flags.moe_q2_down_weighted_slots);
+    let candidate_flags = MicrobenchFlags {
+        moe_motif_coencode: motif_coencode,
         moe_down_weighted_fusion: args.compare_moe_down_weighted_fusion,
         moe_down_weighted_parallel: args.compare_moe_down_weighted_parallel,
         moe_down_unweighted_slots: args.compare_moe_down_unweighted_slots,
+        moe_q2_down_weighted_slots: candidate_moe_q2_down_weighted_slots,
+        moe_q2_down_weighted_reduce_direct: args.compare_moe_q2_down_weighted_reduce_direct,
         ..candidate_flags
     };
     let baseline_label = if args.compare_moe_down_unweighted_slots {
         "moe_down_unweighted_slots_off"
+    } else if args.compare_moe_q2_down_weighted_slots {
+        "moe_q2_down_weighted_slots_off"
+    } else if args.compare_moe_q2_down_weighted_reduce_direct {
+        "moe_q2_down_weighted_reduce_direct_off"
     } else if args.compare_moe_down_weighted_parallel {
         "moe_down_weighted_parallel_off"
     } else {
@@ -1268,6 +1654,10 @@ fn run_moe_down_weighted_fusion_comparison(
     };
     let candidate_label = if args.compare_moe_down_unweighted_slots {
         "moe_down_unweighted_slots_on"
+    } else if args.compare_moe_q2_down_weighted_slots {
+        "moe_q2_down_weighted_slots_on"
+    } else if args.compare_moe_q2_down_weighted_reduce_direct {
+        "moe_q2_down_weighted_reduce_direct_on"
     } else if args.compare_moe_down_weighted_parallel {
         "moe_down_weighted_parallel_on"
     } else {
@@ -1360,6 +1750,540 @@ fn run_moe_q2_gate_up_swiglu_comparison(
         true,
         deferred_model_drops,
     )?;
+    let parity = compare_case_outputs(&baseline.outputs, &candidate.outputs, args)?;
+    Ok(MicrobenchComparison {
+        baseline,
+        candidate,
+        parity,
+        poisoned_candidate: None,
+        poisoned_parity: None,
+        sideband_sensitivity: None,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_glm_projection_nsg_policy_comparison(
+    args: &GlmDsaLayerMicrobenchArgs,
+    selected_paths: &[PathBuf],
+    runtime_config: &RuntimeConfig,
+    input: &ActivationFrame,
+    token_ids: &[i32],
+    positions: &[i32],
+    flags: MicrobenchFlags,
+    deferred_model_drops: &mut Vec<StageModel>,
+) -> Result<MicrobenchComparison> {
+    const POLICY_ENV: &str = "LLAMA_GLM_DSA_EXPERIMENTAL_MUL_MV_SHAPE_POLICY";
+    let _restore_policy = ScopedEnvRemoval::remove(POLICY_ENV);
+    let _restore_q8 = ScopedEnvRemoval::remove("LLAMA_GLM_DSA_MUL_MV_Q8_0_NSG");
+    let _restore_q3 = ScopedEnvRemoval::remove("LLAMA_GLM_DSA_MUL_MV_Q3_K_NSG");
+    let _restore_q4 = ScopedEnvRemoval::remove("LLAMA_GLM_DSA_MUL_MV_Q4_K_NSG");
+    let baseline = run_microbench_case(
+        "glm_projection_nsg_default",
+        selected_paths,
+        runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+    unsafe {
+        std::env::set_var(POLICY_ENV, args.glm_projection_nsg_policy_mask.to_string());
+    }
+    let candidate = run_microbench_case(
+        "glm_projection_nsg_policy",
+        selected_paths,
+        runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+    let parity = compare_case_outputs(&baseline.outputs, &candidate.outputs, args)?;
+    Ok(MicrobenchComparison {
+        baseline,
+        candidate,
+        parity,
+        poisoned_candidate: None,
+        poisoned_parity: None,
+        sideband_sensitivity: None,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_glm_retained_composition_comparison(
+    args: &GlmDsaLayerMicrobenchArgs,
+    selected_paths: &[PathBuf],
+    runtime_config: &RuntimeConfig,
+    input: &ActivationFrame,
+    token_ids: &[i32],
+    positions: &[i32],
+    flags: MicrobenchFlags,
+    deferred_model_drops: &mut Vec<StageModel>,
+) -> Result<MicrobenchComparison> {
+    const POLICY_ENV: &str = "LLAMA_GLM_DSA_EXPERIMENTAL_MUL_MV_SHAPE_POLICY";
+    const NATIVE_DOWN_ENV: &str = "GGML_GLM_DSA_EXPERIMENTAL_NATIVE_MOE_DOWN";
+    let _restore_policy = ScopedEnvRemoval::remove(POLICY_ENV);
+    let _restore_native_down = ScopedEnvRemoval::remove(NATIVE_DOWN_ENV);
+    let _restore_q8 = ScopedEnvRemoval::remove("LLAMA_GLM_DSA_MUL_MV_Q8_0_NSG");
+    let _restore_q3 = ScopedEnvRemoval::remove("LLAMA_GLM_DSA_MUL_MV_Q3_K_NSG");
+    let _restore_q4 = ScopedEnvRemoval::remove("LLAMA_GLM_DSA_MUL_MV_Q4_K_NSG");
+    let compact_runtime_config = runtime_config_with_compact_flash(runtime_config);
+
+    let baseline_flags = MicrobenchFlags {
+        compact_flash_attn: true,
+        allow_compact_flash_auto: true,
+        selected_row_flash: false,
+        native_default_selected_row_flash: false,
+        ..flags
+    };
+    let baseline = run_microbench_case(
+        "glm_retained_composition_off",
+        selected_paths,
+        &compact_runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        baseline_flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+
+    unsafe {
+        std::env::set_var(POLICY_ENV, "3");
+        std::env::set_var(NATIVE_DOWN_ENV, "1");
+    }
+    let candidate_flags = MicrobenchFlags {
+        compact_flash_attn: true,
+        allow_compact_flash_auto: true,
+        selected_row_flash: true,
+        native_default_selected_row_flash: false,
+        ..flags
+    };
+    let candidate = run_microbench_case(
+        "glm_retained_composition_on",
+        selected_paths,
+        &compact_runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        candidate_flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+    let parity = compare_case_outputs(&baseline.outputs, &candidate.outputs, args)?;
+    Ok(MicrobenchComparison {
+        baseline,
+        candidate,
+        parity,
+        poisoned_candidate: None,
+        poisoned_parity: None,
+        sideband_sensitivity: None,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct GlmMoePhaseComparison {
+    env: &'static str,
+    baseline_name: &'static str,
+    candidate_name: &'static str,
+    dispatch_op: &'static str,
+    baseline_native_down: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_glm_moe_phase_comparison(
+    args: &GlmDsaLayerMicrobenchArgs,
+    selected_paths: &[PathBuf],
+    runtime_config: &RuntimeConfig,
+    input: &ActivationFrame,
+    token_ids: &[i32],
+    positions: &[i32],
+    flags: MicrobenchFlags,
+    deferred_model_drops: &mut Vec<StageModel>,
+    comparison: GlmMoePhaseComparison,
+) -> Result<MicrobenchComparison> {
+    let _restore_phase = ScopedEnvRemoval::remove(comparison.env);
+    let baseline_flags = MicrobenchFlags {
+        moe_down_weighted_fusion: comparison.baseline_native_down,
+        ..flags
+    };
+    let baseline = run_microbench_case(
+        comparison.baseline_name,
+        selected_paths,
+        runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        baseline_flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+    unsafe {
+        std::env::set_var(comparison.env, "1");
+    }
+    let candidate_flags = MicrobenchFlags {
+        moe_down_weighted_fusion: false,
+        ..flags
+    };
+    let candidate = run_microbench_case(
+        comparison.candidate_name,
+        selected_paths,
+        runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        candidate_flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+    if flags.metal_dispatch_log
+        && !candidate
+            .metal_dispatch_records
+            .iter()
+            .any(|record| record.op == comparison.dispatch_op)
+    {
+        bail!(
+            "GLM MoE phase candidate {} did not dispatch on the selected real layer span",
+            comparison.dispatch_op
+        );
+    }
+    let parity = compare_case_outputs(&baseline.outputs, &candidate.outputs, args)?;
+    Ok(MicrobenchComparison {
+        baseline,
+        candidate,
+        parity,
+        poisoned_candidate: None,
+        poisoned_parity: None,
+        sideband_sensitivity: None,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_glm_compact_flash_nwg_comparison(
+    args: &GlmDsaLayerMicrobenchArgs,
+    selected_paths: &[PathBuf],
+    runtime_config: &RuntimeConfig,
+    input: &ActivationFrame,
+    token_ids: &[i32],
+    positions: &[i32],
+    flags: MicrobenchFlags,
+    deferred_model_drops: &mut Vec<StageModel>,
+) -> Result<MicrobenchComparison> {
+    const ENV: &str = "LLAMA_GLM_DSA_COMPACT_FLASH_NWG";
+    let _restore_nwg = ScopedEnvRemoval::remove(ENV);
+    unsafe {
+        std::env::set_var(ENV, "4");
+    }
+    let baseline = run_microbench_case(
+        "glm_compact_flash_nwg4",
+        selected_paths,
+        runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+
+    unsafe {
+        std::env::set_var(ENV, "8");
+    }
+    let candidate = run_microbench_case(
+        "glm_compact_flash_nwg8",
+        selected_paths,
+        runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+    let parity = compare_case_outputs(&baseline.outputs, &candidate.outputs, args)?;
+    Ok(MicrobenchComparison {
+        baseline,
+        candidate,
+        parity,
+        poisoned_candidate: None,
+        poisoned_parity: None,
+        sideband_sensitivity: None,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_glm_compact_multihead_flash_comparison(
+    args: &GlmDsaLayerMicrobenchArgs,
+    selected_paths: &[PathBuf],
+    runtime_config: &RuntimeConfig,
+    input: &ActivationFrame,
+    token_ids: &[i32],
+    positions: &[i32],
+    flags: MicrobenchFlags,
+    deferred_model_drops: &mut Vec<StageModel>,
+) -> Result<MicrobenchComparison> {
+    const NWG_ENV: &str = "LLAMA_GLM_DSA_COMPACT_FLASH_NWG";
+    const MULTIHEAD_ENV: &str = "GGML_METAL_EXPERIMENTAL_GLM_COMPACT_MULTIHEAD_FLASH";
+    let _restore_nwg = ScopedEnvRemoval::remove(NWG_ENV);
+    let _restore_multihead = ScopedEnvRemoval::remove(MULTIHEAD_ENV);
+    let (candidate_nwg, candidate_name) = match args.glm_compact_multihead_nwg {
+        4 => ("4", "glm_compact_multihead_nwg4"),
+        8 => ("8", "glm_compact_multihead_nwg8"),
+        value => bail!("unsupported GLM compact multi-head nwg: {value}"),
+    };
+
+    unsafe {
+        std::env::set_var(NWG_ENV, "4");
+        std::env::remove_var(MULTIHEAD_ENV);
+    }
+    let baseline = run_microbench_case(
+        "glm_compact_flash_stock_nwg4",
+        selected_paths,
+        runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+
+    unsafe {
+        std::env::set_var(NWG_ENV, candidate_nwg);
+        std::env::set_var(MULTIHEAD_ENV, "1");
+    }
+    let candidate = run_microbench_case(
+        candidate_name,
+        selected_paths,
+        runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+    let parity = compare_case_outputs(&baseline.outputs, &candidate.outputs, args)?;
+    Ok(MicrobenchComparison {
+        baseline,
+        candidate,
+        parity,
+        poisoned_candidate: None,
+        poisoned_parity: None,
+        sideband_sensitivity: None,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_glm_packed_gather_comparison(
+    args: &GlmDsaLayerMicrobenchArgs,
+    selected_paths: &[PathBuf],
+    runtime_config: &RuntimeConfig,
+    input: &ActivationFrame,
+    token_ids: &[i32],
+    positions: &[i32],
+    flags: MicrobenchFlags,
+    deferred_model_drops: &mut Vec<StageModel>,
+) -> Result<MicrobenchComparison> {
+    const ROWS_ENV: &str = "LLAMA_GLM_DSA_EXPERIMENTAL_PACKED_GATHER_ROWS_PER_TG";
+    const THREADS_ENV: &str = "LLAMA_GLM_DSA_EXPERIMENTAL_PACKED_GATHER_THREADS_PER_ROW";
+    let _restore_rows = ScopedEnvRemoval::remove(ROWS_ENV);
+    let _restore_threads = ScopedEnvRemoval::remove(THREADS_ENV);
+    unsafe {
+        std::env::set_var(ROWS_ENV, "1");
+        std::env::set_var(THREADS_ENV, "64");
+    }
+    let baseline = run_microbench_case(
+        "glm_packed_gather_stock",
+        selected_paths,
+        runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+
+    unsafe {
+        std::env::set_var(ROWS_ENV, "16");
+        std::env::set_var(THREADS_ENV, "32");
+    }
+    let candidate = run_microbench_case(
+        "glm_packed_gather_rows16_threads32",
+        selected_paths,
+        runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+    let parity = compare_case_outputs(&baseline.outputs, &candidate.outputs, args)?;
+    Ok(MicrobenchComparison {
+        baseline,
+        candidate,
+        parity,
+        poisoned_candidate: None,
+        poisoned_parity: None,
+        sideband_sensitivity: None,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_glm_compact_split_exact_comparison(
+    args: &GlmDsaLayerMicrobenchArgs,
+    selected_paths: &[PathBuf],
+    runtime_config: &RuntimeConfig,
+    input: &ActivationFrame,
+    token_ids: &[i32],
+    positions: &[i32],
+    flags: MicrobenchFlags,
+    deferred_model_drops: &mut Vec<StageModel>,
+) -> Result<MicrobenchComparison> {
+    const SPLIT_ENV: &str = "GGML_METAL_EXPERIMENTAL_GLM_COMPACT_SPLIT_EXACT";
+    const NWG_ENV: &str = "LLAMA_GLM_DSA_COMPACT_FLASH_NWG";
+    let _restore_split = ScopedEnvRemoval::remove(SPLIT_ENV);
+    let _restore_nwg = ScopedEnvRemoval::remove(NWG_ENV);
+    unsafe {
+        std::env::set_var(NWG_ENV, "4");
+    }
+    let baseline = run_microbench_case(
+        "glm_compact_flash_stock",
+        selected_paths,
+        runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+
+    unsafe {
+        std::env::set_var(SPLIT_ENV, "1");
+    }
+    let candidate = run_microbench_case(
+        "glm_compact_flash_split_exact",
+        selected_paths,
+        runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+    let parity = compare_case_outputs(&baseline.outputs, &candidate.outputs, args)?;
+    Ok(MicrobenchComparison {
+        baseline,
+        candidate,
+        parity,
+        poisoned_candidate: None,
+        poisoned_parity: None,
+        sideband_sensitivity: None,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_glm_absorbed_qkv_phase_comparison(
+    args: &GlmDsaLayerMicrobenchArgs,
+    selected_paths: &[PathBuf],
+    runtime_config: &RuntimeConfig,
+    input: &ActivationFrame,
+    token_ids: &[i32],
+    positions: &[i32],
+    flags: MicrobenchFlags,
+    deferred_model_drops: &mut Vec<StageModel>,
+) -> Result<MicrobenchComparison> {
+    const PHASE_ENV: &str = "GGML_METAL_EXPERIMENTAL_GLM_ABSORBED_QKV_PHASES";
+    let _restore_phase = ScopedEnvRemoval::remove(PHASE_ENV);
+    let baseline = run_microbench_case(
+        "glm_absorbed_q_fusion_off",
+        selected_paths,
+        runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+    unsafe {
+        std::env::set_var(PHASE_ENV, "1");
+    }
+    let candidate = run_microbench_case(
+        "glm_absorbed_q_fusion_on",
+        selected_paths,
+        runtime_config,
+        args,
+        args.layer_start,
+        args.layer_end,
+        flags,
+        input,
+        token_ids,
+        positions,
+        true,
+        deferred_model_drops,
+    )?;
+    if flags.metal_dispatch_log
+        && !candidate
+            .metal_dispatch_records
+            .iter()
+            .any(|record| record.op == "glm_absorbed_q_fused")
+    {
+        bail!("absorbed-Q fusion candidate did not dispatch on the selected real layer span");
+    }
     let parity = compare_case_outputs(&baseline.outputs, &candidate.outputs, args)?;
     Ok(MicrobenchComparison {
         baseline,
@@ -1532,6 +2456,349 @@ fn native_indexshare_candidate_warmup_source(
     }))
 }
 
+#[derive(Debug, Serialize)]
+struct GlmDsaBranchBatchParityReport {
+    command: &'static str,
+    model_id: String,
+    layer_start: u32,
+    layer_end: u32,
+    activation_width: u32,
+    hidden_max_abs_diff: f32,
+    sideband_exact: bool,
+    branch_parity: bool,
+    commit_hidden_max_abs_diff: f32,
+    commit_sideband_exact: bool,
+    commit_parity: bool,
+    serial_eval_us: u128,
+    branch_eval_us: u128,
+    raw_speedup: f64,
+}
+
+fn run_glm_dsa_branch_batch_parity(
+    args: &GlmDsaLayerMicrobenchArgs,
+    selected_paths: &[PathBuf],
+    runtime_config: &RuntimeConfig,
+    input: &ActivationFrame,
+) -> Result<()> {
+    if args.tokens != 3 {
+        bail!("--branch-batch-parity requires --tokens 3");
+    }
+    if args.position_start != 0 || args.kv_warmup_tokens != 0 {
+        bail!("--branch-batch-parity currently requires position_start=0 and kv_warmup_tokens=0");
+    }
+    configure_env_flags(
+        args,
+        MicrobenchFlags::from_args(args),
+        allow_compact_flash_auto(args),
+    );
+
+    let mut serial_config = runtime_config.clone();
+    serial_config.lane_count = 2;
+    serial_config.branch_sequence_capacity = 0;
+    serial_config.n_batch = Some(serial_config.n_batch.unwrap_or(3).max(3));
+    serial_config.n_ubatch = Some(serial_config.n_ubatch.unwrap_or(3).max(3));
+    let mut branch_config = runtime_config.clone();
+    branch_config.lane_count = 1;
+    branch_config.branch_sequence_capacity = 2;
+    branch_config.n_batch = Some(branch_config.n_batch.unwrap_or(4).max(4));
+    branch_config.n_ubatch = Some(branch_config.n_ubatch.unwrap_or(4).max(4));
+
+    let serial_model = StageModel::open_from_parts(selected_paths, &serial_config)
+        .context("open real GLM-DSA serial branch reference")?;
+    let branch_model = StageModel::open_from_parts(selected_paths, &branch_config)
+        .context("open real GLM-DSA branch-batch candidate")?;
+    let branch_mirror_model = StageModel::open_from_parts(selected_paths, &branch_config)
+        .context("open real GLM-DSA branch-batch mirror")?;
+    let mut serial_a = serial_model
+        .create_session()
+        .context("create GLM serial branch A")?;
+    let mut serial_b = serial_model
+        .create_session()
+        .context("create GLM serial branch B")?;
+    let mut branch = branch_model
+        .create_session()
+        .context("create GLM branch session")?;
+    let mut branch_mirror = branch_mirror_model
+        .create_session()
+        .context("create GLM branch mirror session")?;
+
+    let warm_input = select_activation_rows(input, &[0], args.activation_width, 1)?;
+    let _ = serial_a
+        .decode_step_frame(1, Some(&warm_input), 0)
+        .context("warm GLM serial branch A prefix")?;
+    let _ = serial_b
+        .decode_step_frame(1, Some(&warm_input), 0)
+        .context("warm GLM serial branch B prefix")?;
+    let _ = branch
+        .decode_step_frame(1, Some(&warm_input), 0)
+        .context("warm GLM branch prefix")?;
+    let _ = branch_mirror
+        .decode_step_frame(1, Some(&warm_input), 0)
+        .context("warm GLM branch mirror prefix")?;
+
+    let serial_input_a = select_activation_rows(input, &[0, 1], args.activation_width, 1)?;
+    let serial_input_b = select_activation_rows(input, &[0, 2], args.activation_width, 1)?;
+    let serial_started = Instant::now();
+    let (_, serial_output_a) = serial_a
+        .verify_tokens_frame(&[2, 3], Some(&serial_input_a), 0)
+        .context("run GLM serial branch A")?;
+    let (_, serial_output_b) = serial_b
+        .verify_tokens_frame(&[2, 4], Some(&serial_input_b), 0)
+        .context("run GLM serial branch B")?;
+    let serial_eval_us = serial_started.elapsed().as_micros();
+
+    let branch_input = select_activation_rows(input, &[0, 1, 2], args.activation_width, 2)?;
+    let branch_started = Instant::now();
+    let (predicted, branch_output) = branch
+        .verify_branch_batch_frame_sampled(
+            &[2, 3, 4],
+            &[0, 1, 1],
+            &[0, 2, 3, 4],
+            &[0, 1, 0, 1],
+            2,
+            None,
+            Some(&branch_input),
+            0,
+        )
+        .context("run real GLM-DSA branch batch")?;
+    let branch_eval_us = branch_started.elapsed().as_micros();
+    let (_, branch_mirror_output) = branch_mirror
+        .verify_branch_batch_frame_sampled(
+            &[2, 3, 4],
+            &[0, 1, 1],
+            &[0, 2, 3, 4],
+            &[0, 1, 0, 1],
+            2,
+            None,
+            Some(&branch_input),
+            0,
+        )
+        .context("run real GLM-DSA branch mirror")?;
+    if !predicted.is_empty() {
+        bail!("intermediate GLM layer unexpectedly produced branch tokens");
+    }
+
+    let comparisons = [
+        (0, &serial_output_a, 0),
+        (0, &serial_output_b, 0),
+        (1, &serial_output_a, 1),
+        (2, &serial_output_b, 1),
+    ];
+    let mut hidden_max_abs_diff = 0.0_f32;
+    let mut sideband_exact = true;
+    for (branch_row, serial_output, serial_row) in comparisons {
+        hidden_max_abs_diff = hidden_max_abs_diff.max(compare_hidden_rows(
+            &branch_output,
+            branch_row,
+            serial_output,
+            serial_row,
+            args.activation_width,
+        )?);
+    }
+    for row in 0..3 {
+        hidden_max_abs_diff = hidden_max_abs_diff.max(compare_hidden_rows(
+            &branch_output,
+            row,
+            &branch_mirror_output,
+            row,
+            args.activation_width,
+        )?);
+        sideband_exact &= compare_sideband_rows(
+            &branch_output,
+            row,
+            &branch_mirror_output,
+            row,
+            args.activation_width,
+        )?;
+    }
+    let branch_parity = hidden_max_abs_diff <= 1.0e-4 && sideband_exact;
+    if !branch_parity {
+        bail!(
+            "real GLM branch batch differs from serial execution or branch mirror: max_abs={hidden_max_abs_diff} mirror_sideband_exact={sideband_exact}"
+        );
+    }
+
+    branch
+        .commit_branch_batch(0, &[2, 3])
+        .context("commit real GLM branch A")?;
+    branch_mirror
+        .commit_branch_batch(0, &[2, 3])
+        .context("commit real GLM branch mirror A")?;
+    let (_, serial_commit_output) = serial_a
+        .decode_step_frame(5, Some(&warm_input), 0)
+        .context("run serial GLM post-commit reference")?;
+    let (_, branch_commit_output) = branch
+        .decode_step_frame(5, Some(&warm_input), 0)
+        .context("run GLM after branch commit")?;
+    let (_, branch_mirror_commit_output) = branch_mirror
+        .decode_step_frame(5, Some(&warm_input), 0)
+        .context("run GLM mirror after branch commit")?;
+    let commit_hidden_max_abs_diff = compare_hidden_rows(
+        &branch_commit_output,
+        0,
+        &serial_commit_output,
+        0,
+        args.activation_width,
+    )?
+    .max(compare_hidden_rows(
+        &branch_commit_output,
+        0,
+        &branch_mirror_commit_output,
+        0,
+        args.activation_width,
+    )?);
+    let commit_sideband_exact = compare_sideband_rows(
+        &branch_commit_output,
+        0,
+        &branch_mirror_commit_output,
+        0,
+        args.activation_width,
+    )?;
+    let commit_parity = commit_hidden_max_abs_diff <= 1.0e-4 && commit_sideband_exact;
+    if !commit_parity {
+        bail!(
+            "real GLM committed branch differs from serial execution: max_abs={commit_hidden_max_abs_diff} sideband_exact={commit_sideband_exact}"
+        );
+    }
+
+    let report = GlmDsaBranchBatchParityReport {
+        command: "glm-dsa-layer-microbench --branch-batch-parity",
+        model_id: args.model_id.clone(),
+        layer_start: args.layer_start,
+        layer_end: args.layer_end,
+        activation_width: args.activation_width,
+        hidden_max_abs_diff,
+        sideband_exact,
+        branch_parity,
+        commit_hidden_max_abs_diff,
+        commit_sideband_exact,
+        commit_parity,
+        serial_eval_us,
+        branch_eval_us,
+        raw_speedup: serial_eval_us as f64 / branch_eval_us.max(1) as f64,
+    };
+    let json =
+        serde_json::to_string_pretty(&report).context("serialize GLM branch parity report")?;
+    if let Some(path) = args.output.as_deref() {
+        fs::write(path, format!("{json}\n"))
+            .with_context(|| format!("write {}", path.display()))?;
+    }
+    println!("{json}");
+    Ok(())
+}
+
+fn select_activation_rows(
+    frame: &ActivationFrame,
+    rows: &[usize],
+    activation_width: u32,
+    sequence_count: u32,
+) -> Result<ActivationFrame> {
+    let source_tokens =
+        usize::try_from(frame.desc.token_count).context("frame token count exceeds usize")?;
+    if source_tokens == 0 || rows.is_empty() || rows.iter().any(|row| *row >= source_tokens) {
+        bail!("activation row selection is outside the source frame");
+    }
+    let hidden_row_bytes = usize::try_from(activation_width)
+        .context("activation width exceeds usize")?
+        .checked_mul(std::mem::size_of::<f32>())
+        .context("activation row byte count overflow")?;
+    let hidden_bytes = hidden_row_bytes
+        .checked_mul(source_tokens)
+        .context("activation hidden byte count overflow")?;
+    if frame.payload.len() < hidden_bytes {
+        bail!("activation frame is smaller than its hidden rows");
+    }
+    let sideband_bytes = frame.payload.len() - hidden_bytes;
+    if sideband_bytes % source_tokens != 0 {
+        bail!("activation sideband is not token-major");
+    }
+    let sideband_row_bytes = sideband_bytes / source_tokens;
+    let mut payload = Vec::with_capacity((hidden_row_bytes + sideband_row_bytes) * rows.len());
+    for row in rows {
+        let start = row * hidden_row_bytes;
+        payload.extend_from_slice(&frame.payload[start..start + hidden_row_bytes]);
+    }
+    for row in rows {
+        let start = hidden_bytes + row * sideband_row_bytes;
+        payload.extend_from_slice(&frame.payload[start..start + sideband_row_bytes]);
+    }
+    let mut desc = frame.desc;
+    desc.token_count = u32::try_from(rows.len()).context("selected row count exceeds u32")?;
+    desc.sequence_count = sequence_count;
+    desc.payload_bytes = u64::try_from(payload.len()).context("selected frame bytes exceed u64")?;
+    Ok(ActivationFrame { desc, payload })
+}
+
+fn compare_hidden_rows(
+    left: &ActivationFrame,
+    left_row: usize,
+    right: &ActivationFrame,
+    right_row: usize,
+    activation_width: u32,
+) -> Result<f32> {
+    let row_bytes = usize::try_from(activation_width)
+        .context("activation width exceeds usize")?
+        .checked_mul(std::mem::size_of::<f32>())
+        .context("activation row byte count overflow")?;
+    let left_bytes = activation_row_bytes(left, left_row, row_bytes, false)?;
+    let right_bytes = activation_row_bytes(right, right_row, row_bytes, false)?;
+    Ok(left_bytes
+        .chunks_exact(4)
+        .zip(right_bytes.chunks_exact(4))
+        .map(|(left, right)| {
+            (f32::from_ne_bytes(left.try_into().expect("four-byte f32"))
+                - f32::from_ne_bytes(right.try_into().expect("four-byte f32")))
+            .abs()
+        })
+        .fold(0.0_f32, f32::max))
+}
+
+fn compare_sideband_rows(
+    left: &ActivationFrame,
+    left_row: usize,
+    right: &ActivationFrame,
+    right_row: usize,
+    activation_width: u32,
+) -> Result<bool> {
+    let hidden_row_bytes = usize::try_from(activation_width)
+        .context("activation width exceeds usize")?
+        .checked_mul(std::mem::size_of::<f32>())
+        .context("activation row byte count overflow")?;
+    let left_sideband = activation_row_bytes(left, left_row, hidden_row_bytes, true)?;
+    let right_sideband = activation_row_bytes(right, right_row, hidden_row_bytes, true)?;
+    Ok(left_sideband == right_sideband)
+}
+
+fn activation_row_bytes<'a>(
+    frame: &'a ActivationFrame,
+    row: usize,
+    hidden_row_bytes: usize,
+    sideband: bool,
+) -> Result<&'a [u8]> {
+    let tokens =
+        usize::try_from(frame.desc.token_count).context("frame token count exceeds usize")?;
+    if tokens == 0 || row >= tokens {
+        bail!("activation comparison row is outside the frame");
+    }
+    let hidden_bytes = hidden_row_bytes
+        .checked_mul(tokens)
+        .context("activation hidden byte count overflow")?;
+    if frame.payload.len() < hidden_bytes {
+        bail!("activation frame is smaller than its hidden rows");
+    }
+    if !sideband {
+        let start = row * hidden_row_bytes;
+        return Ok(&frame.payload[start..start + hidden_row_bytes]);
+    }
+    let sideband_bytes = frame.payload.len() - hidden_bytes;
+    if sideband_bytes % tokens != 0 {
+        bail!("activation sideband is not token-major");
+    }
+    let sideband_row_bytes = sideband_bytes / tokens;
+    let start = hidden_bytes + row * sideband_row_bytes;
+    Ok(&frame.payload[start..start + sideband_row_bytes])
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_microbench_case(
     label: &'static str,
@@ -1584,7 +2851,9 @@ fn run_microbench_case_with_warmup(
 ) -> Result<MicrobenchCase> {
     configure_env_flags(args, flags, allow_compact_flash_auto);
     let mut native_logs = Some(NativeLogCapture::start(
-        flags.capture_native_logs() || args.trace_route_tensors,
+        flags.capture_native_logs()
+            || args.trace_route_tensors
+            || args.require_moe_q2_routed_down_proof,
     )?);
     let model = match StageModel::open_from_parts(selected_paths, runtime_config) {
         Ok(model) => model,
@@ -1649,8 +2918,13 @@ fn run_microbench_case_with_warmup(
         native_timings.compact_flash_policy_records,
         args.tokens,
     );
+    let execution_phase = expected_execution_phase(args);
     let (compact_flash_non_measured_policy_records, compact_flash_execution_policy_records) =
-        split_execution_compact_policy_records(compact_flash_policy_records.clone(), timings.len());
+        split_execution_compact_policy_records(
+            compact_flash_policy_records.clone(),
+            timings.len(),
+            execution_phase,
+        );
     let compact_flash_mask_records =
         retain_case_compact_mask_records(native_timings.compact_flash_mask_records, args.tokens);
     let (compact_flash_non_measured_mask_records, compact_flash_execution_mask_records) =
@@ -1658,7 +2932,11 @@ fn run_microbench_case_with_warmup(
     let direct_sparse_decision_records =
         retain_case_decision_records(native_timings.direct_sparse_decision_records, args.tokens);
     let (direct_sparse_non_measured_decision_records, direct_sparse_execution_decision_records) =
-        split_execution_decision_records(direct_sparse_decision_records.clone(), timings.len());
+        split_execution_decision_records(
+            direct_sparse_decision_records.clone(),
+            timings.len(),
+            execution_phase,
+        );
     Ok(MicrobenchCase {
         label,
         flags,
@@ -1859,8 +3137,7 @@ fn run_timed_iteration(
     outputs: &mut Vec<ActivationFrame>,
 ) -> Result<()> {
     let started = Instant::now();
-    let output = session
-        .prefill_chunk_frame_with_positions(token_ids, positions, Some(input), 0)
+    let output = run_timed_iteration_frame(session, args, input, token_ids, positions)
         .with_context(|| format!("run microbench iteration {run_index}"))?;
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     if run_index >= args.warmup {
@@ -1876,6 +3153,35 @@ fn run_timed_iteration(
         }
     }
     Ok(())
+}
+
+fn run_timed_iteration_frame(
+    session: &mut skippy_runtime::StageSession,
+    args: &GlmDsaLayerMicrobenchArgs,
+    input: &ActivationFrame,
+    token_ids: &[i32],
+    positions: &[i32],
+) -> Result<ActivationFrame> {
+    if args.verification_batch {
+        let (_predicted_tokens, output) = session
+            .verify_tokens_frame(token_ids, Some(input), 0)
+            .context("run verification microbench frame")?;
+        return Ok(output);
+    }
+
+    if args.tokens == 1 {
+        let token_id = *token_ids
+            .first()
+            .context("single-token decode microbench requires a token id")?;
+        let (_predicted_token, output) = session
+            .decode_step_frame(token_id, Some(input), 0)
+            .context("run single-token decode microbench frame")?;
+        return Ok(output);
+    }
+
+    session
+        .prefill_chunk_frame_with_positions(token_ids, positions, Some(input), 0)
+        .context("run prefill microbench frame")
 }
 
 fn should_reuse_kv_warmup_checkpoint(args: &GlmDsaLayerMicrobenchArgs) -> bool {
@@ -2234,8 +3540,31 @@ fn validate_args(args: &GlmDsaLayerMicrobenchArgs) -> Result<()> {
     if args.tokens == 0 {
         bail!("tokens must be greater than zero");
     }
+    if args.verification_batch && args.tokens == 1 {
+        bail!("verification_batch requires more than one token");
+    }
+    if args.branch_batch_parity
+        && (args.tokens != 3 || args.position_start != 0 || args.kv_warmup_tokens != 0)
+    {
+        bail!("branch_batch_parity requires tokens=3, position_start=0, and kv_warmup_tokens=0");
+    }
+    if args.multi_session_batch_parity
+        && (args.tokens < 2 || args.position_start != 0 || args.kv_warmup_tokens != 0)
+    {
+        bail!(
+            "multi_session_batch_parity requires tokens>=2, position_start=0, and kv_warmup_tokens=0"
+        );
+    }
+    if args.branch_batch_parity && args.multi_session_batch_parity {
+        bail!("branch_batch_parity and multi_session_batch_parity are mutually exclusive");
+    }
     if args.iterations == 0 {
         bail!("iterations must be greater than zero");
+    }
+    if args.compare_glm_projection_nsg_policy
+        && !(1..=7).contains(&args.glm_projection_nsg_policy_mask)
+    {
+        bail!("glm_projection_nsg_policy_mask must be between 1 and 7");
     }
     if args.activation_width == 0 {
         bail!("activation_width must be greater than zero");
@@ -2310,19 +3639,31 @@ fn validate_args(args: &GlmDsaLayerMicrobenchArgs) -> Result<()> {
         + usize::from(args.compare_cpu_direct_sparse)
         + usize::from(args.compare_metal_sparse_attn_threads_baseline.is_some())
         + usize::from(args.compare_selected_row_flash)
+        + usize::from(args.compare_glm_packed_gather)
+        + usize::from(args.compare_metal_topk_moe_route_fusion)
         + usize::from(args.compare_parallel_lightning_indexer)
+        + usize::from(args.compare_staged_lightning_indexer)
         + usize::from(args.compare_masked_top_k)
         + usize::from(args.compare_indexer_top_k)
         + usize::from(args.compare_decode_clip_top_k)
+        + usize::from(args.compare_moe_motif_coencode)
         + usize::from(args.compare_moe_down_weighted_fusion)
         + usize::from(args.compare_moe_down_weighted_parallel)
         + usize::from(args.compare_moe_down_unweighted_slots)
+        + usize::from(args.compare_moe_q2_down_weighted_slots)
+        + usize::from(args.compare_moe_q2_down_weighted_reduce_direct)
         + usize::from(args.compare_moe_q2_gate_up_swiglu)
+        + usize::from(args.compare_glm_moe_two_phase)
+        + usize::from(args.compare_glm_moe_dual_lane)
+        + usize::from(args.compare_glm_compact_flash_nwg)
+        + usize::from(args.compare_glm_compact_multihead_flash)
+        + usize::from(args.compare_glm_compact_split_exact)
+        + usize::from(args.compare_glm_projection_nsg_policy)
+        + usize::from(args.compare_glm_retained_composition)
+        + usize::from(args.compare_glm_absorbed_qkv_phases)
         + usize::from(args.compare_native_indexshare_producer_consumer);
     if comparison_count > 1 {
-        bail!(
-            "compare_dense_fallback, compare_dense_flash_prefill, compare_cpu_direct_sparse, compare_metal_sparse_attn_threads_baseline, compare_selected_row_flash, compare_parallel_lightning_indexer, compare_masked_top_k, compare_indexer_top_k, compare_decode_clip_top_k, compare_moe_down_weighted_fusion, compare_moe_down_weighted_parallel, compare_moe_down_unweighted_slots, compare_moe_q2_gate_up_swiglu, and compare_native_indexshare_producer_consumer are mutually exclusive"
-        );
+        bail!("GLM-DSA comparison flags are mutually exclusive");
     }
     if real_top_k_warmup_source_layer_start(args)?.is_some() {
         if comparison_count > 0 {
@@ -2562,10 +3903,14 @@ fn configure_env_flags(
         "SKIPPY_GLM_DSA_DISABLE_COMPACT_FLASH_ATTN",
         !flags.compact_flash_attn && !allow_compact_flash_auto,
     );
-    set_env_flag(
-        "SKIPPY_GLM_DSA_EXPERIMENTAL_SELECTED_ROW_FLASH",
-        flags.selected_row_flash,
-    );
+    if flags.native_default_selected_row_flash {
+        clear_env("SKIPPY_GLM_DSA_EXPERIMENTAL_SELECTED_ROW_FLASH");
+    } else {
+        set_env_flag(
+            "SKIPPY_GLM_DSA_EXPERIMENTAL_SELECTED_ROW_FLASH",
+            flags.selected_row_flash,
+        );
+    }
     if flags.native_default_direct_sparse_prefill {
         clear_env("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_PREFILL");
         clear_env("SKIPPY_GLM_DSA_DISABLE_DIRECT_SPARSE_PREFILL");
@@ -2627,7 +3972,7 @@ fn configure_env_flags(
     );
     set_env_flag(
         "SKIPPY_GLM_DSA_LOG_METAL_DISPATCH",
-        flags.metal_dispatch_log,
+        flags.metal_dispatch_log || args.require_moe_q2_routed_down_proof,
     );
     set_env_flag("SKIPPY_GLM_DSA_TENSOR_TRACE", args.trace_route_tensors);
     set_env_flag(
@@ -2641,7 +3986,14 @@ fn configure_env_flags(
     );
     set_optional_env(
         "SKIPPY_GLM_DSA_TENSOR_TRACE_VALUES",
-        args.trace_route_tensors.then(|| "0".to_string()),
+        args.trace_route_tensors.then(|| {
+            std::env::var("SKIPPY_GLM_DSA_TENSOR_TRACE_VALUES_OVERRIDE")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or_else(|| args.tokens.saturating_mul(8))
+                .min(4096)
+                .to_string()
+        }),
     );
     set_optional_env(
         "SKIPPY_GLM_DSA_TENSOR_TRACE_NODES",
@@ -2653,16 +4005,38 @@ fn configure_env_flags(
         flags.moe_motif_coencode,
     );
     set_env_flag(
-        "SKIPPY_GLM_DSA_MOE_DOWN_WEIGHTED_FUSION",
-        flags.moe_down_weighted_fusion,
+        "GGML_METAL_ENABLE_GLM_MOE_DECODE_MOTIF_REFERENCE",
+        flags.moe_motif_coencode,
+    );
+    set_env_flag("SKIPPY_GLM_DSA_MOE_DOWN_WEIGHTED_FUSION", false);
+    set_env_flag("SKIPPY_GLM_DSA_EXPERIMENTAL_Q3_DOWN_WEIGHTED_FUSION", false);
+    set_env_flag(
+        "SKIPPY_GLM_DSA_EXPERIMENTAL_Q3_DOWN_WEIGHTED_REDUCE_DIRECT",
+        false,
     );
     set_env_flag(
-        "SKIPPY_GLM_DSA_EXPERIMENTAL_Q3_DOWN_WEIGHTED_FUSION",
-        flags.moe_down_weighted_fusion,
+        "SKIPPY_GLM_DSA_EXPERIMENTAL_Q2_DOWN_WEIGHTED_SLOTS",
+        flags.moe_q2_down_weighted_slots,
+    );
+    set_env_flag(
+        "SKIPPY_GLM_DSA_EXPERIMENTAL_Q2_DOWN_WEIGHTED_REDUCE_DIRECT",
+        flags.moe_q2_down_weighted_reduce_direct,
     );
     set_env_flag(
         "SKIPPY_GLM_DSA_EXPERIMENTAL_Q3_DOWN_WEIGHTED_PARALLEL",
         flags.moe_down_weighted_parallel,
+    );
+    set_env_flag(
+        "GGML_METAL_ENABLE_Q3_DOWN_SLOT_PARALLEL_REDUCE_R8_NB8",
+        flags.moe_down_weighted_parallel,
+    );
+    set_env_flag(
+        "GGML_GLM_DSA_EXPERIMENTAL_MOE_SHARED_FIRST",
+        flags.moe_down_weighted_parallel,
+    );
+    set_env_flag(
+        "GGML_GLM_DSA_EXPERIMENTAL_NATIVE_MOE_DOWN",
+        flags.moe_down_weighted_fusion,
     );
     set_env_flag(
         "SKIPPY_GLM_DSA_EXPERIMENTAL_Q3_DOWN_UNWEIGHTED_SLOTS",
@@ -2701,6 +4075,16 @@ fn configure_env_flags(
         flags
             .dense_sparse_mask_max_bytes
             .map(|max_bytes| max_bytes.to_string()),
+    );
+    set_optional_env(
+        "SKIPPY_GLM_DSA_DIRECT_SPARSE_DECODE_MAX_TOP_K",
+        flags
+            .direct_sparse_decode_max_top_k
+            .map(|max_top_k| max_top_k.to_string()),
+    );
+    set_optional_env(
+        "SKIPPY_GLM_DSA_COMPACT_FLASH_MIN_KV",
+        flags.compact_flash_min_kv.map(|min_kv| min_kv.to_string()),
     );
     set_optional_env(
         "SKIPPY_GLM_DSA_DIRECT_SPARSE_PREFILL_MIN_KV_TOPK_RATIO",
@@ -2823,7 +4207,7 @@ fn package_request(args: &GlmDsaLayerMicrobenchArgs) -> PackageStageRequest {
     package_request_for_range(args, args.layer_start, args.layer_end)
 }
 
-fn package_request_for_range(
+pub(super) fn package_request_for_range(
     args: &GlmDsaLayerMicrobenchArgs,
     layer_start: u32,
     layer_end: u32,
@@ -2844,7 +4228,7 @@ fn runtime_config(args: &GlmDsaLayerMicrobenchArgs) -> Result<RuntimeConfig> {
     runtime_config_for_range(args, args.layer_start, args.layer_end)
 }
 
-fn runtime_config_for_range(
+pub(super) fn runtime_config_for_range(
     args: &GlmDsaLayerMicrobenchArgs,
     layer_start: u32,
     layer_end: u32,
@@ -2855,6 +4239,7 @@ fn runtime_config_for_range(
         layer_end,
         ctx_size: args.ctx_size,
         lane_count: 1,
+        branch_sequence_capacity: 0,
         n_batch: Some(
             args.n_batch
                 .unwrap_or_else(|| bounded_u32(runtime_batch_tokens(args))),
@@ -2899,6 +4284,17 @@ fn runtime_glm_dsa_policy(args: &GlmDsaLayerMicrobenchArgs) -> GlmDsaPolicyConfi
         compact_flash_min_kv: Some(1),
         ..GlmDsaPolicyConfig::glm_dsa_v1()
     }
+}
+
+fn runtime_config_with_compact_flash(runtime_config: &RuntimeConfig) -> RuntimeConfig {
+    let mut adjusted = runtime_config.clone();
+    let policy = adjusted
+        .glm_dsa_policy
+        .get_or_insert_with(GlmDsaPolicyConfig::glm_dsa_v1);
+    policy.direct_sparse_attn = true;
+    policy.disable_compact_flash_attn = false;
+    policy.compact_flash_min_kv = Some(1);
+    adjusted
 }
 
 fn bounded_u32(value: usize) -> u32 {
@@ -3769,14 +5165,11 @@ fn expected_real_top_k_sideband_width(args: &GlmDsaLayerMicrobenchArgs) -> Resul
 }
 
 fn real_top_k_sideband_width_is_valid(
-    tokens: usize,
+    _tokens: usize,
     actual_width: usize,
     expected_width: usize,
 ) -> bool {
-    if tokens > 1 {
-        return actual_width <= expected_width;
-    }
-    actual_width == expected_width
+    actual_width > 0 && expected_width > 0 && actual_width <= expected_width
 }
 
 fn poison_top_k_sideband(
@@ -4770,6 +6163,7 @@ fn retain_case_compact_mask_records(
 fn split_execution_decision_records(
     records: Vec<DirectSparseDecisionRecord>,
     measured_iterations: usize,
+    expected_phase: &str,
 ) -> (
     Vec<DirectSparseDecisionRecord>,
     Vec<DirectSparseDecisionRecord>,
@@ -4777,24 +6171,55 @@ fn split_execution_decision_records(
     if records.is_empty() || measured_iterations == 0 {
         return (records, Vec::new());
     }
-    let execution_count = records.len().min(measured_iterations);
-    let split_at = records.len() - execution_count;
-    let non_measured = records[..split_at].to_vec();
-    let execution = records[split_at..].to_vec();
-    (non_measured, execution)
+    split_records_for_expected_phase(records, measured_iterations, expected_phase, |record| {
+        record.phase.as_deref()
+    })
 }
 
 fn split_execution_compact_policy_records(
     records: Vec<CompactFlashPolicyRecord>,
     measured_iterations: usize,
+    expected_phase: &str,
 ) -> (Vec<CompactFlashPolicyRecord>, Vec<CompactFlashPolicyRecord>) {
     if records.is_empty() || measured_iterations == 0 {
         return (records, Vec::new());
     }
-    let execution_count = records.len().min(measured_iterations);
-    let split_at = records.len() - execution_count;
-    let non_measured = records[..split_at].to_vec();
-    let execution = records[split_at..].to_vec();
+    split_records_for_expected_phase(records, measured_iterations, expected_phase, |record| {
+        record.phase.as_deref()
+    })
+}
+
+fn split_records_for_expected_phase<T, F>(
+    records: Vec<T>,
+    measured_iterations: usize,
+    expected_phase: &str,
+    phase: F,
+) -> (Vec<T>, Vec<T>)
+where
+    F: Fn(&T) -> Option<&str>,
+{
+    let matching_records = records
+        .iter()
+        .filter(|record| phase(record) == Some(expected_phase))
+        .count();
+    let skip_matching = matching_records.saturating_sub(measured_iterations);
+    let mut matching_index = 0;
+    let mut non_measured = Vec::with_capacity(records.len().saturating_sub(measured_iterations));
+    let mut execution = Vec::with_capacity(measured_iterations.min(matching_records));
+
+    for record in records {
+        if phase(&record) == Some(expected_phase) {
+            if matching_index >= skip_matching {
+                execution.push(record);
+            } else {
+                non_measured.push(record);
+            }
+            matching_index += 1;
+        } else {
+            non_measured.push(record);
+        }
+    }
+
     (non_measured, execution)
 }
 
@@ -5057,6 +6482,7 @@ fn compare_activation_frames(
         hidden_max_abs_diff: hidden.max_abs_diff,
         hidden_max_rel_diff: hidden.max_rel_diff,
         first_hidden_mismatch: hidden.first_mismatch,
+        hidden_stats: hidden.stats,
         sideband_exact_match: sideband.exact_match,
         sideband_semantic_match: sideband.semantic_match,
         sideband_bytes: sideband.compared_bytes,
@@ -5097,6 +6523,12 @@ fn compare_hidden_payloads(
     let mut max_abs_diff = 0.0f32;
     let mut max_rel_diff = 0.0f32;
     let mut first_mismatch = None;
+    let mut baseline_values = Vec::with_capacity(baseline.len() / std::mem::size_of::<f32>());
+    let mut candidate_values = Vec::with_capacity(candidate.len() / std::mem::size_of::<f32>());
+    let mut baseline_sum = 0.0f64;
+    let mut candidate_sum = 0.0f64;
+    let mut baseline_max_abs = 0.0f32;
+    let mut candidate_max_abs = 0.0f32;
     for (index, (baseline_bytes, candidate_bytes)) in baseline
         .chunks_exact(std::mem::size_of::<f32>())
         .zip(candidate.chunks_exact(std::mem::size_of::<f32>()))
@@ -5112,6 +6544,12 @@ fn compare_hidden_payloads(
                 .try_into()
                 .with_context(|| format!("read candidate f32 at {index}"))?,
         );
+        baseline_sum += f64::from(baseline_value);
+        candidate_sum += f64::from(candidate_value);
+        baseline_max_abs = baseline_max_abs.max(baseline_value.abs());
+        candidate_max_abs = candidate_max_abs.max(candidate_value.abs());
+        baseline_values.push(baseline_value);
+        candidate_values.push(candidate_value);
         let abs_diff = (baseline_value - candidate_value).abs();
         let scale = baseline_value
             .abs()
@@ -5131,13 +6569,37 @@ fn compare_hidden_payloads(
             });
         }
     }
+    let first_mismatch_match = first_mismatch
+        .as_ref()
+        .and_then(|mismatch| find_nearest_hidden_value(&baseline_values, mismatch.candidate));
     Ok(HiddenComparison {
         value_count: baseline.len() / std::mem::size_of::<f32>(),
         mismatches,
         max_abs_diff,
         max_rel_diff,
         first_mismatch,
+        stats: HiddenStats {
+            baseline_sum,
+            candidate_sum,
+            baseline_max_abs,
+            candidate_max_abs,
+            first_candidate_value_nearest_baseline: first_mismatch_match,
+        },
     })
+}
+
+fn find_nearest_hidden_value(values: &[f32], needle: f32) -> Option<NearestHiddenValue> {
+    values
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, value)| value.is_finite() && needle.is_finite())
+        .map(|(index, value)| NearestHiddenValue {
+            index,
+            value,
+            abs_diff: (value - needle).abs(),
+        })
+        .min_by(|left, right| left.abs_diff.total_cmp(&right.abs_diff))
 }
 
 fn values_close(baseline: f32, candidate: f32, atol: f32, rtol: f32) -> bool {
@@ -5472,6 +6934,7 @@ struct HiddenComparison {
     max_abs_diff: f32,
     max_rel_diff: f32,
     first_mismatch: Option<HiddenMismatch>,
+    stats: HiddenStats,
 }
 
 struct SidebandComparison {
@@ -5554,6 +7017,7 @@ struct MicrobenchReport {
     ctx_size: u32,
     activation_width: u32,
     tokens: usize,
+    verification_batch: bool,
     position_start: i32,
     kv_warmup_tokens: usize,
     kv_warmup_chunk_tokens: usize,
@@ -5611,6 +7075,8 @@ struct MicrobenchReport {
     compact_flash_guard: Option<CompactFlashGuardReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     moe_weighted_sum_guard: Option<MoeWeightedSumGuardReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moe_q2_routed_down_guard: Option<MoeQ2RoutedDownGuardReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     moe_q2_gate_up_swiglu_guard: Option<MoeQ2GateUpSwigluGuardReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5887,6 +7353,14 @@ fn measured_timing_phase(tokens: usize) -> &'static str {
     if tokens == 1 { "decode" } else { "prefill" }
 }
 
+fn expected_execution_phase(args: &GlmDsaLayerMicrobenchArgs) -> &'static str {
+    if args.verification_batch {
+        "verify"
+    } else {
+        measured_timing_phase(args.tokens)
+    }
+}
+
 #[derive(Serialize)]
 struct RouteFusionGuardReport {
     checked_case: &'static str,
@@ -5998,9 +7472,22 @@ struct MoeWeightedSumGuardReport {
     moe_weighted_sum_f32x4_records: usize,
     moe_weighted_sum_already_weighted_records: usize,
     mul_mv_id_weighted_sum_fused_records: usize,
+    mul_mv_id_weighted_sum_fused_q2_k_records: usize,
     mul_mv_id_weighted_sum_fused_q3_k_records: usize,
+    mul_mv_id_q2_down_weighted_reduce_records: usize,
     mul_mv_id_weighted_slots_records: usize,
+    mul_mv_id_weighted_slots_q2_k_records: usize,
     mul_mv_id_weighted_slots_q3_k_records: usize,
+    failure_summary: String,
+}
+
+#[derive(Serialize)]
+struct MoeQ2RoutedDownGuardReport {
+    checked_case: &'static str,
+    passed: bool,
+    routed_moe_down_records: usize,
+    routed_moe_down_q2_k_records: usize,
+    routed_moe_down_q3_k_records: usize,
     failure_summary: String,
 }
 
@@ -6008,6 +7495,7 @@ struct MoeWeightedSumGuardReport {
 struct MoeQ2GateUpSwigluGuardReport {
     checked_case: &'static str,
     passed: bool,
+    native_path_supported: bool,
     mul_mv_id_q2_gate_up_swiglu_records: usize,
     failure_summary: String,
 }
@@ -6016,16 +7504,19 @@ struct MoeQ2GateUpSwigluGuardReport {
 enum MoeWeightedSumRequirement {
     AnyOptimizedPath,
     FusedWeightedDown,
-    WeightedSlots,
+    WeightedSlotsOrQ2Unweighted,
     UnweightedSlots,
 }
 
 impl MoeWeightedSumRequirement {
     fn from_flags(flags: MicrobenchFlags) -> Self {
-        if flags.moe_down_weighted_fusion {
+        if flags.moe_down_weighted_fusion
+            || flags.moe_down_weighted_parallel
+            || flags.moe_q2_down_weighted_reduce_direct
+        {
             Self::FusedWeightedDown
-        } else if flags.moe_down_weighted_parallel {
-            Self::WeightedSlots
+        } else if flags.moe_q2_down_weighted_slots {
+            Self::WeightedSlotsOrQ2Unweighted
         } else if flags.moe_down_unweighted_slots {
             Self::UnweightedSlots
         } else {
@@ -6037,7 +7528,7 @@ impl MoeWeightedSumRequirement {
         match self {
             Self::AnyOptimizedPath => "any_optimized_path",
             Self::FusedWeightedDown => "fused_weighted_down",
-            Self::WeightedSlots => "weighted_slots",
+            Self::WeightedSlotsOrQ2Unweighted => "weighted_slots_or_q2_unweighted",
             Self::UnweightedSlots => "unweighted_slots",
         }
     }
@@ -6838,23 +8329,36 @@ fn build_moe_weighted_sum_guard_with_requirement(
     let standalone_weighted_sum_ok = dispatch.moe_weighted_sum_records > 0
         && dispatch.moe_weighted_sum_f32x4_records == dispatch.moe_weighted_sum_records;
     let fused_weighted_sum_ok = dispatch.mul_mv_id_weighted_sum_fused_records > 0
-        && dispatch.mul_mv_id_weighted_sum_fused_q3_k_records
+        && supported_quantized_weighted_sum_fused_records(dispatch)
             == dispatch.mul_mv_id_weighted_sum_fused_records;
+    let q2_down_weighted_reduce_ok = dispatch.mul_mv_id_q2_down_weighted_reduce_records > 0;
     let parallel_weighted_slots_ok = dispatch.mul_mv_id_weighted_slots_records > 0
-        && dispatch.mul_mv_id_weighted_slots_q3_k_records
+        && supported_quantized_weighted_slots_records(dispatch)
             == dispatch.mul_mv_id_weighted_slots_records
         && dispatch.moe_weighted_sum_already_weighted_records > 0;
+    let q2_routed_down_unweighted_ok =
+        q2_routed_down_unweighted_weighted_parallel_ok(dispatch, standalone_weighted_sum_ok);
     let unweighted_slots_ok = dispatch.mul_mv_id_weighted_slots_records > 0
-        && dispatch.mul_mv_id_weighted_slots_q3_k_records
+        && supported_quantized_weighted_slots_records(dispatch)
             == dispatch.mul_mv_id_weighted_slots_records
         && standalone_weighted_sum_ok;
 
     let passed = match requirement {
         MoeWeightedSumRequirement::AnyOptimizedPath => {
-            standalone_weighted_sum_ok || fused_weighted_sum_ok || parallel_weighted_slots_ok
+            standalone_weighted_sum_ok
+                || fused_weighted_sum_ok
+                || q2_down_weighted_reduce_ok
+                || parallel_weighted_slots_ok
         }
-        MoeWeightedSumRequirement::FusedWeightedDown => fused_weighted_sum_ok,
-        MoeWeightedSumRequirement::WeightedSlots => parallel_weighted_slots_ok,
+        MoeWeightedSumRequirement::FusedWeightedDown => {
+            fused_weighted_sum_ok || q2_down_weighted_reduce_ok
+        }
+        MoeWeightedSumRequirement::WeightedSlotsOrQ2Unweighted => {
+            parallel_weighted_slots_ok
+                || (dispatch.routed_moe_down_q2_k_records > 0
+                    && dispatch.routed_moe_down_q3_k_records == 0
+                    && q2_routed_down_unweighted_ok)
+        }
         MoeWeightedSumRequirement::UnweightedSlots => unweighted_slots_ok,
     };
 
@@ -6869,9 +8373,10 @@ fn build_moe_weighted_sum_guard_with_requirement(
                 failures.push("required_fused_weighted_down");
                 append_fused_weighted_down_failures(dispatch, &mut failures);
             }
-            MoeWeightedSumRequirement::WeightedSlots => {
-                failures.push("required_weighted_slots");
+            MoeWeightedSumRequirement::WeightedSlotsOrQ2Unweighted => {
+                failures.push("required_weighted_slots_or_q2_unweighted");
                 append_weighted_slots_failures(dispatch, &mut failures);
+                append_q2_routed_down_unweighted_failures(dispatch, &mut failures);
             }
             MoeWeightedSumRequirement::UnweightedSlots => {
                 failures.push("required_unweighted_slots");
@@ -6888,10 +8393,61 @@ fn build_moe_weighted_sum_guard_with_requirement(
         moe_weighted_sum_already_weighted_records: dispatch
             .moe_weighted_sum_already_weighted_records,
         mul_mv_id_weighted_sum_fused_records: dispatch.mul_mv_id_weighted_sum_fused_records,
+        mul_mv_id_weighted_sum_fused_q2_k_records: dispatch
+            .mul_mv_id_weighted_sum_fused_q2_k_records,
         mul_mv_id_weighted_sum_fused_q3_k_records: dispatch
             .mul_mv_id_weighted_sum_fused_q3_k_records,
+        mul_mv_id_q2_down_weighted_reduce_records: dispatch
+            .mul_mv_id_q2_down_weighted_reduce_records,
         mul_mv_id_weighted_slots_records: dispatch.mul_mv_id_weighted_slots_records,
+        mul_mv_id_weighted_slots_q2_k_records: dispatch.mul_mv_id_weighted_slots_q2_k_records,
         mul_mv_id_weighted_slots_q3_k_records: dispatch.mul_mv_id_weighted_slots_q3_k_records,
+        failure_summary: if failures.is_empty() {
+            "none".to_string()
+        } else {
+            failures.join(",")
+        },
+    }
+}
+
+fn supported_quantized_weighted_sum_fused_records(dispatch: &GlmDsaDispatchSummary) -> usize {
+    dispatch.mul_mv_id_weighted_sum_fused_q2_k_records
+        + dispatch.mul_mv_id_weighted_sum_fused_q3_k_records
+}
+
+fn supported_quantized_weighted_slots_records(dispatch: &GlmDsaDispatchSummary) -> usize {
+    dispatch.mul_mv_id_weighted_slots_q2_k_records + dispatch.mul_mv_id_weighted_slots_q3_k_records
+}
+
+fn q2_routed_down_unweighted_weighted_parallel_ok(
+    dispatch: &GlmDsaDispatchSummary,
+    standalone_weighted_sum_ok: bool,
+) -> bool {
+    dispatch.routed_moe_down_q2_k_records > 0
+        && dispatch.routed_moe_down_q3_k_records == 0
+        && dispatch.mul_mv_id_weighted_slots_records == 0
+        && dispatch.moe_weighted_sum_already_weighted_records == 0
+        && standalone_weighted_sum_ok
+}
+
+fn build_moe_q2_routed_down_guard(candidate: &MicrobenchCaseSummary) -> MoeQ2RoutedDownGuardReport {
+    let dispatch = &candidate.metal_dispatch_summary;
+    let mut failures = Vec::new();
+    if dispatch.routed_moe_down_records == 0 {
+        failures.push("missing_routed_moe_down_dispatch");
+    }
+    if dispatch.routed_moe_down_q2_k_records == 0 {
+        failures.push("missing_q2_k_routed_moe_down_dispatch");
+    }
+    if dispatch.routed_moe_down_q3_k_records > 0 {
+        failures.push("q3_k_routed_moe_down_dispatch_present");
+    }
+    MoeQ2RoutedDownGuardReport {
+        checked_case: candidate.label,
+        passed: failures.is_empty(),
+        routed_moe_down_records: dispatch.routed_moe_down_records,
+        routed_moe_down_q2_k_records: dispatch.routed_moe_down_q2_k_records,
+        routed_moe_down_q3_k_records: dispatch.routed_moe_down_q3_k_records,
         failure_summary: if failures.is_empty() {
             "none".to_string()
         } else {
@@ -6902,15 +8458,23 @@ fn build_moe_weighted_sum_guard_with_requirement(
 
 fn build_moe_q2_gate_up_swiglu_guard(
     candidate: &MicrobenchCaseSummary,
+    optimized_probe: Option<&MicrobenchCaseSummary>,
 ) -> MoeQ2GateUpSwigluGuardReport {
-    let dispatch = &candidate.metal_dispatch_summary;
+    const NATIVE_PATH_SUPPORTED: bool = true;
+
+    let checked = optimized_probe.unwrap_or(candidate);
+    let dispatch = &checked.metal_dispatch_summary;
     let mut failures = Vec::new();
+    if !NATIVE_PATH_SUPPORTED {
+        failures.push("unsupported_native_q2_gate_up_swiglu_path");
+    }
     if dispatch.mul_mv_id_q2_gate_up_swiglu_records == 0 {
         failures.push("missing_mul_mv_id_q2_gate_up_swiglu");
     }
     MoeQ2GateUpSwigluGuardReport {
-        checked_case: candidate.label,
+        checked_case: checked.label,
         passed: failures.is_empty(),
+        native_path_supported: NATIVE_PATH_SUPPORTED,
         mul_mv_id_q2_gate_up_swiglu_records: dispatch.mul_mv_id_q2_gate_up_swiglu_records,
         failure_summary: if failures.is_empty() {
             "none".to_string()
@@ -6944,14 +8508,16 @@ fn append_fused_weighted_down_failures(
     dispatch: &GlmDsaDispatchSummary,
     failures: &mut Vec<&'static str>,
 ) {
-    if dispatch.mul_mv_id_weighted_sum_fused_records == 0 {
-        failures.push("missing_mul_mv_id_weighted_sum_fused");
+    if dispatch.mul_mv_id_weighted_sum_fused_records == 0
+        && dispatch.mul_mv_id_q2_down_weighted_reduce_records == 0
+    {
+        failures.push("missing_fused_weighted_down_dispatch");
     }
     if dispatch.mul_mv_id_weighted_sum_fused_records > 0
-        && dispatch.mul_mv_id_weighted_sum_fused_q3_k_records
+        && supported_quantized_weighted_sum_fused_records(dispatch)
             != dispatch.mul_mv_id_weighted_sum_fused_records
     {
-        failures.push("non_q3_k_mul_mv_id_weighted_sum_fused_present");
+        failures.push("unsupported_quantized_mul_mv_id_weighted_sum_fused_present");
     }
 }
 
@@ -6963,14 +8529,33 @@ fn append_weighted_slots_failures(
         failures.push("missing_mul_mv_id_weighted_slots");
     }
     if dispatch.mul_mv_id_weighted_slots_records > 0
-        && dispatch.mul_mv_id_weighted_slots_q3_k_records
+        && supported_quantized_weighted_slots_records(dispatch)
             != dispatch.mul_mv_id_weighted_slots_records
     {
-        failures.push("non_q3_k_mul_mv_id_weighted_slots_present");
+        failures.push("unsupported_quantized_mul_mv_id_weighted_slots_present");
     }
     if dispatch.moe_weighted_sum_already_weighted_records == 0 {
         failures.push("missing_already_weighted_moe_weighted_sum");
     }
+}
+
+fn append_q2_routed_down_unweighted_failures(
+    dispatch: &GlmDsaDispatchSummary,
+    failures: &mut Vec<&'static str>,
+) {
+    if dispatch.routed_moe_down_q2_k_records == 0 {
+        failures.push("missing_q2_k_routed_moe_down_dispatch");
+    }
+    if dispatch.routed_moe_down_q3_k_records > 0 {
+        failures.push("q3_k_routed_moe_down_dispatch_present");
+    }
+    if dispatch.mul_mv_id_weighted_slots_records > 0 {
+        failures.push("weighted_slots_present_for_q2_routed_down");
+    }
+    if dispatch.moe_weighted_sum_already_weighted_records > 0 {
+        failures.push("already_weighted_sum_present_for_q2_routed_down");
+    }
+    append_standalone_weighted_sum_failures(dispatch, failures);
 }
 
 fn append_unweighted_slots_failures(
@@ -6981,10 +8566,10 @@ fn append_unweighted_slots_failures(
         failures.push("missing_mul_mv_id_weighted_slots");
     }
     if dispatch.mul_mv_id_weighted_slots_records > 0
-        && dispatch.mul_mv_id_weighted_slots_q3_k_records
+        && supported_quantized_weighted_slots_records(dispatch)
             != dispatch.mul_mv_id_weighted_slots_records
     {
-        failures.push("non_q3_k_mul_mv_id_weighted_slots_present");
+        failures.push("unsupported_quantized_mul_mv_id_weighted_slots_present");
     }
     if dispatch.moe_weighted_sum_already_weighted_records > 0 {
         failures.push("already_weighted_moe_weighted_sum_present");
@@ -7242,6 +8827,7 @@ struct MicrobenchFlags {
     compact_flash_attn: bool,
     allow_compact_flash_auto: bool,
     selected_row_flash: bool,
+    native_default_selected_row_flash: bool,
     direct_sparse_prefill: bool,
     native_default_direct_sparse_prefill: bool,
     enable_unproven_large_direct_sparse_prefill: bool,
@@ -7260,11 +8846,15 @@ struct MicrobenchFlags {
     moe_down_weighted_fusion: bool,
     moe_down_weighted_parallel: bool,
     moe_down_unweighted_slots: bool,
+    moe_q2_down_weighted_slots: bool,
+    moe_q2_down_weighted_reduce_direct: bool,
     moe_q2_gate_up_swiglu: bool,
     sparse_attn_threads: Option<u32>,
     sparse_attn_group_heads: Option<u32>,
     lightning_indexer_threads: Option<u32>,
     dense_sparse_mask_max_bytes: Option<u64>,
+    direct_sparse_decode_max_top_k: Option<u32>,
+    compact_flash_min_kv: Option<u32>,
     direct_sparse_prefill_min_kv_topk_ratio: Option<u32>,
 }
 
@@ -7276,6 +8866,7 @@ impl MicrobenchFlags {
             compact_flash_attn: args.compact_flash_attn,
             allow_compact_flash_auto: args.allow_compact_flash_auto,
             selected_row_flash: args.selected_row_flash,
+            native_default_selected_row_flash: args.native_default_selected_row_flash,
             direct_sparse_prefill: args.direct_sparse_prefill,
             native_default_direct_sparse_prefill: args.native_default_direct_sparse_prefill,
             enable_unproven_large_direct_sparse_prefill: args
@@ -7296,11 +8887,15 @@ impl MicrobenchFlags {
             moe_down_weighted_fusion: args.moe_down_weighted_fusion,
             moe_down_weighted_parallel: args.moe_down_weighted_parallel,
             moe_down_unweighted_slots: args.moe_down_unweighted_slots,
+            moe_q2_down_weighted_slots: args.moe_q2_down_weighted_slots,
+            moe_q2_down_weighted_reduce_direct: args.moe_q2_down_weighted_reduce_direct,
             moe_q2_gate_up_swiglu: args.moe_q2_gate_up_swiglu,
             sparse_attn_threads: args.sparse_attn_threads,
             sparse_attn_group_heads: args.sparse_attn_group_heads,
             lightning_indexer_threads: args.lightning_indexer_threads,
             dense_sparse_mask_max_bytes: args.dense_sparse_mask_max_bytes,
+            direct_sparse_decode_max_top_k: args.direct_sparse_decode_max_top_k,
+            compact_flash_min_kv: args.compact_flash_min_kv,
             direct_sparse_prefill_min_kv_topk_ratio: args.direct_sparse_prefill_min_kv_topk_ratio,
         }
     }
@@ -7320,6 +8915,8 @@ fn should_run_optimized_dispatch_probe(
         || ((flags.moe_down_weighted_fusion
             || flags.moe_down_weighted_parallel
             || flags.moe_down_unweighted_slots
+            || flags.moe_q2_down_weighted_slots
+            || flags.moe_q2_down_weighted_reduce_direct
             || flags.moe_q2_gate_up_swiglu)
             && !flags.metal_dispatch_log)
 }
@@ -7842,6 +9439,7 @@ struct FrameParity {
     hidden_max_rel_diff: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     first_hidden_mismatch: Option<HiddenMismatch>,
+    hidden_stats: HiddenStats,
     sideband_exact_match: bool,
     sideband_semantic_match: bool,
     sideband_bytes: usize,
@@ -7859,6 +9457,23 @@ struct HiddenMismatch {
     candidate: f32,
     abs_diff: f32,
     rel_diff: f32,
+}
+
+#[derive(Clone, Serialize)]
+struct HiddenStats {
+    baseline_sum: f64,
+    candidate_sum: f64,
+    baseline_max_abs: f32,
+    candidate_max_abs: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    first_candidate_value_nearest_baseline: Option<NearestHiddenValue>,
+}
+
+#[derive(Clone, Serialize)]
+struct NearestHiddenValue {
+    index: usize,
+    value: f32,
+    abs_diff: f32,
 }
 
 #[derive(Serialize)]
@@ -8358,6 +9973,41 @@ mod tests {
     }
 
     #[test]
+    fn execution_decisions_select_the_requested_phase() {
+        let mut prefill = direct_sparse_decode_decision(true);
+        prefill.phase = Some("prefill".to_string());
+        let mut verify = direct_sparse_decode_decision(true);
+        verify.phase = Some("verify".to_string());
+        let trailing_prefill = prefill.clone();
+
+        let (non_measured, execution) = split_execution_decision_records(
+            vec![prefill, verify.clone(), trailing_prefill],
+            1,
+            "verify",
+        );
+
+        assert_eq!(execution, vec![verify]);
+        assert_eq!(non_measured.len(), 2);
+        assert!(
+            non_measured
+                .iter()
+                .all(|record| record.phase.as_deref() == Some("prefill"))
+        );
+    }
+
+    #[test]
+    fn execution_decisions_do_not_substitute_another_phase() {
+        let mut prefill = direct_sparse_decode_decision(true);
+        prefill.phase = Some("prefill".to_string());
+
+        let (non_measured, execution) =
+            split_execution_decision_records(vec![prefill.clone()], 1, "verify");
+
+        assert!(execution.is_empty());
+        assert_eq!(non_measured, vec![prefill]);
+    }
+
+    #[test]
     fn partial_top_k_guard_accepts_optimized_dispatch_probe() {
         let mut candidate = case_summary("candidate", 0, 0, 0);
         candidate.timings.push(IterationTiming {
@@ -8746,6 +10396,7 @@ mod tests {
         assert_eq!(guard.moe_weighted_sum_records, 4);
         assert_eq!(guard.moe_weighted_sum_f32x4_records, 4);
         assert_eq!(guard.mul_mv_id_weighted_sum_fused_records, 0);
+        assert_eq!(guard.mul_mv_id_weighted_sum_fused_q2_k_records, 0);
         assert_eq!(guard.mul_mv_id_weighted_sum_fused_q3_k_records, 0);
         assert_eq!(guard.failure_summary, "none");
     }
@@ -8767,6 +10418,7 @@ mod tests {
         assert_eq!(guard.moe_weighted_sum_records, 0);
         assert_eq!(guard.moe_weighted_sum_f32x4_records, 0);
         assert_eq!(guard.mul_mv_id_weighted_sum_fused_records, 4);
+        assert_eq!(guard.mul_mv_id_weighted_sum_fused_q2_k_records, 0);
         assert_eq!(guard.mul_mv_id_weighted_sum_fused_q3_k_records, 4);
         assert_eq!(guard.failure_summary, "none");
     }
@@ -8774,6 +10426,10 @@ mod tests {
     #[test]
     fn moe_weighted_sum_guard_accepts_q3_k_weighted_slots_dispatches() {
         let mut candidate = case_summary("candidate", 0, 0, 0);
+        candidate.metal_dispatch_summary.routed_moe_down_records = 4;
+        candidate
+            .metal_dispatch_summary
+            .routed_moe_down_q3_k_records = 4;
         candidate.metal_dispatch_summary.moe_weighted_sum_records = 4;
         candidate
             .metal_dispatch_summary
@@ -8792,8 +10448,151 @@ mod tests {
         assert_eq!(guard.moe_weighted_sum_records, 4);
         assert_eq!(guard.moe_weighted_sum_already_weighted_records, 4);
         assert_eq!(guard.mul_mv_id_weighted_slots_records, 4);
+        assert_eq!(guard.mul_mv_id_weighted_slots_q2_k_records, 0);
         assert_eq!(guard.mul_mv_id_weighted_slots_q3_k_records, 4);
         assert_eq!(guard.failure_summary, "none");
+    }
+
+    #[test]
+    fn moe_weighted_sum_guard_accepts_q2_routed_down_unweighted_parallel_bypass() {
+        let mut candidate = case_summary("candidate", 0, 0, 0);
+        candidate.metal_dispatch_summary.routed_moe_down_records = 4;
+        candidate
+            .metal_dispatch_summary
+            .routed_moe_down_q2_k_records = 4;
+        candidate.metal_dispatch_summary.moe_weighted_sum_records = 4;
+        candidate
+            .metal_dispatch_summary
+            .moe_weighted_sum_f32x4_records = 4;
+
+        let guard = build_moe_weighted_sum_guard_with_requirement(
+            &candidate,
+            MoeWeightedSumRequirement::WeightedSlotsOrQ2Unweighted,
+        );
+
+        assert!(guard.passed);
+        assert_eq!(guard.required_path, "weighted_slots_or_q2_unweighted");
+        assert_eq!(guard.moe_weighted_sum_records, 4);
+        assert_eq!(guard.moe_weighted_sum_f32x4_records, 4);
+        assert_eq!(guard.moe_weighted_sum_already_weighted_records, 0);
+        assert_eq!(guard.mul_mv_id_weighted_slots_records, 0);
+        assert_eq!(guard.failure_summary, "none");
+    }
+
+    #[test]
+    fn moe_weighted_sum_guard_accepts_q3_weighted_slots_parallel_path() {
+        let mut candidate = case_summary("candidate", 0, 0, 0);
+        candidate.metal_dispatch_summary.routed_moe_down_records = 4;
+        candidate
+            .metal_dispatch_summary
+            .routed_moe_down_q3_k_records = 4;
+        candidate.metal_dispatch_summary.moe_weighted_sum_records = 4;
+        candidate
+            .metal_dispatch_summary
+            .moe_weighted_sum_already_weighted_records = 4;
+        candidate
+            .metal_dispatch_summary
+            .mul_mv_id_weighted_slots_records = 4;
+        candidate
+            .metal_dispatch_summary
+            .mul_mv_id_weighted_slots_q3_k_records = 4;
+
+        let guard = build_moe_weighted_sum_guard_with_requirement(
+            &candidate,
+            MoeWeightedSumRequirement::WeightedSlotsOrQ2Unweighted,
+        );
+
+        assert!(guard.passed);
+        assert_eq!(guard.required_path, "weighted_slots_or_q2_unweighted");
+        assert_eq!(guard.mul_mv_id_weighted_slots_records, 4);
+        assert_eq!(guard.mul_mv_id_weighted_slots_q3_k_records, 4);
+        assert_eq!(guard.failure_summary, "none");
+    }
+
+    #[test]
+    fn moe_weighted_sum_guard_rejects_q2_weighted_slots_parallel_regression() {
+        let mut candidate = case_summary("candidate", 0, 0, 0);
+        candidate.metal_dispatch_summary.routed_moe_down_records = 4;
+        candidate
+            .metal_dispatch_summary
+            .routed_moe_down_q2_k_records = 4;
+        candidate.metal_dispatch_summary.moe_weighted_sum_records = 4;
+        candidate
+            .metal_dispatch_summary
+            .moe_weighted_sum_already_weighted_records = 4;
+        candidate
+            .metal_dispatch_summary
+            .mul_mv_id_weighted_slots_records = 4;
+        candidate
+            .metal_dispatch_summary
+            .mul_mv_id_weighted_slots_q2_k_records = 4;
+
+        let guard = build_moe_weighted_sum_guard_with_requirement(
+            &candidate,
+            MoeWeightedSumRequirement::WeightedSlotsOrQ2Unweighted,
+        );
+
+        assert!(!guard.passed);
+        assert_eq!(guard.required_path, "weighted_slots_or_q2_unweighted");
+        assert!(
+            guard
+                .failure_summary
+                .contains("weighted_slots_present_for_q2_routed_down")
+        );
+    }
+
+    #[test]
+    fn moe_q2_routed_down_guard_accepts_q2_down_only() {
+        let mut candidate = case_summary("candidate", 0, 0, 0);
+        candidate.metal_dispatch_summary.routed_moe_down_records = 4;
+        candidate
+            .metal_dispatch_summary
+            .routed_moe_down_q2_k_records = 4;
+
+        let guard = build_moe_q2_routed_down_guard(&candidate);
+
+        assert!(guard.passed);
+        assert_eq!(guard.routed_moe_down_records, 4);
+        assert_eq!(guard.routed_moe_down_q2_k_records, 4);
+        assert_eq!(guard.routed_moe_down_q3_k_records, 0);
+        assert_eq!(guard.failure_summary, "none");
+    }
+
+    #[test]
+    fn moe_q2_routed_down_guard_rejects_missing_or_q3_down() {
+        let missing = case_summary("candidate", 0, 0, 0);
+
+        let guard = build_moe_q2_routed_down_guard(&missing);
+
+        assert!(!guard.passed);
+        assert!(
+            guard
+                .failure_summary
+                .contains("missing_routed_moe_down_dispatch")
+        );
+        assert!(
+            guard
+                .failure_summary
+                .contains("missing_q2_k_routed_moe_down_dispatch")
+        );
+
+        let mut q3 = case_summary("candidate", 0, 0, 0);
+        q3.metal_dispatch_summary.routed_moe_down_records = 4;
+        q3.metal_dispatch_summary.routed_moe_down_q3_k_records = 4;
+
+        let guard = build_moe_q2_routed_down_guard(&q3);
+
+        assert!(!guard.passed);
+        assert!(
+            guard
+                .failure_summary
+                .contains("missing_q2_k_routed_moe_down_dispatch")
+        );
+        assert!(
+            guard
+                .failure_summary
+                .contains("q3_k_routed_moe_down_dispatch_present")
+        );
     }
 
     #[test]
@@ -8842,7 +10641,7 @@ mod tests {
         assert!(
             guard
                 .failure_summary
-                .contains("non_q3_k_mul_mv_id_weighted_sum_fused_present")
+                .contains("unsupported_quantized_mul_mv_id_weighted_sum_fused_present")
         );
     }
 
@@ -8883,12 +10682,16 @@ mod tests {
 
         let guard = build_moe_weighted_sum_guard_with_requirement(
             &candidate,
-            MoeWeightedSumRequirement::WeightedSlots,
+            MoeWeightedSumRequirement::WeightedSlotsOrQ2Unweighted,
         );
 
         assert!(!guard.passed);
-        assert_eq!(guard.required_path, "weighted_slots");
-        assert!(guard.failure_summary.contains("required_weighted_slots"));
+        assert_eq!(guard.required_path, "weighted_slots_or_q2_unweighted");
+        assert!(
+            guard
+                .failure_summary
+                .contains("required_weighted_slots_or_q2_unweighted")
+        );
         assert!(
             guard
                 .failure_summary
@@ -8961,9 +10764,10 @@ mod tests {
     fn moe_q2_gate_up_swiglu_guard_requires_dispatch_record() {
         let missing = case_summary("candidate", 0, 0, 0);
 
-        let guard = build_moe_q2_gate_up_swiglu_guard(&missing);
+        let guard = build_moe_q2_gate_up_swiglu_guard(&missing, None);
 
         assert!(!guard.passed);
+        assert!(guard.native_path_supported);
         assert_eq!(guard.mul_mv_id_q2_gate_up_swiglu_records, 0);
         assert!(
             guard
@@ -8976,10 +10780,27 @@ mod tests {
             .metal_dispatch_summary
             .mul_mv_id_q2_gate_up_swiglu_records = 3;
 
-        let guard = build_moe_q2_gate_up_swiglu_guard(&present);
+        let guard = build_moe_q2_gate_up_swiglu_guard(&present, None);
 
         assert!(guard.passed);
+        assert!(guard.native_path_supported);
         assert_eq!(guard.mul_mv_id_q2_gate_up_swiglu_records, 3);
+        assert_eq!(guard.failure_summary, "none");
+    }
+
+    #[test]
+    fn moe_q2_gate_up_swiglu_guard_accepts_optimized_probe() {
+        let candidate = case_summary("candidate", 0, 0, 0);
+        let mut optimized_probe = case_summary("optimized_dispatch_probe", 0, 0, 0);
+        optimized_probe
+            .metal_dispatch_summary
+            .mul_mv_id_q2_gate_up_swiglu_records = 24;
+
+        let guard = build_moe_q2_gate_up_swiglu_guard(&candidate, Some(&optimized_probe));
+
+        assert!(guard.passed);
+        assert_eq!(guard.checked_case, "optimized_dispatch_probe");
+        assert_eq!(guard.mul_mv_id_q2_gate_up_swiglu_records, 24);
         assert_eq!(guard.failure_summary, "none");
     }
 
@@ -9155,21 +10976,14 @@ mod tests {
     }
 
     #[test]
-    fn real_top_k_frame_validation_rejects_high_position_width_one_sideband() {
+    fn real_top_k_frame_validation_accepts_short_decode_sideband_width() {
         let mut args = test_args();
         args.activation_width = 4;
         args.tokens = 1;
         args.position_start = 65536;
         let frame = top_k_frame_for_test(&args, 1);
 
-        let error = validate_real_top_k_frame_for_range(&args, &frame, 6, 7)
-            .unwrap_err()
-            .to_string();
-
-        assert!(
-            error.contains("wrong GLM-DSA top-k sideband width: expected=2048 actual=1"),
-            "{error}"
-        );
+        validate_real_top_k_frame_for_range(&args, &frame, 6, 7).unwrap();
     }
 
     #[test]
@@ -9191,6 +11005,7 @@ mod tests {
             compact_flash_attn: false,
             allow_compact_flash_auto: false,
             selected_row_flash: false,
+            native_default_selected_row_flash: false,
             direct_sparse_prefill: false,
             native_default_direct_sparse_prefill: false,
             enable_unproven_large_direct_sparse_prefill: false,
@@ -9209,11 +11024,15 @@ mod tests {
             moe_down_weighted_fusion: false,
             moe_down_weighted_parallel: false,
             moe_down_unweighted_slots: false,
+            moe_q2_down_weighted_slots: false,
+            moe_q2_down_weighted_reduce_direct: false,
             moe_q2_gate_up_swiglu: false,
             sparse_attn_threads: None,
             sparse_attn_group_heads: None,
             lightning_indexer_threads: None,
             dense_sparse_mask_max_bytes: None,
+            direct_sparse_decode_max_top_k: None,
+            compact_flash_min_kv: None,
             direct_sparse_prefill_min_kv_topk_ratio: None,
         };
 
@@ -9228,6 +11047,7 @@ mod tests {
             compact_flash_attn: false,
             allow_compact_flash_auto: false,
             selected_row_flash: false,
+            native_default_selected_row_flash: false,
             direct_sparse_prefill: false,
             native_default_direct_sparse_prefill: false,
             enable_unproven_large_direct_sparse_prefill: false,
@@ -9246,11 +11066,15 @@ mod tests {
             moe_down_weighted_fusion: false,
             moe_down_weighted_parallel: false,
             moe_down_unweighted_slots: false,
+            moe_q2_down_weighted_slots: false,
+            moe_q2_down_weighted_reduce_direct: false,
             moe_q2_gate_up_swiglu: false,
             sparse_attn_threads: None,
             sparse_attn_group_heads: None,
             lightning_indexer_threads: None,
             dense_sparse_mask_max_bytes: None,
+            direct_sparse_decode_max_top_k: None,
+            compact_flash_min_kv: None,
             direct_sparse_prefill_min_kv_topk_ratio: None,
         };
 
@@ -9265,6 +11089,7 @@ mod tests {
             compact_flash_attn: false,
             allow_compact_flash_auto: false,
             selected_row_flash: false,
+            native_default_selected_row_flash: false,
             direct_sparse_prefill: false,
             native_default_direct_sparse_prefill: false,
             enable_unproven_large_direct_sparse_prefill: false,
@@ -9283,11 +11108,15 @@ mod tests {
             moe_down_weighted_fusion: false,
             moe_down_weighted_parallel: false,
             moe_down_unweighted_slots: false,
+            moe_q2_down_weighted_slots: false,
+            moe_q2_down_weighted_reduce_direct: false,
             moe_q2_gate_up_swiglu: false,
             sparse_attn_threads: None,
             sparse_attn_group_heads: None,
             lightning_indexer_threads: None,
             dense_sparse_mask_max_bytes: None,
+            direct_sparse_decode_max_top_k: None,
+            compact_flash_min_kv: None,
             direct_sparse_prefill_min_kv_topk_ratio: None,
         };
 
@@ -9512,6 +11341,16 @@ mod tests {
 
         validate_args(&args).unwrap();
         assert_eq!(max_requested_position_end(&args).unwrap(), 4095);
+    }
+
+    #[test]
+    fn validate_args_rejects_single_token_verification_batch() {
+        let mut args = test_args();
+        args.verification_batch = true;
+
+        let error = validate_args(&args).unwrap_err().to_string();
+
+        assert!(error.contains("verification_batch requires more than one token"));
     }
 
     #[test]
@@ -10028,6 +11867,9 @@ mod tests {
             ctx_size: 4096,
             activation_width: 4,
             tokens: 1,
+            verification_batch: false,
+            branch_batch_parity: false,
+            multi_session_batch_parity: false,
             position_start: 0,
             kv_warmup_tokens: 0,
             kv_warmup_chunk_tokens: None,
@@ -10046,6 +11888,7 @@ mod tests {
             compact_flash_attn: false,
             allow_compact_flash_auto: false,
             selected_row_flash: false,
+            native_default_selected_row_flash: false,
             direct_sparse_prefill: false,
             native_default_direct_sparse_prefill: false,
             enable_unproven_large_direct_sparse_prefill: false,
@@ -10065,6 +11908,8 @@ mod tests {
             moe_down_weighted_fusion: false,
             moe_down_weighted_parallel: false,
             moe_down_unweighted_slots: false,
+            moe_q2_down_weighted_slots: false,
+            moe_q2_down_weighted_reduce_direct: false,
             moe_q2_gate_up_swiglu: false,
             sparse_attn_threads: None,
             sparse_attn_group_heads: None,
@@ -10072,6 +11917,8 @@ mod tests {
             indexshare_freq: None,
             indexshare_pattern: None,
             dense_sparse_mask_max_bytes: None,
+            direct_sparse_decode_max_top_k: None,
+            compact_flash_min_kv: None,
             direct_sparse_prefill_min_kv_topk_ratio: None,
             require_optimized_route_fusion: false,
             require_direct_sparse_prefill_proof: false,
@@ -10079,6 +11926,7 @@ mod tests {
             require_partial_top_k_proof: false,
             require_compact_flash_proof: false,
             require_moe_weighted_sum_proof: false,
+            require_moe_q2_routed_down_proof: false,
             require_moe_motif_proof: false,
             require_native_indexshare_proof: false,
             require_real_top_k_shared_consumer_proof: false,
@@ -10087,14 +11935,30 @@ mod tests {
             compare_cpu_direct_sparse: false,
             compare_metal_sparse_attn_threads_baseline: None,
             compare_selected_row_flash: false,
+            compare_glm_packed_gather: false,
+            compare_metal_topk_moe_route_fusion: false,
             compare_parallel_lightning_indexer: false,
+            compare_staged_lightning_indexer: false,
             compare_masked_top_k: false,
             compare_indexer_top_k: false,
             compare_decode_clip_top_k: false,
+            compare_moe_motif_coencode: false,
             compare_moe_down_weighted_fusion: false,
             compare_moe_down_weighted_parallel: false,
             compare_moe_down_unweighted_slots: false,
+            compare_moe_q2_down_weighted_slots: false,
+            compare_moe_q2_down_weighted_reduce_direct: false,
             compare_moe_q2_gate_up_swiglu: false,
+            compare_glm_moe_two_phase: false,
+            compare_glm_moe_dual_lane: false,
+            compare_glm_compact_flash_nwg: false,
+            compare_glm_compact_multihead_flash: false,
+            glm_compact_multihead_nwg: 8,
+            compare_glm_compact_split_exact: false,
+            compare_glm_projection_nsg_policy: false,
+            compare_glm_retained_composition: false,
+            compare_glm_absorbed_qkv_phases: false,
+            glm_projection_nsg_policy_mask: 7,
             compare_native_indexshare_producer_consumer: false,
             skip_native_indexshare_poison: false,
             parity_atol: 1.0e-3,
@@ -10102,6 +11966,25 @@ mod tests {
             allow_concurrent: false,
             output: None,
         }
+    }
+
+    #[test]
+    fn compact_comparison_runtime_clears_native_disable_flag() {
+        let args = test_args();
+        let runtime = runtime_config(&args).unwrap();
+        assert!(
+            runtime
+                .glm_dsa_policy
+                .as_ref()
+                .unwrap()
+                .disable_compact_flash_attn
+        );
+
+        let compact = runtime_config_with_compact_flash(&runtime);
+        let policy = compact.glm_dsa_policy.as_ref().unwrap();
+        assert!(policy.direct_sparse_attn);
+        assert!(!policy.disable_compact_flash_attn);
+        assert_eq!(policy.compact_flash_min_kv, Some(1));
     }
 
     #[test]
@@ -10456,6 +12339,20 @@ mod tests {
     }
 
     #[test]
+    fn validate_args_counts_retained_composition_as_comparison() {
+        let mut args = test_args();
+        args.compare_glm_retained_composition = true;
+        args.compare_glm_projection_nsg_policy = true;
+
+        let error = validate_args(&args).unwrap_err().to_string();
+
+        assert!(
+            error.contains("GLM-DSA comparison flags are mutually exclusive"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn validate_args_rejects_unsupported_sparse_attn_thread_width() {
         let mut args = test_args();
         args.sparse_attn_threads = Some(96);
@@ -10584,6 +12481,7 @@ mod tests {
                 compact_flash_attn: false,
                 allow_compact_flash_auto: false,
                 selected_row_flash: false,
+                native_default_selected_row_flash: false,
                 direct_sparse_prefill: true,
                 native_default_direct_sparse_prefill: false,
                 enable_unproven_large_direct_sparse_prefill: false,
@@ -10602,11 +12500,15 @@ mod tests {
                 moe_down_weighted_fusion: false,
                 moe_down_weighted_parallel: false,
                 moe_down_unweighted_slots: false,
+                moe_q2_down_weighted_slots: false,
+                moe_q2_down_weighted_reduce_direct: false,
                 moe_q2_gate_up_swiglu: false,
                 sparse_attn_threads: None,
                 sparse_attn_group_heads: None,
                 lightning_indexer_threads: None,
                 dense_sparse_mask_max_bytes: None,
+                direct_sparse_decode_max_top_k: None,
+                compact_flash_min_kv: None,
                 direct_sparse_prefill_min_kv_topk_ratio: None,
             },
             n_gpu_layers: -1,
@@ -10651,6 +12553,7 @@ mod tests {
                 compact_flash_attn: false,
                 allow_compact_flash_auto: false,
                 selected_row_flash: false,
+                native_default_selected_row_flash: false,
                 direct_sparse_prefill: false,
                 native_default_direct_sparse_prefill: false,
                 enable_unproven_large_direct_sparse_prefill: false,
@@ -10669,11 +12572,15 @@ mod tests {
                 moe_down_weighted_fusion: false,
                 moe_down_weighted_parallel: false,
                 moe_down_unweighted_slots: false,
+                moe_q2_down_weighted_slots: false,
+                moe_q2_down_weighted_reduce_direct: false,
                 moe_q2_gate_up_swiglu: false,
                 sparse_attn_threads: None,
                 sparse_attn_group_heads: None,
                 lightning_indexer_threads: None,
                 dense_sparse_mask_max_bytes: None,
+                direct_sparse_decode_max_top_k: None,
+                compact_flash_min_kv: None,
                 direct_sparse_prefill_min_kv_topk_ratio: None,
             },
             n_gpu_layers: -1,
@@ -11032,6 +12939,7 @@ mod tests {
         candidate.compact_flash_attn = true;
         candidate.allow_compact_flash_auto = true;
         candidate.selected_row_flash = true;
+        candidate.native_default_selected_row_flash = true;
         candidate.direct_sparse_prefill = true;
         candidate.native_default_direct_sparse_prefill = true;
         candidate.enable_unproven_large_direct_sparse_prefill = true;
@@ -11046,6 +12954,7 @@ mod tests {
         assert!(!baseline.compact_flash_attn);
         assert!(!baseline.allow_compact_flash_auto);
         assert!(!baseline.selected_row_flash);
+        assert!(!baseline.native_default_selected_row_flash);
         assert!(!baseline.direct_sparse_prefill);
         assert!(!baseline.native_default_direct_sparse_prefill);
         assert!(!baseline.enable_unproven_large_direct_sparse_prefill);
@@ -11061,6 +12970,7 @@ mod tests {
         candidate.compact_flash_attn = true;
         candidate.allow_compact_flash_auto = true;
         candidate.selected_row_flash = true;
+        candidate.native_default_selected_row_flash = true;
         candidate.direct_sparse_prefill = false;
         candidate.native_default_direct_sparse_prefill = true;
         candidate.enable_unproven_large_direct_sparse_prefill = true;
@@ -11076,6 +12986,7 @@ mod tests {
         assert!(!baseline.compact_flash_attn);
         assert!(!baseline.allow_compact_flash_auto);
         assert!(!baseline.selected_row_flash);
+        assert!(!baseline.native_default_selected_row_flash);
         assert!(!baseline.direct_sparse_prefill);
         assert!(!baseline.native_default_direct_sparse_prefill);
         assert!(!baseline.enable_unproven_large_direct_sparse_prefill);
@@ -11096,6 +13007,7 @@ mod tests {
             compact_flash_attn: false,
             allow_compact_flash_auto: false,
             selected_row_flash: false,
+            native_default_selected_row_flash: false,
             direct_sparse_prefill: true,
             native_default_direct_sparse_prefill: false,
             enable_unproven_large_direct_sparse_prefill: false,
@@ -11114,11 +13026,15 @@ mod tests {
             moe_down_weighted_fusion: false,
             moe_down_weighted_parallel: false,
             moe_down_unweighted_slots: false,
+            moe_q2_down_weighted_slots: false,
+            moe_q2_down_weighted_reduce_direct: false,
             moe_q2_gate_up_swiglu: false,
             sparse_attn_threads: None,
             sparse_attn_group_heads: None,
             lightning_indexer_threads: None,
             dense_sparse_mask_max_bytes: None,
+            direct_sparse_decode_max_top_k: None,
+            compact_flash_min_kv: None,
             direct_sparse_prefill_min_kv_topk_ratio: None,
         }
     }

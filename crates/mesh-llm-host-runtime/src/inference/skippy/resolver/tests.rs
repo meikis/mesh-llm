@@ -776,6 +776,42 @@ draft_max_tokens = 8
 }
 
 #[test]
+fn ngram_mode_selects_llama_native_proposals_and_disables_mtp() {
+    let mesh_config = parse_config(
+        r#"
+[defaults.speculative]
+mode = "ngram"
+ngram_min = 4
+ngram_max = 16
+"#,
+    );
+    let model_file = temp_model_file();
+    let resolved = resolve_skippy_config(SkippyConfigResolveRequest {
+        mesh_config: &mesh_config,
+        model_id: "Qwen/Qwen3-0.6B:Q4_K_M",
+        model_path: model_file.path(),
+        model_bytes: 4 * 1024 * 1024 * 1024,
+        allocatable_memory_bytes: None,
+        request_defaults: None,
+        package_generation: None,
+    })
+    .expect("ngram config should resolve");
+
+    assert_eq!(resolved.speculative.mode, "ngram");
+    assert!(!resolved.speculative.native_mtp_enabled);
+    assert_eq!(resolved.speculative.ngram_min, 4);
+    assert_eq!(resolved.speculative.ngram_max, 16);
+    let openai = resolved
+        .to_embedded_openai_args(4096, true)
+        .expect("embedded args should build");
+    assert!(openai.ngram_simple);
+    assert_eq!(openai.ngram_size_n, 12);
+    assert_eq!(openai.speculative_window_min, 4);
+    assert_eq!(openai.speculative_window, 16);
+    assert!(openai.adaptive_speculative_window);
+}
+
+#[test]
 fn layer_package_translation_does_not_treat_hf_ref_as_direct_gguf() {
     let config = MeshConfig::default();
     let package_ref = "hf://meshllm/Qwen3-8B-Q4_K_M-layers";

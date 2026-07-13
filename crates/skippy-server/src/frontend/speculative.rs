@@ -1,6 +1,55 @@
 use super::*;
 
 pub(super) const DRAFT_MODEL_PROPOSAL_SOURCE: &str = "draft-model";
+pub(super) const NGRAM_SIMPLE_PROPOSAL_SOURCE: &str = "ngram-simple";
+
+pub(super) struct NgramSimpleProposalSource {
+    context_tokens: Vec<i32>,
+    ngram_size: usize,
+    max_window: usize,
+}
+
+impl NgramSimpleProposalSource {
+    pub(super) fn new(ngram_size: usize, max_window: usize) -> Result<Self> {
+        if ngram_size == 0 {
+            bail!("ngram size must be greater than zero");
+        }
+        if max_window == 0 {
+            bail!("ngram speculative window must be greater than zero");
+        }
+        Ok(Self {
+            context_tokens: Vec::new(),
+            ngram_size,
+            max_window,
+        })
+    }
+}
+
+impl SpeculativeProposalSource for NgramSimpleProposalSource {
+    fn label(&self) -> &'static str {
+        NGRAM_SIMPLE_PROPOSAL_SOURCE
+    }
+
+    fn max_window(&self) -> usize {
+        self.max_window
+    }
+
+    fn reset_to_context(&mut self, context_tokens: &[i32]) -> Result<()> {
+        self.context_tokens.clear();
+        self.context_tokens.extend_from_slice(context_tokens);
+        Ok(())
+    }
+
+    fn propose(&mut self, current: i32, max_tokens: usize) -> Result<Vec<i32>> {
+        let Some((&last, history)) = self.context_tokens.split_last() else {
+            return Ok(Vec::new());
+        };
+        if last != current {
+            bail!("ngram proposal context ends with token {last}, but current token is {current}");
+        }
+        skippy_runtime::ngram_simple_draft(history, current, self.ngram_size, max_tokens)
+    }
+}
 
 pub(super) trait SpeculativeProposalSource {
     fn label(&self) -> &'static str;
@@ -58,6 +107,8 @@ pub(super) fn propose_from_source(
 
 #[derive(Default)]
 pub(super) struct OpenAiSpeculativeStats {
+    pub(super) proposal_attempts: usize,
+    pub(super) proposal_misses: usize,
     pub(super) windows: usize,
     pub(super) draft_tokens: usize,
     pub(super) accepted_tokens: usize,
@@ -151,6 +202,7 @@ impl OpenAiSpeculativeStats {
         decision: VerifySpanDecision,
         adaptive_window: &mut usize,
         adaptive_enabled: bool,
+        min_speculative_window: usize,
         max_speculative_window: usize,
     ) {
         self.accepted_tokens += decision.accepted_before_reject;
@@ -185,7 +237,12 @@ impl OpenAiSpeculativeStats {
                 self.observe_reject(decision);
                 self.early_reject_windows += 1;
                 self.repair_required_windows += 1;
-                self.shrink_adaptive_window(adaptive_window, adaptive_enabled, decision);
+                self.shrink_adaptive_window(
+                    adaptive_window,
+                    adaptive_enabled,
+                    min_speculative_window,
+                    decision,
+                );
             }
             VerifySpanDecisionKind::EarlyRejectStop => {
                 self.observe_reject(decision);
@@ -218,6 +275,7 @@ impl OpenAiSpeculativeStats {
         &mut self,
         adaptive_window: &mut usize,
         adaptive_enabled: bool,
+        min_speculative_window: usize,
         decision: VerifySpanDecision,
     ) {
         if !adaptive_enabled {
@@ -229,7 +287,7 @@ impl OpenAiSpeculativeStats {
         let next_window = (*adaptive_window)
             .saturating_sub(1)
             .max(repair_input_count)
-            .max(1);
+            .max(min_speculative_window);
         if next_window < *adaptive_window {
             *adaptive_window = next_window;
             self.adaptive_window_shrinks += 1;
@@ -237,11 +295,19 @@ impl OpenAiSpeculativeStats {
     }
 
     pub(super) fn insert_attrs(&self, attrs: &mut BTreeMap<String, Value>) {
-        if self.windows == 0 {
+        if self.proposal_attempts == 0 {
             attrs.insert("llama_stage.spec.enabled".to_string(), json!(false));
             return;
         }
         attrs.insert("llama_stage.spec.enabled".to_string(), json!(true));
+        attrs.insert(
+            "llama_stage.spec.proposal_attempts".to_string(),
+            json!(self.proposal_attempts),
+        );
+        attrs.insert(
+            "llama_stage.spec.proposal_misses".to_string(),
+            json!(self.proposal_misses),
+        );
         attrs.insert("llama_stage.spec.windows".to_string(), json!(self.windows));
         attrs.insert(
             "llama_stage.spec.proposed".to_string(),
@@ -490,8 +556,10 @@ impl OpenAiSpeculativeStats {
     }
 
     pub(super) fn diagnostics(&self) -> Option<GenerationSpecDiagnostics> {
-        (self.windows > 0).then(|| GenerationSpecDiagnostics {
+        (self.proposal_attempts > 0).then(|| GenerationSpecDiagnostics {
             enabled: true,
+            proposal_attempts: self.proposal_attempts,
+            proposal_misses: self.proposal_misses,
             windows: self.windows,
             proposed: self.draft_tokens,
             accepted: self.accepted_tokens,
@@ -688,6 +756,40 @@ mod tests {
         assert_eq!(proposal.source, "test-source");
         assert_eq!(proposal.requested_limit, 4);
         assert_eq!(proposal.tokens, vec![11, 12]);
+    }
+
+    #[test]
+    fn ngram_simple_source_uses_llama_history_and_resets_after_commit() {
+        let mut source = NgramSimpleProposalSource::new(3, 4).unwrap();
+        source
+            .reset_to_context(&[99, 1, 2, 3, 10, 11, 12, 13, 1, 2, 3])
+            .unwrap();
+
+        let proposal = propose_from_source(&mut source, 3, 4).unwrap();
+
+        assert_eq!(proposal.source, NGRAM_SIMPLE_PROPOSAL_SOURCE);
+        assert_eq!(proposal.tokens, vec![10, 11, 12, 13]);
+        source.reset_to_context(&[99, 8]).unwrap();
+        assert!(propose_from_source(&mut source, 8, 4).unwrap().is_empty());
+    }
+
+    #[test]
+    fn adaptive_window_does_not_shrink_below_declared_minimum() {
+        let mut stats = OpenAiSpeculativeStats::default();
+        let mut window = 8;
+        let early_reject = VerifySpanDecision {
+            kind: VerifySpanDecisionKind::EarlyReject,
+            accepted_before_reject: 0,
+            repair_input_count: Some(1),
+            commit_count: 1,
+        };
+
+        for _ in 0..16 {
+            stats.observe_verify_decision(early_reject, &mut window, true, 4, 16);
+        }
+
+        assert_eq!(window, 4);
+        assert_eq!(stats.adaptive_window_shrinks, 4);
     }
 
     #[test]

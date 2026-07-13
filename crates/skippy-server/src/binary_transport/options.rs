@@ -48,8 +48,11 @@ pub struct EmbeddedOpenAiStageOptions {
     pub spd_optimistic_decode: bool,
     pub spd_rolling_executor: bool,
     pub spd_optimistic_min_logit_margin: Option<f32>,
+    pub speculative_window_min: usize,
     pub speculative_window: usize,
     pub adaptive_speculative_window: bool,
+    pub ngram_simple: bool,
+    pub ngram_size_n: usize,
     pub draft_n_gpu_layers: Option<i32>,
 }
 
@@ -75,6 +78,16 @@ impl BinaryStageOptions {
         }
         if args.openai_spd_rolling_executor && !args.openai_spd_optimistic_decode {
             bail!("--openai-spd-rolling-executor requires --openai-spd-optimistic-decode");
+        }
+        if args.openai_ngram_simple && args.openai_ngram_size_n == 0 {
+            bail!("--openai-ngram-size-n must be greater than zero");
+        }
+        if args.openai_speculative_window_min == 0
+            || args.openai_speculative_window_min > args.openai_speculative_window
+        {
+            bail!(
+                "--openai-speculative-window-min must satisfy 0 < min <= --openai-speculative-window"
+            );
         }
         let wire_dtype = parse_wire_dtype(&args.activation_wire_dtype)?;
         let downstream_wire_condition =
@@ -112,11 +125,14 @@ impl BinaryStageOptions {
                 spd_optimistic_decode: args.openai_spd_optimistic_decode,
                 spd_rolling_executor: args.openai_spd_rolling_executor,
                 spd_optimistic_min_logit_margin: args.openai_spd_optimistic_min_logit_margin,
+                speculative_window_min: args.openai_speculative_window_min,
                 speculative_window: args.openai_speculative_window,
                 adaptive_speculative_window: args.openai_adaptive_speculative_window,
+                ngram_simple: args.openai_ngram_simple,
+                ngram_size_n: args.openai_ngram_size_n,
                 draft_n_gpu_layers: args.openai_draft_n_gpu_layers,
             });
-        let native_mtp_enabled = native_mtp_enabled_from_env();
+        let native_mtp_enabled = native_mtp_enabled_from_env() && !args.openai_ngram_simple;
         Ok(Self {
             config,
             topology,

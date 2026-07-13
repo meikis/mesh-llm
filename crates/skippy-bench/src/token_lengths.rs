@@ -76,6 +76,7 @@ pub fn token_lengths(args: TokenLengthsArgs) -> Result<()> {
             layer_end: args.layer_end,
             ctx_size: args.ctx_size,
             lane_count: 1,
+            branch_sequence_capacity: 0,
             n_batch: None,
             n_ubatch: None,
             n_threads: None,

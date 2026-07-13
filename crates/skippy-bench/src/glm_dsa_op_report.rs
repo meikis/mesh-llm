@@ -122,6 +122,8 @@ struct BackendEvidenceSummary {
     metal_dispatch_ops: BTreeMap<String, usize>,
     metal_compact_get_rows_records: usize,
     metal_compact_flash_no_mask_records: usize,
+    metal_selected_row_flash_records: usize,
+    metal_selected_row_flash_skip_records: usize,
     support: BackendSupportSummary,
 }
 
@@ -1458,11 +1460,26 @@ fn require_local_backend_evidence(path: &Path, summary: &LogSummary) -> Result<(
 fn require_metal_compact_dispatch(path: &Path, summary: &LogSummary) -> Result<()> {
     let backend = &summary.backend;
     let mut missing = Vec::new();
-    if backend.metal_compact_get_rows_records == 0 {
-        missing.push("metal_compact_get_rows");
+    if !backend_has_materialized_compact_path(backend)
+        && !backend_has_selected_row_flash_path(backend)
+    {
+        missing.push("metal_compact_get_rows+metal_compact_flash_no_mask");
+        missing.push("metal_selected_row_flash+metal_selected_row_flash_skip");
     }
-    if backend.metal_compact_flash_no_mask_records == 0 {
+    if backend.metal_selected_row_flash_records > 0
+        && backend.metal_selected_row_flash_skip_records == 0
+    {
+        missing.push("metal_selected_row_flash_skip");
+    }
+    if backend.metal_compact_get_rows_records > 0
+        && backend.metal_compact_flash_no_mask_records == 0
+    {
         missing.push("metal_compact_flash_no_mask");
+    }
+    if backend.metal_compact_flash_no_mask_records > 0
+        && backend.metal_compact_get_rows_records == 0
+    {
+        missing.push("metal_compact_get_rows");
     }
     if missing.is_empty() {
         return Ok(());
@@ -2223,6 +2240,12 @@ fn summarize_backend_evidence(
         if is_metal_compact_flash_no_mask(record) {
             summary.metal_compact_flash_no_mask_records += 1;
         }
+        if is_metal_selected_row_flash(record) {
+            summary.metal_selected_row_flash_records += 1;
+        }
+        if is_metal_selected_row_flash_skip(record) {
+            summary.metal_selected_row_flash_skip_records += 1;
+        }
     }
     summary.support = summarize_backend_support(&summary);
     summary
@@ -2236,10 +2259,19 @@ fn summarize_backend_support(summary: &BackendEvidenceSummary) -> BackendSupport
             && !summary.metal_device_names.is_empty(),
         metal_compute_observed: summary.compute_buffer_devices.contains_key("MTL0"),
         metal_dispatch_observed: summary.metal_dispatch_records > 0,
-        metal_compact_dispatch_observed: summary.metal_compact_get_rows_records > 0
-            && summary.metal_compact_flash_no_mask_records > 0,
+        metal_compact_dispatch_observed: backend_has_materialized_compact_path(summary)
+            || backend_has_selected_row_flash_path(summary),
         cuda_observed: summary.cuda_records > 0,
     }
+}
+
+fn backend_has_materialized_compact_path(summary: &BackendEvidenceSummary) -> bool {
+    summary.metal_compact_get_rows_records > 0 && summary.metal_compact_flash_no_mask_records > 0
+}
+
+fn backend_has_selected_row_flash_path(summary: &BackendEvidenceSummary) -> bool {
+    summary.metal_selected_row_flash_records > 0
+        && summary.metal_selected_row_flash_skip_records > 0
 }
 
 fn is_metal_compact_get_rows(record: &MetalDispatchRecord) -> bool {
@@ -2248,6 +2280,14 @@ fn is_metal_compact_get_rows(record: &MetalDispatchRecord) -> bool {
 
 fn is_metal_compact_flash_no_mask(record: &MetalDispatchRecord) -> bool {
     record.op == "flash_attn_ext" && record.mask_type.as_deref() == Some("none")
+}
+
+fn is_metal_selected_row_flash(record: &MetalDispatchRecord) -> bool {
+    record.op == "selected_row_flash"
+}
+
+fn is_metal_selected_row_flash_skip(record: &MetalDispatchRecord) -> bool {
+    record.op == "selected_row_flash_skip"
 }
 
 fn add_backend_runtime_line(summary: &mut BackendEvidenceSummary, line: &str) {
@@ -2863,6 +2903,8 @@ mod tests {
     const METAL_COMPACT_FLASH_NO_MASK_LINE: &str = "skippy: glm_dsa_metal_dispatch op=flash_attn_ext kernel=vec tensor=__fattn__-75 q_type=f32 k_type=f16 v_type=f16 mask_type=none dst_type=f32 q_width=576 v_width=512 batch=1 heads=64 stream=1 kv=17 grid_x=1 grid_y=64 grid_z=32 threads_x=32 threads_y=1 nwg=32";
     const METAL_ROUTE_ENCODE_CANDIDATE_LINE: &str = "skippy: glm_dsa_metal_dispatch op=topk_moe_route_encode tensor=blk.45.ffn_moe_probs candidate=UNARY/blk.45.ffn_moe_probs,RESHAPE/view reason=fused filtered_nodes=65 graph_nodes=71 graph_idx=30 grid_x=1 grid_y=1 grid_z=1 threads_x=1";
     const METAL_SELECTED_ROW_FLASH_CANDIDATE_LINE: &str = "skippy: glm_dsa_metal_dispatch op=selected_row_flash_candidate tensor=dsa_compact_k_topk_rows-30 reason=accepted_view next_tensor=__fattn__-30 generic=0 view=1 get_rows_uses=2 grid_x=0 grid_y=0 grid_z=0 threads_x=0";
+    const METAL_SELECTED_ROW_FLASH_LINE: &str = "skippy: glm_dsa_metal_dispatch op=selected_row_flash kernel=gather_vec tensor=__fattn__-30 q_type=f32 k_type=f16 top_k_type=i32 dst_type=f32 q_width=576 v_width=512 batch=1 heads=64 stream=1 kv=2048 top_k=2048 nwg=32 smem=81920 grid_x=1 grid_y=64 grid_z=32 threads_x=32 threads_y=1";
+    const METAL_SELECTED_ROW_FLASH_SKIP_LINE: &str = "skippy: glm_dsa_metal_dispatch op=selected_row_flash_skip tensor=dsa_compact_k_topk_rows-30 reason=deferred_to_flash grid_x=1 grid_y=1 grid_z=1 threads_x=1";
     const METAL_WEIGHTED_DOWN_CANDIDATE_LINE: &str = "skippy: glm_dsa_metal_dispatch op=mul_mat_id_weighted_down_candidate tensor=ffn_moe_down-45 next=ffn_gate-45 next_op=MUL_MAT shared_gate=ffn_gate-45 shared_up=ffn_up-45 weighted_sum=ffn_moe_out-45 weighted_sum_op=MOE_WEIGHTED_SUM reason=full_motif shared_branch=1 weighted_sum_uses_down=1 pair_fusable=0 subgraph_fusable=1 filtered_gap=0 graph_gap=0 weighted_sum_gap=2 weighted_sum_graph_gap=2 src0_type=q3_K src1_type=f32 ids_type=i32 dst_type=f32 experts=256 used_experts=8 tokens=1 grid_x=1 grid_y=1 grid_z=1 threads_x=1";
     const METAL_GLM_DSA_MOE_MOTIF_CANDIDATE_LINE: &str = "skippy: glm_dsa_metal_dispatch op=glm_dsa_moe_motif_candidate tensor=ffn_moe_down-45 shared_gate=ffn_gate-45 shared_up=ffn_up-45 weighted_sum=ffn_moe_out-45 reason=full_motif natural_order=1 backend_candidate=1 subgraph_fusable=1 motif_nodes=4 fusion_outputs=3 weighted_sum_gap=2 weighted_sum_graph_gap=2 src0_type=q3_K src1_type=f32 ids_type=i32 dst_type=f32 experts=256 used_experts=8 tokens=1 grid_x=1 grid_y=1 grid_z=1 threads_x=1";
     const COMPUTE_BUFFER_LINES: &str = "~llama_context:       MTL0 compute buffer size is 2421.0264 MiB, matches expectation of 2421.0264 MiB\n~llama_context:       MTL0 compute buffer size of 667.8496 MiB, does not match expectation of 507.0029 MiB\n~llama_context:        CPU compute buffer size is  24.0059 MiB, matches expectation of  24.0059 MiB\n~llama_context:        CPU compute buffer size is   0.0000 MiB, matches expectation of   0.0000 MiB, trailing native detail";
@@ -3347,12 +3389,68 @@ llama_context: n_ctx_seq     = 256";
     }
 
     #[test]
+    fn summarizes_selected_row_flash_as_compact_dispatch_evidence() {
+        let runtime_contract = parse_runtime_contract_summary(BACKEND_EVIDENCE_LINES);
+        let compute_buffers = parse_compute_buffer_records(BACKEND_EVIDENCE_LINES).unwrap();
+        let metal_dispatch = parse_metal_dispatch_records(&format!(
+            "{METAL_SELECTED_ROW_FLASH_SKIP_LINE}\n{METAL_SELECTED_ROW_FLASH_LINE}"
+        ))
+        .unwrap();
+        let backend = summarize_backend_evidence(
+            BACKEND_EVIDENCE_LINES,
+            &runtime_contract,
+            &compute_buffers,
+            &metal_dispatch,
+        );
+
+        assert_eq!(backend.metal_dispatch_records, 2);
+        assert_eq!(
+            backend.metal_dispatch_ops.get("selected_row_flash"),
+            Some(&1)
+        );
+        assert_eq!(
+            backend.metal_dispatch_ops.get("selected_row_flash_skip"),
+            Some(&1)
+        );
+        assert_eq!(backend.metal_compact_get_rows_records, 0);
+        assert_eq!(backend.metal_compact_flash_no_mask_records, 0);
+        assert_eq!(backend.metal_selected_row_flash_records, 1);
+        assert_eq!(backend.metal_selected_row_flash_skip_records, 1);
+        assert!(backend.support.metal_compact_dispatch_observed);
+    }
+
+    #[test]
     fn accepts_metal_compact_dispatch_guard() {
         let timing = parse_timing_records(LINE_WITH_COMPACT_GET_ROWS).unwrap();
         let runtime_contract = parse_runtime_contract_summary(BACKEND_EVIDENCE_LINES);
         let compute_buffers = parse_compute_buffer_records(BACKEND_EVIDENCE_LINES).unwrap();
         let metal_dispatch = parse_metal_dispatch_records(&format!(
             "{METAL_COMPACT_GET_ROWS_LINE}\n{METAL_COMPACT_FLASH_NO_MASK_LINE}"
+        ))
+        .unwrap();
+        let backend = summarize_backend_evidence(
+            BACKEND_EVIDENCE_LINES,
+            &runtime_contract,
+            &compute_buffers,
+            &metal_dispatch,
+        );
+        let summary = summarize_log(
+            "stage1.log".into(),
+            LogRecordInputs::new(&timing)
+                .with_runtime_contract(&runtime_contract)
+                .with_backend(&backend),
+        );
+
+        require_metal_compact_dispatch(Path::new("stage1.log"), &summary).unwrap();
+    }
+
+    #[test]
+    fn accepts_selected_row_flash_compact_dispatch_guard() {
+        let timing = parse_timing_records(LINE_WITH_COMPACT_GET_ROWS).unwrap();
+        let runtime_contract = parse_runtime_contract_summary(BACKEND_EVIDENCE_LINES);
+        let compute_buffers = parse_compute_buffer_records(BACKEND_EVIDENCE_LINES).unwrap();
+        let metal_dispatch = parse_metal_dispatch_records(&format!(
+            "{METAL_SELECTED_ROW_FLASH_SKIP_LINE}\n{METAL_SELECTED_ROW_FLASH_LINE}"
         ))
         .unwrap();
         let backend = summarize_backend_evidence(

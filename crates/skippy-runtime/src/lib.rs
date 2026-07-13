@@ -25,6 +25,7 @@ use skippy_ffi::{
 use tokio::sync::mpsc;
 
 mod devices;
+pub mod lookahead;
 pub mod package;
 mod runtime_events;
 pub mod spd;
@@ -595,6 +596,14 @@ fn summarize_native_log_line(line: &str) -> Option<NativeLogEvent> {
         });
     }
 
+    if let Some(params) = skippy_memory_breakdown_params(line) {
+        return Some(NativeLogEvent {
+            message: line.to_string(),
+            category: "memory",
+            params,
+        });
+    }
+
     if let Some((category, params)) = cpu_offload_diagnostic_params(line) {
         return Some(NativeLogEvent {
             message: line.to_string(),
@@ -686,6 +695,21 @@ fn glm_dsa_direct_sparse_decision_params(line: &str) -> Option<Vec<(String, Valu
             continue;
         };
         params.push((key.to_string(), json_value_from_text(value)));
+    }
+    Some(params)
+}
+
+fn skippy_memory_breakdown_params(line: &str) -> Option<Vec<(String, Value)>> {
+    let rest = line.strip_prefix("skippy: memory_breakdown ")?;
+    let mut params = Vec::new();
+    for part in rest.split_whitespace() {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        params.push((
+            key.to_string(),
+            json_value_from_text(value.trim_matches('"')),
+        ));
     }
     Some(params)
 }
@@ -923,6 +947,7 @@ pub struct RuntimeConfig {
     pub layer_end: u32,
     pub ctx_size: u32,
     pub lane_count: u32,
+    pub branch_sequence_capacity: u32,
     pub n_batch: Option<u32>,
     pub n_ubatch: Option<u32>,
     pub n_threads: Option<u32>,
@@ -970,6 +995,21 @@ impl RuntimeConfig {
         if self.n_threads_batch == Some(0) {
             return Err("n_threads_batch must be greater than zero when provided");
         }
+        if self.branch_sequence_capacity > 0 {
+            let required_sequences = self
+                .lane_count
+                .checked_mul(2_u32.saturating_add(self.branch_sequence_capacity))
+                .ok_or("branch sequence reservation overflows u32")?;
+            if self.n_batch.is_some_and(|value| value < required_sequences)
+                || self
+                    .n_ubatch
+                    .is_some_and(|value| value < required_sequences)
+            {
+                return Err(
+                    "n_batch and n_ubatch must cover all execution, checkpoint, and branch sequences",
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1006,6 +1046,8 @@ impl RuntimeConfig {
                 layer_end: i32::try_from(self.layer_end).context("layer_end exceeds i32")?,
                 ctx_size: i32::try_from(self.ctx_size).context("ctx_size exceeds i32")?,
                 lane_count: i32::try_from(self.lane_count).context("lane_count exceeds i32")?,
+                branch_sequence_capacity: i32::try_from(self.branch_sequence_capacity)
+                    .context("branch_sequence_capacity exceeds i32")?,
                 n_batch: i32::try_from(n_batch).context("n_batch exceeds i32")?,
                 n_ubatch: i32::try_from(n_ubatch).context("n_ubatch exceeds i32")?,
                 n_threads: self
@@ -1080,12 +1122,13 @@ impl RuntimeConfig {
             .unwrap_or_else(|| default_n_batch_for_lane_count(self.lane_count));
         let n_ubatch = self.n_ubatch.unwrap_or(LLAMA_SERVER_DEFAULT_N_UBATCH);
         format!(
-            "stage_index={} layers={}..{} ctx={} lanes={} n_batch={} n_ubatch={} n_gpu_layers={} backend={} cache_k={} cache_v={} flash_attn={:?} load_mode={:?} use_mmap={} use_mmap_prefetch={} use_mmap_buffer={} include_embeddings={} include_output={} filter_tensors_on_load={} glm_dsa_policy={}",
+            "stage_index={} layers={}..{} ctx={} lanes={} branch_sequences={} n_batch={} n_ubatch={} n_gpu_layers={} backend={} cache_k={} cache_v={} flash_attn={:?} load_mode={:?} use_mmap={} use_mmap_prefetch={} use_mmap_buffer={} include_embeddings={} include_output={} filter_tensors_on_load={} glm_dsa_policy={}",
             self.stage_index,
             self.layer_start,
             self.layer_end,
             self.ctx_size,
             self.lane_count,
+            self.branch_sequence_capacity,
             n_batch,
             n_ubatch,
             self.n_gpu_layers,
@@ -1137,6 +1180,7 @@ impl Default for RuntimeConfig {
             layer_end: 1,
             ctx_size: 512,
             lane_count: 1,
+            branch_sequence_capacity: 0,
             n_batch: Some(LLAMA_SERVER_DEFAULT_N_BATCH),
             n_ubatch: Some(LLAMA_SERVER_DEFAULT_N_UBATCH),
             n_threads: None,
@@ -3678,6 +3722,144 @@ impl StageSession {
         Ok((predicted, output_desc, output_payload))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_branch_batch_frame_sampled(
+        &mut self,
+        token_ids: &[i32],
+        position_offsets: &[u32],
+        sequence_offsets: &[u32],
+        sequence_ids: &[u32],
+        sequence_count: u32,
+        sampling: Option<&SamplingConfig>,
+        input: Option<&ActivationFrame>,
+        output_capacity: usize,
+    ) -> Result<(Vec<i32>, ActivationFrame)> {
+        if token_ids.is_empty() {
+            return Err(anyhow!("branch batch requires at least one token"));
+        }
+        if position_offsets.len() != token_ids.len() {
+            return Err(anyhow!("branch position count must match token count"));
+        }
+        if sequence_offsets.len() != token_ids.len() + 1 {
+            return Err(anyhow!(
+                "branch CSR offsets must contain token_count + 1 entries"
+            ));
+        }
+        if sequence_count == 0 {
+            return Err(anyhow!("branch sequence count must be greater than zero"));
+        }
+        let token_count =
+            u32::try_from(token_ids.len()).context("branch token count exceeds u32")?;
+        let membership_count =
+            u32::try_from(sequence_ids.len()).context("branch membership count exceeds u32")?;
+        let branch_desc = skippy_ffi::BranchBatchDesc {
+            version: 1,
+            token_count,
+            sequence_count,
+            sequence_membership_count: membership_count,
+        };
+        let input_desc = input.map(|frame| frame.desc.as_raw());
+        let input_desc_ptr = input_desc
+            .as_ref()
+            .map_or(ptr::null(), |desc| desc as *const RawActivationDesc);
+        let input_payload_ptr = input.map_or(ptr::null(), |frame| frame.payload.as_ptr().cast());
+        let raw_sampling = sampling.map(SamplingConfig::as_raw);
+        let sampling_ptr = raw_sampling
+            .as_ref()
+            .map_or(ptr::null(), |config| config as *const RawSamplingConfig);
+        let mut output_desc = RawActivationDesc {
+            version: 0,
+            dtype: ActivationDType::Unknown,
+            layout: ActivationLayout::Opaque,
+            producer_stage_index: -1,
+            layer_start: 0,
+            layer_end: 0,
+            token_count: 0,
+            sequence_count: 0,
+            payload_bytes: 0,
+            flags: 0,
+        };
+        let mut output_payload = vec![0_u8; output_capacity];
+        let mut output_bytes = 0usize;
+        let mut predicted = vec![0_i32; token_ids.len()];
+        let mut output_token_count = 0usize;
+        let mut error = ptr::null_mut();
+        let status = unsafe {
+            skippy_ffi::skippy_verify_branch_batch_frame_sampled(
+                self.raw,
+                &branch_desc,
+                token_ids.as_ptr(),
+                position_offsets.as_ptr(),
+                sequence_offsets.as_ptr(),
+                sequence_ids.as_ptr(),
+                sampling_ptr,
+                input_desc_ptr,
+                input_payload_ptr,
+                &mut output_desc,
+                output_payload.as_mut_ptr().cast(),
+                output_payload.len(),
+                &mut output_bytes,
+                predicted.as_mut_ptr(),
+                predicted.len(),
+                &mut output_token_count,
+                &mut error,
+            )
+        };
+        if status == Status::BufferTooSmall && output_bytes > output_payload.len() {
+            free_error(error);
+            return self.verify_branch_batch_frame_sampled(
+                token_ids,
+                position_offsets,
+                sequence_offsets,
+                sequence_ids,
+                sequence_count,
+                sampling,
+                input,
+                output_bytes,
+            );
+        }
+        ensure_ok(status, error)?;
+        predicted.truncate(output_token_count);
+        output_payload.truncate(output_bytes);
+        Ok((
+            predicted,
+            ActivationFrame {
+                desc: output_desc.into(),
+                payload: output_payload,
+            },
+        ))
+    }
+
+    pub fn commit_branch_batch(&mut self, sequence_id: u32, accepted_tokens: &[i32]) -> Result<()> {
+        if accepted_tokens.is_empty() {
+            return Err(anyhow!(
+                "branch commit requires at least one accepted token"
+            ));
+        }
+        let mut error = ptr::null_mut();
+        let status = unsafe {
+            skippy_ffi::skippy_commit_branch_batch(
+                self.raw,
+                sequence_id,
+                accepted_tokens.as_ptr(),
+                accepted_tokens.len(),
+                &mut error,
+            )
+        };
+        ensure_ok(status, error)?;
+        self.token_count = self
+            .token_count
+            .checked_add(u64::try_from(accepted_tokens.len()).context("token count exceeds u64")?)
+            .context("session token count overflow")?;
+        Ok(())
+    }
+
+    pub fn discard_branch_batch(&mut self) -> Result<()> {
+        let mut error = ptr::null_mut();
+        let status = unsafe { skippy_ffi::skippy_discard_branch_batch(self.raw, &mut error) };
+        ensure_ok(status, error)
+    }
+
     pub fn copy_output_activation_frame(
         &mut self,
         token_count: usize,
@@ -4246,6 +4428,46 @@ pub fn write_gguf_from_parts(
     ensure_ok(status, error)
 }
 
+pub fn ngram_simple_draft(
+    token_history: &[i32],
+    sampled_token: i32,
+    ngram_size: usize,
+    max_draft_tokens: usize,
+) -> Result<Vec<i32>> {
+    let ngram_size = u16::try_from(ngram_size).context("ngram size exceeds u16")?;
+    let max_draft_tokens =
+        u16::try_from(max_draft_tokens).context("maximum draft tokens exceeds u16")?;
+    if ngram_size == 0 || max_draft_tokens == 0 {
+        return Err(anyhow!("ngram and draft sizes must be greater than zero"));
+    }
+
+    let mut draft = vec![0_i32; usize::from(max_draft_tokens)];
+    let mut written = 0usize;
+    let mut error = ptr::null_mut();
+    let status = unsafe {
+        skippy_ffi::skippy_ngram_simple_draft(
+            token_history.as_ptr(),
+            token_history.len(),
+            sampled_token,
+            ngram_size,
+            max_draft_tokens,
+            draft.as_mut_ptr(),
+            draft.len(),
+            &mut written,
+            &mut error,
+        )
+    };
+    ensure_ok(status, error)?;
+    if written > draft.len() {
+        return Err(anyhow!(
+            "native ngram proposer wrote {written} tokens into capacity {}",
+            draft.len()
+        ));
+    }
+    draft.truncate(written);
+    Ok(draft)
+}
+
 fn format_skippy_error(status: Status, message: &str) -> String {
     if message.is_empty() {
         format!("{:?}", status)
@@ -4297,10 +4519,10 @@ mod tests {
         GlmDsaPolicyConfig, LLAMA_SERVER_DEFAULT_N_BATCH, LLAMA_SERVER_DEFAULT_N_UBATCH, ModelInfo,
         NativeLogAggregator, NativeLogEvent, RuntimeConfig, RuntimeLoadMode,
         SKIPPY_UNIFIED_KV_DEFAULT_N_BATCH, SamplingConfig, StageModel, Status, TensorRole,
-        flush_native_log_writer, format_skippy_error, parse_cache_type, parse_layer_assign_index,
-        redirect_native_logs_to_file, register_filtered_native_logs, restore_native_logs,
-        set_filtered_native_logs_enabled, unregister_filtered_native_logs, write_native_log,
-        write_native_log_note,
+        flush_native_log_writer, format_skippy_error, ngram_simple_draft, parse_cache_type,
+        parse_layer_assign_index, redirect_native_logs_to_file, register_filtered_native_logs,
+        restore_native_logs, set_filtered_native_logs_enabled, unregister_filtered_native_logs,
+        write_native_log, write_native_log_note,
     };
     use std::{
         env,
@@ -4315,6 +4537,16 @@ mod tests {
         },
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    #[test]
+    fn native_ngram_simple_replays_the_previous_matching_suffix() {
+        let history = [99, 1, 2, 3, 10, 11, 12, 13, 1, 2];
+
+        let draft = ngram_simple_draft(&history, 3, 3, 4).unwrap();
+
+        assert_eq!(draft, vec![10, 11, 12, 13]);
+        assert!(ngram_simple_draft(&history, 4, 3, 4).unwrap().is_empty());
+    }
     use tokio::sync::mpsc::error::TryRecvError;
 
     static NATIVE_LOG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -4374,6 +4606,38 @@ mod tests {
             batch_thread_config.validate(),
             Err("n_threads_batch must be greater than zero when provided")
         );
+    }
+
+    #[test]
+    fn runtime_config_requires_batch_capacity_for_branch_sequences() {
+        let config = RuntimeConfig {
+            lane_count: 1,
+            branch_sequence_capacity: 2,
+            n_batch: Some(3),
+            n_ubatch: Some(3),
+            ..RuntimeConfig::default()
+        };
+
+        assert_eq!(
+            config.validate(),
+            Err("n_batch and n_ubatch must cover all execution, checkpoint, and branch sequences")
+        );
+    }
+
+    #[test]
+    fn runtime_config_maps_branch_sequence_capacity_to_native_abi() -> anyhow::Result<()> {
+        let config = RuntimeConfig {
+            lane_count: 1,
+            branch_sequence_capacity: 2,
+            n_batch: Some(4),
+            n_ubatch: Some(4),
+            ..RuntimeConfig::default()
+        };
+
+        let raw = config.as_raw()?;
+        assert_eq!(raw.raw.branch_sequence_capacity, 2);
+        assert!(config.native_log_summary().contains("branch_sequences=2"));
+        Ok(())
     }
 
     #[test]
@@ -4540,6 +4804,7 @@ mod tests {
     fn runtime_config_raw_keeps_llama_batch_default_for_single_lane() -> anyhow::Result<()> {
         let config = RuntimeConfig {
             lane_count: 1,
+            branch_sequence_capacity: 0,
             n_batch: None,
             n_ubatch: None,
             ..RuntimeConfig::default()
@@ -4648,6 +4913,7 @@ mod tests {
             layer_end,
             ctx_size: 256,
             lane_count: 1,
+            branch_sequence_capacity: 0,
             n_batch: None,
             n_ubatch: None,
             n_threads: None,
@@ -4956,6 +5222,30 @@ mod tests {
                         "offload_surface".to_string(),
                         Value::String("compute_buffer".to_string())
                     ),
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn aggregator_tags_skippy_memory_breakdown_with_residency_fields() {
+        let mut aggregator = NativeLogAggregator::default();
+        assert_eq!(
+            aggregator.process_line(
+                "skippy: memory_breakdown stage_index=0 backend=\"Metal\" model_bytes=106179735306 context_bytes=6459228160 compute_bytes=606381670 total_bytes=113245345136"
+            ),
+            vec![NativeLogEvent {
+                message:
+                    "skippy: memory_breakdown stage_index=0 backend=\"Metal\" model_bytes=106179735306 context_bytes=6459228160 compute_bytes=606381670 total_bytes=113245345136"
+                        .to_string(),
+                category: "memory",
+                params: vec![
+                    ("stage_index".to_string(), Value::from(0_u64)),
+                    ("backend".to_string(), Value::String("Metal".to_string())),
+                    ("model_bytes".to_string(), Value::from(106_179_735_306_u64)),
+                    ("context_bytes".to_string(), Value::from(6_459_228_160_u64)),
+                    ("compute_bytes".to_string(), Value::from(606_381_670_u64)),
+                    ("total_bytes".to_string(), Value::from(113_245_345_136_u64)),
                 ],
             }]
         );

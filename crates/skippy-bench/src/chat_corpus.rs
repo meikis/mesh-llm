@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use reqwest::blocking::Client;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::cli::ChatCorpusArgs;
 
@@ -80,7 +81,10 @@ struct ChatCorpusResult {
     total_tokens: Option<u64>,
     finish_reason: Option<String>,
     output_chars: usize,
+    output_sha256: Option<String>,
     spec_enabled: Option<bool>,
+    spec_proposal_attempts: Option<u64>,
+    spec_proposal_misses: Option<u64>,
     spec_windows: Option<u64>,
     spec_proposed: Option<u64>,
     spec_accepted: Option<u64>,
@@ -107,6 +111,8 @@ struct ChatCorpusSummary {
     total_wall_ms: f64,
     completion_tok_s: Option<f64>,
     total_tok_s: Option<f64>,
+    spec_proposal_attempts: u64,
+    spec_proposal_misses: u64,
     spec_windows: u64,
     spec_proposed: u64,
     spec_accepted: u64,
@@ -284,6 +290,9 @@ fn parse_json_response(
     match body {
         Ok(value) if status.is_success() => {
             let usage = value.get("usage");
+            let output = value
+                .pointer("/choices/0/message/content")
+                .and_then(Value::as_str);
             ChatCorpusResult {
                 sequence: prompt_case.index,
                 prompt_id: prompt_case.prompt_id.clone(),
@@ -300,13 +309,14 @@ fn parse_json_response(
                     .pointer("/choices/0/finish_reason")
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned),
-                output_chars: value
-                    .pointer("/choices/0/message/content")
-                    .and_then(Value::as_str)
+                output_chars: output
                     .map(str::chars)
                     .map(Iterator::count)
                     .unwrap_or_default(),
+                output_sha256: output.map(output_sha256),
                 spec_enabled: skippy_spec_bool(&value, "enabled"),
+                spec_proposal_attempts: skippy_spec_u64(&value, "proposal_attempts"),
+                spec_proposal_misses: skippy_spec_u64(&value, "proposal_misses"),
                 spec_windows: skippy_spec_u64(&value, "windows"),
                 spec_proposed: skippy_spec_u64(&value, "proposed"),
                 spec_accepted: skippy_spec_u64(&value, "accepted"),
@@ -348,6 +358,7 @@ fn parse_stream_response(
     let mut line = String::new();
     let mut first_token_ms = None;
     let mut output_chars = 0usize;
+    let mut output = String::new();
     let mut completion_tokens = None;
     let mut prompt_tokens = None;
     let mut total_tokens = None;
@@ -394,6 +405,7 @@ fn parse_stream_response(
                 first_token_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
             }
             output_chars += content.chars().count();
+            output.push_str(content);
         }
         if finish_reason.is_none() {
             finish_reason = value
@@ -422,7 +434,10 @@ fn parse_stream_response(
         total_tokens,
         finish_reason,
         output_chars,
+        output_sha256: Some(output_sha256(&output)),
         spec_enabled: None,
+        spec_proposal_attempts: None,
+        spec_proposal_misses: None,
         spec_windows: None,
         spec_proposed: None,
         spec_accepted: None,
@@ -454,7 +469,10 @@ fn error_result(
         total_tokens: None,
         finish_reason: None,
         output_chars: 0,
+        output_sha256: None,
         spec_enabled: None,
+        spec_proposal_attempts: None,
+        spec_proposal_misses: None,
         spec_windows: None,
         spec_proposed: None,
         spec_accepted: None,
@@ -498,6 +516,10 @@ fn skippy_spec_f64(value: &Value, field: &str) -> Option<f64> {
         .and_then(|skippy| skippy.get("spec"))
         .and_then(|spec| spec.get(field))
         .and_then(Value::as_f64)
+}
+
+fn output_sha256(output: &str) -> String {
+    format!("{:x}", Sha256::digest(output.as_bytes()))
 }
 
 fn prompt_cases(args: &ChatCorpusArgs) -> Result<Vec<PromptCase>> {
@@ -697,6 +719,14 @@ fn summarize(results: &[ChatCorpusResult], total_wall_ms: f64) -> ChatCorpusSumm
         .iter()
         .filter_map(|result| result.total_tokens)
         .sum::<u64>();
+    let spec_proposal_attempts = results
+        .iter()
+        .filter_map(|result| result.spec_proposal_attempts)
+        .sum::<u64>();
+    let spec_proposal_misses = results
+        .iter()
+        .filter_map(|result| result.spec_proposal_misses)
+        .sum::<u64>();
     let spec_windows = results
         .iter()
         .filter_map(|result| result.spec_windows)
@@ -731,6 +761,8 @@ fn summarize(results: &[ChatCorpusResult], total_wall_ms: f64) -> ChatCorpusSumm
         total_wall_ms,
         completion_tok_s: rate(completion_tokens, total_wall_ms),
         total_tok_s: rate(total_tokens, total_wall_ms),
+        spec_proposal_attempts,
+        spec_proposal_misses,
         spec_windows,
         spec_proposed,
         spec_accepted,
@@ -973,10 +1005,20 @@ mod tests {
         let summary = summarize(&results, 1000.0);
 
         assert_eq!(summary.spec_windows, 2);
+        assert_eq!(summary.spec_proposal_attempts, 4);
+        assert_eq!(summary.spec_proposal_misses, 2);
         assert_eq!(summary.spec_proposed, 15);
         assert_eq!(summary.spec_accepted, 9);
         assert_eq!(summary.spec_rejected, 6);
         assert_eq!(summary.spec_accept_rate, Some(0.6));
+    }
+
+    #[test]
+    fn output_hash_is_stable_sha256() {
+        assert_eq!(
+            output_sha256("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     fn chat_result_with_spec(
@@ -999,7 +1041,10 @@ mod tests {
             total_tokens: Some(3),
             finish_reason: Some("stop".to_string()),
             output_chars: 1,
+            output_sha256: Some(output_sha256("x")),
             spec_enabled: Some(true),
+            spec_proposal_attempts: Some(2),
+            spec_proposal_misses: Some(1),
             spec_windows: Some(1),
             spec_proposed: Some(proposed),
             spec_accepted: Some(accepted),

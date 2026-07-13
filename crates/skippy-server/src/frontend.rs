@@ -199,8 +199,11 @@ pub async fn serve_openai(args: ServeOpenAiArgs) -> Result<()> {
         spd_optimistic_decode: false,
         spd_rolling_executor: false,
         spd_optimistic_min_logit_margin: None,
+        speculative_window_min: 1,
         speculative_window: 0,
         adaptive_speculative_window: false,
+        ngram_simple: false,
+        ngram_size_n: 12,
         generation_limit: Arc::new(Semaphore::new(args.generation_concurrency)),
         generation_queue_depth: Arc::new(AtomicUsize::new(0)),
         generation_queue_limit: args.generation_concurrency,
@@ -248,8 +251,11 @@ pub struct EmbeddedOpenAiArgs {
     pub spd_optimistic_decode: bool,
     pub spd_rolling_executor: bool,
     pub spd_optimistic_min_logit_margin: Option<f32>,
+    pub speculative_window_min: usize,
     pub speculative_window: usize,
     pub adaptive_speculative_window: bool,
+    pub ngram_simple: bool,
+    pub ngram_size_n: usize,
     pub draft_n_gpu_layers: Option<i32>,
     pub activation_width: i32,
     pub wire_dtype: WireActivationDType,
@@ -492,12 +498,36 @@ pub fn embedded_openai_backend(args: EmbeddedOpenAiArgs) -> Result<EmbeddedOpenA
     if args.draft_model_path.is_some() && args.speculative_window == 0 {
         bail!("--openai-speculative-window must be greater than zero when a draft model is set");
     }
-    if args.draft_model_path.is_some() && args.spd_manifest_path.is_some() {
-        bail!("draft-model and SPD speculative sources cannot both be configured");
+    let proposal_source_count = usize::from(args.draft_model_path.is_some())
+        + usize::from(args.spd_manifest_path.is_some())
+        + usize::from(args.ngram_simple);
+    if proposal_source_count > 1 {
+        bail!("draft-model, SPD, and ngram-simple proposal sources are mutually exclusive");
     }
     if args.spd_manifest_path.is_some() && args.speculative_window == 0 {
         bail!("--openai-speculative-window must be greater than zero when SPD is set");
     }
+    if args.ngram_simple && args.speculative_window == 0 {
+        bail!("--openai-speculative-window must be greater than zero when ngram-simple is set");
+    }
+    if args.ngram_simple && args.ngram_size_n == 0 {
+        bail!("--openai-ngram-size-n must be greater than zero");
+    }
+    if args.speculative_window_min == 0
+        || (args.speculative_window > 0 && args.speculative_window_min > args.speculative_window)
+    {
+        bail!("speculative window minimum must satisfy 0 < min <= max");
+    }
+    println!(
+        "skippy-server: embedded-openai-speculative ngram_simple={} ngram_size_n={} window_min={} window={} adaptive={} draft_model={} spd={}",
+        args.ngram_simple,
+        args.ngram_size_n,
+        args.speculative_window_min,
+        args.speculative_window,
+        args.adaptive_speculative_window,
+        args.draft_model_path.is_some(),
+        args.spd_manifest_path.is_some(),
+    );
     if args.config.stage_index != 0 || args.config.layer_start != 0 {
         bail!("embedded OpenAI serving is only supported on stage 0");
     }
@@ -580,8 +610,11 @@ pub fn embedded_openai_backend(args: EmbeddedOpenAiArgs) -> Result<EmbeddedOpenA
         spd_optimistic_decode: args.spd_optimistic_decode,
         spd_rolling_executor: args.spd_rolling_executor,
         spd_optimistic_min_logit_margin: args.spd_optimistic_min_logit_margin,
+        speculative_window_min: args.speculative_window_min,
         speculative_window: args.speculative_window,
         adaptive_speculative_window: args.adaptive_speculative_window,
+        ngram_simple: args.ngram_simple,
+        ngram_size_n: args.ngram_size_n,
         generation_limit: Arc::new(Semaphore::new(args.generation_concurrency)),
         generation_queue_depth: Arc::new(AtomicUsize::new(0)),
         generation_queue_limit: args.generation_concurrency,
@@ -625,8 +658,11 @@ struct StageOpenAiBackend {
     spd_optimistic_decode: bool,
     spd_rolling_executor: bool,
     spd_optimistic_min_logit_margin: Option<f32>,
+    speculative_window_min: usize,
     speculative_window: usize,
     adaptive_speculative_window: bool,
+    ngram_simple: bool,
+    ngram_size_n: usize,
     generation_limit: Arc<Semaphore>,
     generation_queue_depth: Arc<AtomicUsize>,
     generation_queue_limit: usize,
@@ -1254,6 +1290,8 @@ impl Default for GenerationCacheStats {
 #[derive(Clone, Copy, Serialize)]
 struct GenerationSpecDiagnostics {
     enabled: bool,
+    proposal_attempts: usize,
+    proposal_misses: usize,
     windows: usize,
     proposed: usize,
     accepted: usize,
@@ -1327,6 +1365,7 @@ impl DraftRunner {
                 layer_end: layer_count,
                 ctx_size: config.ctx_size,
                 lane_count: 1,
+                branch_sequence_capacity: 0,
                 n_batch: None,
                 n_ubatch: None,
                 n_threads: None,
@@ -1830,8 +1869,11 @@ struct EmbeddedStageZeroGeneration<'a> {
     spd_optimistic_decode: bool,
     spd_rolling_executor: bool,
     spd_optimistic_min_logit_margin: Option<f32>,
+    speculative_window_min: usize,
     speculative_window: usize,
     adaptive_speculative_window: bool,
+    ngram_simple: bool,
+    ngram_size_n: usize,
     prompt_token_ids: &'a [i32],
     max_tokens: u32,
     sampling: &'a SamplingConfig,

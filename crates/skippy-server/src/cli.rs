@@ -167,10 +167,19 @@ pub struct ServeBinaryArgs {
         help = "Only start optimistic SPD target decode when the inline top-1/top-2 logit margin is at least this value. Requires --openai-spd-top-k >= 2 to produce margins."
     )]
     pub openai_spd_optimistic_min_logit_margin: Option<f32>,
+    #[arg(long, default_value_t = 1)]
+    pub openai_speculative_window_min: usize,
     #[arg(long, default_value_t = 4)]
     pub openai_speculative_window: usize,
     #[arg(long)]
     pub openai_adaptive_speculative_window: bool,
+    #[arg(
+        long,
+        help = "Use llama.cpp's native ngram-simple self-speculative proposal source."
+    )]
+    pub openai_ngram_simple: bool,
+    #[arg(long, default_value_t = 12)]
+    pub openai_ngram_size_n: usize,
     #[arg(
         long,
         allow_hyphen_values = true,
@@ -355,6 +364,9 @@ mod tests {
             "5.5",
             "--openai-speculative-window",
             "2",
+            "--openai-ngram-simple",
+            "--openai-ngram-size-n",
+            "10",
         ])
         .unwrap();
 
@@ -381,5 +393,7 @@ mod tests {
         assert!(args.openai_spd_rolling_executor);
         assert_eq!(args.openai_spd_optimistic_min_logit_margin, Some(5.5));
         assert_eq!(args.openai_speculative_window, 2);
+        assert!(args.openai_ngram_simple);
+        assert_eq!(args.openai_ngram_size_n, 10);
     }
 }

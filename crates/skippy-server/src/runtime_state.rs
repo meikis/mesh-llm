@@ -1308,6 +1308,7 @@ fn runtime_config_from_stage_config(
         layer_end: config.layer_end,
         ctx_size: config.ctx_size,
         lane_count: config.lane_count,
+        branch_sequence_capacity: 0,
         n_batch: config.n_batch,
         n_ubatch: config.n_ubatch,
         n_threads,

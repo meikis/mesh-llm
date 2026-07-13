@@ -450,7 +450,7 @@ fn run_distributed_collect(args: RunArgs) -> Result<DistributedRunOutcome> {
             })
         })
         .collect::<Vec<_>>();
-    let run_config = json!({
+    let mut run_config = json!({
         "run_id": run_id,
         "topology_id": args.topology_id,
         "model_id": plan.model_identity.model_id,
@@ -467,6 +467,10 @@ fn run_distributed_collect(args: RunArgs) -> Result<DistributedRunOutcome> {
         "max_new_tokens": effective_run_max_new_tokens(&args),
         "stage_max_inflight": args.stage_max_inflight,
         "stage_reply_credit_limit": args.stage_reply_credit_limit,
+        "openai_bind_addr": args.openai_bind_addr.map(|addr| addr.to_string()),
+        "openai_model_id": args.openai_model_id.as_deref(),
+        "openai_default_max_tokens": args.openai_default_max_tokens,
+        "openai_generation_concurrency": args.openai_generation_concurrency,
         "stage_async_prefill_forward": args.stage_async_prefill_forward,
         "stage_downstream_wire_delay_ms": args.stage_downstream_wire_delay_ms,
         "stage_downstream_wire_mbps": args.stage_downstream_wire_mbps,
@@ -480,19 +484,30 @@ fn run_distributed_collect(args: RunArgs) -> Result<DistributedRunOutcome> {
         "stage_connectivity_probe_retry_delay_ms": args.stage_connectivity_probe_retry_delay_ms,
         "stage_connectivity_diagnostics": args.stage_connectivity_diagnostics,
         "keep_remote_on_failure": args.keep_remote_on_failure,
-        "glm_dsa_op_timing": args.glm_dsa_op_timing,
-        "glm_dsa_direct_sparse_attn": args.glm_dsa_direct_sparse_attn,
-        "glm_dsa_direct_sparse_prefill": args.glm_dsa_direct_sparse_prefill,
-        "glm_dsa_metal_topk_moe_route_fusion": args.glm_dsa_metal_topk_moe_route_fusion,
-        "glm_dsa_metal_dispatch_log": args.glm_dsa_metal_dispatch_log,
-        "glm_dsa_indexshare_freq": args.glm_dsa_indexshare_freq,
-        "glm_dsa_indexshare_pattern": args.glm_dsa_indexshare_pattern,
-        "glm_dsa_dense_sparse_mask_max_bytes": args.glm_dsa_dense_sparse_mask_max_bytes,
         "stages": stage_reports,
         "execute_remote": args.execute_remote,
         "keep_remote": args.keep_remote,
         "rsync_model_artifacts": args.rsync_model_artifacts,
     });
+    run_config["n_batch"] = json!(args.n_batch);
+    run_config["n_ubatch"] = json!(args.n_ubatch);
+    run_config["glm_dsa_op_timing"] = json!(args.glm_dsa_op_timing);
+    run_config["glm_dsa_direct_sparse_attn"] = json!(args.glm_dsa_direct_sparse_attn);
+    run_config["glm_dsa_direct_sparse_prefill"] = json!(args.glm_dsa_direct_sparse_prefill);
+    run_config["glm_dsa_metal_topk_moe_route_fusion"] =
+        json!(args.glm_dsa_metal_topk_moe_route_fusion);
+    run_config["glm_dsa_selected_row_flash"] = json!(args.glm_dsa_selected_row_flash);
+    run_config["glm_dsa_metal_dispatch_log"] = json!(args.glm_dsa_metal_dispatch_log);
+    run_config["glm_dsa_indexshare_freq"] = json!(args.glm_dsa_indexshare_freq);
+    run_config["glm_dsa_indexshare_pattern"] = json!(args.glm_dsa_indexshare_pattern);
+    run_config["glm_dsa_dense_sparse_mask_max_bytes"] =
+        json!(args.glm_dsa_dense_sparse_mask_max_bytes);
+    run_config["glm_dsa_direct_sparse_decode_max_top_k"] =
+        json!(args.glm_dsa_direct_sparse_decode_max_top_k);
+    run_config["glm_dsa_compact_flash_min_kv"] = json!(args.glm_dsa_compact_flash_min_kv);
+    run_config["glm_dsa_direct_sparse_decision_log"] =
+        json!(args.glm_dsa_direct_sparse_decision_log);
+    run_config["glm_dsa_compact_flash_policy_log"] = json!(args.glm_dsa_compact_flash_policy_log);
     retry(args.startup_timeout_secs, || {
         let response = client
             .post(format!("{metrics_http}/v1/runs"))
@@ -716,6 +731,8 @@ fn run_args_for_existing_driver(
         layer_end: last.layer_end,
         ctx_size: args.ctx_size,
         n_gpu_layers: args.n_gpu_layers,
+        n_batch: None,
+        n_ubatch: None,
         cache_type_k: "f16".to_string(),
         cache_type_v: "f16".to_string(),
         activation_width: 2048,
@@ -760,6 +777,10 @@ fn run_args_for_existing_driver(
         startup_timeout_secs: args.startup_timeout_secs,
         stage_max_inflight: 4,
         stage_reply_credit_limit: None,
+        openai_bind_addr: None,
+        openai_model_id: None,
+        openai_default_max_tokens: 16,
+        openai_generation_concurrency: 1,
         stage_async_prefill_forward: false,
         stage_downstream_wire_delay_ms: 0.0,
         stage_downstream_wire_mbps: None,
@@ -777,10 +798,15 @@ fn run_args_for_existing_driver(
         glm_dsa_direct_sparse_attn: false,
         glm_dsa_direct_sparse_prefill: false,
         glm_dsa_metal_topk_moe_route_fusion: false,
+        glm_dsa_selected_row_flash: false,
         glm_dsa_metal_dispatch_log: false,
         glm_dsa_indexshare_freq: None,
         glm_dsa_indexshare_pattern: None,
         glm_dsa_dense_sparse_mask_max_bytes: None,
+        glm_dsa_direct_sparse_decode_max_top_k: None,
+        glm_dsa_compact_flash_min_kv: None,
+        glm_dsa_direct_sparse_decision_log: false,
+        glm_dsa_compact_flash_policy_log: false,
     })
 }
 
@@ -1365,6 +1391,8 @@ fn stage_config_json(
         "layer_end": stage.layer_end,
         "ctx_size": args.ctx_size,
         "lane_count": stage_config_lane_count(args)?,
+        "n_batch": args.n_batch,
+        "n_ubatch": args.n_ubatch,
         "n_gpu_layers": args.n_gpu_layers,
         "cache_type_k": args.cache_type_k,
         "cache_type_v": args.cache_type_v,
@@ -1745,8 +1773,9 @@ fn stage_server_command(
         .stage_downstream_wire_mbps
         .map(|mbps| format!(" --downstream-wire-mbps {mbps}"))
         .unwrap_or_default();
+    let openai_arg = stage0_openai_args(args, stage);
     format!(
-        "{}{} serve-binary --config {} --topology {} --activation-width {} --activation-wire-dtype {} --metrics-otlp-grpc {} --telemetry-queue-capacity {} --telemetry-level {} --max-inflight {}{}{} --downstream-wire-delay-ms {}{}",
+        "{}{} serve-binary --config {} --topology {} --activation-width {} --activation-wire-dtype {} --metrics-otlp-grpc {} --telemetry-queue-capacity {} --telemetry-level {} --max-inflight {}{}{} --downstream-wire-delay-ms {}{}{}",
         env_exports,
         shell_quote(bin),
         shell_quote(config_path),
@@ -1763,6 +1792,24 @@ fn stage_server_command(
         async_prefill_forward_arg,
         args.stage_downstream_wire_delay_ms,
         downstream_wire_mbps_arg,
+        openai_arg,
+    )
+}
+
+fn stage0_openai_args(args: &RunArgs, stage: &StageAssignment) -> String {
+    let Some(bind_addr) = args.openai_bind_addr else {
+        return String::new();
+    };
+    if stage.stage_index != 0 {
+        return String::new();
+    }
+    let model_id = args.openai_model_id.as_deref().unwrap_or(&args.model_id);
+    format!(
+        " --openai-bind-addr {} --openai-model-id {} --openai-default-max-tokens {} --openai-generation-concurrency {}",
+        shell_quote(&bind_addr.to_string()),
+        shell_quote(model_id),
+        args.openai_default_max_tokens,
+        args.openai_generation_concurrency,
     )
 }
 
@@ -1788,6 +1835,14 @@ fn stage_server_env_exports(args: &RunArgs) -> String {
             "1".to_string(),
         ));
     }
+    if args.glm_dsa_selected_row_flash
+        || env_flag_enabled("SKIPPY_GLM_DSA_EXPERIMENTAL_SELECTED_ROW_FLASH")
+    {
+        env.push((
+            "SKIPPY_GLM_DSA_EXPERIMENTAL_SELECTED_ROW_FLASH",
+            "1".to_string(),
+        ));
+    }
     if args.glm_dsa_metal_dispatch_log || env_flag_enabled("SKIPPY_GLM_DSA_LOG_METAL_DISPATCH") {
         env.push(("SKIPPY_GLM_DSA_LOG_METAL_DISPATCH", "1".to_string()));
     }
@@ -1803,8 +1858,37 @@ fn stage_server_env_exports(args: &RunArgs) -> String {
             max_bytes.to_string(),
         ));
     }
+    if let Some(max_top_k) = args.glm_dsa_direct_sparse_decode_max_top_k {
+        env.push((
+            "SKIPPY_GLM_DSA_DIRECT_SPARSE_DECODE_MAX_TOP_K",
+            max_top_k.to_string(),
+        ));
+    }
+    if let Some(min_kv) = args.glm_dsa_compact_flash_min_kv {
+        env.push(("SKIPPY_GLM_DSA_COMPACT_FLASH_MIN_KV", min_kv.to_string()));
+    }
+    if args.glm_dsa_direct_sparse_decision_log
+        || env_flag_enabled("SKIPPY_GLM_DSA_LOG_DIRECT_SPARSE_DECISIONS")
+    {
+        env.push((
+            "SKIPPY_GLM_DSA_LOG_DIRECT_SPARSE_DECISIONS",
+            "1".to_string(),
+        ));
+    }
+    if args.glm_dsa_compact_flash_policy_log
+        || env_flag_enabled("SKIPPY_GLM_DSA_LOG_COMPACT_FLASH_POLICY")
+    {
+        env.push(("SKIPPY_GLM_DSA_LOG_COMPACT_FLASH_POLICY", "1".to_string()));
+    }
     if env_flag_enabled("LLAMA_GLM_DSA_PARALLEL_LIGHTNING_INDEXER") {
         env.push(("LLAMA_GLM_DSA_PARALLEL_LIGHTNING_INDEXER", "1".to_string()));
+    }
+    if let Ok(value) = std::env::var("GGML_METAL_EXPERIMENTAL_GLM_MOE_MAX_ACTIVE_EXPERTS")
+        && value
+            .parse::<usize>()
+            .is_ok_and(|active| (1..=8).contains(&active))
+    {
+        env.push(("GGML_METAL_EXPERIMENTAL_GLM_MOE_MAX_ACTIVE_EXPERTS", value));
     }
     if env_flag_enabled("SKIPPY_BINARY_WARM_PRECONNECT") {
         env.push(("SKIPPY_BINARY_WARM_PRECONNECT", "1".to_string()));
@@ -2586,6 +2670,7 @@ fn tokenizer_runtime_config(
         layer_end: tokenizer_layer_end(first),
         ctx_size: args.ctx_size,
         lane_count: 1,
+        branch_sequence_capacity: 0,
         n_batch: None,
         n_ubatch: None,
         n_threads: None,
@@ -3411,6 +3496,8 @@ mod tests {
             layer_end: 2,
             ctx_size: 128,
             n_gpu_layers: 0,
+            n_batch: None,
+            n_ubatch: None,
             cache_type_k: "f16".to_string(),
             cache_type_v: "f16".to_string(),
             activation_width: 2048,
@@ -3420,6 +3507,10 @@ mod tests {
             prompt_limit: None,
             prompt_token_ids: None,
             max_new_tokens: Some(1),
+            openai_bind_addr: None,
+            openai_model_id: None,
+            openai_default_max_tokens: 16,
+            openai_generation_concurrency: 1,
             prefill_chunk_size: None,
             prefill_chunk_threshold: None,
             prefill_chunk_schedule: None,
@@ -3460,10 +3551,15 @@ mod tests {
             glm_dsa_direct_sparse_attn: false,
             glm_dsa_direct_sparse_prefill: false,
             glm_dsa_metal_topk_moe_route_fusion: false,
+            glm_dsa_selected_row_flash: false,
             glm_dsa_metal_dispatch_log: false,
             glm_dsa_indexshare_freq: None,
             glm_dsa_indexshare_pattern: None,
             glm_dsa_dense_sparse_mask_max_bytes: None,
+            glm_dsa_direct_sparse_decode_max_top_k: None,
+            glm_dsa_compact_flash_min_kv: None,
+            glm_dsa_direct_sparse_decision_log: false,
+            glm_dsa_compact_flash_policy_log: false,
         };
 
         assert_eq!(
@@ -3487,6 +3583,7 @@ mod tests {
         args.splits = "1".to_string();
         args.layer_end = 2;
         args.execute_remote = true;
+        args.n_ubatch = Some(128);
         args.rsync_model_artifacts = false;
         args.remote_shared_root_map =
             Some("localhost=/shared/local,micstudio=/shared/remote".to_string());
@@ -3516,6 +3613,7 @@ mod tests {
             assert_eq!(stage_config_load_mode(&args, stage), "layer-package");
             let config = stage_config_json(&args, &plan, stage, &model_ref)?;
             assert_eq!(config["load_mode"], "layer-package");
+            assert_eq!(config["n_ubatch"], 128);
             if stage.host == "micstudio" {
                 assert_eq!(config["model_path"], "/Users/lab/models/package");
             } else {
@@ -4033,6 +4131,8 @@ mod tests {
             layer_end: 2,
             ctx_size: 128,
             n_gpu_layers: 0,
+            n_batch: None,
+            n_ubatch: None,
             cache_type_k: "f16".to_string(),
             cache_type_v: "f16".to_string(),
             activation_width: 2048,
@@ -4042,6 +4142,10 @@ mod tests {
             prompt_limit: None,
             prompt_token_ids: None,
             max_new_tokens: Some(1),
+            openai_bind_addr: None,
+            openai_model_id: None,
+            openai_default_max_tokens: 16,
+            openai_generation_concurrency: 1,
             prefill_chunk_size: None,
             prefill_chunk_threshold: None,
             prefill_chunk_schedule: None,
@@ -4082,10 +4186,15 @@ mod tests {
             glm_dsa_direct_sparse_attn: false,
             glm_dsa_direct_sparse_prefill: false,
             glm_dsa_metal_topk_moe_route_fusion: false,
+            glm_dsa_selected_row_flash: false,
             glm_dsa_metal_dispatch_log: false,
             glm_dsa_indexshare_freq: None,
             glm_dsa_indexshare_pattern: None,
             glm_dsa_dense_sparse_mask_max_bytes: None,
+            glm_dsa_direct_sparse_decode_max_top_k: None,
+            glm_dsa_compact_flash_min_kv: None,
+            glm_dsa_direct_sparse_decision_log: false,
+            glm_dsa_compact_flash_policy_log: false,
         };
         let plan = DeploymentPlan {
             run_id: "run-1".to_string(),
@@ -4151,17 +4260,28 @@ mod tests {
         assert!(!command.contains("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_ATTN"));
         assert!(!command.contains("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_PREFILL"));
         assert!(!command.contains("SKIPPY_GLM_DSA_ENABLE_METAL_TOPK_MOE_FUSION"));
+        assert!(!command.contains("SKIPPY_GLM_DSA_EXPERIMENTAL_SELECTED_ROW_FLASH"));
         assert!(!command.contains("SKIPPY_GLM_DSA_LOG_METAL_DISPATCH"));
         assert!(!command.contains("SKIPPY_GLM_DSA_DENSE_SPARSE_MASK_MAX_BYTES"));
+        assert!(!command.contains("SKIPPY_GLM_DSA_DIRECT_SPARSE_DECODE_MAX_TOP_K"));
+        assert!(!command.contains("SKIPPY_GLM_DSA_COMPACT_FLASH_MIN_KV"));
+        assert!(!command.contains("SKIPPY_GLM_DSA_LOG_DIRECT_SPARSE_DECISIONS"));
+        assert!(!command.contains("SKIPPY_GLM_DSA_LOG_COMPACT_FLASH_POLICY"));
+        assert!(!command.contains("GGML_METAL_EXPERIMENTAL_GLM_MOE_MAX_ACTIVE_EXPERTS"));
 
         args.glm_dsa_op_timing = true;
         args.glm_dsa_direct_sparse_attn = true;
         args.glm_dsa_direct_sparse_prefill = true;
         args.glm_dsa_metal_topk_moe_route_fusion = true;
+        args.glm_dsa_selected_row_flash = true;
         args.glm_dsa_metal_dispatch_log = true;
         args.glm_dsa_indexshare_freq = Some(4);
         args.glm_dsa_indexshare_pattern = Some("FSSS".to_string());
         args.glm_dsa_dense_sparse_mask_max_bytes = Some(1_048_576);
+        args.glm_dsa_direct_sparse_decode_max_top_k = Some(1);
+        args.glm_dsa_compact_flash_min_kv = Some(1);
+        args.glm_dsa_direct_sparse_decision_log = true;
+        args.glm_dsa_compact_flash_policy_log = true;
         let command = remote_start_command(
             &args,
             &plan,
@@ -4172,11 +4292,16 @@ mod tests {
         assert!(command.contains("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_ATTN"));
         assert!(command.contains("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_PREFILL"));
         assert!(command.contains("SKIPPY_GLM_DSA_ENABLE_METAL_TOPK_MOE_FUSION"));
+        assert!(command.contains("SKIPPY_GLM_DSA_EXPERIMENTAL_SELECTED_ROW_FLASH"));
         assert!(command.contains("SKIPPY_GLM_DSA_LOG_METAL_DISPATCH"));
         assert!(command.contains("LLAMA_GLM_DSA_INDEXSHARE_FREQ"));
         assert!(command.contains("LLAMA_GLM_DSA_INDEXSHARE_PATTERN"));
         assert!(command.contains("SKIPPY_GLM_DSA_DENSE_SPARSE_MASK_MAX_BYTES"));
         assert!(command.contains("1048576"));
+        assert!(command.contains("SKIPPY_GLM_DSA_DIRECT_SPARSE_DECODE_MAX_TOP_K"));
+        assert!(command.contains("SKIPPY_GLM_DSA_COMPACT_FLASH_MIN_KV"));
+        assert!(command.contains("SKIPPY_GLM_DSA_LOG_DIRECT_SPARSE_DECISIONS"));
+        assert!(command.contains("SKIPPY_GLM_DSA_LOG_COMPACT_FLASH_POLICY"));
     }
 
     #[test]
@@ -4221,6 +4346,35 @@ mod tests {
         assert!(command.contains("/tmp/remote/run-1/stage/stage.log"));
         assert!(command.contains("sh -c"));
         assert!(!command.contains("/bin/zsh -ilc"));
+    }
+
+    #[test]
+    fn stage_zero_command_enables_openai_frontend() {
+        let mut args = test_run_args();
+        args.openai_bind_addr = Some("127.0.0.1:9337".parse().unwrap());
+        args.openai_model_id = Some("meshllm/glm52-local".to_string());
+        args.openai_default_max_tokens = 32;
+        args.openai_generation_concurrency = 2;
+        let plan = test_deployment_plan(Vec::new());
+
+        let stage0 = test_stage_assignment(0, 40);
+        let command = remote_start_command(&args, &plan, &stage0, "/tmp/run/skippy-server");
+
+        assert!(command.contains("--openai-bind-addr"));
+        assert!(command.contains("127.0.0.1:9337"));
+        assert!(command.contains("--openai-model-id"));
+        assert!(command.contains("meshllm/glm52-local"));
+        assert!(command.contains("--openai-default-max-tokens 32"));
+        assert!(command.contains("--openai-generation-concurrency 2"));
+
+        let mut stage1 = test_stage_assignment(40, 79);
+        stage1.stage_index = 1;
+        let command = remote_start_command(&args, &plan, &stage1, "/tmp/run/skippy-server");
+
+        assert!(!command.contains("--openai-bind-addr"));
+        assert!(!command.contains("--openai-model-id"));
+        assert!(!command.contains("--openai-default-max-tokens"));
+        assert!(!command.contains("--openai-generation-concurrency"));
     }
 
     #[test]
@@ -4329,6 +4483,8 @@ mod tests {
             layer_end: 2,
             ctx_size: 128,
             n_gpu_layers: 0,
+            n_batch: None,
+            n_ubatch: None,
             cache_type_k: "f16".to_string(),
             cache_type_v: "f16".to_string(),
             activation_width: 2048,
@@ -4338,6 +4494,10 @@ mod tests {
             prompt_limit: None,
             prompt_token_ids: None,
             max_new_tokens: None,
+            openai_bind_addr: None,
+            openai_model_id: None,
+            openai_default_max_tokens: 16,
+            openai_generation_concurrency: 1,
             prefill_chunk_size: None,
             prefill_chunk_threshold: None,
             prefill_chunk_schedule: None,
@@ -4378,10 +4538,15 @@ mod tests {
             glm_dsa_direct_sparse_attn: false,
             glm_dsa_direct_sparse_prefill: false,
             glm_dsa_metal_topk_moe_route_fusion: false,
+            glm_dsa_selected_row_flash: false,
             glm_dsa_metal_dispatch_log: false,
             glm_dsa_indexshare_freq: None,
             glm_dsa_indexshare_pattern: None,
             glm_dsa_dense_sparse_mask_max_bytes: None,
+            glm_dsa_direct_sparse_decode_max_top_k: None,
+            glm_dsa_compact_flash_min_kv: None,
+            glm_dsa_direct_sparse_decision_log: false,
+            glm_dsa_compact_flash_policy_log: false,
         }
     }
 

@@ -20,7 +20,7 @@ pub(super) fn resolve_speculative_config(
         global_config.and_then(|config| config.strategy.as_deref()),
         Some("auto"),
     );
-    let native_mtp_enabled = match strategy.as_str() {
+    let mut native_mtp_enabled = match strategy.as_str() {
         "auto" => package_generation_supports_default_native_mtp(package_generation),
         "native-mtp-n1" => {
             if package_generation.is_some_and(|generation| {
@@ -38,13 +38,14 @@ pub(super) fn resolve_speculative_config(
         "disabled" => false,
         _ => bail!("skippy speculative.strategy must be auto, disabled, or native-mtp-n1"),
     };
-    let mode = pick_string_owned(
+    let mut mode = pick_string_owned(
         model_config.and_then(|config| config.mode.as_deref()),
         global_config.and_then(|config| config.mode.as_deref()),
         Some("auto"),
     );
-    if mode == "ngram" {
-        bail!("skippy speculative.mode = \"ngram\" is not supported by the embedded runtime");
+    let package_ngram_window = package_default_ngram_window(package_generation);
+    if mode == "auto" && package_ngram_window.is_some() {
+        mode = "ngram".to_string();
     }
     if pick_owned(
         model_config.and_then(|config| config.draft_hf_repo.clone()),
@@ -130,6 +131,16 @@ pub(super) fn resolve_speculative_config(
         global_config.and_then(|config| config.draft_max_tokens),
         0,
     );
+    let ngram_min = super::support::pick_value(
+        model_config.and_then(|config| config.ngram_min),
+        global_config.and_then(|config| config.ngram_min),
+        package_ngram_window.map_or(1, |window| window.0),
+    );
+    let ngram_max = super::support::pick_value(
+        model_config.and_then(|config| config.ngram_max),
+        global_config.and_then(|config| config.ngram_max),
+        package_ngram_window.map_or(16, |window| window.1),
+    );
     let draft_n_gpu_layers = pick_owned(
         model_config.and_then(|config| config.draft_gpu_layers),
         global_config.and_then(|config| config.draft_gpu_layers),
@@ -142,6 +153,10 @@ pub(super) fn resolve_speculative_config(
     let explicit = mode != "auto"
         || draft_model_path.is_some()
         || draft_max_tokens > 0
+        || model_config
+            .is_some_and(|config| config.ngram_min.is_some() || config.ngram_max.is_some())
+        || global_config
+            .is_some_and(|config| config.ngram_min.is_some() || config.ngram_max.is_some())
         || draft_n_gpu_layers.is_some();
     if mode == "disabled" && draft_model_path.is_some() {
         bail!("skippy speculative draft source cannot be set when speculative.mode = \"disabled\"");
@@ -166,6 +181,18 @@ pub(super) fn resolve_speculative_config(
                 _ => unreachable!(),
             }
         }
+    } else if mode == "ngram" {
+        if draft_model_path.is_some() {
+            bail!("skippy speculative ngram mode cannot also configure a draft model");
+        }
+        if ngram_min == 0 || ngram_max == 0 || ngram_min > ngram_max {
+            bail!("skippy speculative ngram mode requires 0 < ngram_min <= ngram_max");
+        }
+        if strategy == "native-mtp-n1" {
+            bail!("skippy speculative ngram mode cannot also force native-mtp-n1");
+        }
+        native_mtp_enabled = false;
+        draft_model_path = None;
     } else {
         mode = "disabled".to_string();
         draft_model_path = None;
@@ -177,9 +204,24 @@ pub(super) fn resolve_speculative_config(
         draft_model_path,
         pairing_fault,
         draft_max_tokens,
+        ngram_min,
+        ngram_max,
         explicit,
         draft_n_gpu_layers,
     })
+}
+
+fn package_default_ngram_window(generation: Option<&PackageGenerationInfo>) -> Option<(u32, u32)> {
+    let speculative = generation?.speculative_decoding.as_ref()?;
+    let strategy = speculative.strategies.get(&speculative.default)?;
+    if strategy.strategy_type != "ngram-simple" {
+        return None;
+    }
+    strategy
+        .window_policy
+        .as_ref()
+        .map(|window| (window.min_window, window.max_window))
+        .or(Some((1, 16)))
 }
 
 fn package_generation_supports_default_native_mtp(

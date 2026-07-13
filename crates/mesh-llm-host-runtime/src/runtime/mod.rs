@@ -1565,7 +1565,9 @@ where
     loop {
         let startup_load_guard = startup_load_gate.lock().await;
         let launch_started = Instant::now();
-        match start_runtime_split_model(make_start_spec(), model_ref).await {
+        let standby_coordinator = match start_runtime_split_model(make_start_spec(), model_ref)
+            .await
+        {
             Ok(SplitRuntimeStart::Started(loaded)) => {
                 drop(startup_load_guard);
                 let mut loaded = *loaded;
@@ -1592,6 +1594,7 @@ where
                     context: Some(format!("model={model_ref}")),
                 });
                 startup_reset_model_target(target_tx, model_name, console_state).await;
+                Some(coordinator)
             }
             Err(err) => {
                 drop(startup_load_guard);
@@ -1603,6 +1606,7 @@ where
                         message: format!("Split waiting for peers: {err_msg}"),
                         context: Some(format!("model={model_name}")),
                     });
+                    None
                 } else {
                     startup_emit_launch_failure(
                         survey_telemetry,
@@ -1617,15 +1621,33 @@ where
                     return None;
                 }
             }
-        }
+        };
 
-        tokio::select! {
-            result = peer_rx.changed() => {
-                if result.is_err() {
-                    return None;
-                }
+        if let Some(coordinator) = standby_coordinator {
+            loop {
                 tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                    result = peer_rx.changed() => {
+                        if result.is_err() {
+                            return None;
+                        }
+                        if split_standby_coordinator_present(node, coordinator).await {
+                            continue;
+                        }
+                        let _ = emit_event(OutputEvent::Info {
+                            message: format!(
+                                "Split runtime coordinator {} is no longer visible; retrying split planning",
+                                coordinator.fmt_short()
+                            ),
+                            context: Some(format!("model={model_ref}")),
+                        });
+                        break;
+                    }
+                    _ = tokio::time::sleep(SPLIT_STANDBY_RETRY_INTERVAL) => {
+                        if split_standby_coordinator_present(node, coordinator).await {
+                            continue;
+                        }
+                        break;
+                    }
                     result = stop_rx.changed() => {
                         if result.is_err() || *stop_rx.borrow() {
                             return None;
@@ -1633,14 +1655,37 @@ where
                     }
                 }
             }
-            _ = tokio::time::sleep(SPLIT_STANDBY_RETRY_INTERVAL) => {}
-            result = stop_rx.changed() => {
-                if result.is_err() || *stop_rx.borrow() {
-                    return None;
+        } else {
+            tokio::select! {
+                result = peer_rx.changed() => {
+                    if result.is_err() {
+                        return None;
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                        result = stop_rx.changed() => {
+                            if result.is_err() || *stop_rx.borrow() {
+                                return None;
+                            }
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(SPLIT_STANDBY_RETRY_INTERVAL) => {}
+                result = stop_rx.changed() => {
+                    if result.is_err() || *stop_rx.borrow() {
+                        return None;
+                    }
                 }
             }
         }
     }
+}
+
+async fn split_standby_coordinator_present(
+    node: &mesh::Node,
+    coordinator: iroh::EndpointId,
+) -> bool {
+    coordinator == node.id() || node.peers().await.iter().any(|peer| peer.id == coordinator)
 }
 
 async fn startup_start_local_runtime_once<'a, F>(

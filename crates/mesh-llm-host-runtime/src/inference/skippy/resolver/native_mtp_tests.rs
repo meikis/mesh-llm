@@ -35,6 +35,33 @@ fn native_mtp_generation() -> PackageGenerationInfo {
     }
 }
 
+fn ngram_generation() -> PackageGenerationInfo {
+    let mut strategies = BTreeMap::new();
+    strategies.insert(
+        "ngram-simple".to_string(),
+        PackageSpeculativeStrategyInfo {
+            strategy_type: "ngram-simple".to_string(),
+            prediction_depth: None,
+            layer_indices: Vec::new(),
+            window_policy: Some(PackageWindowPolicyInfo {
+                default: "adaptive".to_string(),
+                initial_window: 4,
+                min_window: 4,
+                max_window: 16,
+            }),
+        },
+    );
+
+    PackageGenerationInfo {
+        policy: None,
+        thresholds: None,
+        speculative_decoding: Some(PackageSpeculativeDecodingInfo {
+            default: "ngram-simple".to_string(),
+            strategies,
+        }),
+    }
+}
+
 #[test]
 fn speculative_strategy_auto_without_package_generation_disables_native_mtp() {
     let mesh_config = parse_config("");
@@ -98,6 +125,38 @@ fn speculative_strategy_auto_uses_package_native_mtp_default() {
         .to_embedded_openai_args(4096, true)
         .expect("openai args should build");
     assert!(openai.native_mtp_enabled);
+}
+
+#[test]
+fn package_ngram_default_selects_llama_native_adaptive_window() {
+    let mesh_config = parse_config("");
+    let model_file = temp_model_file();
+    let generation = ngram_generation();
+
+    let resolved = resolve_skippy_config(SkippyConfigResolveRequest {
+        mesh_config: &mesh_config,
+        model_id: "meshllm/ngram-package",
+        model_path: model_file.path(),
+        model_bytes: 4 * 1024 * 1024 * 1024,
+        allocatable_memory_bytes: None,
+        request_defaults: None,
+        package_generation: Some(&generation),
+    })
+    .expect("package ngram default should resolve");
+
+    assert_eq!(resolved.speculative.mode, "ngram");
+    assert!(!resolved.speculative.native_mtp_enabled);
+    assert_eq!(resolved.speculative.ngram_min, 4);
+    assert_eq!(resolved.speculative.ngram_max, 16);
+
+    let openai = resolved
+        .to_embedded_openai_args(4096, true)
+        .expect("embedded args should build");
+    assert!(openai.ngram_simple);
+    assert_eq!(openai.speculative_window_min, 4);
+    assert_eq!(openai.speculative_window, 16);
+    assert!(openai.adaptive_speculative_window);
+    assert!(!openai.native_mtp_enabled);
 }
 
 #[test]

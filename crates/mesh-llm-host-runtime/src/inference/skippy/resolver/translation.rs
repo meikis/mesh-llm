@@ -233,12 +233,22 @@ impl ResolvedSkippyConfig {
             } else {
                 None
             },
+            speculative_window_min: if mode == "ngram" {
+                self.speculative.ngram_min as usize
+            } else {
+                1
+            },
             speculative_window: if mode == "draft" {
                 self.speculative.draft_max_tokens as usize
+            } else if mode == "ngram" {
+                self.speculative.ngram_max as usize
             } else {
                 0
             },
-            adaptive_speculative_window: false,
+            adaptive_speculative_window: mode == "ngram"
+                && self.speculative.ngram_min < self.speculative.ngram_max,
+            ngram_simple: mode == "ngram",
+            ngram_size_n: 12,
             draft_n_gpu_layers: if mode == "draft" {
                 self.speculative.draft_n_gpu_layers
             } else {
@@ -280,6 +290,8 @@ impl ResolvedSkippyConfig {
         }
         if self.speculative.mode == "draft" && self.speculative.draft_model_path.is_some() {
             "draft"
+        } else if self.speculative.mode == "ngram" {
+            "ngram"
         } else {
             "disabled"
         }
@@ -365,8 +377,11 @@ impl ResolvedEmbeddedOpenAiArgs {
             prefill_adaptive_step: BUILTIN_PREFILL_ADAPTIVE_STEP,
             prefill_adaptive_max: BUILTIN_PREFILL_ADAPTIVE_MAX,
             draft_model_path: None,
+            speculative_window_min: 1,
             speculative_window: 0,
             adaptive_speculative_window: false,
+            ngram_simple: false,
+            ngram_size_n: 12,
             draft_n_gpu_layers: None,
             native_mtp_enabled: true,
             activation_width: 0,
@@ -395,8 +410,11 @@ impl ResolvedEmbeddedOpenAiArgs {
             prefill_adaptive_step: BUILTIN_PREFILL_ADAPTIVE_STEP,
             prefill_adaptive_max: BUILTIN_PREFILL_ADAPTIVE_MAX,
             draft_model_path: None,
+            speculative_window_min: 1,
             speculative_window: 0,
             adaptive_speculative_window: false,
+            ngram_simple: false,
+            ngram_size_n: 12,
             draft_n_gpu_layers: None,
             native_mtp_enabled: true,
             activation_width,
@@ -439,8 +457,11 @@ impl ResolvedEmbeddedOpenAiArgs {
             spd_optimistic_decode: false,
             spd_rolling_executor: false,
             spd_optimistic_min_logit_margin: None,
+            speculative_window_min: self.speculative_window_min,
             speculative_window: self.speculative_window,
             adaptive_speculative_window: self.adaptive_speculative_window,
+            ngram_simple: self.ngram_simple,
+            ngram_size_n: self.ngram_size_n,
             draft_n_gpu_layers: self.draft_n_gpu_layers,
             activation_width: self.activation_width,
             wire_dtype: self.wire_dtype,

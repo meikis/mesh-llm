@@ -1,9 +1,10 @@
 pub const ABI_VERSION_MAJOR: u32 = 0;
 pub const ABI_VERSION_MINOR: u32 = 1;
-pub const ABI_VERSION_PATCH: u32 = 31;
+pub const ABI_VERSION_PATCH: u32 = 33;
 pub const FEATURE_BACKEND_DEVICES: u64 = 1 << 23;
 pub const FEATURE_RUNTIME_EVENTS: u64 = 1 << 24;
 pub const FEATURE_NATIVE_MTP_N1: u64 = 1 << 25;
+pub const FEATURE_NGRAM_SIMPLE_DRAFT: u64 = 1 << 26;
 
 pub const GLM_DSA_POLICY_PROFILE_NONE: i32 = 0;
 pub const GLM_DSA_POLICY_PROFILE_V1: i32 = 1;
@@ -215,6 +216,16 @@ pub struct RuntimeConfig {
     pub glm_dsa_direct_sparse_decode_max_top_k: i32,
     pub glm_dsa_dense_sparse_mask_max_bytes: u64,
     pub glm_dsa_compact_flash_min_kv: i32,
+    pub branch_sequence_capacity: i32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct BranchBatchDesc {
+    pub version: u32,
+    pub token_count: u32,
+    pub sequence_count: u32,
+    pub sequence_membership_count: u32,
 }
 
 #[repr(C)]
@@ -876,6 +887,17 @@ mod dynamic {
         out_message_json_bytes: *mut usize,
         out_error: *mut *mut Error,
     ) -> Status;
+    type SkippyNgramSimpleDraftFn = unsafe extern "C" fn(
+        token_history: *const i32,
+        token_history_count: usize,
+        sampled_token: i32,
+        ngram_size: u16,
+        max_draft_tokens: u16,
+        output_tokens: *mut i32,
+        output_token_capacity: usize,
+        out_token_count: *mut usize,
+        out_error: *mut *mut Error,
+    ) -> Status;
 
     impl Symbols {
         fn lookup_optional<Sym>(&self, name: &[u8]) -> Option<Sym>
@@ -938,6 +960,13 @@ mod dynamic {
             symbols().lookup_optional::<SkippyParseChatResponseJsonFn>(
                 b"skippy_parse_chat_response_json\0",
             )
+        })
+    }
+
+    fn skippy_ngram_simple_draft_fn() -> Option<SkippyNgramSimpleDraftFn> {
+        static CACHE: OnceLock<Option<SkippyNgramSimpleDraftFn>> = OnceLock::new();
+        *CACHE.get_or_init(|| {
+            symbols().lookup_optional::<SkippyNgramSimpleDraftFn>(b"skippy_ngram_simple_draft\0")
         })
     }
 
@@ -1036,6 +1065,36 @@ mod dynamic {
                 output_message_json,
                 output_message_json_capacity,
                 out_message_json_bytes,
+                out_error,
+            )
+        }
+    }
+
+    #[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
+    pub unsafe fn skippy_ngram_simple_draft(
+        token_history: *const i32,
+        token_history_count: usize,
+        sampled_token: i32,
+        ngram_size: u16,
+        max_draft_tokens: u16,
+        output_tokens: *mut i32,
+        output_token_capacity: usize,
+        out_token_count: *mut usize,
+        out_error: *mut *mut Error,
+    ) -> Status {
+        let Some(function) = skippy_ngram_simple_draft_fn() else {
+            return Status::Unsupported;
+        };
+        unsafe {
+            function(
+                token_history,
+                token_history_count,
+                sampled_token,
+                ngram_size,
+                max_draft_tokens,
+                output_tokens,
+                output_token_capacity,
+                out_token_count,
                 out_error,
             )
         }
@@ -1290,6 +1349,37 @@ unsafe extern "C" {
         out_error: *mut *mut Error,
     ) -> Status;
 
+    pub fn skippy_verify_branch_batch_frame_sampled(
+        session: *mut Session,
+        branch_desc: *const BranchBatchDesc,
+        token_ids: *const i32,
+        position_offsets: *const u32,
+        sequence_offsets: *const u32,
+        sequence_ids: *const u32,
+        sampling: *const SamplingConfig,
+        input_desc: *const ActivationDesc,
+        input_payload: *const c_void,
+        output_desc: *mut ActivationDesc,
+        output_payload: *mut c_void,
+        output_payload_capacity: usize,
+        out_output_payload_bytes: *mut usize,
+        output_tokens: *mut i32,
+        output_token_capacity: usize,
+        out_token_count: *mut usize,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_commit_branch_batch(
+        session: *mut Session,
+        sequence_id: u32,
+        accepted_tokens: *const i32,
+        accepted_token_count: usize,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_discard_branch_batch(session: *mut Session, out_error: *mut *mut Error)
+    -> Status;
+
     pub fn skippy_decode_step_frame_sampled(
         session: *mut Session,
         token_id: i32,
@@ -1483,6 +1573,18 @@ unsafe extern "C" {
         model: *mut Model,
         token_id: i32,
         out_is_eog: *mut bool,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_ngram_simple_draft(
+        token_history: *const i32,
+        token_history_count: usize,
+        sampled_token: i32,
+        ngram_size: u16,
+        max_draft_tokens: u16,
+        output_tokens: *mut i32,
+        output_token_capacity: usize,
+        out_token_count: *mut usize,
         out_error: *mut *mut Error,
     ) -> Status;
 

@@ -140,8 +140,11 @@ pub(crate) struct GlmDsaDispatchSummary {
     pub(crate) moe_weighted_sum_f32x4_records: usize,
     pub(crate) moe_weighted_sum_already_weighted_records: usize,
     pub(crate) mul_mv_id_weighted_sum_fused_records: usize,
+    pub(crate) mul_mv_id_weighted_sum_fused_q2_k_records: usize,
     pub(crate) mul_mv_id_weighted_sum_fused_q3_k_records: usize,
+    pub(crate) mul_mv_id_q2_down_weighted_reduce_records: usize,
     pub(crate) mul_mv_id_weighted_slots_records: usize,
+    pub(crate) mul_mv_id_weighted_slots_q2_k_records: usize,
     pub(crate) mul_mv_id_weighted_slots_q3_k_records: usize,
     pub(crate) mul_mv_id_q2_gate_up_swiglu_records: usize,
     pub(crate) routed_moe_gate_records: usize,
@@ -149,6 +152,7 @@ pub(crate) struct GlmDsaDispatchSummary {
     pub(crate) routed_moe_down_records: usize,
     pub(crate) routed_moe_gate_q2_k_records: usize,
     pub(crate) routed_moe_up_q2_k_records: usize,
+    pub(crate) routed_moe_down_q2_k_records: usize,
     pub(crate) routed_moe_down_q3_k_records: usize,
     pub(crate) routed_moe_gate_mul_mv_id_records: usize,
     pub(crate) routed_moe_up_mul_mv_id_records: usize,
@@ -291,19 +295,34 @@ pub(crate) fn summarize_metal_dispatch(records: &[MetalDispatchRecord]) -> GlmDs
                     summary.moe_weighted_sum_already_weighted_records += 1;
                 }
             }
-            "mul_mv_id_weighted_sum_fused" => {
+            "mul_mv_id_weighted_sum_fused"
+            | "mul_mv_id_down_weighted_reduce"
+            | "mul_mv_id_q2_down_weighted_reduce_reference"
+            | "mul_mv_id_q3_down_slot_parallel_reduce"
+            | "moe_mul_mat_id" => {
                 summary.mul_mv_id_weighted_sum_fused_records += 1;
-                if record.kernel.as_deref() == Some("q3_K") {
+                let quant_type = dispatch_quant_type(record);
+                if quant_type == Some("q2_K") {
+                    summary.mul_mv_id_weighted_sum_fused_q2_k_records += 1;
+                }
+                if quant_type == Some("q3_K") {
                     summary.mul_mv_id_weighted_sum_fused_q3_k_records += 1;
                 }
             }
+            "mul_mv_id_q2_down_weighted_reduce" => {
+                summary.mul_mv_id_q2_down_weighted_reduce_records += 1;
+            }
             "mul_mv_id_weighted_slots" => {
                 summary.mul_mv_id_weighted_slots_records += 1;
-                if record.kernel.as_deref() == Some("q3_K") {
+                let quant_type = record.kernel.as_deref().or(record.src_type.as_deref());
+                if quant_type == Some("q2_K") {
+                    summary.mul_mv_id_weighted_slots_q2_k_records += 1;
+                }
+                if quant_type == Some("q3_K") {
                     summary.mul_mv_id_weighted_slots_q3_k_records += 1;
                 }
             }
-            "mul_mv_id_q2_gate_up_swiglu" => {
+            op if op.starts_with("mul_mv_id_q2_gate_up_swiglu") => {
                 summary.mul_mv_id_q2_gate_up_swiglu_records += 1;
             }
             _ => {}
@@ -327,8 +346,18 @@ pub(crate) fn summarize_metal_dispatch(records: &[MetalDispatchRecord]) -> GlmDs
         }
 
         let is_mul_mat_id = record.op == "mul_mat_id";
-        let is_down_weighted_sum_fused = record.op == "mul_mv_id_weighted_sum_fused";
+        let is_down_weighted_sum_fused = matches!(
+            record.op.as_str(),
+            "mul_mv_id_weighted_sum_fused"
+                | "mul_mv_id_down_weighted_reduce"
+                | "mul_mv_id_q2_down_weighted_reduce_reference"
+                | "mul_mv_id_q3_down_slot_parallel_reduce"
+                | "moe_mul_mat_id"
+        );
+        let fused_quant_type = dispatch_quant_type(record);
+        let is_down_weighted_reduce = record.op == "mul_mv_id_q2_down_weighted_reduce";
         let is_down_weighted_slots = record.op == "mul_mv_id_weighted_slots";
+        let weighted_slots_quant_type = record.kernel.as_deref().or(record.src_type.as_deref());
 
         if record.tensor.contains("ffn_moe_gate") {
             summary.routed_moe_gate_records += 1;
@@ -354,7 +383,11 @@ pub(crate) fn summarize_metal_dispatch(records: &[MetalDispatchRecord]) -> GlmDs
                 summary.routed_moe_up_mul_mm_id_records += 1;
             }
         }
-        if record.tensor.contains("ffn_moe_down") {
+        if record.tensor.contains("ffn_moe_down")
+            || is_down_weighted_sum_fused
+            || is_down_weighted_reduce
+            || is_down_weighted_slots
+        {
             summary.routed_moe_down_records += 1;
             if record.grid_x > 256 {
                 summary.routed_moe_down_expanded_grid_records += 1;
@@ -362,14 +395,27 @@ pub(crate) fn summarize_metal_dispatch(records: &[MetalDispatchRecord]) -> GlmDs
             if is_mul_mat_id && record.src_type.as_deref() == Some("q3_K") {
                 summary.routed_moe_down_q3_k_records += 1;
             }
+            if is_mul_mat_id && record.src_type.as_deref() == Some("q2_K") {
+                summary.routed_moe_down_q2_k_records += 1;
+            }
             if is_mul_mat_id && record.kernel.as_deref() == Some("mul_mv_id") {
                 summary.routed_moe_down_mul_mv_id_records += 1;
             }
-            if is_down_weighted_sum_fused && record.kernel.as_deref() == Some("q3_K") {
+            if is_down_weighted_sum_fused && fused_quant_type == Some("q3_K") {
                 summary.routed_moe_down_q3_k_records += 1;
             }
-            if is_down_weighted_slots && record.kernel.as_deref() == Some("q3_K") {
+            if is_down_weighted_sum_fused && fused_quant_type == Some("q2_K") {
+                summary.routed_moe_down_q2_k_records += 1;
+            }
+            if is_down_weighted_reduce {
+                summary.routed_moe_down_q2_k_records += 1;
+                summary.routed_moe_down_mul_mv_id_records += 1;
+            }
+            if is_down_weighted_slots && weighted_slots_quant_type == Some("q3_K") {
                 summary.routed_moe_down_q3_k_records += 1;
+            }
+            if is_down_weighted_slots && weighted_slots_quant_type == Some("q2_K") {
+                summary.routed_moe_down_q2_k_records += 1;
             }
             if is_mul_mat_id && record.kernel.as_deref() == Some("mul_mm_id") {
                 summary.routed_moe_down_mul_mm_id_records += 1;
@@ -396,6 +442,16 @@ pub(crate) fn summarize_metal_dispatch(records: &[MetalDispatchRecord]) -> GlmDs
         .map(|(reason, records)| reason.into_summary(records))
         .collect();
     summary
+}
+
+fn dispatch_quant_type(record: &MetalDispatchRecord) -> Option<&str> {
+    if record.op == "mul_mv_id_q3_down_slot_parallel_reduce" {
+        Some("q3_K")
+    } else if record.op == "moe_mul_mat_id" {
+        record.src_type.as_deref()
+    } else {
+        record.kernel.as_deref().or(record.src_type.as_deref())
+    }
 }
 
 fn is_topk_moe_route_pack_candidate(record: &MetalDispatchRecord) -> bool {
@@ -829,6 +885,7 @@ mod tests {
         assert_eq!(summary.mul_mv_id_q2_gate_up_swiglu_records, 1);
         assert_eq!(summary.routed_moe_gate_q2_k_records, 1);
         assert_eq!(summary.routed_moe_up_q2_k_records, 1);
+        assert_eq!(summary.routed_moe_down_q2_k_records, 0);
         assert_eq!(summary.routed_moe_down_q3_k_records, 4);
         assert_eq!(summary.routed_moe_gate_mul_mv_id_records, 1);
         assert_eq!(summary.routed_moe_up_mul_mm_id_records, 1);
@@ -840,6 +897,52 @@ mod tests {
         assert_eq!(summary.route_fusion_reasons[1].reason, "shape_or_sequence");
         assert_eq!(summary.route_fusion_reasons[1].records, 1);
         assert_eq!(summary.dispatch_shapes.len(), 12);
+    }
+
+    #[test]
+    fn metal_dispatch_summary_accepts_current_q3_weighted_reduce_name() {
+        let records = [dispatch(
+            "mul_mv_id_down_weighted_reduce",
+            None,
+            "ffn_moe_out-30",
+            Some("q3_K"),
+        )];
+
+        let summary = summarize_metal_dispatch(&records);
+
+        assert_eq!(summary.mul_mv_id_weighted_sum_fused_records, 1);
+        assert_eq!(summary.mul_mv_id_weighted_sum_fused_q3_k_records, 1);
+        assert_eq!(summary.routed_moe_down_q3_k_records, 1);
+    }
+
+    #[test]
+    fn metal_dispatch_summary_accepts_q2_gate_up_swiglu_variant_name() {
+        let records = [dispatch(
+            "mul_mv_id_q2_gate_up_swiglu_slot1_dual",
+            Some("q2_K"),
+            "ffn_moe_swiglu-30",
+            Some("q2_K"),
+        )];
+
+        let summary = summarize_metal_dispatch(&records);
+
+        assert_eq!(summary.mul_mv_id_q2_gate_up_swiglu_records, 1);
+    }
+
+    #[test]
+    fn metal_dispatch_summary_accepts_current_q3_slot_parallel_name() {
+        let records = [dispatch(
+            "mul_mv_id_q3_down_slot_parallel_reduce",
+            None,
+            "ffn_moe_out-30",
+            None,
+        )];
+
+        let summary = summarize_metal_dispatch(&records);
+
+        assert_eq!(summary.mul_mv_id_weighted_sum_fused_records, 1);
+        assert_eq!(summary.mul_mv_id_weighted_sum_fused_q3_k_records, 1);
+        assert_eq!(summary.routed_moe_down_q3_k_records, 1);
     }
 
     #[test]
@@ -920,6 +1023,38 @@ mod tests {
             sparse_shape.reduction_strategy.as_deref(),
             Some("threadgroup_direct")
         );
+    }
+
+    #[test]
+    fn metal_dispatch_summary_counts_q2_routed_down_records() {
+        let records = vec![
+            dispatch(
+                "mul_mat_id",
+                Some("mul_mv_id"),
+                "blk.45.ffn_moe_down.weight",
+                Some("q2_K"),
+            ),
+            dispatch(
+                "mul_mv_id_weighted_sum_fused",
+                Some("q2_K"),
+                "blk.45.ffn_moe_down.weight",
+                Some("q2_K"),
+            ),
+            dispatch(
+                "mul_mv_id_weighted_slots",
+                Some("q2_K"),
+                "blk.45.ffn_moe_down.weight",
+                Some("q2_K"),
+            ),
+        ];
+
+        let summary = summarize_metal_dispatch(&records);
+
+        assert_eq!(summary.routed_moe_down_records, 3);
+        assert_eq!(summary.routed_moe_down_q2_k_records, 3);
+        assert_eq!(summary.routed_moe_down_q3_k_records, 0);
+        assert_eq!(summary.mul_mv_id_weighted_sum_fused_q2_k_records, 1);
+        assert_eq!(summary.mul_mv_id_weighted_slots_q2_k_records, 1);
     }
 
     #[test]

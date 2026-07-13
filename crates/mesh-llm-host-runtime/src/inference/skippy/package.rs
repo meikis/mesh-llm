@@ -17,6 +17,7 @@ pub struct SkippyPackageIdentity {
     pub source_model_sha256: String,
     pub source_model_bytes: u64,
     pub source_files: Vec<SkippyPackageSourceFile>,
+    pub layer_weight_bytes: Vec<u64>,
     pub layer_count: u32,
     pub activation_width: u32,
     pub tensor_count: u64,
@@ -108,6 +109,7 @@ pub fn synthetic_direct_gguf_package(
         source_model_sha256,
         source_model_bytes,
         source_files,
+        layer_weight_bytes: Vec::new(),
         layer_count: compact.layer_count,
         activation_width: compact.embedding_size,
         tensor_count,
@@ -315,6 +317,7 @@ pub fn identity_from_layer_package(package_ref: &str) -> Result<SkippyPackageIde
     let source_model_bytes = info
         .source_model_bytes
         .unwrap_or_else(|| info.layers.iter().map(|l| l.artifact_bytes).sum::<u64>());
+    let layer_weight_bytes = layer_weight_bytes_from_info(&info);
 
     // For local paths inside an HF cache, convert to an exact hf:// ref so all
     // nodes resolve the same snapshot independently. HF cache dirs look like:
@@ -328,11 +331,24 @@ pub fn identity_from_layer_package(package_ref: &str) -> Result<SkippyPackageIde
         source_model_sha256: info.source_model_sha256,
         source_model_bytes,
         source_files: Vec::new(),
+        layer_weight_bytes,
         layer_count: info.layer_count,
         activation_width,
         tensor_count: info.layers.iter().map(|l| l.tensor_count as u64).sum(),
         generation: info.generation,
     })
+}
+
+fn layer_weight_bytes_from_info(info: &skippy_runtime::package::LayerPackageInfo) -> Vec<u64> {
+    let mut layers = info.layers.clone();
+    layers.sort_by_key(|layer| layer.layer_index);
+    if layers.len() != info.layer_count as usize {
+        return Vec::new();
+    }
+    layers
+        .into_iter()
+        .map(|layer| layer.tensor_bytes.max(layer.artifact_bytes))
+        .collect()
 }
 
 /// Detect if a local path is inside an HF cache directory and convert to `hf://` ref.

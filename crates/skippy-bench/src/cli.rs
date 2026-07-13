@@ -25,6 +25,10 @@ pub enum CommandKind {
     VerifySpanLocal(VerifySpanLocalArgs),
     #[command(name = "verify-span-binary")]
     VerifySpanBinary(VerifySpanBinaryArgs),
+    #[command(name = "branch-batch-local")]
+    BranchBatchLocal(BranchBatchLocalArgs),
+    #[command(name = "lookahead-local")]
+    LookaheadLocal(LookaheadLocalArgs),
     #[command(name = "decode-binary")]
     DecodeBinary(DecodeBinaryArgs),
     #[command(name = "chat-corpus")]
@@ -41,6 +45,10 @@ pub enum CommandKind {
     GlmDsaOpReport(GlmDsaOpReportArgs),
     #[command(name = "glm-dsa-op-compare")]
     GlmDsaOpCompare(GlmDsaOpCompareArgs),
+    #[command(name = "glm-dsa-route-locality")]
+    GlmDsaRouteLocality(GlmDsaRouteLocalityArgs),
+    #[command(name = "glm-dsa-route-mass")]
+    GlmDsaRouteMass(GlmDsaRouteMassArgs),
     #[command(name = "glm-dsa-aggregate-reports")]
     GlmDsaAggregateReports(GlmDsaAggregateReportsArgs),
     Run(RunArgs),
@@ -277,6 +285,71 @@ pub struct GlmDsaOpReportArgs {
     pub output: Option<PathBuf>,
 }
 
+#[derive(Parser)]
+pub struct GlmDsaRouteLocalityArgs {
+    #[arg(long, required = true)]
+    pub log: Vec<PathBuf>,
+    #[arg(
+        long,
+        help = "Only parse the window starting at the first log line containing this marker."
+    )]
+    pub from_marker: Option<String>,
+    #[arg(
+        long,
+        help = "Stop parsing before the first line after the selected start containing this marker."
+    )]
+    pub until_marker: Option<String>,
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Fail unless the combined report contains at least this many consecutive decode transitions."
+    )]
+    pub min_transitions: usize,
+    #[arg(
+        long,
+        default_value = "8,12,16,24,32,48,64",
+        help = "Comma-separated per-layer expert capacities for LRU cache hit-rate simulation."
+    )]
+    pub cache_capacities: String,
+    #[arg(
+        long,
+        help = "Fail unless mean consecutive-token expert overlap is at least this fraction."
+    )]
+    pub require_mean_overlap: Option<f64>,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+pub struct GlmDsaRouteMassArgs {
+    #[arg(long, required = true)]
+    pub log: Vec<PathBuf>,
+    #[arg(
+        long,
+        help = "Only parse the window starting at the first log line containing this marker."
+    )]
+    pub from_marker: Option<String>,
+    #[arg(
+        long,
+        help = "Stop parsing before the first line after the selected start containing this marker."
+    )]
+    pub until_marker: Option<String>,
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Fail unless the combined report contains at least this many decode route-weight records."
+    )]
+    pub min_decode_records: usize,
+    #[arg(
+        long,
+        default_value = "0.9,0.95,0.975,0.99",
+        help = "Comma-separated cumulative route-mass thresholds for adaptive expert-count simulation."
+    )]
+    pub thresholds: String,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum GlmDsaReportTimingPhase {
     Prefill,
@@ -336,6 +409,27 @@ pub struct GlmDsaLayerMicrobenchArgs {
     pub activation_width: u32,
     #[arg(long, default_value_t = 1)]
     pub tokens: usize,
+    #[arg(
+        long,
+        default_value_t = false,
+        action = ArgAction::SetTrue,
+        help = "Execute a multi-token frame through the native Skippy verification path instead of prefill."
+    )]
+    pub verification_batch: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        action = ArgAction::SetTrue,
+        help = "Compare a two-branch shared-prefix llama batch against two serial executions on the selected real GLM-DSA layer. Requires --tokens 3."
+    )]
+    pub branch_batch_parity: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        action = ArgAction::SetTrue,
+        help = "Compare independent GLM-DSA sessions executed serially against one native llama decode batch. --tokens selects the session count."
+    )]
+    pub multi_session_batch_parity: bool,
     #[arg(
         long,
         default_value_t = 0,
@@ -415,6 +509,13 @@ pub struct GlmDsaLayerMicrobenchArgs {
         help = "Enable the experimental native Metal GLM-DSA selected-row flash path that fuses compact GET_ROWS into flash attention."
     )]
     pub selected_row_flash: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        action = ArgAction::SetTrue,
+        help = "Do not set the selected-row Metal override; prove llama.cpp's native default policy instead."
+    )]
+    pub native_default_selected_row_flash: bool,
     #[arg(long, default_value_t = true, action = ArgAction::Set)]
     pub direct_sparse_prefill: bool,
     #[arg(
@@ -528,7 +629,21 @@ pub struct GlmDsaLayerMicrobenchArgs {
         long,
         default_value_t = false,
         action = ArgAction::Set,
-        help = "Enable the experimental native Metal GLM-DSA q2_K routed gate/up SwigLU fusion."
+        help = "Enable the experimental native Metal GLM-DSA q2_K routed down weighted-slots path."
+    )]
+    pub moe_q2_down_weighted_slots: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        action = ArgAction::Set,
+        help = "Enable the experimental native Metal GLM-DSA q2_K routed down direct weighted-reduce path."
+    )]
+    pub moe_q2_down_weighted_reduce_direct: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        action = ArgAction::Set,
+        help = "Request the native Metal GLM-DSA q2_K routed gate/up SwigLU fusion."
     )]
     pub moe_q2_gate_up_swiglu: bool,
     #[arg(
@@ -561,6 +676,16 @@ pub struct GlmDsaLayerMicrobenchArgs {
         help = "Set SKIPPY_GLM_DSA_DENSE_SPARSE_MASK_MAX_BYTES for this microbench run. Used for direct-sparse decision telemetry and memory guard experiments."
     )]
     pub dense_sparse_mask_max_bytes: Option<u64>,
+    #[arg(
+        long,
+        help = "Set SKIPPY_GLM_DSA_DIRECT_SPARSE_DECODE_MAX_TOP_K for this microbench run. Lower values force larger decode top-k windows toward compact selected-KV flash attention."
+    )]
+    pub direct_sparse_decode_max_top_k: Option<u32>,
+    #[arg(
+        long,
+        help = "Set SKIPPY_GLM_DSA_COMPACT_FLASH_MIN_KV for this microbench run. Decode compact flash is only considered when visible KV is at least this value."
+    )]
+    pub compact_flash_min_kv: Option<u32>,
     #[arg(
         long,
         help = "Set SKIPPY_GLM_DSA_DIRECT_SPARSE_PREFILL_MIN_KV_TOPK_RATIO for this microbench run. Lower this only when intentionally forcing direct sparse prefill proof runs."
@@ -602,6 +727,12 @@ pub struct GlmDsaLayerMicrobenchArgs {
         help = "Fail unless the candidate proves GLM-DSA MoE aggregation used the Metal moe_weighted_sum f32x4 path."
     )]
     pub require_moe_weighted_sum_proof: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Fail unless Metal dispatch logs prove routed MoE down projections used q2_K and no q3_K routed-down dispatches were observed."
+    )]
+    pub require_moe_q2_routed_down_proof: bool,
     #[arg(
         long,
         default_value_t = false,
@@ -652,9 +783,27 @@ pub struct GlmDsaLayerMicrobenchArgs {
     #[arg(
         long,
         default_value_t = false,
+        help = "Compare the stock one-row Metal packed F16 gather with the GLM-DSA 16-row threadgroup gather."
+    )]
+    pub compare_glm_packed_gather: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Run the same GLM-DSA Metal case with top-k MoE route fusion disabled as the baseline and enabled as the candidate."
+    )]
+    pub compare_metal_topk_moe_route_fusion: bool,
+    #[arg(
+        long,
+        default_value_t = false,
         help = "Run the same GLM-DSA case with parallel Lightning Indexer disabled as the baseline and enabled as the candidate."
     )]
     pub compare_parallel_lightning_indexer: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Compare the stock serial Lightning Indexer with a row-tiled Metal kernel that stages the shared F32 query once per threadgroup."
+    )]
+    pub compare_staged_lightning_indexer: bool,
     #[arg(
         long,
         default_value_t = false,
@@ -676,6 +825,12 @@ pub struct GlmDsaLayerMicrobenchArgs {
     #[arg(
         long,
         default_value_t = false,
+        help = "Run the same real GLM-DSA layer with native Metal MoE motif coencoding disabled as the baseline and enabled as the candidate."
+    )]
+    pub compare_moe_motif_coencode: bool,
+    #[arg(
+        long,
+        default_value_t = false,
         help = "Run the same GLM-DSA Metal case with routed down + weighted-sum fusion disabled as the baseline and enabled as the candidate."
     )]
     pub compare_moe_down_weighted_fusion: bool,
@@ -694,9 +849,81 @@ pub struct GlmDsaLayerMicrobenchArgs {
     #[arg(
         long,
         default_value_t = false,
-        help = "Run the same GLM-DSA Metal case with q2_K routed gate/up SwigLU fusion disabled as the baseline and enabled as the candidate."
+        help = "Run the same GLM-DSA Metal case with q2_K routed down weighted-slots disabled as the baseline and enabled as the candidate."
+    )]
+    pub compare_moe_q2_down_weighted_slots: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Run the same GLM-DSA Metal case with q2_K direct routed down weighted-reduce disabled as the baseline and enabled as the candidate."
+    )]
+    pub compare_moe_q2_down_weighted_reduce_direct: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Run the same GLM-DSA Metal case with q2_K routed gate/up SwiGLU fusion disabled as the baseline and enabled as the candidate."
     )]
     pub compare_moe_q2_gate_up_swiglu: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Compare ordinary Metal MoE execution against the exact GLM Q2/Q3/Q4 two-phase routed/shared MoE path on the same real layer span."
+    )]
+    pub compare_glm_moe_two_phase: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Compare ordinary Metal MoE execution against the exact GLM Q2/Q3/Q4 dual-lane routed/shared MoE path on the same real layer span."
+    )]
+    pub compare_glm_moe_dual_lane: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Compare GLM compact Flash Attention with four versus eight KV workgroups on the same real layer span."
+    )]
+    pub compare_glm_compact_flash_nwg: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Compare stock GLM compact Flash Attention against the experimental multi-head nwg=8 Metal path on the same real layer span."
+    )]
+    pub compare_glm_compact_multihead_flash: bool,
+    #[arg(
+        long,
+        default_value_t = 8,
+        help = "KV workgroup count for the candidate in --compare-glm-compact-multihead-flash."
+    )]
+    pub glm_compact_multihead_nwg: u32,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Compare stock GLM compact Flash Attention against the exact two-pass QK-score/V path on the same real layer span."
+    )]
+    pub compare_glm_compact_split_exact: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Compare generic Metal matvec defaults against the experimental GLM projection shape policy on the same real layer span."
+    )]
+    pub compare_glm_projection_nsg_policy: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Compare the retained exact GLM Metal composition (selected-row attention, Q8/Q3 projection policy, and native routed down) against the current generic reference."
+    )]
+    pub compare_glm_retained_composition: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Compare ordinary Metal execution against the experimental fused GLM Q8-to-Q4 absorbed-query path on the same real layer span."
+    )]
+    pub compare_glm_absorbed_qkv_phases: bool,
+    #[arg(
+        long,
+        default_value_t = 7,
+        help = "Bitmask for --compare-glm-projection-nsg-policy: 1=Q8 attention, 2=Q3 output, 4=Q4 gate/up."
+    )]
+    pub glm_projection_nsg_policy_mask: u32,
     #[arg(
         long,
         default_value_t = false,
@@ -768,6 +995,54 @@ pub struct VerifySpanLocalArgs {
     #[arg(
         long,
         default_value = "Write a Rust function that parses a list of integers and returns the median."
+    )]
+    pub prompt: String,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+pub struct BranchBatchLocalArgs {
+    #[arg(long)]
+    pub model_path: PathBuf,
+    #[arg(long, default_value_t = 30)]
+    pub layer_end: u32,
+    #[arg(long, default_value_t = 2048)]
+    pub ctx_size: u32,
+    #[arg(long, default_value_t = -1, allow_hyphen_values = true)]
+    pub n_gpu_layers: i32,
+    #[arg(
+        long,
+        default_value = "Write a Rust function that parses integers and returns their median."
+    )]
+    pub prompt: String,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Parser)]
+pub struct LookaheadLocalArgs {
+    #[arg(long)]
+    pub model_path: PathBuf,
+    #[arg(long, default_value_t = 30)]
+    pub layer_end: u32,
+    #[arg(long, default_value_t = 2048)]
+    pub ctx_size: u32,
+    #[arg(long, default_value_t = -1, allow_hyphen_values = true)]
+    pub n_gpu_layers: i32,
+    #[arg(long, default_value_t = 64)]
+    pub max_tokens: usize,
+    #[arg(long, default_value_t = 4)]
+    pub ngram_size: usize,
+    #[arg(long, default_value_t = 8)]
+    pub window_size: usize,
+    #[arg(long, default_value_t = 4)]
+    pub max_candidates: usize,
+    #[arg(long)]
+    pub jacobi_on_miss: bool,
+    #[arg(
+        long,
+        default_value = "Write a Rust function that parses integers and returns their median."
     )]
     pub prompt: String,
     #[arg(long)]
@@ -908,6 +1183,16 @@ pub struct RunArgs {
     pub ctx_size: u32,
     #[arg(long, default_value_t = -1, allow_hyphen_values = true)]
     pub n_gpu_layers: i32,
+    #[arg(
+        long,
+        help = "Override llama.cpp's logical batch size for stage runtimes. Useful for reducing output and graph reservation on memory-tight split runs."
+    )]
+    pub n_batch: Option<u32>,
+    #[arg(
+        long,
+        help = "Override llama.cpp's physical micro-batch size for stage runtimes. Useful for reducing backend compute-buffer reservation on memory-tight split runs."
+    )]
+    pub n_ubatch: Option<u32>,
     #[arg(long, default_value = "f16")]
     pub cache_type_k: String,
     #[arg(long, default_value = "f16")]
@@ -981,6 +1266,28 @@ pub struct RunArgs {
     pub stage_max_inflight: usize,
     #[arg(long)]
     pub stage_reply_credit_limit: Option<usize>,
+    #[arg(
+        long,
+        help = "Bind an OpenAI-compatible HTTP surface on launched stage 0, for example 127.0.0.1:9337."
+    )]
+    pub openai_bind_addr: Option<SocketAddr>,
+    #[arg(
+        long,
+        help = "Served OpenAI model id for stage 0. Defaults to --model-id when omitted."
+    )]
+    pub openai_model_id: Option<String>,
+    #[arg(
+        long,
+        default_value_t = 16,
+        help = "Default max_tokens for stage-0 OpenAI requests that omit max_tokens."
+    )]
+    pub openai_default_max_tokens: u32,
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Maximum concurrent OpenAI chat generation requests hosted by stage 0."
+    )]
+    pub openai_generation_concurrency: usize,
     #[arg(
         long,
         help = "Pass --async-prefill-forward to every binary stage server."
@@ -1084,6 +1391,12 @@ pub struct RunArgs {
     #[arg(
         long,
         default_value_t = false,
+        help = "Enable native Metal GLM-DSA selected-row flash in every launched stage. This fuses compact selected-KV gather into flash attention."
+    )]
+    pub glm_dsa_selected_row_flash: bool,
+    #[arg(
+        long,
+        default_value_t = false,
         help = "Enable native Metal GLM-DSA dispatch-shape logs in every launched stage."
     )]
     pub glm_dsa_metal_dispatch_log: bool,
@@ -1102,6 +1415,28 @@ pub struct RunArgs {
         help = "Set SKIPPY_GLM_DSA_DENSE_SPARSE_MASK_MAX_BYTES in every launched stage. When GLM-DSA direct sparse prefill is enabled, larger dense sparse-mask fallbacks are routed to direct sparse attention."
     )]
     pub glm_dsa_dense_sparse_mask_max_bytes: Option<u64>,
+    #[arg(
+        long,
+        help = "Set SKIPPY_GLM_DSA_DIRECT_SPARSE_DECODE_MAX_TOP_K in every launched stage. Lower values force larger decode top-k windows toward compact selected-KV flash attention."
+    )]
+    pub glm_dsa_direct_sparse_decode_max_top_k: Option<u32>,
+    #[arg(
+        long,
+        help = "Set SKIPPY_GLM_DSA_COMPACT_FLASH_MIN_KV in every launched stage. Decode compact flash is only considered when visible KV is at least this value."
+    )]
+    pub glm_dsa_compact_flash_min_kv: Option<u32>,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Enable llama.cpp GLM-DSA direct-sparse selector decision logs in every launched stage."
+    )]
+    pub glm_dsa_direct_sparse_decision_log: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Enable llama.cpp GLM-DSA compact-flash selector decision logs in every launched stage."
+    )]
+    pub glm_dsa_compact_flash_policy_log: bool,
 }
 
 #[derive(Parser)]
@@ -1624,6 +1959,7 @@ mod tests {
             "--allow-compact-flash-auto",
             "--require-optimized-route-fusion",
             "--require-moe-weighted-sum-proof",
+            "--require-moe-q2-routed-down-proof",
             "--require-moe-motif-proof",
             "--require-native-indexshare-proof",
             "--require-direct-sparse-decode-proof",
@@ -1654,6 +1990,7 @@ mod tests {
         assert!(args.allow_compact_flash_auto);
         assert!(args.require_optimized_route_fusion);
         assert!(args.require_moe_weighted_sum_proof);
+        assert!(args.require_moe_q2_routed_down_proof);
         assert!(args.require_moe_motif_proof);
         assert!(args.require_native_indexshare_proof);
         assert!(args.require_direct_sparse_decode_proof);
@@ -1751,6 +2088,45 @@ mod tests {
     }
 
     #[test]
+    fn parses_glm_dsa_retained_composition_comparison() {
+        let cli = Cli::try_parse_from([
+            "skippy-bench",
+            "glm-dsa-layer-microbench",
+            "--stage-model",
+            "/tmp/glm52-layers",
+            "--compare-glm-retained-composition",
+        ])
+        .unwrap();
+
+        let CommandKind::GlmDsaLayerMicrobench(args) = cli.command else {
+            panic!("expected glm-dsa-layer-microbench subcommand");
+        };
+
+        assert!(args.compare_glm_retained_composition);
+        assert!(!args.compare_glm_projection_nsg_policy);
+        assert!(!args.compare_selected_row_flash);
+    }
+
+    #[test]
+    fn parses_glm_dsa_native_selected_row_default() {
+        let cli = Cli::try_parse_from([
+            "skippy-bench",
+            "glm-dsa-layer-microbench",
+            "--stage-model",
+            "/tmp/glm52-layers",
+            "--native-default-selected-row-flash",
+        ])
+        .unwrap();
+
+        let CommandKind::GlmDsaLayerMicrobench(args) = cli.command else {
+            panic!("expected glm-dsa-layer-microbench subcommand");
+        };
+
+        assert!(args.native_default_selected_row_flash);
+        assert!(!args.selected_row_flash);
+    }
+
+    #[test]
     fn parses_glm_dsa_op_report_window_filters() {
         let cli = Cli::try_parse_from([
             "skippy-bench",
@@ -1786,6 +2162,89 @@ mod tests {
         assert!(args.require_short_prefill_policy_evidence);
         assert!(args.require_long_prefill_policy_evidence);
         assert!(args.require_verify_policy_evidence);
+    }
+
+    #[test]
+    fn parses_glm_dsa_route_locality_command() {
+        let cli = Cli::try_parse_from([
+            "skippy-bench",
+            "glm-dsa-route-locality",
+            "--log",
+            "/tmp/stage-0.log",
+            "--log",
+            "/tmp/stage-1.log",
+            "--from-marker",
+            "request=target",
+            "--until-marker",
+            "request=next",
+            "--min-transitions",
+            "100",
+            "--cache-capacities",
+            "8,16,32",
+            "--require-mean-overlap",
+            "0.5",
+            "--output",
+            "/tmp/route-locality.json",
+        ])
+        .unwrap();
+
+        let CommandKind::GlmDsaRouteLocality(args) = cli.command else {
+            panic!("expected glm-dsa-route-locality subcommand");
+        };
+
+        assert_eq!(
+            args.log,
+            vec![
+                PathBuf::from("/tmp/stage-0.log"),
+                PathBuf::from("/tmp/stage-1.log"),
+            ]
+        );
+        assert_eq!(args.from_marker.as_deref(), Some("request=target"));
+        assert_eq!(args.until_marker.as_deref(), Some("request=next"));
+        assert_eq!(args.min_transitions, 100);
+        assert_eq!(args.cache_capacities, "8,16,32");
+        assert_eq!(args.require_mean_overlap, Some(0.5));
+        assert_eq!(args.output, Some(PathBuf::from("/tmp/route-locality.json")));
+    }
+
+    #[test]
+    fn parses_glm_dsa_route_mass_command() {
+        let cli = Cli::try_parse_from([
+            "skippy-bench",
+            "glm-dsa-route-mass",
+            "--log",
+            "/tmp/stage-0.log",
+            "--log",
+            "/tmp/stage-1.log",
+            "--from-marker",
+            "request=target",
+            "--until-marker",
+            "request=next",
+            "--min-decode-records",
+            "100",
+            "--thresholds",
+            "0.9,0.99",
+            "--output",
+            "/tmp/route-mass.json",
+        ])
+        .unwrap();
+
+        let CommandKind::GlmDsaRouteMass(args) = cli.command else {
+            panic!("expected glm-dsa-route-mass subcommand");
+        };
+
+        assert_eq!(
+            args.log,
+            vec![
+                PathBuf::from("/tmp/stage-0.log"),
+                PathBuf::from("/tmp/stage-1.log"),
+            ]
+        );
+        assert_eq!(args.from_marker.as_deref(), Some("request=target"));
+        assert_eq!(args.until_marker.as_deref(), Some("request=next"));
+        assert_eq!(args.min_decode_records, 100);
+        assert_eq!(args.thresholds, "0.9,0.99");
+        assert_eq!(args.output, Some(PathBuf::from("/tmp/route-mass.json")));
     }
 
     #[test]

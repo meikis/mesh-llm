@@ -12,6 +12,7 @@ pub struct TopologyPlanningInput {
     pub native_context_length: u32,
     pub layer_count: u32,
     pub model_weight_bytes: u64,
+    pub layer_weight_bytes: Vec<u64>,
     pub kv_bytes_per_token: u64,
     pub minimum_nodes: usize,
     pub nodes: Vec<TopologyNode>,
@@ -155,12 +156,6 @@ fn context_candidates(
                 native: native_context,
             });
         }
-        if requested < minimum_context {
-            return Err(TopologyPlanError::ContextBelowMinimum {
-                requested,
-                minimum: minimum_context,
-            });
-        }
         return Ok(vec![requested]);
     }
 
@@ -297,23 +292,21 @@ fn fit_candidate(
         return None;
     }
 
-    let weight_per_layer = input
-        .model_weight_bytes
-        .div_ceil(u64::from(input.layer_count));
+    let layer_weights = layer_weight_bytes(input);
     let kv_per_layer = input
         .kv_bytes_per_token
         .div_ceil(u64::from(input.layer_count));
-    let bytes_per_layer = candidate_bytes_per_layer(
-        weight_per_layer,
-        kv_per_layer,
-        context_length,
-        parallel_lanes,
-    )?;
+    let layer_required_bytes = layer_required_bytes(&layer_weights, kv_per_layer, context_length)?;
 
     let mut capacities = nodes
         .iter()
         .map(|node| {
-            let max_layers = node.usable_vram_bytes / bytes_per_layer;
+            let max_layers = max_contiguous_layers_from(
+                &layer_required_bytes,
+                0,
+                layer_count,
+                node.usable_vram_bytes,
+            );
             (
                 node.clone(),
                 max_layers.min(u64::from(input.layer_count)) as usize,
@@ -353,15 +346,23 @@ fn fit_candidate(
         let remaining_nodes = capacities.len() - stage_index;
         let min_for_later = remaining_nodes.saturating_sub(1) as u32;
         let assignable = remaining_layers.saturating_sub(min_for_later);
-        let layer_span = assignable.min(*max_layers as u32);
+        let layer_span = assignable
+            .min(*max_layers as u32)
+            .min(max_contiguous_layers_from(
+                &layer_required_bytes,
+                next_layer as usize,
+                assignable as usize,
+                node.usable_vram_bytes,
+            ) as u32);
         if layer_span == 0 {
             return None;
         }
 
         let layer_start = next_layer;
         let layer_end = layer_start + layer_span;
-        let parameter_bytes = u64::from(layer_span).saturating_mul(weight_per_layer);
-        let required_bytes = u64::from(layer_span).saturating_mul(bytes_per_layer);
+        let range = layer_start as usize..layer_end as usize;
+        let parameter_bytes = sum_u64(&layer_weights[range.clone()]);
+        let required_bytes = sum_u64(&layer_required_bytes[range]);
         if required_bytes > node.usable_vram_bytes {
             return None;
         }
@@ -471,6 +472,16 @@ fn decode_tpot_target_met(estimate: Option<u32>, target: Option<u32>) -> Option<
     Some(estimate? <= target?)
 }
 
+fn layer_weight_bytes(input: &TopologyPlanningInput) -> Vec<u64> {
+    if input.layer_weight_bytes.len() == input.layer_count as usize {
+        return input.layer_weight_bytes.clone();
+    }
+    let weight_per_layer = input
+        .model_weight_bytes
+        .div_ceil(u64::from(input.layer_count));
+    vec![weight_per_layer; input.layer_count as usize]
+}
+
 fn candidate_bytes_per_layer(
     weight_per_layer: u64,
     kv_per_layer: u64,
@@ -483,6 +494,42 @@ fn candidate_bytes_per_layer(
     let kv_bytes = u128::from(kv_per_layer).checked_mul(u128::from(context_length))?;
     let total = u128::from(weight_per_layer).checked_add(kv_bytes)?;
     total.try_into().ok()
+}
+
+fn layer_required_bytes(
+    layer_weights: &[u64],
+    kv_per_layer: u64,
+    context_length: u32,
+) -> Option<Vec<u64>> {
+    layer_weights
+        .iter()
+        .map(|weight| candidate_bytes_per_layer(*weight, kv_per_layer, context_length, 1))
+        .collect()
+}
+
+fn max_contiguous_layers_from(
+    layer_required_bytes: &[u64],
+    start: usize,
+    limit: usize,
+    capacity: u64,
+) -> u64 {
+    let mut total = 0u64;
+    let mut count = 0u64;
+    for bytes in layer_required_bytes.iter().skip(start).take(limit) {
+        let next = total.saturating_add(*bytes);
+        if next > capacity {
+            break;
+        }
+        total = next;
+        count += 1;
+    }
+    count
+}
+
+fn sum_u64(values: &[u64]) -> u64 {
+    values
+        .iter()
+        .fold(0u64, |total, value| total.saturating_add(*value))
 }
 
 #[cfg(test)]
@@ -520,6 +567,7 @@ mod tests {
             native_context_length: 65_536,
             layer_count: 40,
             model_weight_bytes: 40 * GIB,
+            layer_weight_bytes: Vec::new(),
             kv_bytes_per_token: 64 * 1024,
             minimum_nodes: 1,
             nodes,
@@ -534,6 +582,7 @@ mod tests {
             native_context_length: QWEN_CODER_480B_NATIVE_CONTEXT,
             layer_count: QWEN_CODER_480B_LAYERS,
             model_weight_bytes: QWEN_CODER_480B_WEIGHT_BYTES,
+            layer_weight_bytes: Vec::new(),
             kv_bytes_per_token: QWEN_CODER_480B_Q8_KV_BYTES_PER_TOKEN,
             minimum_nodes: 2,
             nodes,
@@ -607,6 +656,75 @@ mod tests {
             .find(|stage| stage.node_id == "large")
             .unwrap();
         assert!(small.layer_end - small.layer_start < large.layer_end - large.layer_start);
+    }
+
+    #[test]
+    fn exact_layer_weights_allow_uneven_package_fit() {
+        let mut request = input(vec![node("large", 12), node("small", 9)]);
+        request.layer_count = 4;
+        request.model_weight_bytes = 18 * GIB;
+        request.layer_weight_bytes = vec![GIB / 8, GIB / 8, 9 * GIB, 8 * GIB];
+        request.kv_bytes_per_token = 1;
+        request.minimum_nodes = 2;
+
+        let plan = plan_topology(&request).unwrap();
+
+        assert_eq!(plan.stages.len(), 2);
+        assert_eq!(
+            plan.stages
+                .iter()
+                .map(|stage| (stage.node_id.as_str(), stage.layer_start, stage.layer_end))
+                .collect::<Vec<_>>(),
+            vec![("large", 0, 3), ("small", 3, 4)]
+        );
+        assert_eq!(plan.stages[0].parameter_bytes, 9 * GIB + GIB / 4);
+        assert_eq!(plan.stages[1].parameter_bytes, 8 * GIB);
+    }
+
+    #[test]
+    fn glm52_layer_package_fits_observed_two_node_lab_budgets() {
+        let mut layer_weights = vec![3_634_859_616; 79];
+        layer_weights[0..3].fill(204_373_536);
+        for layer in (6..78).step_by(4) {
+            layer_weights[layer] = 3_644_818_336;
+        }
+        layer_weights[78] = 3_725_108_384;
+
+        let request = TopologyPlanningInput {
+            native_context_length: 1_048_576,
+            layer_count: 79,
+            model_weight_bytes: layer_weights.iter().sum(),
+            layer_weight_bytes: layer_weights,
+            // Q4_0 K/V pricing for GLM-DSA's compressed MLA cache.
+            kv_bytes_per_token: 48_348,
+            minimum_nodes: 2,
+            nodes: vec![
+                TopologyNode {
+                    node_id: "large".to_string(),
+                    detected_vram_bytes: 239_100_000_000,
+                    max_vram_bytes: None,
+                    runtime_headroom_bytes: 0,
+                    stage_transfer_latency_ms: Some(1),
+                },
+                TopologyNode {
+                    node_id: "small".to_string(),
+                    detected_vram_bytes: 115_400_000_000,
+                    max_vram_bytes: None,
+                    runtime_headroom_bytes: 0,
+                    stage_transfer_latency_ms: Some(1),
+                },
+            ],
+            context_length_override: Some(65_536),
+            parallel_lanes_override: Some(1),
+            target_decode_tpot_ms: Some(33),
+        };
+
+        let plan = plan_topology(&request).expect("GLM-5.2 package should fit the lab");
+
+        assert_eq!(plan.context_length, 65_536);
+        assert_eq!(plan.stages.len(), 2);
+        assert_eq!(plan.stages[0].layer_start, 0);
+        assert_eq!(plan.stages[1].layer_end, 79);
     }
 
     #[test]
@@ -684,18 +802,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_context_override_below_minimum_floor() {
+    fn accepts_explicit_context_override_below_auto_floor() {
         let mut request = input(vec![node("a", 80), node("b", 80)]);
         request.native_context_length = 262_144;
         request.context_length_override = Some(32_768);
 
-        assert_eq!(
-            plan_topology(&request),
-            Err(TopologyPlanError::ContextBelowMinimum {
-                requested: 32_768,
-                minimum: 65_536,
-            })
-        );
+        let plan = plan_topology(&request).unwrap();
+
+        assert_eq!(plan.context_length, 32_768);
     }
 
     #[test]

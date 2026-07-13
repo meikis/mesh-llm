@@ -358,6 +358,7 @@ fn open_live_stage_model(
         layer_end,
         ctx_size: config.ctx_size,
         lane_count: 1,
+        branch_sequence_capacity: 0,
         n_batch: None,
         n_ubatch: None,
         n_threads: None,

@@ -7,6 +7,8 @@ use skippy_protocol::{
 };
 use skippy_runtime::{ActivationFrame, RuntimeActivationDType};
 
+use super::diagnostics::glm_dsa_indexshare_exec_log_enabled;
+
 pub(crate) fn forwarded_stage_message(
     config: &StageConfig,
     incoming: &StageWireMessage,
@@ -53,7 +55,7 @@ pub(crate) fn forwarded_stage_message_timed(
                     state.flags,
                 )
             })?;
-    if sideband_stats.glm_dsa_top_k_count > 0 {
+    if sideband_stats.glm_dsa_top_k_count > 0 && glm_dsa_indexshare_exec_log_enabled() {
         eprintln!(
             "skippy: glm_dsa_top_k_sideband_forward stage={} request={} session={} kind={:?} pos_start={} tokens={} hidden_bytes={} sideband_bytes={} sideband_i32={}",
             config.stage_id,

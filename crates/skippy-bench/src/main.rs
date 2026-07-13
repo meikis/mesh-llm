@@ -1,13 +1,18 @@
+mod branch_batch_local;
 mod chat_corpus;
 mod cli;
 mod decode_binary;
 mod distributed;
 mod glm_dsa_layer_microbench;
 mod glm_dsa_microbench_summary;
+mod glm_dsa_multi_session_batch;
 mod glm_dsa_op_report;
 mod glm_dsa_report_aggregate;
+mod glm_dsa_route_locality;
+mod glm_dsa_route_mass;
 mod local_single;
 mod local_split;
+mod lookahead_local;
 mod model_identity;
 mod support;
 mod token_lengths;
@@ -18,6 +23,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use crate::{
+    branch_batch_local::branch_batch_local,
     chat_corpus::chat_corpus,
     cli::{Cli, CommandKind},
     decode_binary::decode_binary,
@@ -25,11 +31,14 @@ use crate::{
     glm_dsa_layer_microbench::glm_dsa_layer_microbench,
     glm_dsa_op_report::{glm_dsa_op_compare, glm_dsa_op_report},
     glm_dsa_report_aggregate::glm_dsa_aggregate_reports,
+    glm_dsa_route_locality::glm_dsa_route_locality,
+    glm_dsa_route_mass::glm_dsa_route_mass,
     local_single::local_single,
     local_split::{
         local_split_binary, local_split_chain_binary, local_split_chain_inprocess,
         local_split_compare, local_split_inprocess,
     },
+    lookahead_local::lookahead_local,
     token_lengths::token_lengths,
     verify_span_binary::verify_span_binary,
     verify_span_local::verify_span_local,
@@ -45,6 +54,8 @@ fn main() -> Result<()> {
         CommandKind::LocalSplitChainBinary(args) => local_split_chain_binary(args),
         CommandKind::VerifySpanLocal(args) => verify_span_local(args),
         CommandKind::VerifySpanBinary(args) => verify_span_binary(args),
+        CommandKind::BranchBatchLocal(args) => branch_batch_local(args),
+        CommandKind::LookaheadLocal(args) => lookahead_local(args),
         CommandKind::DecodeBinary(args) => decode_binary(args),
         CommandKind::ChatCorpus(args) => chat_corpus(args),
         CommandKind::TokenLengths(args) => token_lengths(args),
@@ -53,6 +64,8 @@ fn main() -> Result<()> {
         CommandKind::GlmDsaLayerMicrobench(args) => glm_dsa_layer_microbench(args),
         CommandKind::GlmDsaOpReport(args) => glm_dsa_op_report(args),
         CommandKind::GlmDsaOpCompare(args) => glm_dsa_op_compare(args),
+        CommandKind::GlmDsaRouteLocality(args) => glm_dsa_route_locality(args),
+        CommandKind::GlmDsaRouteMass(args) => glm_dsa_route_mass(args),
         CommandKind::GlmDsaAggregateReports(args) => glm_dsa_aggregate_reports(args),
         CommandKind::Run(args) => run_distributed(args),
     }

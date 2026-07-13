@@ -44,6 +44,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 const AUTO_ALIGN_SESSION_ENV: &str = "SKIPPY_STAGE_AUTO_ALIGN_SESSION";
 
 mod decode_batcher;
+mod diagnostics;
 #[allow(dead_code)]
 pub(crate) mod direct_return;
 pub(crate) mod forwarding;
@@ -409,8 +410,11 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
                 spd_optimistic_decode: openai_options.spd_optimistic_decode,
                 spd_rolling_executor: openai_options.spd_rolling_executor,
                 spd_optimistic_min_logit_margin: openai_options.spd_optimistic_min_logit_margin,
+                speculative_window_min: openai_options.speculative_window_min,
                 speculative_window: openai_options.speculative_window,
                 adaptive_speculative_window: openai_options.adaptive_speculative_window,
+                ngram_simple: openai_options.ngram_simple,
+                ngram_size_n: openai_options.ngram_size_n,
                 draft_n_gpu_layers: openai_options.draft_n_gpu_layers,
                 activation_width,
                 wire_dtype,
@@ -4393,18 +4397,20 @@ fn input_activation_frame(
         if message.raw_bytes.len() & 3 != 0 {
             bail!("GLM-DSA top-k sideband payload is not i32-aligned");
         }
-        eprintln!(
-            "skippy: glm_dsa_top_k_sideband_receive stage={} request={} session={} kind={:?} pos_start={} tokens={} hidden_bytes={} sideband_bytes={} sideband_i32={}",
-            config.stage_id,
-            message.request_id,
-            message.session_id,
-            message.kind,
-            message.pos_start,
-            message.token_count,
-            payload.len(),
-            message.raw_bytes.len(),
-            message.raw_bytes.len() / std::mem::size_of::<i32>(),
-        );
+        if diagnostics::glm_dsa_indexshare_exec_log_enabled() {
+            eprintln!(
+                "skippy: glm_dsa_top_k_sideband_receive stage={} request={} session={} kind={:?} pos_start={} tokens={} hidden_bytes={} sideband_bytes={} sideband_i32={}",
+                config.stage_id,
+                message.request_id,
+                message.session_id,
+                message.kind,
+                message.pos_start,
+                message.token_count,
+                payload.len(),
+                message.raw_bytes.len(),
+                message.raw_bytes.len() / std::mem::size_of::<i32>(),
+            );
+        }
         payload.extend_from_slice(&message.raw_bytes);
     }
     let (layer_start, layer_end) = upstream_layer_range(config, topology, message);

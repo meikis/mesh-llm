@@ -6,21 +6,22 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 skippy_quantize_bin="${SKIPPY_QUANTIZE_BIN:-$repo_root/target/release/skippy-quantize}"
 skippy_model_package_bin="${SKIPPY_MODEL_PACKAGE_BIN:-$repo_root/target/release/skippy-model-package}"
 
-source_root="${SOURCE_ROOT:-/mnt/bf16}"
+work_base="${WORK_BASE:-/Users/lab/glm52-work/q2-routed-down}"
+source_root="${SOURCE_ROOT:-/Users/lab/glm52-work/bf16-gguf}"
 source_prefix="${SOURCE_PREFIX:-BF16}"
-target_root="${TARGET_ROOT:-/mnt/quant-scratch}"
+target_root="${TARGET_ROOT:-$work_base/quant-scratch}"
 target_prefix="${TARGET_PREFIX:-Q2_K-RoutedDown-MTP-Q8}"
 output_basename="${OUTPUT_BASENAME:-GLM-5.2-Q2_K-RoutedDown-MTP-Q8}"
-manifest="${MANIFEST:-/mnt/work/glm52-q2-routed-down/quant-manifest.json}"
-package_dir="${PACKAGE_DIR:-/mnt/package/GLM-5.2-Q2_K-RoutedDown-MTP-Q8-layers}"
+manifest="${MANIFEST:-$work_base/quant-manifest.json}"
+package_dir="${PACKAGE_DIR:-$work_base/package/GLM-5.2-Q2_K-RoutedDown-MTP-Q8-layers}"
 package_model_id="${PACKAGE_MODEL_ID:-meshllm/GLM-5.2-Q2_K-RoutedDown-MTP-Q8-GGUF:Q2_K-RoutedDown-MTP-Q8}"
 package_source_repo="${PACKAGE_SOURCE_REPO:-meshllm/GLM-5.2-Q2_K-RoutedDown-MTP-Q8-GGUF}"
 package_source_revision="${PACKAGE_SOURCE_REVISION:-local}"
 recipe="${TENSOR_TYPE_FILE:-$repo_root/recipes/quantization/glm-5.2-q2-k-routed-down-mtp-q8.tensor-types.txt}"
-work_dir="${WORK_DIR:-/mnt/work/glm52-q2-routed-down/native-work}"
-spool_dir="${SPOOL_DIR:-/mnt/work/glm52-q2-routed-down/spool}"
-record_dir="${RECORD_DIR:-/mnt/work/glm52-q2-routed-down/records}"
-status_file="${JSON_EVENT_FILE:-/mnt/work/glm52-q2-routed-down/status.json}"
+work_dir="${WORK_DIR:-$work_base/native-work}"
+spool_dir="${SPOOL_DIR:-$work_base/spool}"
+record_dir="${RECORD_DIR:-$work_base/records}"
+status_file="${JSON_EVENT_FILE:-$work_base/status.json}"
 shard_scratch_dir="${SHARD_SCRATCH_DIR:-$work_dir/shard-scratch}"
 stages="${STAGES:-2}"
 nthreads="${NTHREADS:-}"
@@ -45,7 +46,7 @@ fi
 
 if [[ ! -d "$source_root/$source_prefix" ]]; then
   echo "missing BF16 source prefix: $source_root/$source_prefix" >&2
-  echo "mount or download meshllm/GLM-5.2-MTP-BF16-GGUF before running" >&2
+  echo "point SOURCE_ROOT/SOURCE_PREFIX at the local BF16 GGUF shards before running" >&2
   exit 1
 fi
 

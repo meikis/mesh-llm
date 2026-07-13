@@ -376,9 +376,10 @@ spec_default               = "auto"          # bool or "auto"
 # draft_cache_type_k = "q8_0"
 # draft_cache_type_v = "q8_0"
 
-# N-gram speculative (when mode = "ngram")
-# ngram_min = 1
-# ngram_max = 5
+# N-gram speculative for staged serving (llama.cpp ngram-simple proposals)
+# mode      = "ngram"
+# ngram_min = 4   # adaptive VerifySpan floor; set equal to max for fixed windows
+# ngram_max = 16  # adaptive VerifySpan ceiling
 
 # --- Request defaults (merged at OpenAI frontend only) -------------------
 [defaults.request_defaults]

@@ -16,6 +16,8 @@ PROMPT_CORPUS="${PROMPT_CORPUS:-}"
 PROMPT_LIMIT="${PROMPT_LIMIT:-}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-8}"
 PREFILL_CHUNK_SIZE="${PREFILL_CHUNK_SIZE:-128}"
+N_BATCH="${N_BATCH:-128}"
+N_UBATCH="${N_UBATCH:-128}"
 
 CTX_SIZE="${CTX_SIZE:-131072}"
 SPLITS="${SPLITS:-35}"
@@ -28,6 +30,20 @@ STAGE_MAX_INFLIGHT="${STAGE_MAX_INFLIGHT:-1}"
 STAGE_TELEMETRY_LEVEL="${STAGE_TELEMETRY_LEVEL:-debug}"
 STAGE_TELEMETRY_QUEUE_CAPACITY="${STAGE_TELEMETRY_QUEUE_CAPACITY:-32768}"
 STAGE_DISABLE_MMAP_BUFFER="${STAGE_DISABLE_MMAP_BUFFER:-1}"
+GLM_DSA_OP_TIMING="${GLM_DSA_OP_TIMING:-1}"
+GLM_DSA_DIRECT_SPARSE_ATTN="${GLM_DSA_DIRECT_SPARSE_ATTN:-1}"
+GLM_DSA_DIRECT_SPARSE_PREFILL="${GLM_DSA_DIRECT_SPARSE_PREFILL:-1}"
+GLM_DSA_SELECTED_ROW_FLASH="${GLM_DSA_SELECTED_ROW_FLASH:-0}"
+GLM_DSA_DIRECT_SPARSE_DECODE_MAX_TOP_K="${GLM_DSA_DIRECT_SPARSE_DECODE_MAX_TOP_K:-}"
+GLM_DSA_COMPACT_FLASH_MIN_KV="${GLM_DSA_COMPACT_FLASH_MIN_KV:-}"
+GLM_DSA_DIRECT_SPARSE_DECISION_LOG="${GLM_DSA_DIRECT_SPARSE_DECISION_LOG:-0}"
+GLM_DSA_COMPACT_FLASH_POLICY_LOG="${GLM_DSA_COMPACT_FLASH_POLICY_LOG:-0}"
+GLM_MOE_MAX_ACTIVE_EXPERTS="${GLM_MOE_MAX_ACTIVE_EXPERTS:-}"
+KEEP_REMOTE="${KEEP_REMOTE:-0}"
+OPENAI_BIND_ADDR="${OPENAI_BIND_ADDR:-}"
+OPENAI_MODEL_ID="${OPENAI_MODEL_ID:-}"
+OPENAI_DEFAULT_MAX_TOKENS="${OPENAI_DEFAULT_MAX_TOKENS:-16}"
+OPENAI_GENERATION_CONCURRENCY="${OPENAI_GENERATION_CONCURRENCY:-1}"
 
 MODEL_ID="${MODEL_ID:-meshllm/GLM-5.2-Q2_K-MTP-Q8-GGUF:Q2_K-MTP-Q8}"
 STAGE_MODEL="${STAGE_MODEL:-/Volumes/External/models/huggingface/hub/models--meshllm--GLM-5.2-Q2_K-MTP-Q8-layers/snapshots/main}"
@@ -71,15 +87,29 @@ Options:
   --run-prefix NAME             Prefix for generated run ids. Default: glm52-li.
   --work-dir PATH               Local benchmark work dir. Default: /Volumes/External/skippy-runtime-bench.
   --stage-model PATH            Local GLM 5.2 layer package path.
+  --n-batch N                   Logical llama.cpp batch size for stage runtimes. Default: 128.
+  --n-ubatch N                  Physical llama.cpp micro-batch size for stage runtimes. Default: 128.
   --sync-remote                 Sync this source tree to micstudio before running.
   --build-local                 Build local release skippy-bench/skippy-server/metrics-server first.
   --build-remote                Build remote release skippy-server first.
+  --keep-remote                 Leave stage processes running after the driver exits.
+  --openai-bind-addr ADDR       Bind an OpenAI-compatible endpoint on stage 0, for example 127.0.0.1:9337.
+  --openai-model-id MODEL       Served OpenAI model id. Defaults to MODEL_ID.
   --reset-stage-cache           Remove legacy composed stage GGUF cache for the selected topology first.
   --dry-run                     Print commands without executing.
   -h, --help                    Show this help.
 
 Useful environment overrides:
   HOSTS, ENDPOINT_HOST_MAP, SPLITS, CTX_SIZE, STAGE_MAX_INFLIGHT,
+  PREFILL_CHUNK_SIZE, N_BATCH, N_UBATCH,
+  KEEP_REMOTE, OPENAI_BIND_ADDR, OPENAI_MODEL_ID, OPENAI_DEFAULT_MAX_TOKENS,
+  OPENAI_GENERATION_CONCURRENCY,
+  GLM_DSA_OP_TIMING, GLM_DSA_DIRECT_SPARSE_ATTN,
+  GLM_DSA_DIRECT_SPARSE_PREFILL,
+  GLM_DSA_SELECTED_ROW_FLASH,
+  GLM_DSA_DIRECT_SPARSE_DECODE_MAX_TOP_K, GLM_DSA_COMPACT_FLASH_MIN_KV,
+  GLM_DSA_DIRECT_SPARSE_DECISION_LOG, GLM_DSA_COMPACT_FLASH_POLICY_LOG,
+  GLM_MOE_MAX_ACTIVE_EXPERTS,
   STAGE_DISABLE_MMAP_BUFFER, STAGE_SERVER_BIN, SKIPPY_BENCH_BIN,
   METRICS_SERVER_BIN, STAGE_MODEL_PATH_MAP, REMOTE_SOURCE_DIR.
 
@@ -126,6 +156,14 @@ while [[ $# -gt 0 ]]; do
       STAGE_MODEL="$2"
       shift 2
       ;;
+    --n-batch)
+      N_BATCH="$2"
+      shift 2
+      ;;
+    --n-ubatch)
+      N_UBATCH="$2"
+      shift 2
+      ;;
     --sync-remote)
       SYNC_REMOTE=1
       shift
@@ -137,6 +175,18 @@ while [[ $# -gt 0 ]]; do
     --build-remote)
       BUILD_REMOTE=1
       shift
+      ;;
+    --keep-remote)
+      KEEP_REMOTE=1
+      shift
+      ;;
+    --openai-bind-addr)
+      OPENAI_BIND_ADDR="$2"
+      shift 2
+      ;;
+    --openai-model-id)
+      OPENAI_MODEL_ID="$2"
+      shift 2
       ;;
     --reset-stage-cache)
       RESET_STAGE_CACHE=1
@@ -286,6 +336,10 @@ run_one() {
     env_prefix+=(LLAMA_GLM_DSA_PARALLEL_LIGHTNING_INDEXER=0)
   fi
 
+  if [[ -n "$GLM_MOE_MAX_ACTIVE_EXPERTS" ]]; then
+    env_prefix+=(GGML_METAL_EXPERIMENTAL_GLM_MOE_MAX_ACTIVE_EXPERTS="$GLM_MOE_MAX_ACTIVE_EXPERTS")
+  fi
+
   if [[ "$RESET_STAGE_CACHE" == "1" ]]; then
     reset_stage_cache "$variant"
   fi
@@ -309,6 +363,8 @@ run_one() {
     --cache-type-v "$CACHE_TYPE_V"
     --max-new-tokens "$MAX_NEW_TOKENS"
     --prefill-chunk-size "$PREFILL_CHUNK_SIZE"
+    --n-batch "$N_BATCH"
+    --n-ubatch "$N_UBATCH"
     --work-dir "$WORK_DIR"
     --remote-root "$REMOTE_ROOT"
     --remote-root-map "$REMOTE_ROOT_MAP"
@@ -328,12 +384,47 @@ run_one() {
     --stage-max-inflight "$STAGE_MAX_INFLIGHT"
     --stage-telemetry-queue-capacity "$STAGE_TELEMETRY_QUEUE_CAPACITY"
     --stage-telemetry-level "$STAGE_TELEMETRY_LEVEL"
-    --glm-dsa-op-timing
-    --glm-dsa-direct-sparse-attn
     --output "$output"
   )
+  if [[ "$GLM_DSA_OP_TIMING" == "1" ]]; then
+    cmd+=(--glm-dsa-op-timing)
+  fi
+  if [[ "$GLM_DSA_DIRECT_SPARSE_ATTN" == "1" ]]; then
+    cmd+=(--glm-dsa-direct-sparse-attn)
+  fi
+  if [[ "$GLM_DSA_DIRECT_SPARSE_PREFILL" == "1" ]]; then
+    cmd+=(--glm-dsa-direct-sparse-prefill)
+  fi
+  if [[ "$GLM_DSA_SELECTED_ROW_FLASH" == "1" ]]; then
+    cmd+=(--glm-dsa-selected-row-flash)
+  fi
+  if [[ -n "$GLM_DSA_DIRECT_SPARSE_DECODE_MAX_TOP_K" ]]; then
+    cmd+=(--glm-dsa-direct-sparse-decode-max-top-k "$GLM_DSA_DIRECT_SPARSE_DECODE_MAX_TOP_K")
+  fi
+  if [[ -n "$GLM_DSA_COMPACT_FLASH_MIN_KV" ]]; then
+    cmd+=(--glm-dsa-compact-flash-min-kv "$GLM_DSA_COMPACT_FLASH_MIN_KV")
+  fi
+  if [[ "$GLM_DSA_DIRECT_SPARSE_DECISION_LOG" == "1" ]]; then
+    cmd+=(--glm-dsa-direct-sparse-decision-log)
+  fi
+  if [[ "$GLM_DSA_COMPACT_FLASH_POLICY_LOG" == "1" ]]; then
+    cmd+=(--glm-dsa-compact-flash-policy-log)
+  fi
   if [[ "$STAGE_DISABLE_MMAP_BUFFER" == "1" ]]; then
     cmd+=(--stage-disable-mmap-buffer)
+  fi
+  if [[ "$KEEP_REMOTE" == "1" ]]; then
+    cmd+=(--keep-remote)
+  fi
+  if [[ -n "$OPENAI_BIND_ADDR" ]]; then
+    cmd+=(
+      --openai-bind-addr "$OPENAI_BIND_ADDR"
+      --openai-default-max-tokens "$OPENAI_DEFAULT_MAX_TOKENS"
+      --openai-generation-concurrency "$OPENAI_GENERATION_CONCURRENCY"
+    )
+    if [[ -n "$OPENAI_MODEL_ID" ]]; then
+      cmd+=(--openai-model-id "$OPENAI_MODEL_ID")
+    fi
   fi
 
   if [[ -n "$PROMPT_CORPUS" ]]; then

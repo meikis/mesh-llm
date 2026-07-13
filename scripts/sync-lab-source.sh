@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: scripts/sync-lab-source.sh [--dry-run] [--source PATH] HOST [REMOTE_DIR]
+Usage: scripts/sync-lab-source.sh [--dry-run] [--prepared-llama] [--source PATH] HOST [REMOTE_DIR]
 
 Synchronize the current mesh-llm source tree to a lab host while preserving
 remote build/runtime caches. The default remote directory is:
@@ -15,17 +15,23 @@ remote build/runtime caches. The default remote directory is:
 Examples:
 
   scripts/sync-lab-source.sh micstudio
+  scripts/sync-lab-source.sh --prepared-llama micstudio
   scripts/sync-lab-source.sh --dry-run micstudio /Users/lab/src/mesh-llm-codex
 EOF
 }
 
 DRY_RUN=0
+SYNC_PREPARED_LLAMA=0
 SOURCE="$ROOT"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)
       DRY_RUN=1
+      shift
+      ;;
+    --prepared-llama)
+      SYNC_PREPARED_LLAMA=1
       shift
       ;;
     --source)
@@ -114,3 +120,28 @@ REMOTE_DIR_QUOTED="$(printf "%q" "$REMOTE_DIR")"
 ssh "$HOST" "mkdir -p ${REMOTE_DIR_QUOTED} && rm -rf ${REMOTE_DIR_QUOTED}/.git"
 
 rsync "${RSYNC_ARGS[@]}" "${FILTER_ARGS[@]}" "$SOURCE/" "$HOST:$REMOTE_DIR/"
+
+if [[ "$SYNC_PREPARED_LLAMA" == "1" ]]; then
+  llama_source="$SOURCE/.deps/llama.cpp"
+  llama_target="$REMOTE_DIR/.deps/llama.cpp"
+  if [[ ! -f "$llama_source/CMakeLists.txt" || ! -f "$llama_source/ggml/CMakeLists.txt" ]]; then
+    echo "prepared llama.cpp source not found: $llama_source" >&2
+    exit 1
+  fi
+
+  echo "syncing prepared llama.cpp source"
+  echo "  source: $llama_source/"
+  echo "  target: $HOST:$llama_target/"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "  mode:   dry run"
+  fi
+
+  llama_target_quoted="$(printf "%q" "$llama_target")"
+  ssh "$HOST" "mkdir -p ${llama_target_quoted}"
+  rsync "${RSYNC_ARGS[@]}" \
+    --filter='P /.git/***' \
+    --filter='H /.git/***' \
+    --filter='P /build/***' \
+    --filter='H /build/***' \
+    "$llama_source/" "$HOST:$llama_target/"
+fi

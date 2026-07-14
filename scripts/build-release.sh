@@ -174,4 +174,8 @@ case "$BACKEND" in
     rocm) cargo_features+=(--features gpu-bench-hip) ;;
 esac
 stamp_build_version
-(cd "$REPO_ROOT" && cargo build --release --locked -p mesh-llm "${cargo_features[@]}")
+if ((${#cargo_features[@]})); then
+    (cd "$REPO_ROOT" && cargo build --release --locked -p mesh-llm "${cargo_features[@]}")
+else
+    (cd "$REPO_ROOT" && cargo build --release --locked -p mesh-llm)
+fi

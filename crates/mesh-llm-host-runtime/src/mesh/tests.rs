@@ -306,9 +306,12 @@ fn stage_load_request() -> crate::inference::skippy::StageLoadRequest {
         n_batch: Some(1024),
         n_ubatch: Some(512),
         n_gpu_layers: -1,
+        mmap: Some(false),
+        mlock: true,
         cache_type_k: "f16".to_string(),
         cache_type_v: "q8_0".to_string(),
         flash_attn_type: skippy_protocol::FlashAttentionType::Auto,
+        native_mtp_enabled: true,
         shutdown_generation: 3,
         coordinator_term: 11,
         coordinator_id: None,
@@ -395,6 +398,7 @@ async fn make_test_node_with_requirements(
         genesis_policy: Arc::new(Mutex::new(None)),
         signed_genesis_policy: Arc::new(Mutex::new(None)),
         bootstrap_token: Arc::new(Mutex::new(None)),
+        join_targets: Arc::new(Mutex::new(Vec::new())),
         first_joined_mesh_ts: Arc::new(Mutex::new(None)),
         accepting: Arc::new((
             tokio::sync::Notify::new(),
@@ -645,10 +649,14 @@ fn stage_load_proto_roundtrip_preserves_source_model_bytes() {
     let load = stage_load_request();
     let proto = stage_load_to_proto(load.clone());
     assert_eq!(proto.source_model_bytes, Some(123_456_789));
+    assert_eq!(proto.mmap, Some(false));
+    assert_eq!(proto.mlock, Some(true));
 
     let decoded = stage_load_from_proto(proto).unwrap();
     assert_eq!(decoded.source_model_bytes, Some(123_456_789));
     assert_eq!(decoded.model_path.as_deref(), Some("/models/demo.gguf"));
+    assert_eq!(decoded.mmap, Some(false));
+    assert!(decoded.mlock);
 }
 
 #[test]
@@ -2228,11 +2236,6 @@ async fn control_plane_refresh_inventory() -> Result<()> {
     let (server, _secret_key, _config_path) =
         start_owner_control_test_server(&owner_keypair, &tmp).await?;
     let expected_model_ref = crate::models::model_ref_for_path(&gguf_path);
-    let expected_inventory_name = gguf_path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .expect("gguf test file should have a valid stem")
-        .to_string();
     assert!(server.available_models().await.is_empty());
 
     let (_refresh_endpoint, mut refresh_send, mut refresh_recv, requester_id) =
@@ -2271,11 +2274,7 @@ async fn control_plane_refresh_inventory() -> Result<()> {
             .contains(&expected_model_ref)
     );
     let inventory_snapshot = server.runtime_data_collector().local_inventory_snapshot();
-    assert!(
-        inventory_snapshot
-            .model_names
-            .contains(&expected_inventory_name)
-    );
+    assert!(inventory_snapshot.model_names.contains(&expected_model_ref));
 
     write_len_prefixed(&mut refresh_send, &refresh_request(31).encode_to_vec()).await?;
     let second = read_owner_control_envelope(&mut refresh_recv).await?;
@@ -3152,6 +3151,142 @@ fn relay_reconnect_controller_applies_cooldown_after_attempt_and_prunes_gone_pee
     );
 }
 
+mod lan_join_target_tracking_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn remember_join_target_updates_address_on_peer_rebind() {
+        let node = make_test_node(super::super::NodeRole::Worker)
+            .await
+            .unwrap();
+        let peer_id = make_test_endpoint_id(34);
+
+        let mut first = EndpointAddr {
+            id: peer_id,
+            addrs: Default::default(),
+        };
+        first
+            .addrs
+            .insert(TransportAddr::Ip("192.168.1.50:47916".parse().unwrap()));
+        node.remember_join_target(first).await;
+
+        assert_eq!(
+            node.join_target_lan_ipv4().await,
+            vec!["192.168.1.50:47916".parse().unwrap()],
+            "the first advertised LAN address should be recorded"
+        );
+
+        let mut rebound = EndpointAddr {
+            id: peer_id,
+            addrs: Default::default(),
+        };
+        rebound
+            .addrs
+            .insert(TransportAddr::Ip("192.168.1.50:51000".parse().unwrap()));
+        node.remember_join_target(rebound).await;
+
+        assert_eq!(
+            node.join_target_lan_ipv4().await,
+            vec!["192.168.1.50:51000".parse().unwrap()],
+            "a rebind under the same peer id must replace the stale dial-back address"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_target_lan_ipv4_keeps_only_lan_addresses() {
+        let node = make_test_node(super::super::NodeRole::Worker)
+            .await
+            .unwrap();
+        let peer_id = make_test_endpoint_id(35);
+        let mut target = EndpointAddr {
+            id: peer_id,
+            addrs: Default::default(),
+        };
+        for addr in [
+            "192.168.1.50:47916",
+            "8.8.8.8:47916",
+            "100.64.0.1:47916",
+            "127.0.0.1:47916",
+            "172.17.0.1:47916",
+        ] {
+            target
+                .addrs
+                .insert(TransportAddr::Ip(addr.parse().unwrap()));
+        }
+        node.remember_join_target(target).await;
+
+        let lan_addrs: HashSet<_> = node
+            .join_target_lan_ipv4()
+            .await
+            .into_iter()
+            .map(|addr| addr.to_string())
+            .collect();
+        assert_eq!(
+            lan_addrs,
+            ["192.168.1.50:47916", "172.17.0.1:47916"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+    }
+
+    #[tokio::test]
+    async fn known_peer_lan_ipv4_keeps_only_lan_addresses() {
+        let node = make_test_node(super::super::NodeRole::Worker)
+            .await
+            .unwrap();
+        let peer_id = make_test_endpoint_id(36);
+        let mut peer = make_test_peer_info(peer_id);
+        for addr in [
+            "10.0.0.5:47916",
+            "203.0.113.5:47916",
+            "100.64.0.1:47916",
+            "172.17.0.1:47916",
+        ] {
+            peer.addr
+                .addrs
+                .insert(TransportAddr::Ip(addr.parse().unwrap()));
+        }
+        node.state.lock().await.peers.insert(peer_id, peer);
+
+        let lan_addrs: HashSet<_> = node
+            .known_peer_lan_ipv4()
+            .await
+            .into_iter()
+            .map(|addr| addr.to_string())
+            .collect();
+        assert_eq!(
+            lan_addrs,
+            ["10.0.0.5:47916", "172.17.0.1:47916"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+    }
+
+    #[tokio::test]
+    async fn dial_peer_addr_clears_dead_peer_gate_before_connect() {
+        let node = make_test_node(super::super::NodeRole::Worker)
+            .await
+            .unwrap();
+        let peer_id = make_test_endpoint_id(37);
+        node.state
+            .lock()
+            .await
+            .dead_peers
+            .insert(peer_id, std::time::Instant::now());
+
+        let _ = node
+            .dial_peer_addr(EndpointAddr {
+                id: peer_id,
+                addrs: Default::default(),
+            })
+            .await;
+
+        assert!(!node.state.lock().await.dead_peers.contains_key(&peer_id));
+    }
+}
+
 #[test]
 fn stale_dispatcher_cannot_remove_replacement_connection() {
     assert!(
@@ -3281,16 +3416,16 @@ fn incoming_peer_promoted_after_valid_gossip() {
     );
 
     assert!(
-        !stream_allowed_before_admission(STREAM_TUNNEL),
+        !stream_allowed_before_admission(STREAM_TUNNEL, TrustPolicy::Off),
         "raw tunnel streams must be gated until after admission"
     );
     assert!(
-        stream_allowed_before_admission(STREAM_TUNNEL_HTTP),
+        stream_allowed_before_admission(STREAM_TUNNEL_HTTP, TrustPolicy::Off),
         "HTTP tunnel streams must be allowed for passive SDK clients"
     );
 
     assert!(
-        stream_allowed_before_admission(STREAM_GOSSIP),
+        stream_allowed_before_admission(STREAM_GOSSIP, TrustPolicy::Off),
         "STREAM_GOSSIP must always be allowed — it is the admission path"
     );
 
@@ -3344,22 +3479,22 @@ fn incoming_peer_rejected_on_legacy_or_malformed_gossip() {
         STREAM_PLUGIN_MESH_STREAM,
     ] {
         assert!(
-            !stream_allowed_before_admission(stream_type),
+            !stream_allowed_before_admission(stream_type, TrustPolicy::Off),
             "stream {:#04x} must be quarantine-gated for unadmitted peers — if this fails, the gate is broken",
             stream_type
         );
     }
 
     assert!(
-        stream_allowed_before_admission(STREAM_GOSSIP),
+        stream_allowed_before_admission(STREAM_GOSSIP, TrustPolicy::Off),
         "STREAM_GOSSIP must bypass the gate (it is the admission handshake)"
     );
     assert!(
-        stream_allowed_before_admission(STREAM_ROUTE_REQUEST),
+        stream_allowed_before_admission(STREAM_ROUTE_REQUEST, TrustPolicy::Off),
         "STREAM_ROUTE_REQUEST must bypass the gate (passive/client request-only path)"
     );
     assert!(
-        stream_allowed_before_admission(STREAM_TUNNEL_HTTP),
+        stream_allowed_before_admission(STREAM_TUNNEL_HTTP, TrustPolicy::Off),
         "STREAM_TUNNEL_HTTP must bypass the gate (passive/client inference path)"
     );
 
@@ -3382,7 +3517,7 @@ fn passive_route_table_request_does_not_admit_peer() {
     );
 
     assert!(
-        stream_allowed_before_admission(STREAM_ROUTE_REQUEST),
+        stream_allowed_before_admission(STREAM_ROUTE_REQUEST, TrustPolicy::Off),
         "STREAM_ROUTE_REQUEST must be allowed before admission (passive/client path)"
     );
 
@@ -3396,7 +3531,7 @@ fn passive_route_table_request_does_not_admit_peer() {
         STREAM_PLUGIN_MESH_STREAM,
     ] {
         assert!(
-            !stream_allowed_before_admission(gated),
+            !stream_allowed_before_admission(gated, TrustPolicy::Off),
             "stream {:#04x} must remain gated after a route request — route request must not unlock other streams",
             gated
         );
@@ -5232,11 +5367,11 @@ fn dead_peer_ttl_expires() {
 #[test]
 fn non_scope_tunnel_streams_pass_through_without_proto_validation() {
     assert!(
-        !stream_allowed_before_admission(STREAM_TUNNEL),
+        !stream_allowed_before_admission(STREAM_TUNNEL, TrustPolicy::Off),
         "STREAM_TUNNEL (0x02) must be gated until after gossip admission"
     );
     assert!(
-        stream_allowed_before_admission(STREAM_TUNNEL_HTTP),
+        stream_allowed_before_admission(STREAM_TUNNEL_HTTP, TrustPolicy::Off),
         "STREAM_TUNNEL_HTTP (0x04) must be allowed for passive SDK inference"
     );
 
@@ -5282,7 +5417,7 @@ fn non_scope_tunnel_streams_pass_through_without_proto_validation() {
     );
 
     assert!(
-        !stream_allowed_before_admission(STREAM_TUNNEL),
+        !stream_allowed_before_admission(STREAM_TUNNEL, TrustPolicy::Off),
         "STREAM_TUNNEL must require admission (raw tunnel security boundary)"
     );
 }
@@ -5618,11 +5753,11 @@ async fn test_on_demand_transitive_peer_connection_completes_gossip() -> Result<
 #[test]
 fn legacy_config_stream_ids_are_reserved_and_require_admission() {
     assert!(
-        !stream_allowed_before_admission(STREAM_CONFIG_SUBSCRIBE),
+        !stream_allowed_before_admission(STREAM_CONFIG_SUBSCRIBE, TrustPolicy::Off),
         "reserved STREAM_CONFIG_SUBSCRIBE (0x0b) must not bypass admission"
     );
     assert!(
-        !stream_allowed_before_admission(STREAM_CONFIG_PUSH),
+        !stream_allowed_before_admission(STREAM_CONFIG_PUSH, TrustPolicy::Off),
         "reserved STREAM_CONFIG_PUSH (0x0c) must not bypass admission"
     );
 }
@@ -7429,9 +7564,12 @@ fn test_stage_load_request() -> crate::inference::skippy::StageLoadRequest {
         n_batch: Some(128),
         n_ubatch: Some(64),
         n_gpu_layers: -1,
+        mmap: None,
+        mlock: false,
         cache_type_k: "f16".to_string(),
         cache_type_v: "f16".to_string(),
         flash_attn_type: skippy_protocol::FlashAttentionType::Auto,
+        native_mtp_enabled: true,
         shutdown_generation: 7,
         coordinator_term: 11,
         coordinator_id: Some(make_test_endpoint_id(0x70)),
@@ -8006,4 +8144,40 @@ fn active_stage_refresh_timeout_marks_cached_stage_failed() {
         status.error.as_deref(),
         Some("stage status refresh timed out")
     );
+}
+
+#[test]
+fn passive_streams_are_gated_when_trust_policy_enforces_ownership() {
+    // With an enforcing trust policy, only gossip bypasses the quarantine
+    // gate. A leaked invite token must not be a bearer credential for
+    // inference: a caller rejected by the trust gate (UntrustedOwner) must
+    // not be able to route requests via the passive paths.
+    for policy in [TrustPolicy::RequireOwned, TrustPolicy::Allowlist] {
+        assert!(
+            stream_allowed_before_admission(STREAM_GOSSIP, policy),
+            "gossip must always be allowed ({policy:?}) — it is the admission path"
+        );
+        assert!(
+            !stream_allowed_before_admission(STREAM_TUNNEL_HTTP, policy),
+            "HTTP tunnel must be gated under {policy:?} — otherwise a leaked token serves inference"
+        );
+        assert!(
+            !stream_allowed_before_admission(STREAM_ROUTE_REQUEST, policy),
+            "route request must be gated under {policy:?}"
+        );
+        assert!(
+            !stream_allowed_before_admission(STREAM_TUNNEL, policy),
+            "raw tunnel must stay gated under {policy:?}"
+        );
+    }
+
+    // Non-enforcing policies keep passive paths open. PreferOwned is advisory:
+    // it warns about unattributed peers but does not reject them.
+    for policy in [TrustPolicy::Off, TrustPolicy::PreferOwned] {
+        assert!(stream_allowed_before_admission(STREAM_TUNNEL_HTTP, policy));
+        assert!(stream_allowed_before_admission(
+            STREAM_ROUTE_REQUEST,
+            policy
+        ));
+    }
 }

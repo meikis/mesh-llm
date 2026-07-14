@@ -29,8 +29,8 @@ use openai_frontend::{
     GuardedOpenAiBackend, GuardrailMode, GuardrailPolicy, GuardrailPolicyHandle, MessageContent,
     MessageContentPart, ModelId, ModelObject, OpenAiBackend, OpenAiError, OpenAiErrorKind,
     OpenAiHookPolicy, OpenAiRequestContext, OpenAiResult, PrefillHookSignals, ReasoningEffort,
-    StreamingGuardrailMode, Usage, apply_chat_hook_outcome, chat_mesh_hooks_enabled,
-    normalize_reasoning_template_options,
+    RetryExhaustionMode, StreamingGuardrailMode, Usage, apply_chat_hook_outcome,
+    chat_mesh_hooks_enabled,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -44,7 +44,7 @@ use skippy_protocol::binary::{
 };
 use skippy_protocol::{MessageBase, SCHEMA_VERSION, StageConfig, StageTopology};
 use skippy_runtime::{
-    ActivationFrame, ChatTemplateJsonOptions, ChatTemplateOptions,
+    ActivationFrame, ChatReasoningFormat, ChatTemplateJsonOptions, ChatTemplateOptions,
     FlashAttentionType as RuntimeFlashAttentionType, GenerationSignalWindow,
     LogitBias as RuntimeLogitBias, MAX_LOGIT_BIAS, MediaInput, ModelInfo, RuntimeConfig,
     RuntimeLoadMode, SamplingConfig, StageModel, StageSession, TokenSignal,
@@ -57,11 +57,13 @@ use tokio::{
 
 use crate::{
     binary_transport::{
-        PredictionReturnHub, PredictionReturnReceiver, WireCondition, connect_binary_downstream,
+        BinaryStageExecutionOptions, DecodeFrameBatcher, PredictionReturnHub,
+        PredictionReturnReceiver, WireCondition, connect_binary_downstream,
         forwarded_stage_message, forwarded_stage_message_timed, run_binary_stage_message,
-        stage_output_activation_capacity, write_stage_message_conditioned,
+        send_client_ready_hello_if_enabled, stage_output_activation_capacity,
+        write_stage_message_conditioned,
     },
-    cli::ServeOpenAiArgs,
+    cli::{OpenAiGuardrailsCliMode, ServeOpenAiArgs},
     config::{load_json, validate_config},
     kv_integration::{KvStageIntegration, proactive_eviction_attrs, proactive_eviction_error_kind},
     runtime_state::{RuntimeSessionStats, RuntimeState, load_runtime},
@@ -70,20 +72,28 @@ use crate::{
 
 mod admission;
 mod backend;
+mod decode_batcher;
 mod embedded_execution;
 mod embedded_generation;
 mod generation_flow;
 mod local_generation;
+mod native_mtp;
 mod prefill;
 mod prefix_cache;
 mod prompting;
 mod request;
 mod speculative;
+mod tool_emulation;
 mod util;
+
+#[cfg(test)]
+use prompting::parse_emulated_chat_output;
 mod wire_messages;
 
 use self::{
     admission::{GenerationTokenBudget, GenerationTokenBudgetRequest},
+    decode_batcher::DecodeBatcher,
+    native_mtp::*,
     prefill::*,
     request::*,
     speculative::*,
@@ -174,7 +184,10 @@ pub async fn serve_openai(args: ServeOpenAiArgs) -> Result<()> {
     }
     let kv = KvStageIntegration::from_config(&config)?.map(Arc::new);
     let ctx_size = usize::try_from(config.ctx_size).unwrap_or(usize::MAX);
-    let backend = Arc::new(StageOpenAiBackend {
+    let decode_batcher = DecodeBatcher::new(runtime.clone(), args.generation_concurrency);
+    let decode_frame_batcher =
+        DecodeFrameBatcher::new(runtime.clone(), args.generation_concurrency);
+    let backend: Arc<dyn OpenAiBackend> = Arc::new(StageOpenAiBackend {
         runtime,
         config,
         telemetry: telemetry.clone(),
@@ -186,13 +199,22 @@ pub async fn serve_openai(args: ServeOpenAiArgs) -> Result<()> {
         draft: None,
         speculative_window: 0,
         adaptive_speculative_window: false,
+        ngram_min: 0,
+        ngram_max: 0,
+        native_mtp_enabled: false,
+        native_mtp_max_tokens: 1,
+        native_mtp_min_tokens: 0,
         generation_limit: Arc::new(Semaphore::new(args.generation_concurrency)),
         generation_queue_depth: Arc::new(AtomicUsize::new(0)),
         generation_queue_limit: args.generation_concurrency,
         generation_token_budget: Arc::new(GenerationTokenBudget::new(ctx_size)),
         hook_policy: None,
         kv,
+        decode_batcher,
+        decode_frame_batcher,
     });
+    let backend = OpenAiGuardrailsConfig::for_standalone_mode(args.openai_guardrails)
+        .wrap_backend_with_context_limit(backend, Some(ctx_size));
     let app: Router = instrumented_openai_router(backend, telemetry.clone());
 
     println!(
@@ -224,6 +246,12 @@ pub struct EmbeddedOpenAiArgs {
     pub speculative_window: usize,
     pub adaptive_speculative_window: bool,
     pub draft_n_gpu_layers: Option<i32>,
+    pub ngram_min: usize,
+    pub ngram_max: usize,
+    pub native_mtp_enabled: bool,
+    pub native_mtp_draft_model_path: Option<PathBuf>,
+    pub native_mtp_max_tokens: usize,
+    pub native_mtp_min_tokens: usize,
     pub activation_width: i32,
     pub wire_dtype: WireActivationDType,
     pub reply_credit_limit: Option<usize>,
@@ -261,6 +289,37 @@ impl OpenAiGuardrailsConfig {
             target: OpenAiGuardrailsTarget::Skippy,
             policy: GuardrailPolicyHandle::default(),
             compaction: None,
+        }
+    }
+
+    pub fn compatibility_for_skippy() -> Self {
+        Self {
+            target: OpenAiGuardrailsTarget::Skippy,
+            policy: GuardrailPolicy {
+                mode: GuardrailMode::MetricsOnly,
+                apply_to_all_models: true,
+                retry_exhaustion_mode: RetryExhaustionMode::PassLastText,
+                ..GuardrailPolicy::default()
+            }
+            .into(),
+            compaction: None,
+        }
+    }
+
+    pub fn for_standalone_mode(mode: OpenAiGuardrailsCliMode) -> Self {
+        match mode {
+            OpenAiGuardrailsCliMode::Disabled => Self::disabled_for_skippy(),
+            OpenAiGuardrailsCliMode::Metrics => Self::compatibility_for_skippy(),
+            OpenAiGuardrailsCliMode::Enforce => Self {
+                target: OpenAiGuardrailsTarget::Skippy,
+                policy: GuardrailPolicy {
+                    mode: GuardrailMode::Enforce,
+                    apply_to_all_models: true,
+                    ..GuardrailPolicy::default()
+                }
+                .into(),
+                compaction: None,
+            },
         }
     }
 
@@ -465,9 +524,21 @@ pub fn embedded_openai_backend(args: EmbeddedOpenAiArgs) -> Result<EmbeddedOpenA
     if args.draft_model_path.is_some() && args.speculative_window == 0 {
         bail!("--openai-speculative-window must be greater than zero when a draft model is set");
     }
+    if args.native_mtp_draft_model_path.is_some() && !args.native_mtp_enabled {
+        bail!("native MTP must be enabled when an MTP draft model is set");
+    }
+    if args.ngram_min > args.ngram_max && args.ngram_max > 0 {
+        bail!("--openai-ngram-min must be less than or equal to --openai-ngram-max");
+    }
     if args.config.stage_index != 0 || args.config.layer_start != 0 {
         bail!("embedded OpenAI serving is only supported on stage 0");
     }
+    attach_native_mtp_draft_model(
+        args.native_mtp_draft_model_path.as_deref(),
+        &args.runtime,
+        &args.config,
+        args.draft_n_gpu_layers,
+    )?;
     let draft = open_draft_runner(
         args.draft_model_path.as_deref(),
         &args.config,
@@ -506,6 +577,9 @@ pub fn embedded_openai_backend(args: EmbeddedOpenAiArgs) -> Result<EmbeddedOpenA
         prefill_reply_credit_limit,
         lane_pool,
         prediction_returns: args.prediction_returns.clone(),
+        native_mtp_enabled: args.native_mtp_enabled,
+        native_mtp_max_tokens: args.native_mtp_max_tokens,
+        native_mtp_min_tokens: args.native_mtp_min_tokens,
     };
     args.telemetry
         .emit("stage.openai_server_start", lifecycle_attrs(&args.config));
@@ -519,6 +593,9 @@ pub fn embedded_openai_backend(args: EmbeddedOpenAiArgs) -> Result<EmbeddedOpenA
     .context("prewarm embedded OpenAI runtime sessions")?;
     let kv = KvStageIntegration::from_config(&args.config)?.map(Arc::new);
     let ctx_size = usize::try_from(args.config.ctx_size).unwrap_or(usize::MAX);
+    let decode_batcher = DecodeBatcher::new(args.runtime.clone(), args.generation_concurrency);
+    let decode_frame_batcher =
+        DecodeFrameBatcher::new(args.runtime.clone(), args.generation_concurrency);
     let backend: Arc<dyn OpenAiBackend> = Arc::new(StageOpenAiBackend {
         runtime: args.runtime,
         config: args.config.clone(),
@@ -531,12 +608,19 @@ pub fn embedded_openai_backend(args: EmbeddedOpenAiArgs) -> Result<EmbeddedOpenA
         draft,
         speculative_window: args.speculative_window,
         adaptive_speculative_window: args.adaptive_speculative_window,
+        ngram_min: args.ngram_min,
+        ngram_max: args.ngram_max,
+        native_mtp_enabled: args.native_mtp_enabled,
+        native_mtp_max_tokens: args.native_mtp_max_tokens,
+        native_mtp_min_tokens: args.native_mtp_min_tokens,
         generation_limit: Arc::new(Semaphore::new(args.generation_concurrency)),
         generation_queue_depth: Arc::new(AtomicUsize::new(0)),
         generation_queue_limit: args.generation_concurrency,
         generation_token_budget: Arc::new(GenerationTokenBudget::new(ctx_size)),
         hook_policy: args.hook_policy,
         kv,
+        decode_batcher,
+        decode_frame_batcher,
     });
     let openai_guardrails = args
         .openai_guardrails
@@ -570,12 +654,19 @@ struct StageOpenAiBackend {
     draft: Option<Arc<Mutex<DraftRunner>>>,
     speculative_window: usize,
     adaptive_speculative_window: bool,
+    ngram_min: usize,
+    ngram_max: usize,
+    native_mtp_enabled: bool,
+    native_mtp_max_tokens: usize,
+    native_mtp_min_tokens: usize,
     generation_limit: Arc<Semaphore>,
     generation_queue_depth: Arc<AtomicUsize>,
     generation_queue_limit: usize,
     generation_token_budget: Arc<GenerationTokenBudget>,
     hook_policy: Option<Arc<dyn OpenAiHookPolicy>>,
     kv: Option<Arc<KvStageIntegration>>,
+    decode_batcher: DecodeBatcher,
+    decode_frame_batcher: DecodeFrameBatcher,
 }
 
 struct GenerationQueueReservation {
@@ -813,6 +904,9 @@ enum OpenAiBackendMode {
         prefill_reply_credit_limit: usize,
         lane_pool: Option<Arc<PersistentStageLanePool>>,
         prediction_returns: Option<Arc<PredictionReturnHub>>,
+        native_mtp_enabled: bool,
+        native_mtp_max_tokens: usize,
+        native_mtp_min_tokens: usize,
     },
 }
 
@@ -1045,7 +1139,19 @@ impl PersistentStageLanePool {
         let timer = PhaseTimer::start();
         let mut stream = connect_binary_downstream(&self.config, self.timeout_secs)?
             .ok_or_else(|| anyhow!("embedded stage0 has no downstream"))?;
+        let local_addr = stream.local_addr().ok();
+        let peer_addr = stream.peer_addr().ok();
+        eprintln!(
+            "openai downstream lane waiting ready: stage_id={} lane_id={lane_id} local={local_addr:?} peer={peer_addr:?}",
+            self.config.stage_id
+        );
+        send_client_ready_hello_if_enabled(&mut stream)
+            .context("send persistent downstream lane client ready hello")?;
         recv_ready(&mut stream).context("persistent downstream lane did not become ready")?;
+        eprintln!(
+            "openai downstream lane received ready: stage_id={} lane_id={lane_id} local={local_addr:?} peer={peer_addr:?}",
+            self.config.stage_id
+        );
         let mut attrs = lifecycle_attrs(&self.config);
         attrs.insert(
             "llama_stage.openai_downstream_lane_id".to_string(),
@@ -1249,6 +1355,8 @@ impl DraftRunner {
                 n_threads: None,
                 n_threads_batch: None,
                 n_gpu_layers: n_gpu_layers.unwrap_or(config.n_gpu_layers),
+                mmap: config.mmap,
+                mlock: config.mlock,
                 selected_backend_device: config
                     .selected_device
                     .as_ref()
@@ -1311,6 +1419,56 @@ fn open_draft_runner(
         n_gpu_layers,
         window,
     )?))))
+}
+
+fn attach_native_mtp_draft_model(
+    path: Option<&Path>,
+    runtime: &Arc<Mutex<RuntimeState>>,
+    config: &StageConfig,
+    n_gpu_layers: Option<i32>,
+) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if !path.is_file() {
+        bail!("MTP draft model does not exist: {}", path.display());
+    }
+    let layer_count = model_layer_count(path)?;
+    let mut runtime = runtime
+        .lock()
+        .map_err(|_| anyhow!("runtime lock poisoned"))?;
+    runtime
+        .model
+        .attach_mtp_draft_model(
+            path,
+            &RuntimeConfig {
+                stage_index: 0,
+                layer_start: 0,
+                layer_end: layer_count,
+                ctx_size: config.ctx_size,
+                lane_count: config.lane_count,
+                n_batch: None,
+                n_ubatch: None,
+                n_threads: None,
+                n_threads_batch: None,
+                n_gpu_layers: n_gpu_layers.unwrap_or(config.n_gpu_layers),
+                mmap: config.mmap,
+                mlock: config.mlock,
+                selected_backend_device: config
+                    .selected_device
+                    .as_ref()
+                    .map(|device| device.backend_device.clone()),
+                cache_type_k: skippy_runtime::GGML_TYPE_F16,
+                cache_type_v: skippy_runtime::GGML_TYPE_F16,
+                flash_attn_type: RuntimeFlashAttentionType::Auto,
+                load_mode: RuntimeLoadMode::RuntimeSlice,
+                projector_path: None,
+                include_embeddings: true,
+                include_output: true,
+                filter_tensors_on_load: false,
+            },
+        )
+        .with_context(|| format!("attach MTP draft model {}", path.display()))
 }
 
 fn model_layer_count(path: &Path) -> Result<u32> {
@@ -1484,6 +1642,33 @@ fn tool_calls_requested(request: &ChatCompletionRequest) -> bool {
             .tool_choice
             .as_ref()
             .is_some_and(|choice| matches!(choice.as_str(), Some("none")))
+}
+
+fn chat_output_parser_required(
+    request: &ChatCompletionRequest,
+    template_options: &ChatTemplateOptions,
+) -> bool {
+    tool_calls_requested(request)
+        || template_options
+            .reasoning_format
+            .is_some_and(ChatReasoningFormat::parses_reasoning)
+}
+
+fn template_exposes_reasoning(template_options: &ChatTemplateOptions) -> bool {
+    template_options
+        .reasoning_format
+        .is_some_and(ChatReasoningFormat::exposes_reasoning)
+}
+
+fn apply_reasoning_visibility(
+    parsed: Option<ParsedChatMessage>,
+    template_options: &ChatTemplateOptions,
+) -> Option<ParsedChatMessage> {
+    let mut parsed = parsed?;
+    if !template_exposes_reasoning(template_options) {
+        parsed.reasoning_content = None;
+    }
+    Some(parsed)
 }
 
 fn chat_response_from_generated_text(
@@ -1694,6 +1879,9 @@ struct LocalGeneration<'a> {
     max_tokens: u32,
     sampling: &'a SamplingConfig,
     chat_sampling_metadata: Option<&'a str>,
+    native_mtp_enabled: bool,
+    native_mtp_max_tokens: usize,
+    native_mtp_min_tokens: usize,
     hook_request: Option<ChatCompletionRequest>,
     hook_runtime: Option<tokio::runtime::Handle>,
     cancellation: Option<&'a openai_frontend::CancellationToken>,
@@ -1712,6 +1900,11 @@ struct EmbeddedStageZeroGeneration<'a> {
     draft: Option<Arc<Mutex<DraftRunner>>>,
     speculative_window: usize,
     adaptive_speculative_window: bool,
+    ngram_min: usize,
+    ngram_max: usize,
+    native_mtp_enabled: bool,
+    native_mtp_max_tokens: usize,
+    native_mtp_min_tokens: usize,
     prompt_token_ids: &'a [i32],
     max_tokens: u32,
     sampling: &'a SamplingConfig,
@@ -1735,6 +1928,7 @@ struct SplitMultimodalGeneration<'a> {
     downstream_wire_condition: WireCondition,
     lane_pool: Arc<PersistentStageLanePool>,
     prediction_return: Option<PredictionReturnReceiver>,
+    emulation_active: bool,
 }
 
 struct EmbeddedLocalOutput {
@@ -1764,6 +1958,7 @@ struct EmbeddedStageExecution {
 struct EmbeddedFusedFirstDecode {
     predicted: i32,
     predicted_tokens: Vec<i32>,
+    native_mtp_draft: Option<NativeMtpDraft>,
     reply_stats: StageReplyStats,
     execution: EmbeddedExecutionStats,
     elapsed_ms: f64,
@@ -1793,6 +1988,7 @@ struct ChatOutputStreamParser {
     backend: StageOpenAiBackend,
     request: ChatCompletionRequest,
     metadata: String,
+    emit_reasoning: bool,
     text: String,
     emitted_content: String,
     emitted_reasoning_content: String,
@@ -1800,11 +1996,17 @@ struct ChatOutputStreamParser {
 }
 
 impl ChatOutputStreamParser {
-    fn new(backend: StageOpenAiBackend, request: ChatCompletionRequest, metadata: String) -> Self {
+    fn new(
+        backend: StageOpenAiBackend,
+        request: ChatCompletionRequest,
+        metadata: String,
+        emit_reasoning: bool,
+    ) -> Self {
         Self {
             backend,
             request,
             metadata,
+            emit_reasoning,
             text: String::new(),
             emitted_content: String::new(),
             emitted_reasoning_content: String::new(),
@@ -1835,18 +2037,19 @@ impl ChatOutputStreamParser {
             return Ok(Vec::new());
         };
         let mut events = Vec::new();
-        if let Some(delta) = suffix_delta(
-            parsed.reasoning_content.as_deref(),
-            &mut self.emitted_reasoning_content,
-        ) {
+        if self.emit_reasoning
+            && let Some(delta) = suffix_delta(
+                parsed.reasoning_content.as_deref(),
+                &mut self.emitted_reasoning_content,
+            )
+        {
             events.push(GenerationStreamEvent::ReasoningDelta(delta));
         }
         if let Some(delta) = suffix_delta(parsed.content.as_deref(), &mut self.emitted_content) {
             events.push(GenerationStreamEvent::Delta(delta));
         }
-        if !is_partial
-            && !self.emitted_tool_calls
-            && let Some(tool_calls) = parsed.tool_calls
+        if let (true, Some(tool_calls)) =
+            (!is_partial && !self.emitted_tool_calls, parsed.tool_calls)
         {
             self.emitted_tool_calls = true;
             events.push(GenerationStreamEvent::ToolCalls(tool_calls));
@@ -1950,6 +2153,27 @@ enum TokenControl {
     Stop,
 }
 
+/// Whether generation for this request is running under tool-call emulation:
+/// the request carries tools and the rendered prompt metadata does not report
+/// native tool support (empty grammar triggers). Used to enable early
+/// generation stop once a complete emulated tool call has been produced.
+fn emulation_generation_active(
+    hook_request: Option<&ChatCompletionRequest>,
+    prompt: &PreparedGenerationPrompt,
+) -> bool {
+    let Some(request) = hook_request else {
+        return false;
+    };
+    if !tool_calls_requested(request) {
+        return false;
+    }
+    prompt
+        .chat_parse_metadata
+        .as_deref()
+        .map(|metadata| !tool_emulation::template_supports_native_tool_calls(metadata))
+        .unwrap_or(false)
+}
+
 struct TextGenerationCollector<'a, F>
 where
     F: FnMut(&str) -> OpenAiResult<()>,
@@ -1964,6 +2188,7 @@ where
     completion_tokens: usize,
     finish_reason: FinishReason,
     metrics: GenerationMetrics,
+    emulation_active: bool,
 }
 
 impl<'a, F> TextGenerationCollector<'a, F>
@@ -1987,7 +2212,17 @@ where
             completion_tokens: 0,
             finish_reason: finish_reason_for_generation(true),
             metrics: GenerationMetrics::default(),
+            emulation_active: false,
         }
+    }
+
+    /// Enables early generation stop once a complete emulated tool call is
+    /// generated. Mirrors goose's `tool_call_emitted -> Stop` so the model does
+    /// not ramble after emitting a call. Only active for emulated tools
+    /// requests; native requests are unaffected.
+    fn with_emulation_stop(mut self, emulation_active: bool) -> Self {
+        self.emulation_active = emulation_active;
+        self
     }
 
     fn push_token(&mut self, token: i32) -> OpenAiResult<TokenControl> {
@@ -2022,6 +2257,11 @@ where
             .any(|stop| !stop.is_empty() && self.text.contains(stop))
         {
             self.text = trim_at_stop(&self.text, &self.stop_values).to_string();
+            self.emit_safe_delta(true)?;
+            self.finish_reason = finish_reason_for_generation(false);
+            return Ok(TokenControl::Stop);
+        }
+        if self.emulation_active && tool_emulation::emulated_tool_call_complete(&self.text) {
             self.emit_safe_delta(true)?;
             self.finish_reason = finish_reason_for_generation(false);
             return Ok(TokenControl::Stop);

@@ -444,6 +444,38 @@ fn default_control_bind_addr() -> std::net::SocketAddr {
     std::net::SocketAddr::from(([127, 0, 0, 1], 0))
 }
 
+/// Detect this host's primary **private LAN** IPv4 without sending any packets.
+///
+/// Returns a genuine RFC1918 LAN address (`10/8`, `172.16/12`, `192.168/16`)
+/// or `None`. It deliberately never returns a public, CGNAT (`100.64/10`), or
+/// VPN/tunnel address, so the caller can safely pin QUIC's bind to it.
+///
+/// Detection has two phases:
+///
+/// 1. **Default-route source probe.** Open an unconnected UDP socket and
+///    `connect()` it to a routable target so the kernel fills in the source IP
+///    it would use to reach that target. No datagrams are sent. This is the
+///    fast, accurate answer on a normal single-LAN host — but on a full-tunnel
+///    VPN host the default route points at the tunnel, so the source is a
+///    VPN/utun address. We therefore accept this result **only if it is a
+///    private LAN IPv4**.
+/// 2. **Interface scan fallback.** If the probe yields a non-private address
+///    (VPN default route) or fails (no default route on an isolated LAN), scan
+///    local interfaces and pick the first private, operational, non-loopback,
+///    non-link-local, non-point-to-point IPv4. Point-to-point interfaces are
+///    skipped because VPN/tunnel interfaces present as p2p.
+///
+/// Used to auto-pin QUIC's bind address to the real LAN interface on
+/// multi-homed hosts (e.g. macOS with several `utun`/VPN interfaces). Binding
+/// `0.0.0.0` on such hosts lets the kernel pick a wrong source for an
+/// unconnected QUIC `sendmsg` (yielding `EHOSTUNREACH` or a slow WAN-hairpin
+/// path) and breaks/degrades direct LAN connectivity in either dial direction.
+/// Returning only a private LAN IPv4 (or `None`) means a wrong default route
+/// can never hard-pin relay-less QUIC off-LAN; we fall back to `0.0.0.0`
+/// instead. Public-relay (Nostr) mode keeps its IPv6/relay paths regardless, so
+/// long-haul reachability to a remote mesh is never sacrificed for the LAN hint.
+pub use lan_bootstrap::detect_primary_lan_ipv4;
+
 fn is_public_ipv4_candidate(socket: &SocketAddr) -> bool {
     match socket.ip() {
         IpAddr::V4(ip) => is_global_ipv4_candidate(ip),
@@ -708,11 +740,11 @@ mod relay_map_tests {
 }
 
 /// End-to-end regression tests for `--relay-auth` against a real in-process
-/// iroh-relay running [`iroh_relay::server::AccessConfig::Restricted`].
+/// iroh-relay running a custom [`iroh_relay::server::AccessControl`].
 ///
 /// These tests do not go through the full `Node::start` path — they exercise
 /// `relay_map_from_urls` (the new wiring) plus the iroh `Endpoint` builder
-/// the same way `bind_mesh_endpoint` does, with `ca_roots_config` overridden
+/// the same way `bind_mesh_endpoint` does, with `ca_tls_config` overridden
 /// for the relay's self-signed test cert. The contract being defended is:
 ///
 ///  1. A token configured for a gated relay URL reaches iroh as
@@ -730,25 +762,31 @@ mod gated_relay_e2e_tests {
     use iroh::Watcher;
     use iroh::endpoint::{Endpoint, RelayMode, presets};
     use iroh::test_utils::run_relay_server_with_access;
-    use iroh_relay::server::{Access, AccessConfig};
-    use iroh_relay::tls::CaRootsConfig;
+    use iroh_relay::server::{Access, AccessControl, AllowAll, ClientRequest};
+    use iroh_relay::tls::CaTlsConfig;
     use std::collections::HashMap;
+    use std::sync::Arc;
     use std::time::Duration;
+
+    #[derive(Debug)]
+    struct TokenAccess(&'static str);
+
+    impl AccessControl for TokenAccess {
+        async fn on_connect(&self, request: &ClientRequest) -> Access {
+            if request.auth_token().as_deref() == Some(self.0) {
+                Access::Allow
+            } else {
+                Access::Deny { reason: None }
+            }
+        }
+    }
 
     /// Spawn an in-process iroh-relay that only admits `expected_token`.
     /// Returns (relay_url_string, drop-guard server).
     async fn spawn_gated_relay(
         expected_token: &'static str,
     ) -> (String, iroh_relay::server::Server) {
-        let access = AccessConfig::Restricted(Box::new(move |request| {
-            Box::pin(async move {
-                if request.auth_token().as_deref() == Some(expected_token) {
-                    Access::Allow
-                } else {
-                    Access::Deny
-                }
-            })
-        }));
+        let access = Arc::new(TokenAccess(expected_token));
         let (_relay_map, relay_url, server) = run_relay_server_with_access(false, access)
             .await
             .expect("spawn gated relay");
@@ -768,7 +806,7 @@ mod gated_relay_e2e_tests {
                 relay_urls,
                 relay_auths,
             )))
-            .ca_roots_config(CaRootsConfig::insecure_skip_verify())
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify())
             .bind()
             .await
             .expect("endpoint bind")
@@ -854,7 +892,7 @@ mod gated_relay_e2e_tests {
         // Spin up a second, fully-open relay to stand in for a public iroh
         // relay sharing the same map.
         let (_public_map, public_url, _public) =
-            run_relay_server_with_access(false, AccessConfig::Everyone)
+            run_relay_server_with_access(false, Arc::new(AllowAll))
                 .await
                 .expect("spawn public relay");
         let public_url = public_url.to_string();
@@ -2086,6 +2124,19 @@ async fn bind_mesh_endpoint(
 
     if let Some(addr) = quic_bind_addr(quic_bind) {
         tracing::info!("Binding QUIC to {addr}");
+        if !relay.policy.uses_relay() && addr.is_ipv4() {
+            // LAN-only (relay-disabled) mode with a specific IPv4 bind: clear the
+            // pre-configured default sockets first. `bind_addr` only replaces the
+            // default for the *same* address family, so binding a specific IPv4
+            // would otherwise leave the default IPv6 `[::]` socket in place. That
+            // extra local IPv6 path becomes a second candidate, and with no relay
+            // iroh's multipath negotiation across the IPv4+IPv6 locals fails with
+            // `MultipathNotNegotiated`, stalling the connection with no fallback.
+            // Pinning a single IPv4 socket keeps one local path family so the LAN
+            // direct path establishes cleanly. In relay (public) mode we keep the
+            // defaults so relay/IPv6 reachability is unaffected.
+            builder = builder.clear_ip_transports();
+        }
         builder = builder.bind_addr(addr)?;
     }
 
@@ -2266,6 +2317,10 @@ pub struct Node {
     genesis_policy: Arc<Mutex<Option<crate::MeshGenesisPolicy>>>,
     signed_genesis_policy: Arc<Mutex<Option<crate::SignedMeshGenesisPolicy>>>,
     bootstrap_token: Arc<Mutex<Option<crate::SignedBootstrapToken>>>,
+    /// Addresses we have been asked to join (from invite tokens), retained so
+    /// the LAN beacon can unicast a dial-back hint to them even before a direct
+    /// connection forms (relay-less multi-homed-initiator case).
+    join_targets: Arc<Mutex<Vec<EndpointAddr>>>,
     first_joined_mesh_ts: Arc<Mutex<Option<u64>>>,
     accepting: Arc<(tokio::sync::Notify, std::sync::atomic::AtomicBool)>,
     vram_bytes: u64,
@@ -2481,21 +2536,37 @@ pub(crate) fn is_peer_admitted(peers: &HashMap<EndpointId, PeerInfo>, id: &Endpo
 }
 
 /// Returns `true` if the given stream type is permitted before a peer has
-/// been admitted through gossip.
+/// been admitted through gossip, under the node's trust policy.
 ///
-/// Only two streams bypass the quarantine gate:
+/// With a non-enforcing trust policy (`Off` or `PreferOwned`), three streams
+/// bypass the quarantine gate:
 /// - `STREAM_GOSSIP (0x01)`: the admission handshake itself.
 /// - `STREAM_ROUTE_REQUEST (0x05)`: passive/client request-only path — caller
 ///   is NEVER promoted to `state.peers`.
 /// - `STREAM_TUNNEL_HTTP (0x04)`: passive SDK inference path for callers that
 ///   have an invite token but should not need a local `/v1` HTTP listener.
 ///
-/// Every other stream — including raw tunnel (0x02) — requires the remote to
-/// have completed gossip first.
-pub(crate) fn stream_allowed_before_admission(stream_type: u8) -> bool {
-    stream_type == STREAM_GOSSIP
-        || stream_type == STREAM_ROUTE_REQUEST
-        || stream_type == STREAM_TUNNEL_HTTP
+/// When a trust policy enforces ownership (`RequireOwned` or `Allowlist`), only
+/// `STREAM_GOSSIP` bypasses the gate. Otherwise a leaked invite token is a
+/// bearer credential for inference: a caller rejected by the trust gate (e.g.
+/// `UntrustedOwner` under `Allowlist`) could still route requests via the
+/// passive paths without ever being admitted. If a node enforces who may join,
+/// the same enforcement must cover who may consume. `PreferOwned` remains
+/// advisory and therefore preserves the passive-client behavior of `Off`.
+///
+/// Every other stream — including raw tunnel (0x02) — always requires the
+/// remote to have completed gossip first.
+pub(crate) fn stream_allowed_before_admission(stream_type: u8, trust_policy: TrustPolicy) -> bool {
+    if stream_type == STREAM_GOSSIP {
+        return true;
+    }
+    if matches!(
+        trust_policy,
+        TrustPolicy::RequireOwned | TrustPolicy::Allowlist
+    ) {
+        return false;
+    }
+    stream_type == STREAM_ROUTE_REQUEST || stream_type == STREAM_TUNNEL_HTTP
 }
 
 pub(crate) fn ingest_tunnel_map(
@@ -3640,7 +3711,7 @@ impl Node {
                 .store(true, std::sync::atomic::Ordering::Release);
             lifecycle.shutdown.notify_waiters();
             let _ = lifecycle.task.await;
-            drop(lifecycle.endpoint);
+            lifecycle.endpoint.close().await;
         }
     }
 
@@ -3760,6 +3831,7 @@ impl Node {
             genesis_policy: Arc::new(Mutex::new(None)),
             signed_genesis_policy: Arc::new(Mutex::new(None)),
             bootstrap_token: Arc::new(Mutex::new(None)),
+            join_targets: Arc::new(Mutex::new(Vec::new())),
             first_joined_mesh_ts: Arc::new(Mutex::new(None)),
             accepting: Arc::new((
                 tokio::sync::Notify::new(),
@@ -3922,6 +3994,7 @@ impl Node {
             genesis_policy: Arc::new(Mutex::new(None)),
             signed_genesis_policy: Arc::new(Mutex::new(None)),
             bootstrap_token: Arc::new(Mutex::new(None)),
+            join_targets: Arc::new(Mutex::new(Vec::new())),
             first_joined_mesh_ts: Arc::new(Mutex::new(None)),
             accepting: Arc::new((
                 tokio::sync::Notify::new(),
@@ -4676,6 +4749,49 @@ impl Node {
         addr
     }
 
+    /// The local node's reachable [`EndpointAddr`], filtered to the bound LAN
+    /// interface in the same way the invite token is. Used by mDNS reverse-dial
+    /// so a host can advertise (and peers can learn) a direct address to dial
+    /// back on the working direction.
+    pub fn advertised_endpoint_addr(&self) -> EndpointAddr {
+        self.endpoint_addr_for_advertisement()
+    }
+
+    /// Dial a peer by its [`EndpointAddr`] directly (no token decode).
+    ///
+    /// Used by mDNS reverse-dial: when a relay-less direct connection cannot be
+    /// established in one direction (multi-homed initiator), the other side
+    /// dials back on the direction that works.
+    pub async fn dial_peer_addr(&self, addr: EndpointAddr) -> Result<()> {
+        self.state.lock().await.dead_peers.remove(&addr.id);
+        self.connect_to_peer(addr).await
+    }
+
+    /// The set of peer endpoint IDs we currently hold a connection to.
+    ///
+    /// Used by mDNS reverse-dial to avoid redialing already-connected peers.
+    pub async fn connected_peer_ids(&self) -> std::collections::HashSet<EndpointId> {
+        self.state
+            .lock()
+            .await
+            .connections
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    /// LAN IPv4 socket addresses of all known peers (from gossip/tokens),
+    /// regardless of connection state. Used by the LAN beacon to unicast a
+    /// dial-back hint directly to peers when multicast is unavailable.
+    pub async fn known_peer_lan_ipv4(&self) -> Vec<std::net::SocketAddrV4> {
+        let state = self.state.lock().await;
+        let mut out = Vec::new();
+        for peer in state.peers.values() {
+            out.extend(lan_bootstrap::lan_ipv4_candidates(&peer.addr));
+        }
+        out
+    }
+
     /// Decode an invite token into an [`EndpointAddr`] without connecting.
     /// Returns `Err` if the token is not valid base64 or not valid JSON.
     pub fn decode_invite_token(invite_token: &str) -> Result<EndpointAddr> {
@@ -4797,7 +4913,35 @@ impl Node {
         };
         // Clear dead status — explicit join should always attempt connection
         self.state.lock().await.dead_peers.remove(&addr.id);
+        self.remember_join_target(addr.clone()).await;
         self.connect_to_peer(addr).await
+    }
+
+    /// Record a join target address so the LAN beacon can unicast a dial-back
+    /// hint to it even before a direct connection forms.
+    ///
+    /// If a target with the same endpoint id is already recorded, its address
+    /// is replaced with the newer one. A peer that restarts or rebinds to a new
+    /// QUIC port advertises a fresh `EndpointAddr` under the same id, and the
+    /// beacon must dial that rather than keep unicasting to the stale socket.
+    async fn remember_join_target(&self, addr: EndpointAddr) {
+        let mut targets = self.join_targets.lock().await;
+        if let Some(existing) = targets.iter_mut().find(|t| t.id == addr.id) {
+            *existing = addr;
+        } else {
+            targets.push(addr);
+        }
+    }
+
+    /// LAN IPv4 socket addresses of recorded join targets (from invite tokens),
+    /// used by the LAN beacon for dial-back unicast before peers are connected.
+    pub async fn join_target_lan_ipv4(&self) -> Vec<std::net::SocketAddrV4> {
+        let targets = self.join_targets.lock().await;
+        let mut out = Vec::new();
+        for addr in targets.iter() {
+            out.extend(lan_bootstrap::lan_ipv4_candidates(addr));
+        }
+        out
     }
 
     /// Like [`join`], but retries once after a delay on transient (connect/timeout)
@@ -4840,6 +4984,7 @@ impl Node {
         // total budget which covers all but the worst relay conditions.
         let backoffs = [5, 10];
         self.state.lock().await.dead_peers.remove(&addr.id);
+        self.remember_join_target(addr.clone()).await;
         let mut last_err = match self.connect_to_peer(addr.clone()).await {
             Ok(()) => return Ok(()),
             Err(e) => e,
@@ -6655,7 +6800,7 @@ impl Node {
         recv: iroh::endpoint::RecvStream,
     ) -> Option<MeshBiStream> {
         let capture_streams = self.swarm_capture_enabled();
-        if stream_allowed_before_admission(stream_type) {
+        if stream_allowed_before_admission(stream_type, self.trust_policy) {
             if capture_streams {
                 self.capture_stream_observation(remote, stream_type, protocol, true);
             }
@@ -8610,36 +8755,24 @@ impl Node {
                 revision,
                 hash,
                 apply_mode,
+                diagnostics,
             } => {
                 if apply_mode == ConfigApplyMode::Staged {
                     let _ = self.config_revision_tx.send(revision);
                 }
-                crate::proto::node::OwnerControlEnvelope {
-                    r#gen: NODE_PROTOCOL_GENERATION,
-                    handshake: None,
-                    request: None,
-                    response: Some(crate::proto::node::OwnerControlResponse {
-                        request_id,
-                        get_config: None,
-                        watch_config: None,
-                        apply_config: Some(crate::proto::node::OwnerControlApplyConfigResponse {
-                            success: true,
-                            current_revision: revision,
-                            config_hash: hash.to_vec(),
-                            error: None,
-                            apply_mode: match apply_mode {
-                                ConfigApplyMode::Staged => {
-                                    crate::proto::node::ConfigApplyMode::Staged as i32
-                                }
-                                ConfigApplyMode::Noop => {
-                                    crate::proto::node::ConfigApplyMode::Noop as i32
-                                }
-                            },
-                        }),
-                        refresh_inventory: None,
-                    }),
-                    error: None,
-                }
+                owner_control_response::apply_response_envelope(
+                    request_id,
+                    crate::proto::node::OwnerControlApplyConfigResponse {
+                        success: true,
+                        current_revision: revision,
+                        config_hash: hash.to_vec(),
+                        error: None,
+                        apply_mode: owner_control_response::proto_apply_mode(apply_mode),
+                        diagnostics: owner_control_response::config_diagnostics_to_proto(
+                            &diagnostics,
+                        ),
+                    },
+                )
             }
             ApplyResult::RevisionConflict { current_revision } => owner_control_error_envelope(
                 crate::proto::node::OwnerControlErrorCode::RevisionConflict,
@@ -8651,49 +8784,49 @@ impl Node {
                 revision,
                 hash,
                 error,
+                diagnostics,
             } => {
                 let _ = self.config_revision_tx.send(revision);
-                crate::proto::node::OwnerControlEnvelope {
-                    r#gen: NODE_PROTOCOL_GENERATION,
-                    handshake: None,
-                    request: None,
-                    response: Some(crate::proto::node::OwnerControlResponse {
-                        request_id,
-                        get_config: None,
-                        watch_config: None,
-                        apply_config: Some(crate::proto::node::OwnerControlApplyConfigResponse {
-                            success: false,
-                            current_revision: revision,
-                            config_hash: hash.to_vec(),
-                            error: Some(error),
-                            apply_mode: crate::proto::node::ConfigApplyMode::Staged as i32,
-                        }),
-                        refresh_inventory: None,
-                    }),
-                    error: None,
-                }
+                owner_control_response::apply_response_envelope(
+                    request_id,
+                    crate::proto::node::OwnerControlApplyConfigResponse {
+                        success: false,
+                        current_revision: revision,
+                        config_hash: hash.to_vec(),
+                        error: Some(error),
+                        apply_mode: crate::proto::node::ConfigApplyMode::Staged as i32,
+                        diagnostics: owner_control_response::config_diagnostics_to_proto(
+                            &diagnostics,
+                        ),
+                    },
+                )
             }
-            ApplyResult::ValidationError(error) | ApplyResult::PersistError(error) => {
-                crate::proto::node::OwnerControlEnvelope {
-                    r#gen: NODE_PROTOCOL_GENERATION,
-                    handshake: None,
-                    request: None,
-                    response: Some(crate::proto::node::OwnerControlResponse {
-                        request_id,
-                        get_config: None,
-                        watch_config: None,
-                        apply_config: Some(crate::proto::node::OwnerControlApplyConfigResponse {
-                            success: false,
-                            current_revision,
-                            config_hash: current_hash.to_vec(),
-                            error: Some(error),
-                            apply_mode: crate::proto::node::ConfigApplyMode::Unspecified as i32,
-                        }),
-                        refresh_inventory: None,
-                    }),
-                    error: None,
-                }
+            ApplyResult::ValidationError { error, diagnostics } => {
+                owner_control_response::apply_response_envelope(
+                    request_id,
+                    crate::proto::node::OwnerControlApplyConfigResponse {
+                        success: false,
+                        current_revision,
+                        config_hash: current_hash.to_vec(),
+                        error: Some(error),
+                        apply_mode: crate::proto::node::ConfigApplyMode::Unspecified as i32,
+                        diagnostics: owner_control_response::config_diagnostics_to_proto(
+                            &diagnostics,
+                        ),
+                    },
+                )
             }
+            ApplyResult::PersistError(error) => owner_control_response::apply_response_envelope(
+                request_id,
+                crate::proto::node::OwnerControlApplyConfigResponse {
+                    success: false,
+                    current_revision,
+                    config_hash: current_hash.to_vec(),
+                    error: Some(error),
+                    apply_mode: crate::proto::node::ConfigApplyMode::Unspecified as i32,
+                    diagnostics: Vec::new(),
+                },
+            ),
         };
         self.send_owner_control_envelope(send, envelope).await
     }
@@ -8943,1268 +9076,6 @@ impl Node {
     }
 }
 
-fn stage_topology_key(topology_id: &str, run_id: &str) -> String {
-    format!("{topology_id}\n{run_id}")
-}
-
-fn stage_runtime_status_key(topology_id: &str, run_id: &str, stage_id: &str) -> String {
-    format!("{topology_id}\n{run_id}\n{stage_id}")
-}
-
-fn endpoint_id_from_bytes(bytes: Vec<u8>) -> anyhow::Result<EndpointId> {
-    let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-        anyhow::anyhow!(
-            "invalid endpoint id length: expected 32, got {}",
-            bytes.len()
-        )
-    })?;
-    let public_key = iroh::PublicKey::from_bytes(&arr)
-        .map_err(|error| anyhow::anyhow!("invalid endpoint id bytes: {error}"))?;
-    Ok(EndpointId::from(public_key))
-}
-
-fn stage_runtime_status_from_snapshot(
-    node_id: Option<EndpointId>,
-    status: crate::inference::skippy::StageStatusSnapshot,
-) -> StageRuntimeStatus {
-    StageRuntimeStatus {
-        topology_id: status.topology_id,
-        run_id: status.run_id,
-        model_id: status.model_id,
-        backend: status.backend,
-        package_ref: status.package_ref,
-        manifest_sha256: status.manifest_sha256,
-        source_model_path: status.source_model_path,
-        source_model_sha256: status.source_model_sha256,
-        source_model_bytes: status.source_model_bytes,
-        materialized_path: status.materialized_path,
-        materialized_pinned: status.materialized_pinned,
-        projector_path: status.projector_path,
-        stage_id: status.stage_id,
-        stage_index: status.stage_index,
-        node_id,
-        layer_start: status.layer_start,
-        layer_end: status.layer_end,
-        state: status.state,
-        bind_addr: status.bind_addr,
-        activation_width: status.activation_width,
-        wire_dtype: status.wire_dtype,
-        selected_device: status.selected_device,
-        ctx_size: status.ctx_size,
-        lane_count: status.lane_count,
-        n_batch: status.n_batch,
-        n_ubatch: status.n_ubatch,
-        flash_attn_type: status.flash_attn_type,
-        error: status.error,
-        shutdown_generation: status.shutdown_generation,
-    }
-}
-
-fn stage_snapshot_from_runtime_status(
-    status: &StageRuntimeStatus,
-    state: crate::inference::skippy::StageRuntimeState,
-    error: Option<String>,
-) -> crate::inference::skippy::StageStatusSnapshot {
-    crate::inference::skippy::StageStatusSnapshot {
-        topology_id: status.topology_id.clone(),
-        run_id: status.run_id.clone(),
-        model_id: status.model_id.clone(),
-        backend: status.backend.clone(),
-        package_ref: status.package_ref.clone(),
-        manifest_sha256: status.manifest_sha256.clone(),
-        source_model_path: status.source_model_path.clone(),
-        source_model_sha256: status.source_model_sha256.clone(),
-        source_model_bytes: status.source_model_bytes,
-        materialized_path: status.materialized_path.clone(),
-        materialized_pinned: status.materialized_pinned,
-        projector_path: status.projector_path.clone(),
-        stage_id: status.stage_id.clone(),
-        stage_index: status.stage_index,
-        layer_start: status.layer_start,
-        layer_end: status.layer_end,
-        state,
-        bind_addr: status.bind_addr.clone(),
-        activation_width: status.activation_width,
-        wire_dtype: status.wire_dtype,
-        selected_device: status.selected_device.clone(),
-        ctx_size: status.ctx_size,
-        lane_count: status.lane_count,
-        n_batch: status.n_batch,
-        n_ubatch: status.n_ubatch,
-        flash_attn_type: status.flash_attn_type,
-        error,
-        shutdown_generation: status.shutdown_generation,
-        coordinator_term: 0,
-        coordinator_id: None,
-        lease_until_unix_ms: 0,
-    }
-}
-
-fn stage_topology_from_load(
-    node_id: EndpointId,
-    load: &crate::inference::skippy::StageLoadRequest,
-) -> StageTopologyInstance {
-    StageTopologyInstance {
-        topology_id: load.topology_id.clone(),
-        run_id: load.run_id.clone(),
-        model_id: load.model_id.clone(),
-        package_ref: load.package_ref.clone(),
-        manifest_sha256: load.manifest_sha256.clone(),
-        stages: vec![StageAssignment {
-            stage_id: load.stage_id.clone(),
-            stage_index: load.stage_index,
-            node_id,
-            layer_start: load.layer_start,
-            layer_end: load.layer_end,
-            endpoint: StageEndpoint {
-                bind_addr: load.bind_addr.clone(),
-            },
-        }],
-    }
-}
-
-fn stage_control_request_to_proto(
-    requester_id: EndpointId,
-    request: crate::inference::skippy::StageControlRequest,
-) -> skippy_stage_proto::StageControlRequest {
-    use skippy_stage_proto::stage_control_request::Command;
-
-    let command = match request {
-        crate::inference::skippy::StageControlRequest::Claim(claim) => {
-            Command::ClaimCoordinator(stage_coordinator_claim_to_proto(claim))
-        }
-        crate::inference::skippy::StageControlRequest::Load(load) => {
-            Command::LoadStage(stage_load_to_proto(load))
-        }
-        crate::inference::skippy::StageControlRequest::Stop(stop) => {
-            Command::StopStage(skippy_stage_proto::StopStage {
-                topology_id: stop.topology_id,
-                run_id: stop.run_id,
-                stage_id: stop.stage_id,
-                shutdown_generation: stop.shutdown_generation,
-                coordinator_term: stop.coordinator_term,
-            })
-        }
-        crate::inference::skippy::StageControlRequest::Status(status) => {
-            Command::GetStageStatus(skippy_stage_proto::GetStageStatus {
-                topology_id: status.topology_id,
-                run_id: status.run_id,
-                stage_id: status.stage_id,
-            })
-        }
-        crate::inference::skippy::StageControlRequest::Inventory(inventory) => {
-            Command::GetLayerInventory(skippy_stage_proto::GetLayerInventory {
-                model_id: inventory.model_id,
-                package_ref: inventory.package_ref,
-                manifest_sha256: inventory.manifest_sha256,
-            })
-        }
-        crate::inference::skippy::StageControlRequest::Prepare(prepare) => {
-            Command::PrepareStage(skippy_stage_proto::PrepareStage {
-                load_stage: Some(stage_load_to_proto(prepare.load)),
-                coordinator_id: prepare.coordinator_id.map(|id| id.as_bytes().to_vec()),
-            })
-        }
-        crate::inference::skippy::StageControlRequest::CancelPrepare(cancel) => {
-            Command::CancelPrepareStage(skippy_stage_proto::CancelPrepareStage {
-                topology_id: cancel.topology_id,
-                run_id: cancel.run_id,
-                stage_id: cancel.stage_id,
-                shutdown_generation: cancel.shutdown_generation,
-            })
-        }
-        crate::inference::skippy::StageControlRequest::StatusUpdate(status) => {
-            Command::StageStatusUpdate(skippy_stage_proto::StageStatusUpdate {
-                status: Some(stage_preparation_status_to_proto(status)),
-            })
-        }
-    };
-
-    skippy_stage_proto::StageControlRequest {
-        r#gen: skippy_protocol::STAGE_PROTOCOL_GENERATION,
-        requester_id: requester_id.as_bytes().to_vec(),
-        command: Some(command),
-    }
-}
-
-fn stage_load_to_proto(
-    load: crate::inference::skippy::StageLoadRequest,
-) -> skippy_stage_proto::LoadStage {
-    skippy_stage_proto::LoadStage {
-        topology_id: load.topology_id,
-        run_id: load.run_id,
-        model_id: load.model_id,
-        backend: load.backend,
-        package_ref: load.package_ref,
-        manifest_sha256: load.manifest_sha256,
-        stage_id: load.stage_id,
-        stage_index: load.stage_index,
-        layer_start: load.layer_start,
-        layer_end: load.layer_end,
-        model_path: load.model_path,
-        source_model_bytes: load.source_model_bytes,
-        projector_path: load.projector_path,
-        selected_device: load.selected_device.map(stage_device_to_proto),
-        bind_addr: load.bind_addr,
-        activation_width: load.activation_width.max(0) as u32,
-        wire_dtype: stage_wire_dtype_to_proto(load.wire_dtype) as i32,
-        ctx_size: load.ctx_size,
-        lane_count: load.lane_count,
-        n_batch: load.n_batch,
-        n_ubatch: load.n_ubatch,
-        n_gpu_layers: load.n_gpu_layers,
-        cache_type_k: load.cache_type_k,
-        cache_type_v: load.cache_type_v,
-        flash_attn_type: stage_flash_attn_type_to_proto(load.flash_attn_type) as i32,
-        shutdown_generation: load.shutdown_generation,
-        coordinator_term: load.coordinator_term,
-        coordinator_id: load.coordinator_id.map(|id| id.to_string()),
-        lease_until_unix_ms: load.lease_until_unix_ms,
-        load_mode: match load.load_mode {
-            skippy_protocol::LoadMode::RuntimeSlice => {
-                skippy_stage_proto::StageLoadMode::RuntimeSlice as i32
-            }
-            skippy_protocol::LoadMode::LayerPackage => {
-                skippy_stage_proto::StageLoadMode::LayerPackage as i32
-            }
-            skippy_protocol::LoadMode::ArtifactSlice => {
-                skippy_stage_proto::StageLoadMode::ArtifactSlice as i32
-            }
-        },
-        upstream: load.upstream.map(stage_peer_to_proto),
-        downstream: load.downstream.map(stage_peer_to_proto),
-    }
-}
-
-fn stage_coordinator_claim_to_proto(
-    claim: crate::inference::skippy::StageCoordinatorClaim,
-) -> skippy_stage_proto::ClaimCoordinator {
-    skippy_stage_proto::ClaimCoordinator {
-        model_id: claim.model_id,
-        package_ref: claim.package_ref,
-        manifest_sha256: claim.manifest_sha256,
-        topology_id: claim.topology_id,
-        run_id: claim.run_id,
-        coordinator_id: claim.coordinator_id,
-        coordinator_term: claim.coordinator_term,
-        participant_set_hash: claim.participant_set_hash,
-        topology_hash: claim.topology_hash,
-        lease_until_unix_ms: claim.lease_until_unix_ms,
-    }
-}
-
-fn stage_peer_to_proto(
-    peer: crate::inference::skippy::StagePeerDescriptor,
-) -> skippy_stage_proto::StagePeer {
-    skippy_stage_proto::StagePeer {
-        stage_id: peer.stage_id,
-        stage_index: peer.stage_index,
-        endpoint: peer.endpoint,
-        node_id: peer.node_id.map(|id| id.as_bytes().to_vec()),
-    }
-}
-
-fn stage_device_to_proto(device: skippy_protocol::StageDevice) -> skippy_stage_proto::StageDevice {
-    skippy_stage_proto::StageDevice {
-        backend_device: device.backend_device,
-        stable_id: device.stable_id,
-        index: device.index.map(|value| value as u64),
-        vram_bytes: device.vram_bytes,
-    }
-}
-
-fn stage_control_request_from_proto(
-    frame: skippy_stage_proto::StageControlRequest,
-) -> anyhow::Result<crate::inference::skippy::StageControlRequest> {
-    use skippy_stage_proto::stage_control_request::Command;
-
-    match frame
-        .command
-        .ok_or_else(|| anyhow::anyhow!("missing stage control command"))?
-    {
-        Command::ClaimCoordinator(claim) => {
-            Ok(crate::inference::skippy::StageControlRequest::Claim(
-                stage_coordinator_claim_from_proto(claim)?,
-            ))
-        }
-        Command::LoadStage(load) => Ok(crate::inference::skippy::StageControlRequest::Load(
-            stage_load_from_proto(load)?,
-        )),
-        Command::StopStage(stop) => Ok(crate::inference::skippy::StageControlRequest::Stop(
-            crate::inference::skippy::StageStopRequest {
-                topology_id: stop.topology_id,
-                run_id: stop.run_id,
-                stage_id: stop.stage_id,
-                shutdown_generation: stop.shutdown_generation,
-                coordinator_term: stop.coordinator_term,
-            },
-        )),
-        Command::GetStageStatus(status) => {
-            Ok(crate::inference::skippy::StageControlRequest::Status(
-                crate::inference::skippy::StageStatusFilter {
-                    topology_id: status.topology_id,
-                    run_id: status.run_id,
-                    stage_id: status.stage_id,
-                },
-            ))
-        }
-        Command::GetLayerInventory(inventory) => {
-            Ok(crate::inference::skippy::StageControlRequest::Inventory(
-                crate::inference::skippy::StageInventoryRequest {
-                    model_id: inventory.model_id,
-                    package_ref: inventory.package_ref,
-                    manifest_sha256: inventory.manifest_sha256,
-                },
-            ))
-        }
-        Command::PrepareStage(prepare) => {
-            let load = prepare
-                .load_stage
-                .ok_or_else(|| anyhow::anyhow!("prepare stage missing load_stage"))?;
-            Ok(crate::inference::skippy::StageControlRequest::Prepare(
-                crate::inference::skippy::StagePrepareRequest {
-                    load: stage_load_from_proto(load)?,
-                    coordinator_id: prepare
-                        .coordinator_id
-                        .map(endpoint_id_from_bytes)
-                        .transpose()
-                        .context("invalid prepare stage coordinator_id")?,
-                },
-            ))
-        }
-        Command::CancelPrepareStage(cancel) => Ok(
-            crate::inference::skippy::StageControlRequest::CancelPrepare(
-                crate::inference::skippy::StageCancelPrepareRequest {
-                    topology_id: cancel.topology_id,
-                    run_id: cancel.run_id,
-                    stage_id: cancel.stage_id,
-                    shutdown_generation: cancel.shutdown_generation,
-                },
-            ),
-        ),
-        Command::StageStatusUpdate(update) => {
-            let status = update
-                .status
-                .ok_or_else(|| anyhow::anyhow!("stage status update missing status"))?;
-            Ok(crate::inference::skippy::StageControlRequest::StatusUpdate(
-                stage_preparation_status_from_proto(status),
-            ))
-        }
-    }
-}
-
-fn stage_load_from_proto(
-    load: skippy_stage_proto::LoadStage,
-) -> anyhow::Result<crate::inference::skippy::StageLoadRequest> {
-    Ok(crate::inference::skippy::StageLoadRequest {
-        topology_id: load.topology_id,
-        run_id: load.run_id,
-        model_id: load.model_id,
-        backend: load.backend,
-        package_ref: load.package_ref,
-        manifest_sha256: load.manifest_sha256,
-        stage_id: load.stage_id,
-        stage_index: load.stage_index,
-        layer_start: load.layer_start,
-        layer_end: load.layer_end,
-        model_path: load.model_path,
-        source_model_bytes: load.source_model_bytes,
-        projector_path: load.projector_path,
-        selected_device: load
-            .selected_device
-            .map(stage_device_from_proto)
-            .transpose()?,
-        bind_addr: load.bind_addr,
-        activation_width: i32::try_from(load.activation_width)
-            .context("stage activation_width exceeds i32")?,
-        wire_dtype: stage_wire_dtype_from_proto(load.wire_dtype),
-        ctx_size: load.ctx_size,
-        lane_count: if load.lane_count == 0 {
-            4
-        } else {
-            load.lane_count
-        },
-        n_batch: load.n_batch,
-        n_ubatch: load.n_ubatch,
-        n_gpu_layers: load.n_gpu_layers,
-        cache_type_k: load.cache_type_k,
-        cache_type_v: load.cache_type_v,
-        flash_attn_type: stage_flash_attn_type_from_proto(load.flash_attn_type),
-        shutdown_generation: load.shutdown_generation,
-        coordinator_term: load.coordinator_term,
-        coordinator_id: load
-            .coordinator_id
-            .map(|id| id.parse())
-            .transpose()
-            .context("invalid stage load coordinator_id")?,
-        lease_until_unix_ms: load.lease_until_unix_ms,
-        load_mode: stage_load_mode_from_proto(load.load_mode),
-        upstream: load.upstream.map(stage_peer_from_proto).transpose()?,
-        downstream: load.downstream.map(stage_peer_from_proto).transpose()?,
-    })
-}
-
-fn stage_coordinator_claim_from_proto(
-    claim: skippy_stage_proto::ClaimCoordinator,
-) -> anyhow::Result<crate::inference::skippy::StageCoordinatorClaim> {
-    Ok(crate::inference::skippy::StageCoordinatorClaim {
-        model_id: claim.model_id,
-        package_ref: claim.package_ref,
-        manifest_sha256: claim.manifest_sha256,
-        topology_id: claim.topology_id,
-        run_id: claim.run_id,
-        coordinator_id: claim.coordinator_id,
-        coordinator_term: claim.coordinator_term,
-        participant_set_hash: claim.participant_set_hash,
-        topology_hash: claim.topology_hash,
-        lease_until_unix_ms: claim.lease_until_unix_ms,
-    })
-}
-
-fn stage_device_from_proto(
-    device: skippy_stage_proto::StageDevice,
-) -> anyhow::Result<skippy_protocol::StageDevice> {
-    Ok(skippy_protocol::StageDevice {
-        backend_device: device.backend_device,
-        stable_id: device.stable_id,
-        index: device
-            .index
-            .map(usize::try_from)
-            .transpose()
-            .context("stage selected_device.index exceeds usize")?,
-        vram_bytes: device.vram_bytes,
-    })
-}
-
-fn stage_peer_from_proto(
-    peer: skippy_stage_proto::StagePeer,
-) -> anyhow::Result<crate::inference::skippy::StagePeerDescriptor> {
-    Ok(crate::inference::skippy::StagePeerDescriptor {
-        stage_id: peer.stage_id,
-        stage_index: peer.stage_index,
-        endpoint: peer.endpoint,
-        node_id: peer
-            .node_id
-            .map(endpoint_id_from_bytes)
-            .transpose()
-            .context("invalid stage peer node_id")?,
-    })
-}
-
-fn stage_load_mode_from_proto(value: i32) -> skippy_protocol::LoadMode {
-    match skippy_stage_proto::StageLoadMode::try_from(value)
-        .unwrap_or(skippy_stage_proto::StageLoadMode::Unspecified)
-    {
-        skippy_stage_proto::StageLoadMode::Unspecified
-        | skippy_stage_proto::StageLoadMode::RuntimeSlice => {
-            skippy_protocol::LoadMode::RuntimeSlice
-        }
-        skippy_stage_proto::StageLoadMode::LayerPackage => skippy_protocol::LoadMode::LayerPackage,
-        skippy_stage_proto::StageLoadMode::ArtifactSlice => {
-            skippy_protocol::LoadMode::ArtifactSlice
-        }
-    }
-}
-
-fn stage_wire_dtype_from_proto(value: i32) -> crate::inference::skippy::StageWireDType {
-    match skippy_stage_proto::StageWireDType::try_from(value)
-        .unwrap_or(skippy_stage_proto::StageWireDType::StageWireDtypeUnspecified)
-    {
-        skippy_stage_proto::StageWireDType::StageWireDtypeUnspecified
-        | skippy_stage_proto::StageWireDType::StageWireDtypeF16 => {
-            crate::inference::skippy::StageWireDType::F16
-        }
-        skippy_stage_proto::StageWireDType::StageWireDtypeF32 => {
-            crate::inference::skippy::StageWireDType::F32
-        }
-        skippy_stage_proto::StageWireDType::StageWireDtypeQ8 => {
-            crate::inference::skippy::StageWireDType::Q8
-        }
-    }
-}
-
-fn stage_control_unavailable_response(
-    request: crate::inference::skippy::StageControlRequest,
-) -> crate::inference::skippy::StageControlResponse {
-    let status = match request {
-        crate::inference::skippy::StageControlRequest::Claim(claim) => {
-            return crate::inference::skippy::StageControlResponse::ClaimAccepted(
-                crate::inference::skippy::StageCoordinatorClaimAck {
-                    accepted: false,
-                    claim,
-                    error: Some("stage control is not available".to_string()),
-                },
-            );
-        }
-        crate::inference::skippy::StageControlRequest::Load(load) => {
-            stage_status_from_load(&load, crate::inference::skippy::StageRuntimeState::Failed)
-        }
-        crate::inference::skippy::StageControlRequest::Stop(stop) => {
-            crate::inference::skippy::StageStatusSnapshot {
-                topology_id: stop.topology_id,
-                run_id: stop.run_id,
-                model_id: String::new(),
-                backend: "skippy".to_string(),
-                package_ref: None,
-                manifest_sha256: None,
-                source_model_path: None,
-                source_model_sha256: None,
-                source_model_bytes: None,
-                materialized_path: None,
-                materialized_pinned: false,
-                projector_path: None,
-                stage_id: stop.stage_id,
-                stage_index: 0,
-                layer_start: 0,
-                layer_end: 0,
-                state: crate::inference::skippy::StageRuntimeState::Failed,
-                bind_addr: String::new(),
-                activation_width: 0,
-                wire_dtype: crate::inference::skippy::StageWireDType::F16,
-                selected_device: None,
-                ctx_size: 0,
-                lane_count: 0,
-                n_batch: None,
-                n_ubatch: None,
-                flash_attn_type: skippy_protocol::FlashAttentionType::Auto,
-                error: Some("stage control is not available".to_string()),
-                shutdown_generation: stop.shutdown_generation,
-                coordinator_term: stop.coordinator_term,
-                coordinator_id: None,
-                lease_until_unix_ms: 0,
-            }
-        }
-        crate::inference::skippy::StageControlRequest::Status(_) => {
-            return crate::inference::skippy::StageControlResponse::Status(Vec::new());
-        }
-        crate::inference::skippy::StageControlRequest::Inventory(inventory) => {
-            return crate::inference::skippy::StageControlResponse::Inventory(
-                crate::inference::skippy::StageLayerInventory {
-                    model_id: inventory.model_id,
-                    package_ref: inventory.package_ref,
-                    manifest_sha256: inventory.manifest_sha256,
-                    layer_count: 0,
-                    ready_ranges: Vec::new(),
-                    available_ranges: Vec::new(),
-                    missing_ranges: Vec::new(),
-                    preparing_ranges: Vec::new(),
-                    source_model_path: None,
-                    source_model_bytes: None,
-                    source_model_kind: crate::inference::skippy::SourceModelKind::Unknown,
-                },
-            );
-        }
-        crate::inference::skippy::StageControlRequest::Prepare(prepare) => {
-            return crate::inference::skippy::StageControlResponse::PrepareAccepted(
-                crate::inference::skippy::StagePrepareAcceptedResponse {
-                    accepted: false,
-                    status: stage_preparation_status_from_load(
-                        &prepare.load,
-                        crate::inference::skippy::StagePreparationState::Failed,
-                        Some("stage control is not available".to_string()),
-                    ),
-                    error: Some("stage control is not available".to_string()),
-                },
-            );
-        }
-        crate::inference::skippy::StageControlRequest::CancelPrepare(cancel) => {
-            return crate::inference::skippy::StageControlResponse::PreparationStatus(
-                stage_preparation_status_from_cancel(
-                    cancel,
-                    crate::inference::skippy::StagePreparationState::Failed,
-                    Some("stage control is not available".to_string()),
-                ),
-            );
-        }
-        crate::inference::skippy::StageControlRequest::StatusUpdate(_) => {
-            return crate::inference::skippy::StageControlResponse::StatusAck(
-                crate::inference::skippy::StageStatusAck {
-                    accepted: false,
-                    error: Some("stage control is not available".to_string()),
-                },
-            );
-        }
-    };
-    crate::inference::skippy::StageControlResponse::Ready(
-        crate::inference::skippy::StageReadyResponse {
-            accepted: false,
-            status,
-            error: Some("stage control is not available".to_string()),
-        },
-    )
-}
-
-fn stage_status_from_load(
-    load: &crate::inference::skippy::StageLoadRequest,
-    state: crate::inference::skippy::StageRuntimeState,
-) -> crate::inference::skippy::StageStatusSnapshot {
-    crate::inference::skippy::StageStatusSnapshot {
-        topology_id: load.topology_id.clone(),
-        run_id: load.run_id.clone(),
-        model_id: load.model_id.clone(),
-        backend: load.backend.clone(),
-        package_ref: Some(load.package_ref.clone()),
-        manifest_sha256: Some(load.manifest_sha256.clone()),
-        source_model_path: load.model_path.clone(),
-        source_model_sha256: None,
-        source_model_bytes: load.source_model_bytes,
-        materialized_path: None,
-        materialized_pinned: false,
-        projector_path: load.projector_path.clone(),
-        stage_id: load.stage_id.clone(),
-        stage_index: load.stage_index,
-        layer_start: load.layer_start,
-        layer_end: load.layer_end,
-        state,
-        bind_addr: load.bind_addr.clone(),
-        activation_width: load.activation_width.max(0) as u32,
-        wire_dtype: load.wire_dtype,
-        selected_device: load.selected_device.clone(),
-        ctx_size: load.ctx_size,
-        lane_count: load.lane_count,
-        n_batch: load.n_batch,
-        n_ubatch: load.n_ubatch,
-        flash_attn_type: load.flash_attn_type,
-        error: Some("stage control is not available".to_string()),
-        shutdown_generation: load.shutdown_generation,
-        coordinator_term: load.coordinator_term,
-        coordinator_id: load.coordinator_id,
-        lease_until_unix_ms: load.lease_until_unix_ms,
-    }
-}
-
-fn stage_preparation_status_from_load(
-    load: &crate::inference::skippy::StageLoadRequest,
-    state: crate::inference::skippy::StagePreparationState,
-    error: Option<String>,
-) -> crate::inference::skippy::StagePreparationStatus {
-    crate::inference::skippy::StagePreparationStatus {
-        topology_id: load.topology_id.clone(),
-        run_id: load.run_id.clone(),
-        model_id: load.model_id.clone(),
-        backend: load.backend.clone(),
-        package_ref: load.package_ref.clone(),
-        manifest_sha256: load.manifest_sha256.clone(),
-        stage_id: load.stage_id.clone(),
-        stage_index: load.stage_index,
-        layer_start: load.layer_start,
-        layer_end: load.layer_end,
-        state,
-        bytes_done: None,
-        bytes_total: None,
-        bind_addr: None,
-        error,
-        shutdown_generation: load.shutdown_generation,
-        coordinator_term: load.coordinator_term,
-        coordinator_id: load.coordinator_id,
-        lease_until_unix_ms: load.lease_until_unix_ms,
-    }
-}
-
-fn stage_preparation_status_from_cancel(
-    cancel: crate::inference::skippy::StageCancelPrepareRequest,
-    state: crate::inference::skippy::StagePreparationState,
-    error: Option<String>,
-) -> crate::inference::skippy::StagePreparationStatus {
-    crate::inference::skippy::StagePreparationStatus {
-        topology_id: cancel.topology_id,
-        run_id: cancel.run_id,
-        model_id: String::new(),
-        backend: "skippy".to_string(),
-        package_ref: String::new(),
-        manifest_sha256: String::new(),
-        stage_id: cancel.stage_id,
-        stage_index: 0,
-        layer_start: 0,
-        layer_end: 0,
-        state,
-        bytes_done: None,
-        bytes_total: None,
-        bind_addr: None,
-        error,
-        shutdown_generation: cancel.shutdown_generation,
-        coordinator_term: 0,
-        coordinator_id: None,
-        lease_until_unix_ms: 0,
-    }
-}
-
-fn stage_control_response_to_proto(
-    response: crate::inference::skippy::StageControlResponse,
-    status_list_supported: bool,
-) -> skippy_stage_proto::StageControlResponse {
-    use skippy_stage_proto::stage_control_response::Response;
-
-    let response = match response {
-        crate::inference::skippy::StageControlResponse::ClaimAccepted(accepted) => {
-            Response::CoordinatorClaimAccepted(skippy_stage_proto::CoordinatorClaimAccepted {
-                accepted: accepted.accepted,
-                claim: Some(stage_coordinator_claim_to_proto(accepted.claim)),
-                error: accepted.error,
-            })
-        }
-        crate::inference::skippy::StageControlResponse::Ready(ready) => {
-            Response::StageReady(skippy_stage_proto::StageReady {
-                accepted: ready.accepted,
-                status: Some(stage_status_to_proto(ready.status)),
-                error: ready.error,
-            })
-        }
-        crate::inference::skippy::StageControlResponse::Status(statuses) => {
-            if status_list_supported {
-                Response::StageStatuses(skippy_stage_proto::StageStatusList {
-                    statuses: statuses.into_iter().map(stage_status_to_proto).collect(),
-                })
-            } else {
-                Response::StageStatus(statuses.into_iter().next().map_or_else(
-                    || skippy_stage_proto::StageStatus {
-                        state: skippy_stage_proto::StageRuntimeState::Stopped as i32,
-                        ..Default::default()
-                    },
-                    stage_status_to_proto,
-                ))
-            }
-        }
-        crate::inference::skippy::StageControlResponse::Inventory(inventory) => {
-            Response::LayerInventory(layer_inventory_to_proto(inventory))
-        }
-        crate::inference::skippy::StageControlResponse::PrepareAccepted(accepted) => {
-            Response::PrepareStageAccepted(skippy_stage_proto::PrepareStageAccepted {
-                accepted: accepted.accepted,
-                status: Some(stage_preparation_status_to_proto(accepted.status)),
-                error: accepted.error,
-            })
-        }
-        crate::inference::skippy::StageControlResponse::PreparationStatus(status) => {
-            Response::StagePreparationStatus(stage_preparation_status_to_proto(status))
-        }
-        crate::inference::skippy::StageControlResponse::StatusAck(ack) => {
-            Response::StageStatusAck(skippy_stage_proto::StageStatusAck {
-                accepted: ack.accepted,
-                error: ack.error,
-            })
-        }
-    };
-
-    skippy_stage_proto::StageControlResponse {
-        r#gen: skippy_protocol::STAGE_PROTOCOL_GENERATION,
-        response: Some(response),
-    }
-}
-
-fn stage_control_response_from_proto(
-    frame: skippy_stage_proto::StageControlResponse,
-) -> anyhow::Result<crate::inference::skippy::StageControlResponse> {
-    use skippy_stage_proto::stage_control_response::Response;
-
-    match frame
-        .response
-        .ok_or_else(|| anyhow::anyhow!("missing stage control response"))?
-    {
-        Response::CoordinatorClaimAccepted(accepted) => {
-            let claim = accepted
-                .claim
-                .ok_or_else(|| anyhow::anyhow!("coordinator claim accepted missing claim"))?;
-            Ok(
-                crate::inference::skippy::StageControlResponse::ClaimAccepted(
-                    crate::inference::skippy::StageCoordinatorClaimAck {
-                        accepted: accepted.accepted,
-                        claim: stage_coordinator_claim_from_proto(claim)?,
-                        error: accepted.error,
-                    },
-                ),
-            )
-        }
-        Response::StageReady(ready) => {
-            let status = ready
-                .status
-                .ok_or_else(|| anyhow::anyhow!("stage ready missing status"))?;
-            Ok(crate::inference::skippy::StageControlResponse::Ready(
-                crate::inference::skippy::StageReadyResponse {
-                    accepted: ready.accepted,
-                    status: stage_status_from_proto(status)?,
-                    error: ready.error,
-                },
-            ))
-        }
-        Response::StageStatus(status) => {
-            Ok(crate::inference::skippy::StageControlResponse::Status(
-                vec![stage_status_from_proto(status)?],
-            ))
-        }
-        Response::StageStatuses(statuses) => {
-            Ok(crate::inference::skippy::StageControlResponse::Status(
-                statuses
-                    .statuses
-                    .into_iter()
-                    .map(stage_status_from_proto)
-                    .collect::<anyhow::Result<Vec<_>>>()?,
-            ))
-        }
-        Response::LayerInventory(inventory) => {
-            Ok(crate::inference::skippy::StageControlResponse::Inventory(
-                layer_inventory_from_proto(inventory),
-            ))
-        }
-        Response::PrepareStageAccepted(accepted) => {
-            let status = accepted
-                .status
-                .ok_or_else(|| anyhow::anyhow!("prepare stage accepted missing status"))?;
-            Ok(
-                crate::inference::skippy::StageControlResponse::PrepareAccepted(
-                    crate::inference::skippy::StagePrepareAcceptedResponse {
-                        accepted: accepted.accepted,
-                        status: stage_preparation_status_from_proto(status),
-                        error: accepted.error,
-                    },
-                ),
-            )
-        }
-        Response::StagePreparationStatus(status) => Ok(
-            crate::inference::skippy::StageControlResponse::PreparationStatus(
-                stage_preparation_status_from_proto(status),
-            ),
-        ),
-        Response::StageStatusAck(ack) => {
-            Ok(crate::inference::skippy::StageControlResponse::StatusAck(
-                crate::inference::skippy::StageStatusAck {
-                    accepted: ack.accepted,
-                    error: ack.error,
-                },
-            ))
-        }
-    }
-}
-
-fn layer_inventory_to_proto(
-    inventory: crate::inference::skippy::StageLayerInventory,
-) -> skippy_stage_proto::LayerInventory {
-    skippy_stage_proto::LayerInventory {
-        model_id: inventory.model_id,
-        package_ref: inventory.package_ref,
-        manifest_sha256: inventory.manifest_sha256,
-        layer_count: inventory.layer_count,
-        ready_ranges: inventory
-            .ready_ranges
-            .into_iter()
-            .map(layer_range_to_proto)
-            .collect(),
-        available_ranges: inventory
-            .available_ranges
-            .into_iter()
-            .map(layer_range_to_proto)
-            .collect(),
-        missing_ranges: inventory
-            .missing_ranges
-            .into_iter()
-            .map(layer_range_to_proto)
-            .collect(),
-        preparing_ranges: inventory
-            .preparing_ranges
-            .into_iter()
-            .map(stage_preparation_status_to_proto)
-            .collect(),
-        source_model_path: inventory.source_model_path,
-        source_model_bytes: inventory.source_model_bytes,
-        source_model_kind: source_model_kind_to_proto(inventory.source_model_kind) as i32,
-    }
-}
-
-fn layer_inventory_from_proto(
-    inventory: skippy_stage_proto::LayerInventory,
-) -> crate::inference::skippy::StageLayerInventory {
-    crate::inference::skippy::StageLayerInventory {
-        model_id: inventory.model_id,
-        package_ref: inventory.package_ref,
-        manifest_sha256: inventory.manifest_sha256,
-        layer_count: inventory.layer_count,
-        ready_ranges: inventory
-            .ready_ranges
-            .into_iter()
-            .map(layer_range_from_proto)
-            .collect(),
-        available_ranges: inventory
-            .available_ranges
-            .into_iter()
-            .map(layer_range_from_proto)
-            .collect(),
-        missing_ranges: inventory
-            .missing_ranges
-            .into_iter()
-            .map(layer_range_from_proto)
-            .collect(),
-        preparing_ranges: inventory
-            .preparing_ranges
-            .into_iter()
-            .map(stage_preparation_status_from_proto)
-            .collect(),
-        source_model_path: inventory.source_model_path,
-        source_model_bytes: inventory.source_model_bytes,
-        source_model_kind: source_model_kind_from_proto(inventory.source_model_kind),
-    }
-}
-
-fn layer_range_to_proto(
-    range: crate::inference::skippy::LayerRange,
-) -> skippy_stage_proto::LayerRange {
-    skippy_stage_proto::LayerRange {
-        layer_start: range.layer_start,
-        layer_end: range.layer_end,
-    }
-}
-
-fn layer_range_from_proto(
-    range: skippy_stage_proto::LayerRange,
-) -> crate::inference::skippy::LayerRange {
-    crate::inference::skippy::LayerRange {
-        layer_start: range.layer_start,
-        layer_end: range.layer_end,
-    }
-}
-
-fn source_model_kind_to_proto(
-    kind: crate::inference::skippy::SourceModelKind,
-) -> skippy_stage_proto::SourceModelKind {
-    match kind {
-        crate::inference::skippy::SourceModelKind::Unknown => {
-            skippy_stage_proto::SourceModelKind::Unspecified
-        }
-        crate::inference::skippy::SourceModelKind::LayerPackage => {
-            skippy_stage_proto::SourceModelKind::LayerPackage
-        }
-        crate::inference::skippy::SourceModelKind::PlainGguf => {
-            skippy_stage_proto::SourceModelKind::PlainGguf
-        }
-        crate::inference::skippy::SourceModelKind::SplitGguf => {
-            skippy_stage_proto::SourceModelKind::SplitGguf
-        }
-    }
-}
-
-fn source_model_kind_from_proto(value: i32) -> crate::inference::skippy::SourceModelKind {
-    match skippy_stage_proto::SourceModelKind::try_from(value)
-        .unwrap_or(skippy_stage_proto::SourceModelKind::Unspecified)
-    {
-        skippy_stage_proto::SourceModelKind::Unspecified => {
-            crate::inference::skippy::SourceModelKind::Unknown
-        }
-        skippy_stage_proto::SourceModelKind::LayerPackage => {
-            crate::inference::skippy::SourceModelKind::LayerPackage
-        }
-        skippy_stage_proto::SourceModelKind::PlainGguf => {
-            crate::inference::skippy::SourceModelKind::PlainGguf
-        }
-        skippy_stage_proto::SourceModelKind::SplitGguf => {
-            crate::inference::skippy::SourceModelKind::SplitGguf
-        }
-    }
-}
-
-fn stage_preparation_status_to_proto(
-    status: crate::inference::skippy::StagePreparationStatus,
-) -> skippy_stage_proto::StagePreparationStatus {
-    skippy_stage_proto::StagePreparationStatus {
-        topology_id: status.topology_id,
-        run_id: status.run_id,
-        model_id: status.model_id,
-        backend: status.backend,
-        package_ref: status.package_ref,
-        manifest_sha256: status.manifest_sha256,
-        stage_id: status.stage_id,
-        stage_index: status.stage_index,
-        layer_start: status.layer_start,
-        layer_end: status.layer_end,
-        state: stage_preparation_state_to_proto(status.state) as i32,
-        bytes_done: status.bytes_done,
-        bytes_total: status.bytes_total,
-        bind_addr: status.bind_addr,
-        error: status.error,
-        shutdown_generation: status.shutdown_generation,
-        coordinator_term: status.coordinator_term,
-        coordinator_id: status.coordinator_id.map(|id| id.to_string()),
-        lease_until_unix_ms: status.lease_until_unix_ms,
-    }
-}
-
-fn stage_preparation_status_from_proto(
-    status: skippy_stage_proto::StagePreparationStatus,
-) -> crate::inference::skippy::StagePreparationStatus {
-    let coordinator_id = status.coordinator_id.and_then(|id| match id.parse() {
-        Ok(id) => Some(id),
-        Err(error) => {
-            tracing::warn!(
-                coordinator_id = %id,
-                error = %error,
-                "invalid stage preparation coordinator_id"
-            );
-            None
-        }
-    });
-    crate::inference::skippy::StagePreparationStatus {
-        topology_id: status.topology_id,
-        run_id: status.run_id,
-        model_id: status.model_id,
-        backend: status.backend,
-        package_ref: status.package_ref,
-        manifest_sha256: status.manifest_sha256,
-        stage_id: status.stage_id,
-        stage_index: status.stage_index,
-        layer_start: status.layer_start,
-        layer_end: status.layer_end,
-        state: stage_preparation_state_from_proto(status.state),
-        bytes_done: status.bytes_done,
-        bytes_total: status.bytes_total,
-        bind_addr: status.bind_addr,
-        error: status.error,
-        shutdown_generation: status.shutdown_generation,
-        coordinator_term: status.coordinator_term,
-        coordinator_id,
-        lease_until_unix_ms: status.lease_until_unix_ms,
-    }
-}
-
-fn stage_status_to_proto(
-    status: crate::inference::skippy::StageStatusSnapshot,
-) -> skippy_stage_proto::StageStatus {
-    skippy_stage_proto::StageStatus {
-        topology_id: status.topology_id,
-        run_id: status.run_id,
-        model_id: status.model_id,
-        backend: status.backend,
-        stage_id: status.stage_id,
-        stage_index: status.stage_index,
-        layer_start: status.layer_start,
-        layer_end: status.layer_end,
-        state: stage_runtime_state_to_proto(status.state) as i32,
-        bind_addr: status.bind_addr,
-        activation_width: status.activation_width,
-        wire_dtype: stage_wire_dtype_to_proto(status.wire_dtype) as i32,
-        error: status.error,
-        shutdown_generation: status.shutdown_generation,
-        selected_device: status.selected_device.map(stage_device_to_proto),
-        ctx_size: status.ctx_size,
-        lane_count: status.lane_count,
-        n_batch: status.n_batch,
-        n_ubatch: status.n_ubatch,
-        package_ref: status.package_ref,
-        manifest_sha256: status.manifest_sha256,
-        source_model_path: status.source_model_path,
-        source_model_sha256: status.source_model_sha256,
-        source_model_bytes: status.source_model_bytes,
-        materialized_path: status.materialized_path,
-        materialized_pinned: Some(status.materialized_pinned),
-        projector_path: status.projector_path,
-        flash_attn_type: stage_flash_attn_type_to_proto(status.flash_attn_type) as i32,
-        coordinator_term: status.coordinator_term,
-        coordinator_id: status.coordinator_id.map(|id| id.to_string()),
-        lease_until_unix_ms: status.lease_until_unix_ms,
-    }
-}
-
-fn stage_status_from_proto(
-    status: skippy_stage_proto::StageStatus,
-) -> anyhow::Result<crate::inference::skippy::StageStatusSnapshot> {
-    Ok(crate::inference::skippy::StageStatusSnapshot {
-        topology_id: status.topology_id,
-        run_id: status.run_id,
-        model_id: status.model_id,
-        backend: status.backend,
-        stage_id: status.stage_id,
-        stage_index: status.stage_index,
-        layer_start: status.layer_start,
-        layer_end: status.layer_end,
-        state: stage_runtime_state_from_proto(status.state),
-        bind_addr: status.bind_addr,
-        activation_width: status.activation_width,
-        wire_dtype: stage_wire_dtype_from_proto(status.wire_dtype),
-        selected_device: status
-            .selected_device
-            .map(stage_device_from_proto)
-            .transpose()?,
-        ctx_size: status.ctx_size,
-        lane_count: if status.lane_count == 0 {
-            4
-        } else {
-            status.lane_count
-        },
-        n_batch: status.n_batch,
-        n_ubatch: status.n_ubatch,
-        package_ref: status.package_ref,
-        manifest_sha256: status.manifest_sha256,
-        source_model_path: status.source_model_path,
-        source_model_sha256: status.source_model_sha256,
-        source_model_bytes: status.source_model_bytes,
-        materialized_path: status.materialized_path,
-        materialized_pinned: status.materialized_pinned.unwrap_or(false),
-        projector_path: status.projector_path,
-        flash_attn_type: stage_flash_attn_type_from_proto(status.flash_attn_type),
-        error: status.error,
-        shutdown_generation: status.shutdown_generation,
-        coordinator_term: status.coordinator_term,
-        coordinator_id: status
-            .coordinator_id
-            .map(|id| id.parse())
-            .transpose()
-            .context("invalid stage status coordinator_id")?,
-        lease_until_unix_ms: status.lease_until_unix_ms,
-    })
-}
-
-fn stage_flash_attn_type_to_proto(
-    value: skippy_protocol::FlashAttentionType,
-) -> skippy_stage_proto::StageFlashAttnType {
-    match value {
-        skippy_protocol::FlashAttentionType::Auto => skippy_stage_proto::StageFlashAttnType::Auto,
-        skippy_protocol::FlashAttentionType::Disabled => {
-            skippy_stage_proto::StageFlashAttnType::Disabled
-        }
-        skippy_protocol::FlashAttentionType::Enabled => {
-            skippy_stage_proto::StageFlashAttnType::Enabled
-        }
-    }
-}
-
-fn stage_flash_attn_type_from_proto(value: i32) -> skippy_protocol::FlashAttentionType {
-    match skippy_stage_proto::StageFlashAttnType::try_from(value)
-        .unwrap_or(skippy_stage_proto::StageFlashAttnType::Unspecified)
-    {
-        skippy_stage_proto::StageFlashAttnType::Unspecified
-        | skippy_stage_proto::StageFlashAttnType::Auto => skippy_protocol::FlashAttentionType::Auto,
-        skippy_stage_proto::StageFlashAttnType::Disabled => {
-            skippy_protocol::FlashAttentionType::Disabled
-        }
-        skippy_stage_proto::StageFlashAttnType::Enabled => {
-            skippy_protocol::FlashAttentionType::Enabled
-        }
-    }
-}
-
-fn stage_runtime_state_from_proto(value: i32) -> crate::inference::skippy::StageRuntimeState {
-    match skippy_stage_proto::StageRuntimeState::try_from(value)
-        .unwrap_or(skippy_stage_proto::StageRuntimeState::Failed)
-    {
-        skippy_stage_proto::StageRuntimeState::Starting => {
-            crate::inference::skippy::StageRuntimeState::Starting
-        }
-        skippy_stage_proto::StageRuntimeState::Ready => {
-            crate::inference::skippy::StageRuntimeState::Ready
-        }
-        skippy_stage_proto::StageRuntimeState::Stopping => {
-            crate::inference::skippy::StageRuntimeState::Stopping
-        }
-        skippy_stage_proto::StageRuntimeState::Stopped
-        | skippy_stage_proto::StageRuntimeState::Unspecified => {
-            crate::inference::skippy::StageRuntimeState::Stopped
-        }
-        skippy_stage_proto::StageRuntimeState::Failed => {
-            crate::inference::skippy::StageRuntimeState::Failed
-        }
-    }
-}
-
-fn stage_runtime_state_to_proto(
-    state: crate::inference::skippy::StageRuntimeState,
-) -> skippy_stage_proto::StageRuntimeState {
-    match state {
-        crate::inference::skippy::StageRuntimeState::Starting => {
-            skippy_stage_proto::StageRuntimeState::Starting
-        }
-        crate::inference::skippy::StageRuntimeState::Ready => {
-            skippy_stage_proto::StageRuntimeState::Ready
-        }
-        crate::inference::skippy::StageRuntimeState::Stopping => {
-            skippy_stage_proto::StageRuntimeState::Stopping
-        }
-        crate::inference::skippy::StageRuntimeState::Stopped => {
-            skippy_stage_proto::StageRuntimeState::Stopped
-        }
-        crate::inference::skippy::StageRuntimeState::Failed => {
-            skippy_stage_proto::StageRuntimeState::Failed
-        }
-    }
-}
-
-fn stage_preparation_state_from_proto(
-    value: i32,
-) -> crate::inference::skippy::StagePreparationState {
-    match skippy_stage_proto::StagePreparationState::try_from(value)
-        .unwrap_or(skippy_stage_proto::StagePreparationState::Unspecified)
-    {
-        skippy_stage_proto::StagePreparationState::Assigned
-        | skippy_stage_proto::StagePreparationState::Unspecified => {
-            crate::inference::skippy::StagePreparationState::Assigned
-        }
-        skippy_stage_proto::StagePreparationState::Downloading => {
-            crate::inference::skippy::StagePreparationState::Downloading
-        }
-        skippy_stage_proto::StagePreparationState::Available => {
-            crate::inference::skippy::StagePreparationState::Available
-        }
-        skippy_stage_proto::StagePreparationState::Resolving => {
-            crate::inference::skippy::StagePreparationState::Resolving
-        }
-        skippy_stage_proto::StagePreparationState::Loading => {
-            crate::inference::skippy::StagePreparationState::Loading
-        }
-        skippy_stage_proto::StagePreparationState::Ready => {
-            crate::inference::skippy::StagePreparationState::Ready
-        }
-        skippy_stage_proto::StagePreparationState::Failed => {
-            crate::inference::skippy::StagePreparationState::Failed
-        }
-        skippy_stage_proto::StagePreparationState::Cancelled => {
-            crate::inference::skippy::StagePreparationState::Cancelled
-        }
-    }
-}
-
-fn stage_preparation_state_to_proto(
-    state: crate::inference::skippy::StagePreparationState,
-) -> skippy_stage_proto::StagePreparationState {
-    match state {
-        crate::inference::skippy::StagePreparationState::Assigned => {
-            skippy_stage_proto::StagePreparationState::Assigned
-        }
-        crate::inference::skippy::StagePreparationState::Downloading => {
-            skippy_stage_proto::StagePreparationState::Downloading
-        }
-        crate::inference::skippy::StagePreparationState::Available => {
-            skippy_stage_proto::StagePreparationState::Available
-        }
-        crate::inference::skippy::StagePreparationState::Resolving => {
-            skippy_stage_proto::StagePreparationState::Resolving
-        }
-        crate::inference::skippy::StagePreparationState::Loading => {
-            skippy_stage_proto::StagePreparationState::Loading
-        }
-        crate::inference::skippy::StagePreparationState::Ready => {
-            skippy_stage_proto::StagePreparationState::Ready
-        }
-        crate::inference::skippy::StagePreparationState::Failed => {
-            skippy_stage_proto::StagePreparationState::Failed
-        }
-        crate::inference::skippy::StagePreparationState::Cancelled => {
-            skippy_stage_proto::StagePreparationState::Cancelled
-        }
-    }
-}
-
-fn stage_wire_dtype_to_proto(
-    dtype: crate::inference::skippy::StageWireDType,
-) -> skippy_stage_proto::StageWireDType {
-    match dtype {
-        crate::inference::skippy::StageWireDType::F32 => {
-            skippy_stage_proto::StageWireDType::StageWireDtypeF32
-        }
-        crate::inference::skippy::StageWireDType::F16 => {
-            skippy_stage_proto::StageWireDType::StageWireDtypeF16
-        }
-        crate::inference::skippy::StageWireDType::Q8 => {
-            skippy_stage_proto::StageWireDType::StageWireDtypeQ8
-        }
-    }
-}
-
 /// Generate a mesh ID for a new mesh.
 /// Named meshes: `sha256("mesh-llm:" + name + ":" + nostr_pubkey)` — deterministic, unique per creator.
 /// Unnamed meshes: random UUID, persisted to `~/.mesh-llm/mesh-id`.
@@ -10375,8 +9246,11 @@ mod artifact_transfer_io;
 mod direct_path;
 mod gossip;
 mod heartbeat;
+mod lan_bootstrap;
+mod owner_control_response;
 mod plugin_streams;
 pub(crate) mod requirements;
+mod stage_proto;
 pub use gossip::backfill_legacy_descriptors;
 #[allow(unused_imports)]
 use gossip::{apply_transitive_ann, peer_meaningfully_changed};
@@ -10385,6 +9259,7 @@ use heartbeat::{HeartbeatFailurePolicy, heartbeat_failure_policy_for_peer};
 pub(crate) use heartbeat::{
     PeerDownReportDisposition, peer_down_report_disposition, resolve_peer_down,
 };
+use stage_proto::*;
 #[cfg(test)]
 pub(crate) mod tests;
 

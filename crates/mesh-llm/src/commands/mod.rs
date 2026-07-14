@@ -1,19 +1,23 @@
+mod config;
 mod discover;
 mod doctor;
 mod download;
 mod models;
 mod plugin_cli;
 mod runtime;
+mod setup;
 
 use anyhow::Result;
 use mesh_llm_cli::{Cli, Command};
 
+use self::config::dispatch_config_command;
 use self::discover::{DiscoverOptions, run_discover, run_stop};
 use self::doctor::dispatch_doctor_command;
 use self::download::dispatch_download_command;
 use self::models::dispatch_models_command;
 use self::plugin_cli::run_external_plugin_command;
 use self::runtime::{dispatch_runtime_command, run_drop, run_load, run_status};
+use self::setup::dispatch_setup_command;
 
 pub async fn dispatch(cli: &Cli) -> Result<bool> {
     let Some(cmd) = cli.command.as_ref() else {
@@ -45,8 +49,38 @@ async fn dispatch_general_command(cli: &Cli, cmd: &Command) -> Result<()> {
             mesh_llm_commands::gpus::dispatch_gpu_command(*json, command.as_ref())?;
             Ok(())
         }
-        Command::Runtime { command } => dispatch_runtime_command(command.as_ref()).await,
-        Command::Doctor { command, json } => dispatch_doctor_command(command.as_ref(), *json).await,
+        Command::Runtime { command } => {
+            dispatch_runtime_command(command.as_ref(), cli.config.as_deref()).await
+        }
+        Command::Setup { .. } => dispatch_setup_command(cmd, cli.config.as_deref()).await,
+        Command::Uninstall {
+            dry_run,
+            yes,
+            keep_cache,
+            keep_service_files,
+            purge_config,
+            keep_config,
+            binary_path,
+            json,
+            verbose,
+        } => mesh_llm_commands::uninstall::run_uninstall_command(
+            mesh_llm_commands::uninstall::UninstallOptions {
+                dry_run: *dry_run,
+                yes: *yes,
+                keep_cache: *keep_cache,
+                keep_service_files: *keep_service_files,
+                purge_config: *purge_config,
+                keep_config: *keep_config,
+                binary_path: binary_path.clone(),
+                json: *json,
+                verbose: *verbose,
+            },
+            run_stop,
+        ),
+        Command::Config { command } => dispatch_config_command(cli, command),
+        Command::Doctor { command, json } => {
+            dispatch_doctor_command(command.as_ref(), cli.config.as_deref(), *json).await
+        }
         Command::Load { name, port } => run_load(name, *port).await,
         Command::Unload { name, port } => run_drop(name, *port).await,
         Command::Status { port } => run_status(*port).await,
@@ -89,7 +123,8 @@ async fn dispatch_general_command(cli: &Cli, cmd: &Command) -> Result<()> {
         Command::Skills { command } => mesh_llm_commands::skills::run_skills_command(command),
         Command::Plugin { command } => run_plugin_command(command, cli).await,
         Command::Benchmark { command } => {
-            mesh_llm_commands::benchmark::dispatch_benchmark_command(command).await
+            mesh_llm_commands::benchmark::dispatch_benchmark_command(cli.config.as_deref(), command)
+                .await
         }
         Command::ModelPrepare { .. } => dispatch_model_prepare(cmd).await,
         Command::Auth { command } => mesh_llm_commands::auth::run_auth_command(command),
@@ -144,12 +179,21 @@ async fn dispatch_model_prepare(cmd: &Command) -> Result<()> {
 }
 
 async fn run_plugin_command(command: &mesh_llm_cli::PluginCommand, cli: &Cli) -> Result<()> {
-    let rows = if matches!(command, mesh_llm_cli::PluginCommand::List) {
-        Some(resolved_plugin_list_rows(cli)?)
-    } else {
-        None
-    };
-    mesh_llm_commands::plugin::run_plugin_command(command, rows.as_ref()).await?;
+    match command {
+        mesh_llm_cli::PluginCommand::List => {
+            let rows = resolved_plugin_list_rows(cli)?;
+            mesh_llm_commands::plugin::run_plugin_command(command, Some(&rows)).await?;
+        }
+        mesh_llm_cli::PluginCommand::Info { .. } => {
+            if !mesh_llm_commands::plugin::run_plugin_command(command, None).await? {
+                let rows = resolved_plugin_list_rows(cli)?;
+                mesh_llm_commands::plugin::run_plugin_command(command, Some(&rows)).await?;
+            }
+        }
+        _ => {
+            mesh_llm_commands::plugin::run_plugin_command(command, None).await?;
+        }
+    }
     Ok(())
 }
 

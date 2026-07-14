@@ -1,3 +1,13 @@
+mod built_in_schema;
+mod schema_types;
+
+pub use built_in_schema::{
+    BuiltInConfigPathResolution, built_in_config_schema_descriptor, built_in_config_settings,
+    canonicalize_built_in_config_identifier, canonicalize_built_in_config_path,
+    resolve_built_in_config_identifier, resolve_built_in_config_path,
+};
+pub use schema_types::*;
+
 pub use mesh_llm_types::runtime::ModelRuntimeKind;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
@@ -58,9 +68,15 @@ fn default_model_target_demand_upgrade_max_age_secs() -> u64 {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RuntimeConfig {
     #[serde(default)]
+    pub debug: bool,
+    #[serde(default)]
+    pub listen_all: bool,
+    #[serde(default)]
     pub reconcile_model_targets: bool,
     #[serde(default)]
     pub reconcile_model_target_demand_upgrades: bool,
+    #[serde(default)]
+    pub native_runtime: NativeRuntimeConfig,
     #[serde(default = "default_model_target_demand_upgrade_min_requests")]
     pub model_target_demand_upgrade_min_requests: u64,
     #[serde(default = "default_model_target_demand_upgrade_max_age_secs")]
@@ -70,14 +86,27 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
+            debug: false,
+            listen_all: false,
             reconcile_model_targets: false,
             reconcile_model_target_demand_upgrades: false,
+            native_runtime: NativeRuntimeConfig::default(),
             model_target_demand_upgrade_min_requests:
                 DEFAULT_MODEL_TARGET_DEMAND_UPGRADE_MIN_REQUESTS,
             model_target_demand_upgrade_max_age_secs:
                 DEFAULT_MODEL_TARGET_DEMAND_UPGRADE_MAX_AGE_SECS,
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct NativeRuntimeConfig {
+    #[serde(default)]
+    pub mesh_version: Option<String>,
+    #[serde(default)]
+    pub skippy_abi: Option<String>,
+    #[serde(default)]
+    pub selection: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -208,6 +237,118 @@ impl Serialize for ModelConfigEntry {
             state.serialize_field("advanced", value)?;
         }
         state.end()
+    }
+}
+
+impl ModelConfigEntry {
+    /// Compute a derived profile hash from the runtime-shaping fields of this entry.
+    ///
+    /// The profile is derived from the fields that materially affect runtime
+    /// behavior: ModelFitConfig (ctx_size, batch, ubatch, cache_type_k,
+    /// cache_type_v, flash_attention), HardwareConfig (model_runtime, device,
+    /// gpu_layers, tensor_split, split_mode, main_gpu, cpu_moe, n_cpu_moe,
+    /// fit_target_mib, mmap, mlock), and ThroughputConfig (parallel,
+    /// continuous_batching, threads, threads_batch).
+    ///
+    /// Returns an 8-hex-character string (e.g. "a3f2b9c1"), or empty string
+    /// if all profile-input fields are at their defaults.
+    /// Derive a stable profile string from the runtime-shaping config fields.
+    ///
+    /// Returns an 8-hex-char hash when any profile-input field is set,
+    /// or an empty string (profile = default) when all inputs are at defaults.
+    pub fn derived_profile(&self) -> String {
+        let mut buf = Vec::new();
+        Self::write_effective_fit_profile(&mut buf, self);
+        Self::write_effective_hw_profile(&mut buf, self);
+        Self::write_effective_tp_profile(&mut buf, self);
+
+        if buf.is_empty() {
+            return String::new();
+        }
+
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        buf.hash(&mut hasher);
+        let hash = hasher.finish();
+        format!("{:08x}", hash & 0xFFFFFFFF)
+    }
+
+    fn write_effective_fit_profile(buf: &mut Vec<u8>, entry: &ModelConfigEntry) {
+        use std::io::Write;
+        macro_rules! wo {
+            ($key:literal, $val:expr) => {
+                if let Some(ref v) = $val {
+                    let _ = write!(buf, concat!($key, "={:?}\0"), v);
+                }
+            };
+        }
+        // Effective fit fields: sub-config (set by ConfigEditor) preferred,
+        // top-level (set by direct Rust construction) as fallback.
+        let fit = entry.model_fit.as_ref();
+        wo!("ctx_size", fit.and_then(|f| f.ctx_size).or(entry.ctx_size));
+        wo!("batch", fit.and_then(|f| f.batch).or(entry.batch));
+        wo!("ubatch", fit.and_then(|f| f.ubatch).or(entry.ubatch));
+        wo!(
+            "cache_type_k",
+            fit.and_then(|f| f.cache_type_k.as_ref())
+                .or(entry.cache_type_k.as_ref())
+        );
+        wo!(
+            "cache_type_v",
+            fit.and_then(|f| f.cache_type_v.as_ref())
+                .or(entry.cache_type_v.as_ref())
+        );
+        wo!(
+            "flash_attention",
+            fit.and_then(|f| f.flash_attention)
+                .or(entry.flash_attention)
+        );
+    }
+
+    fn write_effective_hw_profile(buf: &mut Vec<u8>, entry: &ModelConfigEntry) {
+        use std::io::Write;
+        macro_rules! wo {
+            ($key:literal, $val:expr) => {
+                if let Some(ref v) = $val {
+                    let _ = write!(buf, concat!($key, "={:?}\0"), v);
+                }
+            };
+        }
+        let hw = entry.hardware.as_ref();
+        wo!(
+            "gpu_id",
+            hw.and_then(|h| h.device.as_ref()).or(entry.gpu_id.as_ref())
+        );
+        if let Some(hw) = hw {
+            wo!("model_runtime", hw.model_runtime);
+            wo!("gpu_layers", hw.gpu_layers);
+            wo!("tensor_split", hw.tensor_split);
+            wo!("split_mode", hw.split_mode);
+            wo!("main_gpu", hw.main_gpu);
+            wo!("cpu_moe", hw.cpu_moe);
+            wo!("n_cpu_moe", hw.n_cpu_moe);
+            wo!("fit_target_mib", hw.fit_target_mib);
+            wo!("mmap", hw.mmap);
+            wo!("mlock", hw.mlock);
+        }
+    }
+
+    fn write_effective_tp_profile(buf: &mut Vec<u8>, entry: &ModelConfigEntry) {
+        use std::io::Write;
+        macro_rules! wo {
+            ($key:literal, $val:expr) => {
+                if let Some(ref v) = $val {
+                    let _ = write!(buf, concat!($key, "={:?}\0"), v);
+                }
+            };
+        }
+        let tp = entry.throughput.as_ref();
+        wo!("parallel", tp.and_then(|t| t.parallel).or(entry.parallel));
+        if let Some(tp) = tp {
+            wo!("continuous_batching", tp.continuous_batching);
+            wo!("threads", tp.threads);
+            wo!("threads_batch", tp.threads_batch);
+        }
     }
 }
 
@@ -398,45 +539,171 @@ pub struct SkippyConfig {
     pub prefill_chunk_schedule: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SpeculativeConfig {
-    #[serde(default)]
+    pub strategy: Option<String>,
     pub mode: Option<String>,
-    #[serde(default)]
-    pub draft_model_path: Option<String>,
-    #[serde(default)]
+    pub draft_model: Option<String>,
     pub draft_hf_repo: Option<String>,
-    #[serde(default)]
     pub draft_hf_file: Option<String>,
-    #[serde(default)]
     pub draft_selection_policy: Option<String>,
-    #[serde(default)]
     pub pairing_fault: Option<String>,
-    #[serde(default)]
     pub draft_max_tokens: Option<u32>,
-    #[serde(default)]
     pub draft_min_tokens: Option<u32>,
-    #[serde(default)]
     pub draft_acceptance_threshold: Option<f64>,
-    #[serde(default)]
     pub draft_split_probability: Option<f64>,
-    #[serde(default)]
     pub draft_gpu_layers: Option<i32>,
-    #[serde(default)]
     pub draft_device: Option<String>,
-    #[serde(default)]
     pub draft_threads: Option<usize>,
-    #[serde(default)]
     pub draft_cache_type_k: Option<String>,
-    #[serde(default)]
     pub draft_cache_type_v: Option<String>,
-    #[serde(default)]
     pub ngram_min: Option<u32>,
-    #[serde(default)]
     pub ngram_max: Option<u32>,
-    #[serde(default)]
     pub spec_default: Option<BoolOrAuto>,
+    pub(crate) legacy_draft_model_path_used: bool,
+}
+
+/// Raw deserialization helper that accepts both `draft_model` and the legacy
+/// `draft_model_path` key. The public `SpeculativeConfig` is constructed from
+/// this after detecting which key was used.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpeculativeConfigRaw {
+    #[serde(default, deserialize_with = "deserialize_speculative_strategy")]
+    strategy: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    draft_model: Option<String>,
+    #[serde(default)]
+    draft_model_path: Option<String>,
+    #[serde(default)]
+    draft_hf_repo: Option<String>,
+    #[serde(default)]
+    draft_hf_file: Option<String>,
+    #[serde(default)]
+    draft_selection_policy: Option<String>,
+    #[serde(default)]
+    pairing_fault: Option<String>,
+    #[serde(default)]
+    draft_max_tokens: Option<u32>,
+    #[serde(default)]
+    draft_min_tokens: Option<u32>,
+    #[serde(default)]
+    draft_acceptance_threshold: Option<f64>,
+    #[serde(default)]
+    draft_split_probability: Option<f64>,
+    #[serde(default)]
+    draft_gpu_layers: Option<i32>,
+    #[serde(default)]
+    draft_device: Option<String>,
+    #[serde(default)]
+    draft_threads: Option<usize>,
+    #[serde(default)]
+    draft_cache_type_k: Option<String>,
+    #[serde(default)]
+    draft_cache_type_v: Option<String>,
+    #[serde(default)]
+    ngram_min: Option<u32>,
+    #[serde(default)]
+    ngram_max: Option<u32>,
+    #[serde(default)]
+    spec_default: Option<BoolOrAuto>,
+}
+
+impl<'de> Deserialize<'de> for SpeculativeConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = SpeculativeConfigRaw::deserialize(deserializer)?;
+        let legacy_used = raw.draft_model_path.is_some();
+        if raw.draft_model.is_some() && raw.draft_model_path.is_some() {
+            return Err(serde::de::Error::custom(
+                "speculative config cannot set both `draft_model` and the legacy `draft_model_path`; \
+                 use `draft_model` only",
+            ));
+        }
+        Ok(SpeculativeConfig {
+            strategy: raw.strategy,
+            mode: raw.mode,
+            draft_model: raw.draft_model.or(raw.draft_model_path),
+            draft_hf_repo: raw.draft_hf_repo,
+            draft_hf_file: raw.draft_hf_file,
+            draft_selection_policy: raw.draft_selection_policy,
+            pairing_fault: raw.pairing_fault,
+            draft_max_tokens: raw.draft_max_tokens,
+            draft_min_tokens: raw.draft_min_tokens,
+            draft_acceptance_threshold: raw.draft_acceptance_threshold,
+            draft_split_probability: raw.draft_split_probability,
+            draft_gpu_layers: raw.draft_gpu_layers,
+            draft_device: raw.draft_device,
+            draft_threads: raw.draft_threads,
+            draft_cache_type_k: raw.draft_cache_type_k,
+            draft_cache_type_v: raw.draft_cache_type_v,
+            ngram_min: raw.ngram_min,
+            ngram_max: raw.ngram_max,
+            spec_default: raw.spec_default,
+            legacy_draft_model_path_used: legacy_used,
+        })
+    }
+}
+
+impl Serialize for SpeculativeConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(Some(21))?;
+        map.serialize_entry("strategy", &self.strategy)?;
+        map.serialize_entry("mode", &self.mode)?;
+        if self.legacy_draft_model_path_used {
+            if let Some(ref v) = self.draft_model {
+                map.serialize_entry("draft_model_path", v)?;
+            }
+        } else if let Some(ref v) = self.draft_model {
+            map.serialize_entry("draft_model", v)?;
+        }
+        map.serialize_entry("draft_hf_repo", &self.draft_hf_repo)?;
+        map.serialize_entry("draft_hf_file", &self.draft_hf_file)?;
+        map.serialize_entry("draft_selection_policy", &self.draft_selection_policy)?;
+        map.serialize_entry("pairing_fault", &self.pairing_fault)?;
+        map.serialize_entry("draft_max_tokens", &self.draft_max_tokens)?;
+        map.serialize_entry("draft_min_tokens", &self.draft_min_tokens)?;
+        map.serialize_entry(
+            "draft_acceptance_threshold",
+            &self.draft_acceptance_threshold,
+        )?;
+        map.serialize_entry("draft_split_probability", &self.draft_split_probability)?;
+        map.serialize_entry("draft_gpu_layers", &self.draft_gpu_layers)?;
+        map.serialize_entry("draft_device", &self.draft_device)?;
+        map.serialize_entry("draft_threads", &self.draft_threads)?;
+        map.serialize_entry("draft_cache_type_k", &self.draft_cache_type_k)?;
+        map.serialize_entry("draft_cache_type_v", &self.draft_cache_type_v)?;
+        map.serialize_entry("ngram_min", &self.ngram_min)?;
+        map.serialize_entry("ngram_max", &self.ngram_max)?;
+        map.serialize_entry("spec_default", &self.spec_default)?;
+        map.end()
+    }
+}
+
+fn deserialize_speculative_strategy<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(
+        Option::<String>::deserialize(deserializer)?.map(|strategy| {
+            if strategy == "native-mtp-n1" {
+                "mtp".to_string()
+            } else {
+                strategy
+            }
+        }),
+    )
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -978,6 +1245,8 @@ pub struct PluginConfigEntry {
     /// Optional URL passed to the plugin as `MESH_LLM_PLUGIN_URL`.
     #[serde(default)]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub settings: BTreeMap<String, toml::Value>,
     #[serde(default, skip_serializing_if = "PluginStartupConfig::is_default")]
     pub startup: PluginStartupConfig,
 }

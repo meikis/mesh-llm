@@ -17,7 +17,8 @@ impl OpenAiBackend for StageOpenAiBackend {
         apply_chat_request_defaults(&mut request, &self.request_defaults);
         ensure_chat_runtime_features_supported(&request)?;
         let sampling = chat_sampling_config(&request)?;
-        let template_options = chat_template_options(&request)?;
+        let template_options = chat_template_options(&request, &self.request_defaults)?;
+        let parse_chat_output = chat_output_parser_required(&request, &template_options);
         let template_timer = PhaseTimer::start();
         let prompt = self.prepare_chat_prompt(&request, template_options)?;
         let mut template_attrs = self.openai_attrs(&ids);
@@ -54,12 +55,17 @@ impl OpenAiBackend for StageOpenAiBackend {
             )
             .await?;
         let response_timer = PhaseTimer::start();
-        let parsed_message = self.parse_chat_output(
-            &output.text,
-            &request,
-            chat_parse_metadata.as_deref(),
-            false,
-        )?;
+        let parsed_message = if parse_chat_output {
+            self.parse_chat_output(
+                &output.text,
+                &request,
+                chat_parse_metadata.as_deref(),
+                false,
+            )?
+        } else {
+            None
+        };
+        let parsed_message = apply_reasoning_visibility(parsed_message, &template_options);
         let response =
             chat_response_from_generated_text(request.model.clone(), &output, parsed_message);
         let mut response_attrs = self.openai_attrs(&ids);
@@ -110,7 +116,9 @@ impl OpenAiBackend for StageOpenAiBackend {
         ensure_chat_runtime_features_supported(&request)?;
         let sampling = chat_sampling_config(&request)?;
         let include_usage = request.include_usage();
-        let template_options = chat_template_options(&request)?;
+        let template_options = chat_template_options(&request, &self.request_defaults)?;
+        let parse_chat_output = chat_output_parser_required(&request, &template_options);
+        let emit_reasoning = template_exposes_reasoning(&template_options);
         let template_timer = PhaseTimer::start();
         let prompt = self.prepare_chat_prompt(&request, template_options)?;
         let mut template_attrs = self.openai_attrs(&ids);
@@ -144,6 +152,8 @@ impl OpenAiBackend for StageOpenAiBackend {
                 sampling,
                 include_usage,
                 Some(request.clone()),
+                parse_chat_output,
+                emit_reasoning,
                 context,
                 ids,
             )
@@ -261,6 +271,8 @@ impl OpenAiBackend for StageOpenAiBackend {
                 sampling,
                 include_usage,
                 None,
+                false,
+                false,
                 context,
                 ids,
             )
@@ -425,6 +437,8 @@ impl StageOpenAiBackend {
         sampling: SamplingConfig,
         include_usage: bool,
         hook_request: Option<ChatCompletionRequest>,
+        parse_chat_output: bool,
+        emit_reasoning: bool,
         context: OpenAiRequestContext,
         ids: OpenAiGenerationIds,
     ) -> OpenAiResult<GenerationStream> {
@@ -440,16 +454,18 @@ impl StageOpenAiBackend {
         let chat_parse_metadata = prompt.chat_parse_metadata.clone();
         let (tx, rx) = mpsc::channel(16);
         let hook_runtime = Some(tokio::runtime::Handle::current());
-        let mut chat_stream_parser =
-            if let (Some(request), Some(metadata)) = (hook_request.clone(), chat_parse_metadata) {
-                Some(ChatOutputStreamParser::new(
-                    backend.clone(),
-                    request,
-                    metadata,
-                ))
-            } else {
-                None
-            };
+        let mut chat_stream_parser = if let (true, Some(request), Some(metadata)) =
+            (parse_chat_output, hook_request.clone(), chat_parse_metadata)
+        {
+            Some(ChatOutputStreamParser::new(
+                backend.clone(),
+                request,
+                metadata,
+                emit_reasoning,
+            ))
+        } else {
+            None
+        };
         task::spawn_blocking(move || {
             let _permit = permit;
             let result = backend.generate_text(

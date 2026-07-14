@@ -1,15 +1,41 @@
 use anyhow::{Context, Result};
-use mesh_llm_cli::GpuCommand;
+use mesh_llm_cli::{GpuCommand, benchmark::GpuBenchmarkBackend};
 use mesh_llm_system::{
     benchmark::{self, SavedBenchmark},
     hardware::{self, GpuFacts, HardwareSurvey},
+    vram::VramCapacity,
 };
 use serde_json::{Value, json};
 
+pub mod tune;
+
+pub(crate) mod tune_apply;
+pub(crate) mod tune_hardware;
+pub(crate) mod tune_resolver;
+pub(crate) mod tune_runner;
+
 pub fn dispatch_gpu_command(json_output: bool, command: Option<&GpuCommand>) -> Result<()> {
     match command {
-        Some(GpuCommand::Detect { json }) => run_gpu_benchmark(json_output || *json),
+        Some(command) => match command {
+            GpuCommand::Detect { json } => run_gpu_benchmark(json_output || *json),
+            GpuCommand::RunBenchmark { backend } => run_gpu_backend_benchmark(*backend),
+        },
         None => run_gpus(json_output),
+    }
+}
+
+fn run_gpu_backend_benchmark(backend: GpuBenchmarkBackend) -> Result<()> {
+    let outputs = benchmark::run_backend_by_name(map_gpu_backend(backend))?;
+    println!("{}", serde_json::to_string(&outputs)?);
+    Ok(())
+}
+
+fn map_gpu_backend(backend: GpuBenchmarkBackend) -> &'static str {
+    match backend {
+        GpuBenchmarkBackend::Metal => "metal",
+        GpuBenchmarkBackend::Cuda => "cuda",
+        GpuBenchmarkBackend::Hip => "hip",
+        GpuBenchmarkBackend::Intel => "intel",
     }
 }
 
@@ -80,13 +106,16 @@ fn gpus_json(hw: &HardwareSurvey) -> Value {
 }
 
 fn gpu_json(gpu: &GpuFacts) -> Value {
+    let capacity = VramCapacity::new(gpu.vram_bytes, gpu.reserved_bytes);
     json!({
         "index": gpu.index,
         "name": gpu.display_name,
         "stable_id": gpu.stable_id,
         "backend_device": gpu.backend_device,
         "vram_bytes": gpu.vram_bytes,
+        "rated_vram_gb": capacity.rated_capacity_gb(),
         "reserved_bytes": gpu.reserved_bytes,
+        "allocatable_vram_bytes": capacity.allocatable_bytes(),
         "mem_bandwidth_gbps": gpu.mem_bandwidth_gbps,
         "compute_tflops_fp32": gpu.compute_tflops_fp32,
         "compute_tflops_fp16": gpu.compute_tflops_fp16,
@@ -133,13 +162,16 @@ fn gpu_benchmark_json(hw: &HardwareSurvey, saved: &SavedBenchmark) -> Value {
         .take(benchmarked_gpu_count)
         .enumerate()
         .map(|(index, gpu)| {
+            let capacity = VramCapacity::new(gpu.vram_bytes, gpu.reserved_bytes);
             json!({
                 "index": gpu.index,
                 "name": gpu.display_name,
                 "stable_id": gpu.stable_id,
                 "backend_device": gpu.backend_device,
                 "vram_bytes": gpu.vram_bytes,
+                "rated_vram_gb": capacity.rated_capacity_gb(),
                 "reserved_bytes": gpu.reserved_bytes,
+                "allocatable_vram_bytes": capacity.allocatable_bytes(),
                 "unified_memory": gpu.unified_memory,
                 "pci_bdf": gpu.pci_bdf,
                 "vendor_uuid": gpu.vendor_uuid,
@@ -232,11 +264,7 @@ fn print_gpu(gpu: &GpuFacts) {
 }
 
 fn format_vram(bytes: u64) -> String {
-    if bytes == 0 {
-        "unknown".to_string()
-    } else {
-        format!("{:.1} GB", bytes as f64 / 1e9)
-    }
+    mesh_llm_system::vram::format_rated_capacity(bytes)
 }
 
 fn format_bandwidth(gbps: f64) -> String {
@@ -275,7 +303,8 @@ mod tests {
 
     #[test]
     fn test_format_vram_gb() {
-        assert_eq!(format_vram(24_000_000_000), "24.0 GB");
+        assert_eq!(format_vram(24_000_000_000), "24 GB");
+        assert_eq!(format_vram(32 * 1024 * 1024 * 1024), "32 GB");
     }
 
     #[test]

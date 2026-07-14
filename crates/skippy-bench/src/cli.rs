@@ -20,13 +20,132 @@ pub enum CommandKind {
     LocalSplitBinary(LocalSplitBinaryArgs),
     LocalSplitCompare(LocalSplitCompareArgs),
     LocalSplitChainBinary(LocalSplitChainBinaryArgs),
+    #[command(name = "verify-span-local")]
+    VerifySpanLocal(VerifySpanLocalArgs),
     #[command(name = "chat-corpus")]
     ChatCorpus(ChatCorpusArgs),
     #[command(name = "token-lengths")]
     TokenLengths(TokenLengthsArgs),
     #[command(name = "focused-runtime")]
     FocusedRuntime(FocusedRuntimeArgs),
+    Eval(EvalArgs),
     Run(RunArgs),
+}
+
+#[derive(Parser)]
+pub struct EvalArgs {
+    #[command(subcommand)]
+    pub command: EvalCommandKind,
+}
+
+#[derive(Subcommand)]
+pub enum EvalCommandKind {
+    List(EvalListArgs),
+    Info(EvalInfoArgs),
+    Sync(EvalSyncArgs),
+    Install(EvalSyncArgs),
+    Doctor(EvalDoctorArgs),
+    Run(EvalRunArgs),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum EvalId {
+    SpeedBench,
+    TerminalBench,
+    SweBenchPro,
+    McpAtlas,
+}
+
+impl EvalId {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SpeedBench => "speed-bench",
+            Self::TerminalBench => "terminal-bench",
+            Self::SweBenchPro => "swe-bench-pro",
+            Self::McpAtlas => "mcp-atlas",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum EvalPack {
+    Core,
+}
+
+#[derive(Parser)]
+pub struct EvalListArgs {
+    #[arg(long)]
+    pub cache_root: Option<PathBuf>,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Parser)]
+pub struct EvalInfoArgs {
+    pub eval: EvalId,
+    #[arg(long)]
+    pub cache_root: Option<PathBuf>,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Parser)]
+pub struct EvalSyncArgs {
+    #[arg(value_enum)]
+    pub evals: Vec<EvalId>,
+    #[arg(long, value_enum, default_value_t = EvalPack::Core)]
+    pub pack: EvalPack,
+    #[arg(long)]
+    pub cache_root: Option<PathBuf>,
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Parser)]
+pub struct EvalDoctorArgs {
+    #[arg(value_enum)]
+    pub evals: Vec<EvalId>,
+    #[arg(long, value_enum, default_value_t = EvalPack::Core)]
+    pub pack: EvalPack,
+    #[arg(long)]
+    pub cache_root: Option<PathBuf>,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Parser)]
+pub struct EvalRunArgs {
+    pub eval: EvalId,
+    #[arg(long, default_value = "http://127.0.0.1:9337/v1")]
+    pub base_url: String,
+    #[arg(long, default_value = DEFAULT_LOCAL_MODEL_ID)]
+    pub model: String,
+    #[arg(long, default_value = "skippy-bench")]
+    pub api_key: String,
+    #[arg(long)]
+    pub cache_root: Option<PathBuf>,
+    #[arg(long)]
+    pub output_dir: Option<PathBuf>,
+    #[arg(long, default_value_t = 300)]
+    pub timeout_secs: u64,
+    #[arg(long)]
+    pub harness_timeout_secs: Option<u64>,
+    #[arg(
+        long,
+        default_value_t = 1,
+        help = "Expected OpenAI endpoint generation concurrency; native harness request concurrency is kept equal to this value."
+    )]
+    pub endpoint_concurrency: usize,
+    #[arg(long)]
+    pub run_id: Option<String>,
+    #[arg(long, default_value = "http://127.0.0.1:18080")]
+    pub metrics_http: String,
+    #[arg(long)]
+    pub metrics_run_id: Option<String>,
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -89,6 +208,39 @@ pub struct TokenLengthsArgs {
 }
 
 #[derive(Parser)]
+pub struct VerifySpanLocalArgs {
+    #[arg(long)]
+    pub model_path: PathBuf,
+    #[arg(long, default_value_t = 48)]
+    pub layer_end: u32,
+    #[arg(long)]
+    pub split_layer: Option<u32>,
+    #[arg(long, default_value_t = 4096)]
+    pub ctx_size: u32,
+    #[arg(long, default_value_t = -1, allow_hyphen_values = true)]
+    pub n_gpu_layers: i32,
+    #[arg(long, default_value = "f16")]
+    pub cache_type_k: String,
+    #[arg(long, default_value = "f16")]
+    pub cache_type_v: String,
+    #[arg(long)]
+    pub n_batch: Option<u32>,
+    #[arg(long)]
+    pub n_ubatch: Option<u32>,
+    #[arg(long, default_value_t = 64)]
+    pub iterations: usize,
+    #[arg(long, default_value_t = 8)]
+    pub warmup: usize,
+    #[arg(
+        long,
+        default_value = "Write a Rust function that parses a list of integers and returns the median."
+    )]
+    pub prompt: String,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Parser)]
 pub struct ChatCorpusArgs {
     #[arg(long, default_value = "http://127.0.0.1:9337/v1")]
     pub base_url: String,
@@ -112,6 +264,14 @@ pub struct ChatCorpusArgs {
     pub request_timeout_secs: u64,
     #[arg(long)]
     pub output: Option<PathBuf>,
+    #[arg(long)]
+    pub metrics_report_output: Option<PathBuf>,
+    #[arg(long)]
+    pub run_id: Option<String>,
+    #[arg(long, default_value = "http://127.0.0.1:18080")]
+    pub metrics_http: String,
+    #[arg(long)]
+    pub metrics_run_id: Option<String>,
     #[arg(long, default_value = "chat-corpus-session")]
     pub session_prefix: String,
     #[arg(long)]
@@ -132,7 +292,7 @@ pub struct ChatCorpusArgs {
 pub struct RunArgs {
     #[arg(long, default_value = "target/debug/metrics-server")]
     pub metrics_server_bin: PathBuf,
-    #[arg(long, default_value = "target/debug/skippy-server")]
+    #[arg(long, default_value = "target/release/skippy-server")]
     pub stage_server_bin: PathBuf,
     #[arg(
         long,
@@ -265,7 +425,7 @@ pub struct RunArgs {
 pub struct LocalSingleArgs {
     #[arg(long, default_value = "target/debug/metrics-server")]
     pub metrics_server_bin: PathBuf,
-    #[arg(long, default_value = "target/debug/skippy-server")]
+    #[arg(long, default_value = "target/release/skippy-server")]
     pub stage_server_bin: PathBuf,
     #[arg(long)]
     pub model_path: PathBuf,
@@ -325,7 +485,7 @@ pub struct LocalSplitInprocessArgs {
 
 #[derive(Parser)]
 pub struct LocalSplitBinaryArgs {
-    #[arg(long, default_value = "target/debug/skippy-server")]
+    #[arg(long, default_value = "target/release/skippy-server")]
     pub stage_server_bin: PathBuf,
     #[arg(long)]
     pub model_path: PathBuf,
@@ -353,7 +513,7 @@ pub struct LocalSplitBinaryArgs {
 
 #[derive(Parser)]
 pub struct LocalSplitCompareArgs {
-    #[arg(long, default_value = "target/debug/skippy-server")]
+    #[arg(long, default_value = "target/release/skippy-server")]
     pub stage_server_bin: PathBuf,
     #[arg(long)]
     pub model_path: PathBuf,
@@ -383,7 +543,7 @@ pub struct LocalSplitCompareArgs {
 
 #[derive(Parser)]
 pub struct LocalSplitChainBinaryArgs {
-    #[arg(long, default_value = "target/debug/skippy-server")]
+    #[arg(long, default_value = "target/release/skippy-server")]
     pub stage_server_bin: PathBuf,
     #[arg(long)]
     pub model_path: PathBuf,
@@ -415,6 +575,8 @@ pub struct LocalSplitChainBinaryArgs {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use clap::Parser;
 
     use super::{Cli, CommandKind, FocusedRuntimeScenario};
@@ -470,5 +632,54 @@ mod tests {
         };
 
         assert_eq!(args.run.max_new_tokens, None);
+    }
+
+    #[test]
+    fn parses_verify_span_local_command() {
+        let cli = Cli::try_parse_from([
+            "skippy-bench",
+            "verify-span-local",
+            "--model-path",
+            "/tmp/model.gguf",
+            "--layer-end",
+            "48",
+            "--iterations",
+            "3",
+            "--warmup",
+            "1",
+            "--n-gpu-layers",
+            "-1",
+        ])
+        .unwrap();
+
+        let CommandKind::VerifySpanLocal(args) = cli.command else {
+            panic!("expected verify-span-local subcommand");
+        };
+
+        assert_eq!(args.model_path, PathBuf::from("/tmp/model.gguf"));
+        assert_eq!(args.layer_end, 48);
+        assert_eq!(args.split_layer, None);
+        assert_eq!(args.iterations, 3);
+        assert_eq!(args.warmup, 1);
+        assert_eq!(args.n_gpu_layers, -1);
+    }
+
+    #[test]
+    fn parses_verify_span_local_split_layer() {
+        let cli = Cli::try_parse_from([
+            "skippy-bench",
+            "verify-span-local",
+            "--model-path",
+            "/tmp/model.gguf",
+            "--split-layer",
+            "24",
+        ])
+        .unwrap();
+
+        let CommandKind::VerifySpanLocal(args) = cli.command else {
+            panic!("expected verify-span-local subcommand");
+        };
+
+        assert_eq!(args.split_layer, Some(24));
     }
 }

@@ -377,6 +377,7 @@ impl StageControlState {
             async_prefill_forward: true,
             downstream_wire_condition: WireCondition::new(0.0, None)?,
             downstream_connect_timeout_secs: 30,
+            native_mtp_enabled: effective_load.native_mtp_enabled,
             openai: None,
         });
         if let Err(error) =
@@ -720,6 +721,8 @@ fn stage_config(
         n_batch: load.n_batch,
         n_ubatch: load.n_ubatch,
         n_gpu_layers: load.n_gpu_layers,
+        mmap: load.mmap,
+        mlock: load.mlock,
         cache_type_k: empty_to_default(&load.cache_type_k, "f16"),
         cache_type_v: empty_to_default(&load.cache_type_v, "f16"),
         flash_attn_type: load.flash_attn_type,
@@ -729,6 +732,7 @@ fn stage_config(
         ),
         selected_device: load.selected_device.clone(),
         kv_cache: None,
+        native_mtp_enabled: load.native_mtp_enabled,
         load_mode: load.load_mode.clone(),
         bind_addr: load.bind_addr.clone(),
         upstream: load.upstream.as_ref().map(peer_config),

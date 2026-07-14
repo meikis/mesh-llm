@@ -239,6 +239,7 @@ pub struct GgufCompactMeta {
     pub rope_freq_base: f32,
     pub expert_count: u32,
     pub expert_used_count: u32,
+    pub nextn_predict_layers: u32,
 }
 
 impl GgufCompactMeta {
@@ -411,7 +412,15 @@ struct GgufTensorInfo {
 
 /// Scan a GGUF file header and return compact structural metadata.
 /// Reads only the KV section, never tensor data. Returns None on any parse failure.
-pub fn scan_gguf_compact_meta(path: &Path) -> Option<GgufCompactMeta> {
+struct GgufHeader {
+    file: std::fs::File,
+    n_tensors: usize,
+    n_kv: usize,
+}
+
+/// Opens `path`, validates the GGUF magic/version, and reads the tensor/KV
+/// header counts shared by every GGUF scan entry point below.
+fn open_gguf_header(path: &Path) -> Option<GgufHeader> {
     let mut f = std::fs::File::open(path).ok()?;
 
     let mut magic = [0u8; 4];
@@ -423,8 +432,32 @@ pub fn scan_gguf_compact_meta(path: &Path) -> Option<GgufCompactMeta> {
     if version < 2 {
         return None;
     }
-    let _n_tensors = read_gguf_header_count(&mut f, MAX_GGUF_TENSOR_COUNT, "tensor count").ok()?;
+
+    let n_tensors = read_gguf_header_count(&mut f, MAX_GGUF_TENSOR_COUNT, "tensor count").ok()?;
     let n_kv = read_gguf_header_count(&mut f, MAX_GGUF_HEADER_KV_COUNT, "KV count").ok()?;
+
+    Some(GgufHeader {
+        file: f,
+        n_tensors,
+        n_kv,
+    })
+}
+
+/// Skips every KV pair without inspecting keys/values, for scans that only
+/// need the tensor-info table.
+fn skip_all_kv_pairs(f: &mut std::fs::File, n_kv: usize) -> Option<()> {
+    for _ in 0..n_kv {
+        let _key = read_gguf_string(f).ok()?;
+        let vtype = GgufType::from_u32(read_u32(f).ok()?)?;
+        skip_gguf_value(f, vtype).ok()?;
+    }
+    Some(())
+}
+
+pub fn scan_gguf_compact_meta(path: &Path) -> Option<GgufCompactMeta> {
+    let GgufHeader {
+        file: mut f, n_kv, ..
+    } = open_gguf_header(path)?;
 
     let mut meta = GgufCompactMeta::default();
     for _ in 0..n_kv {
@@ -489,21 +522,28 @@ pub fn scan_gguf_compact_meta(path: &Path) -> Option<GgufCompactMeta> {
             if let Ok(Some(v)) = read_gguf_value_as_u32(&mut f, vtype) {
                 meta.expert_used_count = v;
             }
+        } else if key.ends_with(".nextn_predict_layers") {
+            if let Ok(Some(v)) = read_gguf_value_as_u32(&mut f, vtype) {
+                meta.nextn_predict_layers = v;
+            }
         } else {
             skip_gguf_value(&mut f, vtype).ok()?;
         }
     }
 
-    if meta.key_length == 0
-        && meta.head_count > 0
-        && let Some(key_length) = meta.embedding_size.checked_div(meta.head_count)
-    {
+    let derived_key_length = (meta.key_length == 0 && meta.head_count > 0)
+        .then(|| meta.embedding_size.checked_div(meta.head_count))
+        .flatten();
+    if let Some(key_length) = derived_key_length {
         meta.key_length = key_length;
     }
-    if meta.value_length == 0
-        && let Some(effective_kv) = meta.effective_kv_head_count()
-        && let Some(value_length) = meta.embedding_size.checked_div(effective_kv)
-    {
+    let derived_value_length = (meta.value_length == 0)
+        .then(|| {
+            meta.effective_kv_head_count()
+                .and_then(|effective_kv| meta.embedding_size.checked_div(effective_kv))
+        })
+        .flatten();
+    if let Some(value_length) = derived_value_length {
         meta.value_length = value_length;
     }
 
@@ -550,6 +590,39 @@ fn read_tensor_infos(
     Ok(tensors)
 }
 
+/// Scan GGUF tensor names and return whether any tensor matches the predicate.
+/// Reads only the header and tensor-info table, never tensor data.
+pub fn scan_gguf_tensor_names_any(
+    path: &Path,
+    mut matches: impl FnMut(&str) -> bool,
+) -> Option<bool> {
+    let GgufHeader {
+        file: mut f,
+        n_tensors,
+        n_kv,
+    } = open_gguf_header(path)?;
+
+    skip_all_kv_pairs(&mut f, n_kv)?;
+
+    for _ in 0..n_tensors {
+        let name = read_gguf_string(&mut f).ok()?;
+        if matches(&name) {
+            return Some(true);
+        }
+        let n_dims = read_u32(&mut f).ok()?;
+        if n_dims > MAX_GGUF_TENSOR_DIMS {
+            return None;
+        }
+        for _ in 0..n_dims {
+            let _ = read_u64(&mut f).ok()?;
+        }
+        let _ggml_type = read_u32(&mut f).ok()?;
+        let _offset = read_u64(&mut f).ok()?;
+    }
+
+    Some(false)
+}
+
 fn is_expert_partitioned_tensor(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     if lower.contains("shared_expert") || lower.contains("sharedexpert") || lower.contains("shexp")
@@ -568,21 +641,12 @@ fn is_expert_partitioned_tensor(name: &str) -> bool {
 /// Scan GGUF tensor metadata and estimate which bytes are always resident versus
 /// expert-partitioned. Reads only the header and tensor-info tables.
 pub fn scan_gguf_tensor_byte_profile(path: &Path) -> Option<GgufTensorByteProfile> {
-    let mut f = std::fs::File::open(path).ok()?;
+    let GgufHeader {
+        file: mut f,
+        n_tensors,
+        n_kv,
+    } = open_gguf_header(path)?;
     let file_len = f.metadata().ok()?.len();
-
-    let mut magic = [0u8; 4];
-    f.read_exact(&mut magic).ok()?;
-    if &magic != b"GGUF" {
-        return None;
-    }
-    let version = read_u32(&mut f).ok()?;
-    if version < 2 {
-        return None;
-    }
-
-    let n_tensors = read_gguf_header_count(&mut f, MAX_GGUF_TENSOR_COUNT, "tensor count").ok()?;
-    let n_kv = read_gguf_header_count(&mut f, MAX_GGUF_HEADER_KV_COUNT, "KV count").ok()?;
 
     let mut expert_count = 0u32;
     let mut expert_used_count = 0u32;
@@ -799,6 +863,42 @@ mod tests {
         assert_eq!(meta.effective_kv_head_count(), Some(8));
         assert_eq!(meta.k_cache_bytes_per_token_f16(), Some(49_152));
         assert_eq!(meta.v_cache_bytes_per_token_f16(), Some(49_152));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scan_gguf_compact_meta_preserves_nextn_predict_layers() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"GGUF");
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&0i64.to_le_bytes());
+        bytes.extend_from_slice(&2i64.to_le_bytes());
+        push_gguf_string(&mut bytes, "general.architecture");
+        bytes.extend_from_slice(&(GgufType::String as u32).to_le_bytes());
+        push_gguf_string(&mut bytes, "deepseek2");
+        push_u32_kv(&mut bytes, "deepseek2.nextn_predict_layers", 1);
+
+        let path = write_bytes("model-artifact-gguf-nextn", &bytes);
+        let meta = scan_gguf_compact_meta(&path).expect("should parse GGUF");
+        assert_eq!(meta.architecture, "deepseek2");
+        assert_eq!(meta.nextn_predict_layers, 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn scan_gguf_tensor_names_any_detects_nextn_tensor_without_reading_data() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"GGUF");
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&2i64.to_le_bytes());
+        bytes.extend_from_slice(&0i64.to_le_bytes());
+        push_tensor_info(&mut bytes, "blk.0.attn_q.weight", 0);
+        push_tensor_info(&mut bytes, "blk.23.nextn.eh_proj.weight", 64);
+
+        let path = write_bytes("model-artifact-gguf-nextn-tensor", &bytes);
+        let has_nextn = scan_gguf_tensor_names_any(&path, |name| name.contains(".nextn."))
+            .expect("tensor scan should parse");
+        assert!(has_nextn);
         let _ = std::fs::remove_file(path);
     }
 

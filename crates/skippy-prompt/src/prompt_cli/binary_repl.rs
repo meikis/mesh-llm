@@ -27,6 +27,8 @@ pub fn binary_repl(args: BinaryReplArgs) -> Result<()> {
             n_threads: None,
             n_threads_batch: None,
             n_gpu_layers: args.tokenizer_n_gpu_layers,
+            mmap: args.mmap,
+            mlock: args.mlock,
             selected_backend_device: None,
             cache_type_k: GGML_TYPE_F16,
             cache_type_v: GGML_TYPE_F16,
@@ -71,6 +73,8 @@ pub fn binary_repl(args: BinaryReplArgs) -> Result<()> {
                 n_threads: None,
                 n_threads_batch: None,
                 n_gpu_layers: 0,
+                mmap: args.mmap,
+                mlock: args.mlock,
                 selected_backend_device: None,
                 cache_type_k: GGML_TYPE_F16,
                 cache_type_v: GGML_TYPE_F16,
@@ -107,11 +111,6 @@ pub fn binary_repl(args: BinaryReplArgs) -> Result<()> {
         args.first_stage_addr,
         format_prompt_max_new_tokens(args.max_new_tokens),
         args.prefill_chunk_size
-    );
-    let direct_returns = PromptDirectReturnServer::start(args.direct_return_bind_addr)?;
-    eprintln!(
-        "direct prediction return listener: {}",
-        direct_returns.endpoint()
     );
     if let Some(draft) = draft.as_ref() {
         eprintln!(
@@ -211,7 +210,6 @@ pub fn binary_repl(args: BinaryReplArgs) -> Result<()> {
                 prompt_index,
                 prompt: &prompt,
                 live_session: None,
-                direct_returns: &direct_returns,
             })
             .or_else(|error| handle_prompt_error(error, &interrupt, prompt_index))?;
             prompt_index += 1;
@@ -277,7 +275,6 @@ pub fn binary_repl(args: BinaryReplArgs) -> Result<()> {
                 prompt_index,
                 prompt: &prompt,
                 live_session: None,
-                direct_returns: &direct_returns,
             })
             .or_else(|error| handle_prompt_error(error, &interrupt, prompt_index))?;
             prompt_index += 1;
@@ -298,7 +295,6 @@ pub fn binary_repl(args: BinaryReplArgs) -> Result<()> {
             prompt_index,
             prompt: input,
             live_session: append_transcript.then_some(&mut live_session),
-            direct_returns: &direct_returns,
         });
         if prompt_result.is_err() {
             live_session.mark_dirty();

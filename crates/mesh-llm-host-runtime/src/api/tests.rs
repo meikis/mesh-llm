@@ -23,6 +23,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 
+mod apply_config_diagnostics;
+mod apply_config_validation_authority;
+mod runtime_config;
+mod runtime_config_validation_authority;
+mod runtime_control_state;
+mod runtime_control_state_builder;
+mod runtime_control_state_options;
+
 fn qwen_coder_remote_catalog_entry() -> crate::models::remote_catalog::CatalogEntry {
     use crate::models::remote_catalog::{
         CatalogCurated, CatalogEntry, CatalogSource, CatalogVariant,
@@ -378,6 +386,7 @@ fn test_build_runtime_status_payload_uses_local_processes() {
                 pid: 100,
                 slots: 4,
                 context_length: None,
+                profile: String::new(),
             },
             RuntimeProcessPayload {
                 name: "Llama".into(),
@@ -388,6 +397,7 @@ fn test_build_runtime_status_payload_uses_local_processes() {
                 pid: 101,
                 slots: 4,
                 context_length: None,
+                profile: String::new(),
             },
         ],
     );
@@ -416,6 +426,7 @@ fn test_build_runtime_status_payload_keeps_duplicate_model_instances() {
                 pid: 100,
                 slots: 4,
                 context_length: Some(8192),
+                profile: String::new(),
             },
             RuntimeProcessPayload {
                 name: "Qwen".into(),
@@ -426,6 +437,7 @@ fn test_build_runtime_status_payload_keeps_duplicate_model_instances() {
                 pid: 100,
                 slots: 4,
                 context_length: Some(8192),
+                profile: String::new(),
             },
         ],
     );
@@ -451,6 +463,7 @@ fn test_build_runtime_processes_payload_sorts_processes() {
             pid: 11,
             slots: 4,
             context_length: None,
+            profile: String::new(),
         },
         RuntimeProcessPayload {
             name: "Alpha".into(),
@@ -461,6 +474,7 @@ fn test_build_runtime_processes_payload_sorts_processes() {
             pid: 10,
             slots: 4,
             context_length: None,
+            profile: String::new(),
         },
     ]);
 
@@ -481,6 +495,7 @@ fn test_runtime_processes_payload_includes_context_length() {
             pid: 10,
             slots: 4,
             context_length: Some(65536),
+            profile: String::new(),
         },
         RuntimeProcessPayload {
             name: "model-b".into(),
@@ -491,6 +506,7 @@ fn test_runtime_processes_payload_includes_context_length() {
             pid: 11,
             slots: 2,
             context_length: None,
+            profile: String::new(),
         },
     ]);
 
@@ -1267,6 +1283,7 @@ async fn control_plane_api_apply_config_uses_full_mesh_config_contract() {
             config_hash: vec![0xab; 32],
             error: None,
             apply_mode: ConfigApplyMode::Staged as i32,
+            diagnostics: Vec::new(),
         },
     ))
     .await;
@@ -2281,6 +2298,7 @@ async fn seed_runtime_data_api_state(state: &MeshApi) {
             pid: 111,
             slots: 4,
             context_length: None,
+            profile: String::new(),
         }];
         inner
             .runtime_data_producer
@@ -2299,6 +2317,7 @@ async fn seed_runtime_data_api_state(state: &MeshApi) {
                 local_processes.push(runtime_data::RuntimeProcessSnapshot {
                     model: "collector-model".into(),
                     instance_id: Some("runtime-1".into()),
+                    profile: String::new(),
                     backend: "collector-backend".into(),
                     pid: 777,
                     port: 9337,
@@ -4271,6 +4290,7 @@ async fn api_runtime_reads_from_collector_snapshot() {
             pid: 111,
             slots: 4,
             context_length: None,
+            profile: String::new(),
         }];
 
         inner
@@ -4290,6 +4310,7 @@ async fn api_runtime_reads_from_collector_snapshot() {
                 local_processes.push(runtime_data::RuntimeProcessSnapshot {
                     model: "collector-model".into(),
                     instance_id: None,
+                    profile: String::new(),
                     backend: "collector-backend".into(),
                     pid: 777,
                     port: 9337,

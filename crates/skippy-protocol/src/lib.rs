@@ -261,6 +261,10 @@ pub struct StageConfig {
     pub n_ubatch: Option<u32>,
     #[serde(default)]
     pub n_gpu_layers: i32,
+    #[serde(default)]
+    pub mmap: Option<bool>,
+    #[serde(default)]
+    pub mlock: bool,
     #[serde(default = "default_cache_type")]
     pub cache_type_k: String,
     #[serde(default = "default_cache_type")]
@@ -273,6 +277,8 @@ pub struct StageConfig {
     pub selected_device: Option<StageDevice>,
     #[serde(default)]
     pub kv_cache: Option<StageKvCacheConfig>,
+    #[serde(default = "default_native_mtp_enabled")]
+    pub native_mtp_enabled: bool,
     pub load_mode: LoadMode,
     pub bind_addr: String,
     #[serde(default)]
@@ -362,6 +368,10 @@ fn default_lane_count() -> u32 {
 
 fn default_cache_type() -> String {
     "f16".to_string()
+}
+
+fn default_native_mtp_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

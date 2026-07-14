@@ -34,6 +34,8 @@ const MAX_OBJECT_UPLOAD_CHUNKED_WIRE_BYTES: usize = MAX_OBJECT_UPLOAD_BODY_BYTES
 const MAX_HEADERS: usize = 64;
 const MAX_RESPONSE_BODY_PREVIEW_BYTES: usize = 4 * 1024;
 const MAX_ERROR_RESPONSE_BYTES: usize = 256 * 1024;
+const MAX_TRANSFORMED_RESPONSE_BODY_BYTES: usize = 8 * 1024 * 1024;
+const TRANSFORMED_RESPONSE_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_TOKEN_MARGIN: u32 = 256;
 
 #[derive(Debug, Clone, Copy)]
@@ -198,6 +200,17 @@ struct ParsedResponseHeaders {
     content_length: Option<usize>,
     content_type: Option<String>,
 }
+
+#[derive(Clone, Copy)]
+struct ResponseBodyReadLimits {
+    max_body_bytes: usize,
+    idle_timeout: Duration,
+}
+
+const TRANSFORMED_RESPONSE_READ_LIMITS: ResponseBodyReadLimits = ResponseBodyReadLimits {
+    max_body_bytes: MAX_TRANSFORMED_RESPONSE_BODY_BYTES,
+    idle_timeout: TRANSFORMED_RESPONSE_BODY_IDLE_TIMEOUT,
+};
 
 #[derive(Debug, Default, Deserialize)]
 struct RequestMetadata {
@@ -1755,11 +1768,17 @@ async fn relay_translated_responses_json<R: AsyncRead + Unpin>(
         return relay_error_response(tcp_stream, reader, probe).await;
     }
     let mut buffered = probe.buffered;
-    reader.read_to_end(&mut buffered).await?;
-
     let parsed = try_parse_response_headers(&buffered)?
         .ok_or_else(|| anyhow!("incomplete HTTP response"))?;
-    let body = &buffered[parsed.header_end..];
+    let body_end = read_transformed_response_body(
+        reader,
+        &mut buffered,
+        parsed.header_end,
+        parsed.content_length,
+        TRANSFORMED_RESPONSE_READ_LIMITS,
+    )
+    .await?;
+    let body = &buffered[parsed.header_end..body_end];
     if let Some(result) = retryable_quality_result(body, retry_policy) {
         return Ok(result);
     }
@@ -1794,16 +1813,14 @@ async fn relay_normalized_chat_completion_json<R: AsyncRead + Unpin>(
     let mut buffered = probe.buffered;
     let parsed = try_parse_response_headers(&buffered)?
         .ok_or_else(|| anyhow!("incomplete HTTP response"))?;
-    let body_end = if let Some(content_length) = parsed.content_length {
-        let body_end = parsed.header_end + content_length;
-        while buffered.len() < body_end {
-            read_response_chunk(reader, &mut buffered).await?;
-        }
-        body_end
-    } else {
-        reader.read_to_end(&mut buffered).await?;
-        buffered.len()
-    };
+    let body_end = read_transformed_response_body(
+        reader,
+        &mut buffered,
+        parsed.header_end,
+        parsed.content_length,
+        TRANSFORMED_RESPONSE_READ_LIMITS,
+    )
+    .await?;
     let body = &buffered[parsed.header_end..body_end];
     let normalized_body =
         normalize_chat_completion_json_body(body).unwrap_or_else(|| body.to_vec());
@@ -1984,6 +2001,69 @@ async fn read_response_chunk<R: AsyncRead + Unpin>(
     }
     buf.extend_from_slice(&chunk[..read_result]);
     Ok(read_result)
+}
+
+async fn read_transformed_response_body<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    buffered: &mut Vec<u8>,
+    header_end: usize,
+    content_length: Option<usize>,
+    limits: ResponseBodyReadLimits,
+) -> Result<usize> {
+    if header_end > buffered.len() {
+        bail!("invalid HTTP response header boundary");
+    }
+    let buffered_body_bytes = buffered.len() - header_end;
+    if buffered_body_bytes > limits.max_body_bytes {
+        bail!(
+            "upstream success response body exceeds {} bytes",
+            limits.max_body_bytes
+        );
+    }
+
+    let expected_end = content_length
+        .map(|content_length| {
+            if content_length > limits.max_body_bytes {
+                bail!(
+                    "upstream success response Content-Length exceeds {} bytes",
+                    limits.max_body_bytes
+                );
+            }
+            header_end
+                .checked_add(content_length)
+                .ok_or_else(|| anyhow!("upstream success response Content-Length overflow"))
+        })
+        .transpose()?;
+
+    loop {
+        if let Some(expected_end) = expected_end
+            && buffered.len() >= expected_end
+        {
+            return Ok(expected_end);
+        }
+
+        let mut chunk = [0u8; 8192];
+        let read_result = tokio::time::timeout(limits.idle_timeout, reader.read(&mut chunk))
+            .await
+            .context("upstream success response body idle timeout")??;
+        if read_result == 0 {
+            return expected_end.map_or_else(
+                || Ok(buffered.len()),
+                |_| Err(anyhow!("unexpected EOF while reading HTTP response body")),
+            );
+        }
+        let next_body_bytes = buffered
+            .len()
+            .saturating_sub(header_end)
+            .saturating_add(read_result);
+        if next_body_bytes > limits.max_body_bytes {
+            bail!(
+                "upstream success response body exceeds {} bytes",
+                limits.max_body_bytes
+            );
+        }
+        buffered.extend_from_slice(&chunk[..read_result]);
+    }
 }
 
 async fn probe_http_response<R: AsyncRead + Unpin>(reader: &mut R) -> Result<ResponseProbe> {
@@ -4157,12 +4237,14 @@ fn models_list_json(
     let mut data: Vec<serde_json::Value> = models
         .iter()
         .filter_map(|m| {
-            let descriptor = descriptor_for_model(descriptors, m);
-            let public_id = public_model_id(m, descriptor);
+            let (base_model, profile) =
+                crate::network::openai::ingress::parse_model_with_profile(m);
+            let descriptor = descriptor_for_model(descriptors, base_model);
+            let public_id = public_model_id(base_model, descriptor, profile);
             if !seen.insert(public_id.clone()) {
                 return None;
             }
-            let capabilities = capabilities_for_model(m, descriptors);
+            let capabilities = capabilities_for_model(base_model, descriptors);
             let has_multimodal = capabilities.supports_multimodal_runtime();
             let has_vision = capabilities.supports_vision_runtime();
             let has_audio = capabilities.supports_audio_runtime();
@@ -4180,7 +4262,7 @@ fn models_list_json(
                 caps.push("reasoning");
             }
             let display_name = if public_id == *m {
-                crate::models::installed_model_display_name(m)
+                crate::models::installed_model_display_name(base_model)
             } else {
                 public_id.clone()
             };
@@ -4195,7 +4277,7 @@ fn models_list_json(
                 "audio_status": capabilities.audio_status(),
                 "reasoning_status": capabilities.reasoning_status(),
             });
-            if let Some(metadata) = model_metadata_json(m, descriptor, runtimes)
+            if let Some(metadata) = model_metadata_json(base_model, descriptor, runtimes)
                 && let Some(object) = model.as_object_mut()
             {
                 object.insert("metadata".to_string(), metadata);
@@ -4340,9 +4422,23 @@ fn internal_model_for_public_id(
     models: &[String],
     descriptors: &[mesh::ServedModelDescriptor],
 ) -> Option<String> {
+    let (requested_base, requested_profile) =
+        crate::network::openai::ingress::parse_model_with_profile(requested);
+
     models.iter().find_map(|model| {
-        let descriptor = descriptor_for_model(descriptors, model);
-        (public_model_id(model, descriptor) == requested).then(|| model.clone())
+        let (model_base, model_profile) =
+            crate::network::openai::ingress::parse_model_with_profile(model);
+        let descriptor = descriptor_for_model(descriptors, model_base);
+        let public_id = public_model_id(model_base, descriptor, model_profile);
+        if public_id == requested {
+            return Some(model.clone());
+        }
+        let (public_base, _public_profile) =
+            crate::network::openai::ingress::parse_model_with_profile(&public_id);
+        if public_base == requested_base && requested_profile.is_empty() {
+            return Some(model.clone());
+        }
+        None
     })
 }
 
@@ -4355,7 +4451,11 @@ fn descriptor_for_model<'a>(
         .find(|descriptor| descriptor.identity.model_name == model_name)
 }
 
-fn public_model_id(model_name: &str, descriptor: Option<&mesh::ServedModelDescriptor>) -> String {
+fn public_model_id(
+    model_name: &str,
+    descriptor: Option<&mesh::ServedModelDescriptor>,
+    profile: &str,
+) -> String {
     // A descriptor with an `artifact` field has enough information to
     // produce a public ID that round-trips to the same model. Without
     // it, the HuggingFace path collapses to just the repo name and
@@ -4366,18 +4466,23 @@ fn public_model_id(model_name: &str, descriptor: Option<&mesh::ServedModelDescri
     // local models), and finally the internal model_name (which
     // always carries the quant suffix our resolver knows how to
     // route).
-    if let Some(descriptor) = descriptor
+    let base_id = if let Some(descriptor) = descriptor
         && descriptor_can_produce_lossless_id(&descriptor.identity)
         && let Some(id) = public_model_id_from_identity(&descriptor.identity)
     {
-        return id;
-    }
+        id
+    } else if let Some(id) = public_model_id_from_local_path(model_name) {
+        id
+    } else {
+        model_name.to_string()
+    };
 
-    if let Some(id) = public_model_id_from_local_path(model_name) {
-        return id;
+    // Append profile suffix for non-default profiles
+    if profile.is_empty() {
+        base_id
+    } else {
+        format!("{}#{}", base_id, profile)
     }
-
-    model_name.to_string()
 }
 
 /// A descriptor identity carries enough information for
@@ -6403,6 +6508,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transformed_response_rejects_oversized_content_length_before_reading() {
+        let (_writer, mut reader) = tokio::io::duplex(64);
+        let mut buffered = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
+        let header_end = buffered.len();
+
+        let error = read_transformed_response_body(
+            &mut reader,
+            &mut buffered,
+            header_end,
+            Some(9),
+            ResponseBodyReadLimits {
+                max_body_bytes: 8,
+                idle_timeout: Duration::from_secs(1),
+            },
+        )
+        .await
+        .expect_err("oversized declared body must be rejected");
+
+        assert!(error.to_string().contains("Content-Length exceeds 8 bytes"));
+    }
+
+    #[tokio::test]
+    async fn transformed_response_rejects_oversized_unframed_body() {
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        writer.write_all(b"123456789").await.unwrap();
+        drop(writer);
+        let mut buffered = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
+        let header_end = buffered.len();
+
+        let error = read_transformed_response_body(
+            &mut reader,
+            &mut buffered,
+            header_end,
+            None,
+            ResponseBodyReadLimits {
+                max_body_bytes: 8,
+                idle_timeout: Duration::from_secs(1),
+            },
+        )
+        .await
+        .expect_err("oversized unframed body must be rejected");
+
+        assert!(error.to_string().contains("body exceeds 8 bytes"));
+    }
+
+    #[tokio::test]
+    async fn transformed_response_body_read_has_idle_timeout() {
+        let (_writer, mut reader) = tokio::io::duplex(64);
+        let mut buffered = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
+        let header_end = buffered.len();
+
+        let error = read_transformed_response_body(
+            &mut reader,
+            &mut buffered,
+            header_end,
+            None,
+            ResponseBodyReadLimits {
+                max_body_bytes: 8,
+                idle_timeout: Duration::from_millis(10),
+            },
+        )
+        .await
+        .expect_err("idle body read must time out");
+
+        assert!(is_timeout_error(&error), "unexpected error: {error:#}");
+    }
+
+    #[tokio::test]
     async fn test_read_http_request_truncates_pipelined_follow_up_bytes() {
         let request = read_request_from_parts(vec![
             b"GET /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\nGET /mesh/drop HTTP/1.1\r\nHost: localhost\r\n\r\n"
@@ -6662,5 +6835,29 @@ mod tests {
             body.contains("\"type\":\"response.completed\""),
             "missing completed event:\n{body}"
         );
+    }
+
+    #[test]
+    fn public_model_id_with_named_profile() {
+        let result = public_model_id("Qwen3-8B", None, "low-ctx");
+        assert_eq!(result, "Qwen3-8B#low-ctx");
+    }
+
+    #[test]
+    fn public_model_id_without_profile() {
+        let result = public_model_id("Qwen3-8B", None, "");
+        assert_eq!(result, "Qwen3-8B");
+    }
+
+    #[test]
+    fn public_model_id_with_empty_profile() {
+        let result = public_model_id("Qwen3-8B", None, "");
+        assert_eq!(result, "Qwen3-8B");
+    }
+
+    #[test]
+    fn public_model_id_with_huggingface_ref_and_profile() {
+        let result = public_model_id("org/repo:Q4_K_M", None, "high-ctx");
+        assert_eq!(result, "org/repo:Q4_K_M#high-ctx");
     }
 }

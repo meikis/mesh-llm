@@ -184,8 +184,6 @@ pub struct BinaryReplArgs {
     pub tokenizer_n_gpu_layers: i32,
     #[arg(long, default_value = "127.0.0.1:19031")]
     pub first_stage_addr: String,
-    #[arg(long, default_value = "127.0.0.1:19030")]
-    pub direct_return_bind_addr: SocketAddr,
     #[arg(long, default_value_t = 0)]
     pub tokenizer_layer_start: u32,
     #[arg(long, default_value_t = 10)]
@@ -240,6 +238,13 @@ pub struct BinaryReplArgs {
     pub ngram_count_step_tokens: usize,
     #[arg(long, default_value_t = DEFAULT_MARGIN_STEP_TOKENS)]
     pub ngram_margin_step_tokens: usize,
+    #[arg(
+        long,
+        help = "Set mmap explicitly with --mmap true or --mmap false; unlike --mlock, omitting --mmap keeps the runtime default"
+    )]
+    pub mmap: Option<bool>,
+    #[arg(long)]
+    pub mlock: bool,
     #[arg(long, default_value_t = 60)]
     pub startup_timeout_secs: u64,
     #[arg(long, default_value_t = 30)]

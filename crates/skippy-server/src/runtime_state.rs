@@ -1354,9 +1354,9 @@ fn runtime_config_from_stage_config(
             LoadMode::ArtifactSlice => RuntimeLoadMode::ArtifactSlice,
         },
         projector_path: config.projector_path.clone(),
-        use_mmap: config.use_mmap && config.load_mode != LoadMode::LayerPackage,
+        use_mmap: config.use_mmap,
         use_mmap_prefetch: false,
-        use_mmap_buffer: config.use_mmap_buffer && config.load_mode != LoadMode::LayerPackage,
+        use_mmap_buffer: config.use_mmap_buffer,
         include_embeddings: config.layer_start == 0,
         include_output: config.downstream.is_none(),
         filter_tensors_on_load: config.filter_tensors_on_load,
@@ -1681,6 +1681,30 @@ mod tests {
         assert_eq!(policy.short_prefill_max_tokens, Some(2048));
         assert_eq!(policy.compact_flash_min_kv, Some(1));
         assert_eq!(policy.dense_sparse_mask_max_bytes, Some(268_435_456));
+    }
+
+    #[test]
+    fn runtime_config_preserves_layer_package_mmap_controls() {
+        let package_dir = tempfile::tempdir().unwrap();
+        write_glm_dsa_package_manifest(package_dir.path());
+        let mut config =
+            layer_package_stage_config(package_dir.path().to_string_lossy().to_string());
+
+        config.use_mmap = true;
+        config.use_mmap_buffer = false;
+        let runtime_config =
+            runtime_config_from_stage_config(&config, &RuntimeLaunchOverrides::default()).unwrap();
+        assert!(runtime_config.use_mmap);
+        assert!(!runtime_config.use_mmap_buffer);
+        assert!(!runtime_config.use_mmap_prefetch);
+
+        config.use_mmap = false;
+        config.use_mmap_buffer = true;
+        let runtime_config =
+            runtime_config_from_stage_config(&config, &RuntimeLaunchOverrides::default()).unwrap();
+        assert!(!runtime_config.use_mmap);
+        assert!(runtime_config.use_mmap_buffer);
+        assert!(!runtime_config.use_mmap_prefetch);
     }
 
     #[test]

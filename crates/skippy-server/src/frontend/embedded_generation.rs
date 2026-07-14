@@ -3,10 +3,19 @@ use std::collections::VecDeque;
 use super::embedded_execution::DispatchedEmbeddedStage;
 use super::*;
 
-struct PipelinedNgramWindow {
+struct PipelinedMtpWindow {
     window: VerifyWindow,
     candidate: i32,
+    is_mtp_anchor: bool,
     dispatched: DispatchedEmbeddedStage,
+}
+
+struct MtpAnchoredPipeline {
+    proposal: NativeMtpHybridProposal,
+    origin: NativeMtpDraftOrigin,
+    candidates: VecDeque<i32>,
+    accepted_tokens: usize,
+    next_draft: Option<NativeMtpDraft>,
 }
 
 impl StageOpenAiBackend {
@@ -853,11 +862,18 @@ impl StageOpenAiBackend {
             };
             let mut verify_window_scheduler =
                 VerifyWindowScheduler::new(VerifyWindowPipelineConfig::from_env());
-            let pipeline_enabled = verify_window_scheduler.enabled()
-                && request.ngram_max > 0
-                && direct_prediction_return_opened;
+            let pipeline_requested = verify_window_scheduler.enabled()
+                && request.native_mtp_enabled
+                && native_mtp_options.ngram_hybrid
+                && draft_guard.is_none();
+            if pipeline_requested && !direct_prediction_return_opened {
+                return Err(OpenAiError::backend(
+                    "MTP-anchored verify-window pipelining requires direct prediction return",
+                ));
+            }
+            let pipeline_enabled = pipeline_requested;
             let mut pipelined_windows = VecDeque::new();
-            let mut pipelined_history = context_tokens.clone();
+            let mut pipelined = None;
             let mut pipelined_current = current;
             for decode_step in decoded_tokens as u32..request.max_tokens {
                 if fused_reached_stop {
@@ -875,10 +891,284 @@ impl StageOpenAiBackend {
                 let token_timer = PhaseTimer::start();
                 let native_mtp_remaining =
                     (request.max_tokens as usize).saturating_sub(decoded_tokens);
+                if pipeline_enabled {
+                    if pipelined.is_none()
+                        && pipelined_windows.is_empty()
+                        && let Some(pending) = native_mtp.take_pending_draft()
+                    {
+                        if pending.tokens.len() == 1 {
+                            let proposal =
+                                MtpAnchoredNgramExtender::from_options(native_mtp_options).extend(
+                                    pending.tokens[0],
+                                    &context_tokens,
+                                    native_mtp_remaining,
+                                );
+                            pipelined_current = current;
+                            pipelined = Some(MtpAnchoredPipeline {
+                                candidates: proposal.tokens().iter().copied().collect(),
+                                proposal,
+                                origin: pending.origin,
+                                accepted_tokens: 0,
+                                next_draft: None,
+                            });
+                        } else {
+                            native_mtp.observe_next_draft(
+                                Some(NativeMtpDraft {
+                                    tokens: pending.tokens,
+                                    proposal_compute_us: 0,
+                                }),
+                                pending.origin,
+                            );
+                        }
+                    }
+                    if let Some(pipeline) = pipelined.as_mut() {
+                        while verify_window_scheduler.has_capacity()
+                            && decoded_tokens + pipelined_windows.len()
+                                < request.max_tokens as usize
+                        {
+                            let is_mtp_anchor =
+                                pipeline.candidates.len() == pipeline.proposal.tokens().len();
+                            let Some(candidate) = pipeline.candidates.pop_front() else {
+                                break;
+                            };
+                            let offset = pipelined_windows.len();
+                            let window = verify_window_scheduler.open(
+                                prefill_token_count + decoded_tokens + offset,
+                                decoded_tokens + offset,
+                            )?;
+                            let input = [pipelined_current];
+                            let message = embedded_verify_window_message(
+                                request.wire_dtype,
+                                VerifyWindowMessageArgs {
+                                    window_id: window.id,
+                                    request_id,
+                                    session_id,
+                                    prompt_token_count: request.prompt_token_ids.len(),
+                                    pos_start: window.base_position,
+                                    decode_step: window.decode_step,
+                                    tokens: &input,
+                                    sampling: wire_sampling.clone(),
+                                    checkpoint: false,
+                                },
+                            )?;
+                            let dispatched = self.dispatch_embedded_stage_message(
+                                &request,
+                                downstream,
+                                &session_key,
+                                &message,
+                                &input,
+                            )?;
+                            pipelined_windows.push_back(PipelinedMtpWindow {
+                                window,
+                                candidate,
+                                is_mtp_anchor,
+                                dispatched,
+                            });
+                            pipelined_current = candidate;
+                        }
+                        if let Some(window) = pipelined_windows.pop_front() {
+                            let verify = self.complete_dispatched_stage_message_direct(
+                                &request,
+                                downstream,
+                                window.dispatched,
+                                WireReplyKind::PredictedTokens,
+                            )?;
+                            let completed = verify_window_scheduler
+                                .complete_next(verify.reply.window.window_id)?;
+                            if completed != window.window {
+                                return Err(OpenAiError::backend(
+                                    "verify window scheduler lost FIFO state",
+                                ));
+                            }
+                            let target =
+                                *verify.reply.predicted_tokens.first().ok_or_else(|| {
+                                    OpenAiError::backend(
+                                        "pipelined verify window returned no target token",
+                                    )
+                                })?;
+                            let accepted = target == window.candidate;
+                            if window.is_mtp_anchor {
+                                let pipeline = pipelined.as_ref().expect("pipeline retained");
+                                let anchor_span = native_mtp.observe_taken_draft_span(
+                                    &[window.candidate],
+                                    &verify.reply.predicted_tokens,
+                                    ms_to_us(verify.elapsed_ms),
+                                );
+                                native_mtp_counters.observe_batched_verification(
+                                    pipeline.origin,
+                                    !anchor_span.rejected,
+                                );
+                            }
+                            speculative_stats.windows += 1;
+                            speculative_stats.draft_tokens += 1;
+                            speculative_stats.primary_verify_requests += 1;
+                            speculative_stats.primary_verify_tokens += 1;
+                            speculative_stats.primary_verify_elapsed_ms += verify.elapsed_ms;
+                            speculative_stats.primary_verify_stage0_compute_ms +=
+                                verify.stats.stage0_compute_ms;
+                            speculative_stats.primary_verify_runtime_lock_wait_ms +=
+                                verify.stats.runtime_lock_wait_ms;
+                            speculative_stats.primary_verify_runtime_lock_hold_ms +=
+                                verify.stats.runtime_lock_hold_ms;
+                            speculative_stats.primary_verify_activation_encode_ms +=
+                                verify.stats.activation_encode_ms;
+                            speculative_stats.primary_verify_forward_write_ms +=
+                                verify.stats.forward_write_ms;
+                            speculative_stats.primary_verify_downstream_wait_ms +=
+                                verify.stats.downstream_wait_ms;
+                            speculative_stats.primary_verify_output_activation_bytes =
+                                speculative_stats
+                                    .primary_verify_output_activation_bytes
+                                    .saturating_add(verify.stats.output_activation_bytes);
+                            speculative_stats.primary_verify_forward_activation_bytes =
+                                speculative_stats
+                                    .primary_verify_forward_activation_bytes
+                                    .saturating_add(verify.stats.forward_activation_bytes);
+                            decode_stage0_compute_ms += verify.stats.stage0_compute_ms;
+                            decode_runtime_lock_wait_ms += verify.stats.runtime_lock_wait_ms;
+                            decode_runtime_lock_wait_max_ms = decode_runtime_lock_wait_max_ms
+                                .max(verify.stats.runtime_lock_wait_ms);
+                            decode_runtime_lock_hold_ms += verify.stats.runtime_lock_hold_ms;
+                            decode_runtime_lock_hold_max_ms = decode_runtime_lock_hold_max_ms
+                                .max(verify.stats.runtime_lock_hold_ms);
+                            decode_runtime_lock_acquires += 1;
+                            decode_forward_activation_encode_ms +=
+                                verify.stats.activation_encode_ms;
+                            decode_output_activation_bytes = decode_output_activation_bytes
+                                .saturating_add(verify.stats.output_activation_bytes);
+                            decode_forward_activation_bytes = decode_forward_activation_bytes
+                                .saturating_add(verify.stats.forward_activation_bytes);
+                            decode_forward_write_ms += verify.stats.forward_write_ms;
+                            decode_downstream_wait_ms += verify.stats.downstream_wait_ms;
+                            if accepted {
+                                speculative_stats.accepted_tokens += 1;
+                                speculative_stats.full_accept_windows += 1;
+                                let pipeline = pipelined.as_mut().expect("pipeline retained");
+                                pipeline.accepted_tokens += 1;
+                                pipeline.next_draft = NativeMtpDraft::from_verify_prediction_tokens(
+                                    &verify.reply.predicted_tokens,
+                                    1,
+                                );
+                            } else {
+                                speculative_stats.rejected_tokens += 1;
+                                speculative_stats.rejected_windows += 1;
+                                speculative_stats.early_reject_windows += 1;
+                                speculative_stats.first_reject_position_sum += 1;
+                            }
+                            current = target;
+                            decoded_tokens += 1;
+                            exact_replay_tokens.push(current);
+                            context_tokens.push(current);
+                            let reached_stop = on_token(current)? == TokenControl::Stop
+                                || decoded_tokens >= request.max_tokens as usize;
+                            if !accepted || reached_stop {
+                                let stale_count = pipelined_windows.len();
+                                while let Some(stale) = pipelined_windows.pop_front() {
+                                    let stale_reply = self
+                                        .complete_dispatched_stage_message_direct(
+                                            &request,
+                                            downstream,
+                                            stale.dispatched,
+                                            WireReplyKind::PredictedTokens,
+                                        )?;
+                                    verify_window_scheduler
+                                        .complete_next(stale_reply.reply.window.window_id)?;
+                                }
+                                verify_window_scheduler.record_stale_discarded(stale_count);
+                                let pipeline = pipelined.take().expect("pipeline retained");
+                                native_mtp_counters.observe_hybrid_proposal(
+                                    pipeline.proposal.ngram_span_available(),
+                                    pipeline.proposal.ngram_anchor_agreed(),
+                                    pipeline.proposal.ngram_anchor_disagreed(),
+                                    pipeline.proposal.tokens().len(),
+                                    pipeline.accepted_tokens,
+                                );
+                                native_mtp.clear_pending_draft();
+                                if !accepted && native_mtp_options.reject_cooldown_tokens > 0 {
+                                    native_mtp_reject_cooldown_remaining =
+                                        native_mtp_options.reject_cooldown_tokens;
+                                    native_mtp_suppress_cooldown_drafts_remaining =
+                                        native_mtp_options.suppress_cooldown_draft_limit;
+                                }
+                                if !accepted || stale_count > 0 {
+                                    let trim = self.trim_embedded_stage_session(
+                                        &request,
+                                        downstream,
+                                        &session_key,
+                                        request_id,
+                                        session_id,
+                                        prefill_token_count + decoded_tokens,
+                                    )?;
+                                    speculative_stats.recovery_ms += trim.elapsed_ms;
+                                }
+                                pipelined_current = current;
+                                if reached_stop {
+                                    break;
+                                }
+                            } else if pipelined_windows.is_empty()
+                                && pipelined
+                                    .as_ref()
+                                    .is_some_and(|pipeline| pipeline.candidates.is_empty())
+                            {
+                                let pipeline = pipelined.take().expect("pipeline retained");
+                                let next_draft_available = pipeline.next_draft.is_some();
+                                native_mtp_counters.observe_hybrid_proposal(
+                                    pipeline.proposal.ngram_span_available(),
+                                    pipeline.proposal.ngram_anchor_agreed(),
+                                    pipeline.proposal.ngram_anchor_disagreed(),
+                                    pipeline.proposal.tokens().len(),
+                                    pipeline.accepted_tokens,
+                                );
+                                native_mtp_counters.observe_verify_next_draft(
+                                    next_draft_available,
+                                    next_draft_available,
+                                );
+                                if let Some(next_draft) = pipeline.next_draft {
+                                    native_mtp.observe_next_draft(
+                                        Some(next_draft),
+                                        NativeMtpDraftOrigin::VerifyNext,
+                                    );
+                                }
+                            }
+                            if self.telemetry.is_debug_enabled() {
+                                let mut attrs = self.openai_attrs(request.ids);
+                                attrs.insert(
+                                    "llama_stage.message_kind".to_string(),
+                                    json!("VerifyWindow"),
+                                );
+                                attrs.insert(
+                                    "llama_stage.spec.proposal_source".to_string(),
+                                    json!("native_mtp_anchored_ngram"),
+                                );
+                                attrs.insert(
+                                    "llama_stage.verify_window_id".to_string(),
+                                    json!(window.window.id),
+                                );
+                                attrs.insert(
+                                    "llama_stage.verify_window.accepted".to_string(),
+                                    json!(accepted),
+                                );
+                                attrs.insert(
+                                    "llama_stage.verify_window.in_flight_after".to_string(),
+                                    json!(verify_window_scheduler.in_flight_len()),
+                                );
+                                attrs.insert(
+                                    "llama_stage.verify_window.stale_discarded".to_string(),
+                                    json!(verify_window_scheduler.stale_discard_count()),
+                                );
+                                self.emit_openai_phase(
+                                    "stage.openai_decode_verify_window",
+                                    token_timer,
+                                    attrs,
+                                );
+                            }
+                            continue;
+                        }
+                    }
+                }
                 let can_run_native_mtp_batched_verify = native_mtp_options.batched_verify
                     && native_mtp_reject_cooldown_remaining == 0
                     && draft_guard.is_none()
-                    && !pipeline_enabled
                     && native_mtp_remaining >= 2;
                 let pending_native_mtp_draft = can_run_native_mtp_batched_verify
                     .then(|| native_mtp.take_pending_draft())
@@ -918,191 +1208,6 @@ impl StageOpenAiBackend {
                     )? {
                         BatchedVerifyControl::ReachedStop => break,
                         BatchedVerifyControl::Continue => continue,
-                    }
-                }
-                if pipeline_enabled {
-                    if pipelined_windows.is_empty() {
-                        pipelined_history.clone_from(&context_tokens);
-                        pipelined_current = current;
-                    }
-                    while verify_window_scheduler.has_capacity()
-                        && decoded_tokens + pipelined_windows.len() < request.max_tokens as usize
-                    {
-                        let proposal =
-                            propose_ngram_tokens(&pipelined_history, request.ngram_min, 1);
-                        let Some(&candidate) = proposal.first() else {
-                            break;
-                        };
-                        let offset = pipelined_windows.len();
-                        let window = verify_window_scheduler.open(
-                            prefill_token_count + decoded_tokens + offset,
-                            decoded_tokens + offset,
-                        )?;
-                        let input = [pipelined_current];
-                        let message = embedded_verify_window_message(
-                            request.wire_dtype,
-                            VerifyWindowMessageArgs {
-                                window_id: window.id,
-                                request_id,
-                                session_id,
-                                prompt_token_count: request.prompt_token_ids.len(),
-                                pos_start: window.base_position,
-                                decode_step: window.decode_step,
-                                tokens: &input,
-                                sampling: wire_sampling.clone(),
-                                checkpoint: false,
-                            },
-                        )?;
-                        let dispatched = self.dispatch_embedded_stage_message(
-                            &request,
-                            downstream,
-                            &session_key,
-                            &message,
-                            &input,
-                        )?;
-                        pipelined_windows.push_back(PipelinedNgramWindow {
-                            window,
-                            candidate,
-                            dispatched,
-                        });
-                        pipelined_history.push(candidate);
-                        pipelined_current = candidate;
-                    }
-                    if let Some(window) = pipelined_windows.pop_front() {
-                        let verify = self.complete_dispatched_stage_message(
-                            &request,
-                            downstream,
-                            window.dispatched,
-                            WireReplyKind::PredictedTokens,
-                        )?;
-                        let completed =
-                            verify_window_scheduler.complete_next(verify.reply.window.window_id)?;
-                        if completed != window.window {
-                            return Err(OpenAiError::backend(
-                                "verify window scheduler lost FIFO state",
-                            ));
-                        }
-                        let target = *verify.reply.predicted_tokens.first().ok_or_else(|| {
-                            OpenAiError::backend("pipelined verify window returned no target token")
-                        })?;
-                        let accepted = target == window.candidate;
-                        speculative_stats.windows += 1;
-                        speculative_stats.draft_tokens += 1;
-                        speculative_stats.primary_verify_requests += 1;
-                        speculative_stats.primary_verify_tokens += 1;
-                        speculative_stats.primary_verify_elapsed_ms += verify.elapsed_ms;
-                        speculative_stats.primary_verify_stage0_compute_ms +=
-                            verify.stats.stage0_compute_ms;
-                        speculative_stats.primary_verify_runtime_lock_wait_ms +=
-                            verify.stats.runtime_lock_wait_ms;
-                        speculative_stats.primary_verify_runtime_lock_hold_ms +=
-                            verify.stats.runtime_lock_hold_ms;
-                        speculative_stats.primary_verify_activation_encode_ms +=
-                            verify.stats.activation_encode_ms;
-                        speculative_stats.primary_verify_forward_write_ms +=
-                            verify.stats.forward_write_ms;
-                        speculative_stats.primary_verify_downstream_wait_ms +=
-                            verify.stats.downstream_wait_ms;
-                        speculative_stats.primary_verify_output_activation_bytes =
-                            speculative_stats
-                                .primary_verify_output_activation_bytes
-                                .saturating_add(verify.stats.output_activation_bytes);
-                        speculative_stats.primary_verify_forward_activation_bytes =
-                            speculative_stats
-                                .primary_verify_forward_activation_bytes
-                                .saturating_add(verify.stats.forward_activation_bytes);
-                        decode_stage0_compute_ms += verify.stats.stage0_compute_ms;
-                        decode_runtime_lock_wait_ms += verify.stats.runtime_lock_wait_ms;
-                        decode_runtime_lock_wait_max_ms =
-                            decode_runtime_lock_wait_max_ms.max(verify.stats.runtime_lock_wait_ms);
-                        decode_runtime_lock_hold_ms += verify.stats.runtime_lock_hold_ms;
-                        decode_runtime_lock_hold_max_ms =
-                            decode_runtime_lock_hold_max_ms.max(verify.stats.runtime_lock_hold_ms);
-                        decode_runtime_lock_acquires += 1;
-                        decode_forward_activation_encode_ms += verify.stats.activation_encode_ms;
-                        decode_output_activation_bytes = decode_output_activation_bytes
-                            .saturating_add(verify.stats.output_activation_bytes);
-                        decode_forward_activation_bytes = decode_forward_activation_bytes
-                            .saturating_add(verify.stats.forward_activation_bytes);
-                        decode_forward_write_ms += verify.stats.forward_write_ms;
-                        decode_downstream_wait_ms += verify.stats.downstream_wait_ms;
-                        if accepted {
-                            speculative_stats.accepted_tokens += 1;
-                            speculative_stats.full_accept_windows += 1;
-                        } else {
-                            speculative_stats.rejected_tokens += 1;
-                            speculative_stats.rejected_windows += 1;
-                            speculative_stats.early_reject_windows += 1;
-                            speculative_stats.first_reject_position_sum += 1;
-                        }
-                        current = target;
-                        decoded_tokens += 1;
-                        context_tokens.push(current);
-                        let reached_stop = on_token(current)? == TokenControl::Stop
-                            || decoded_tokens >= request.max_tokens as usize;
-                        if !accepted || reached_stop {
-                            let stale_count = pipelined_windows.len();
-                            while let Some(stale) = pipelined_windows.pop_front() {
-                                let stale_reply = self.complete_dispatched_stage_message(
-                                    &request,
-                                    downstream,
-                                    stale.dispatched,
-                                    WireReplyKind::PredictedTokens,
-                                )?;
-                                verify_window_scheduler
-                                    .complete_next(stale_reply.reply.window.window_id)?;
-                            }
-                            verify_window_scheduler.record_stale_discarded(stale_count);
-                            if stale_count > 0 {
-                                let trim = self.trim_embedded_stage_session(
-                                    &request,
-                                    downstream,
-                                    &session_key,
-                                    request_id,
-                                    session_id,
-                                    prefill_token_count + decoded_tokens,
-                                )?;
-                                speculative_stats.recovery_ms += trim.elapsed_ms;
-                            }
-                            pipelined_history.clone_from(&context_tokens);
-                            pipelined_current = current;
-                        }
-                        if self.telemetry.is_debug_enabled() {
-                            let mut attrs = self.openai_attrs(request.ids);
-                            attrs.insert(
-                                "llama_stage.message_kind".to_string(),
-                                json!("VerifyWindow"),
-                            );
-                            attrs.insert(
-                                "llama_stage.spec.proposal_source".to_string(),
-                                json!("ngram"),
-                            );
-                            attrs.insert(
-                                "llama_stage.verify_window_id".to_string(),
-                                json!(window.window.id),
-                            );
-                            attrs.insert(
-                                "llama_stage.verify_window.accepted".to_string(),
-                                json!(accepted),
-                            );
-                            attrs.insert(
-                                "llama_stage.verify_window.in_flight_after".to_string(),
-                                json!(verify_window_scheduler.in_flight_len()),
-                            );
-                            attrs.insert(
-                                "llama_stage.verify_window.stale_discarded".to_string(),
-                                json!(verify_window_scheduler.stale_discard_count()),
-                            );
-                            self.emit_openai_phase(
-                                "stage.openai_decode_verify_window",
-                                token_timer,
-                                attrs,
-                            );
-                        }
-                        if reached_stop {
-                            break;
-                        }
-                        continue;
                     }
                 }
                 if draft_guard.is_some() || request.ngram_max > 0 {
@@ -1639,7 +1744,7 @@ impl StageOpenAiBackend {
             if !pipelined_windows.is_empty() {
                 let stale_count = pipelined_windows.len();
                 while let Some(stale) = pipelined_windows.pop_front() {
-                    let stale_reply = self.complete_dispatched_stage_message(
+                    let stale_reply = self.complete_dispatched_stage_message_direct(
                         &request,
                         downstream,
                         stale.dispatched,
@@ -1657,6 +1762,16 @@ impl StageOpenAiBackend {
                     prefill_token_count + decoded_tokens,
                 )?;
                 speculative_stats.recovery_ms += trim.elapsed_ms;
+            }
+            if let Some(pipeline) = pipelined.take() {
+                native_mtp_counters.observe_hybrid_proposal(
+                    pipeline.proposal.ngram_span_available(),
+                    pipeline.proposal.ngram_anchor_agreed(),
+                    pipeline.proposal.ngram_anchor_disagreed(),
+                    pipeline.proposal.tokens().len(),
+                    pipeline.accepted_tokens,
+                );
+                native_mtp.clear_pending_draft();
             }
             let mut decode_attrs = self.openai_attrs(request.ids);
             decode_attrs.insert(

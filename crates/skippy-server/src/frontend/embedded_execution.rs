@@ -131,15 +131,52 @@ impl StageOpenAiBackend {
         &self,
         request: &EmbeddedStageZeroGeneration<'_>,
         downstream: &mut TcpStream,
-        mut dispatched: DispatchedEmbeddedStage,
+        dispatched: DispatchedEmbeddedStage,
         expected_reply: WireReplyKind,
     ) -> OpenAiResult<EmbeddedStageExecution> {
-        let wait_timer = PhaseTimer::start();
-        let reply = receive_embedded_stage_reply(
+        self.complete_dispatched_stage_message_with_return(
+            request,
             downstream,
-            request.prediction_return.as_ref(),
+            dispatched,
             expected_reply,
-        )?;
+            false,
+        )
+    }
+
+    pub(super) fn complete_dispatched_stage_message_direct(
+        &self,
+        request: &EmbeddedStageZeroGeneration<'_>,
+        downstream: &mut TcpStream,
+        dispatched: DispatchedEmbeddedStage,
+        expected_reply: WireReplyKind,
+    ) -> OpenAiResult<EmbeddedStageExecution> {
+        self.complete_dispatched_stage_message_with_return(
+            request,
+            downstream,
+            dispatched,
+            expected_reply,
+            true,
+        )
+    }
+
+    fn complete_dispatched_stage_message_with_return(
+        &self,
+        request: &EmbeddedStageZeroGeneration<'_>,
+        downstream: &mut TcpStream,
+        mut dispatched: DispatchedEmbeddedStage,
+        expected_reply: WireReplyKind,
+        require_direct_return: bool,
+    ) -> OpenAiResult<EmbeddedStageExecution> {
+        let wait_timer = PhaseTimer::start();
+        let reply = if require_direct_return {
+            receive_direct_prediction_return(request.prediction_return.as_ref(), expected_reply)?
+        } else {
+            receive_embedded_stage_reply(
+                downstream,
+                request.prediction_return.as_ref(),
+                expected_reply,
+            )?
+        };
         dispatched.execution.downstream_wait_ms = wait_timer.elapsed_ms();
         dispatched.stats.merge(reply.stats);
         if dispatched.message_kind == WireMessageKind::VerifyWindow {
@@ -292,6 +329,30 @@ impl StageOpenAiBackend {
             downstream_write_ms: 0.0,
             downstream_wait_ms: 0.0,
         })
+    }
+}
+
+fn receive_direct_prediction_return(
+    prediction_return: Option<&PredictionReturnReceiver>,
+    expected_reply: WireReplyKind,
+) -> OpenAiResult<StageReply> {
+    let prediction_return = prediction_return.ok_or_else(|| {
+        OpenAiError::backend("direct prediction return was required but is not configured")
+    })?;
+    let started = Instant::now();
+    loop {
+        if let Some(reply) = prediction_return
+            .try_recv_expected(expected_reply)
+            .map_err(openai_backend_error)?
+        {
+            return Ok(reply);
+        }
+        if started.elapsed() >= DIRECT_RETURN_FALLBACK_TIMEOUT {
+            return Err(OpenAiError::backend(format!(
+                "timed out waiting for {expected_reply:?} reply from direct prediction return"
+            )));
+        }
+        std::thread::sleep(DIRECT_RETURN_FALLBACK_POLL);
     }
 }
 

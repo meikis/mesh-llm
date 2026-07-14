@@ -54,6 +54,10 @@ pub struct EmbeddedOpenAiStageOptions {
     pub ngram_simple: bool,
     pub ngram_size_n: usize,
     pub draft_n_gpu_layers: Option<i32>,
+    pub ngram_min: usize,
+    pub ngram_max: usize,
+    pub native_mtp_max_tokens: usize,
+    pub native_mtp_min_tokens: usize,
 }
 
 impl BinaryStageOptions {
@@ -131,6 +135,10 @@ impl BinaryStageOptions {
                 ngram_simple: args.openai_ngram_simple,
                 ngram_size_n: args.openai_ngram_size_n,
                 draft_n_gpu_layers: args.openai_draft_n_gpu_layers,
+                ngram_min: args.openai_ngram_min,
+                ngram_max: args.openai_ngram_max,
+                native_mtp_max_tokens: 3,
+                native_mtp_min_tokens: 0,
             });
         let native_mtp_enabled = native_mtp_enabled_from_env() && !args.openai_ngram_simple;
         Ok(Self {

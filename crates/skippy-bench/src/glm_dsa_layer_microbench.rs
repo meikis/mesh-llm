@@ -2709,7 +2709,7 @@ fn select_activation_rows(
         bail!("activation frame is smaller than its hidden rows");
     }
     let sideband_bytes = frame.payload.len() - hidden_bytes;
-    if sideband_bytes % source_tokens != 0 {
+    if !sideband_bytes.is_multiple_of(source_tokens) {
         bail!("activation sideband is not token-major");
     }
     let sideband_row_bytes = sideband_bytes / source_tokens;
@@ -2769,12 +2769,12 @@ fn compare_sideband_rows(
     Ok(left_sideband == right_sideband)
 }
 
-fn activation_row_bytes<'a>(
-    frame: &'a ActivationFrame,
+fn activation_row_bytes(
+    frame: &ActivationFrame,
     row: usize,
     hidden_row_bytes: usize,
     sideband: bool,
-) -> Result<&'a [u8]> {
+) -> Result<&[u8]> {
     let tokens =
         usize::try_from(frame.desc.token_count).context("frame token count exceeds usize")?;
     if tokens == 0 || row >= tokens {
@@ -2791,7 +2791,7 @@ fn activation_row_bytes<'a>(
         return Ok(&frame.payload[start..start + hidden_row_bytes]);
     }
     let sideband_bytes = frame.payload.len() - hidden_bytes;
-    if sideband_bytes % tokens != 0 {
+    if !sideband_bytes.is_multiple_of(tokens) {
         bail!("activation sideband is not token-major");
     }
     let sideband_row_bytes = sideband_bytes / tokens;
@@ -4251,6 +4251,8 @@ pub(super) fn runtime_config_for_range(
         n_threads: None,
         n_threads_batch: None,
         n_gpu_layers: args.n_gpu_layers,
+        mmap: Some(false),
+        mlock: false,
         selected_backend_device: None,
         cache_type_k: parse_cache_type(&args.cache_type_k).context("parse cache_type_k")?,
         cache_type_v: parse_cache_type(&args.cache_type_v).context("parse cache_type_v")?,

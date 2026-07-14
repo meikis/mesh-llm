@@ -181,6 +181,8 @@ fn runtime_config(
         n_threads: None,
         n_threads_batch: None,
         n_gpu_layers: args.n_gpu_layers,
+        mmap: None,
+        mlock: false,
         selected_backend_device: None,
         cache_type_k: parse_cache_type("f16")?,
         cache_type_v: parse_cache_type("f16")?,

@@ -1,0 +1,4048 @@
+From fc9c614fdc796ea5b1af8efc16fa97d8e4f4278e Mon Sep 17 00:00:00 2001
+From: Mesh-LLM CI <ci@mesh-llm.local>
+Date: Tue, 14 Jul 2026 09:16:09 +1000
+Subject: [PATCH 16/18] llama: implement native GLM-DSA model execution
+
+---
+ include/llama.h              |    2 +
+ src/llama-arch.cpp           |    3 +
+ src/llama-arch.h             |    3 +
+ src/llama-context.cpp        |  208 +++++
+ src/llama-graph.cpp          | 1651 ++++++++++++++++++++++++++++++++--
+ src/llama-graph.h            |   75 +-
+ src/llama-hparams.h          |    4 +
+ src/llama-kv-cache-dsa.cpp   |   25 +-
+ src/llama-kv-cache-dsa.h     |    3 +-
+ src/llama-kv-cache.cpp       |   26 +-
+ src/llama-kv-cache.h         |    3 +
+ src/llama-model-loader.cpp   |    4 +
+ src/llama-model-loader.h     |    1 +
+ src/llama-model-saver.cpp    |   12 +
+ src/llama-model.cpp          |   82 +-
+ src/llama-quant.cpp          |    8 +-
+ src/models/deepseek2.cpp     |   26 +-
+ src/models/glm-dsa-block.cpp |   95 ++
+ src/models/glm-dsa-block.h   |   29 +
+ src/models/glm-dsa.cpp       | 1023 ++++++++++++++++++++-
+ src/models/models.h          |    5 +-
+ 21 files changed, 3170 insertions(+), 118 deletions(-)
+ create mode 100644 src/models/glm-dsa-block.cpp
+ create mode 100644 src/models/glm-dsa-block.h
+
+diff --git a/include/llama.h b/include/llama.h
+index 4460a6a..256b359 100644
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -322,6 +322,8 @@ extern "C" {
+         // Keep the booleans together to avoid misalignment during copy-by-value.
+         bool vocab_only;      // only load the vocabulary, no weights
+         bool use_mmap;        // use mmap if possible
++        bool use_mmap_prefetch; // prefetch mmaped model files during load
++        bool use_mmap_buffer; // use backend buffers backed directly by mmaped model file ranges
+         bool use_direct_io;   // use direct io, takes precedence over use_mmap when supported
+         bool use_mlock;       // force system to keep model in RAM
+         bool check_tensors;   // validate model tensor data
+diff --git a/src/llama-arch.cpp b/src/llama-arch.cpp
+index b890e66..81e94ac 100644
+--- a/src/llama-arch.cpp
++++ b/src/llama-arch.cpp
+@@ -255,6 +255,9 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
+     { LLM_KV_ATTENTION_OUTPUT_LORA_RANK,             "%s.attention.output_lora_rank"             },
+     { LLM_KV_ATTENTION_COMPRESS_ROPE_FREQ_BASE,      "%s.attention.compress_rope_freq_base"      },
+     { LLM_KV_ATTENTION_COMPRESS_RATIOS,              "%s.attention.compress_ratios"              },
++    { LLM_KV_ATTENTION_INDEXER_TOP_K_FREQUENCY,      "%s.attention.indexer.top_k_frequency"      },
++    { LLM_KV_ATTENTION_INDEXER_SKIP_TOP_K_OFFSET,    "%s.attention.indexer.skip_top_k_offset"    },
++    { LLM_KV_ATTENTION_INDEXER_TYPES,                "%s.attention.indexer.types"                },
+     { LLM_KV_ATTENTION_SHARED_KV_LAYERS,             "%s.attention.shared_kv_layers"             },
+     { LLM_KV_ATTENTION_RECURRENT_LAYERS,             "%s.attention.recurrent_layers"             },
+ 
+diff --git a/src/llama-arch.h b/src/llama-arch.h
+index a4f5091..fbfdd7c 100644
+--- a/src/llama-arch.h
++++ b/src/llama-arch.h
+@@ -260,6 +260,9 @@ enum llm_kv {
+     LLM_KV_ATTENTION_OUTPUT_LORA_RANK,
+     LLM_KV_ATTENTION_COMPRESS_ROPE_FREQ_BASE,
+     LLM_KV_ATTENTION_COMPRESS_RATIOS,
++    LLM_KV_ATTENTION_INDEXER_TOP_K_FREQUENCY,
++    LLM_KV_ATTENTION_INDEXER_SKIP_TOP_K_OFFSET,
++    LLM_KV_ATTENTION_INDEXER_TYPES,
+     LLM_KV_ATTENTION_SHARED_KV_LAYERS,
+     LLM_KV_ATTENTION_RECURRENT_LAYERS,
+ 
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 72b0993..615134f 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -61,6 +61,188 @@ static const llm_fused_op_probe llm_fused_op_lid_probe = {
+     /*.n_tokens_per_seq =*/ 1,
+ };
+ 
++static const char * llama_glm_dsa_required_backend_op_name(enum ggml_op op) {
++    switch (op) {
++        case GGML_OP_LIGHTNING_INDEXER: return "GLM-DSA lightning indexer";
++        case GGML_OP_DSA_SPARSE_MASK:   return "GLM-DSA sparse mask";
++        case GGML_OP_DSA_SPARSE_ATTN:   return "GLM-DSA sparse attention";
++        default:                        return nullptr;
++    }
++}
++
++static int llama_glm_dsa_layer_from_named_node(const ggml_tensor * node, const char * prefix) {
++    const size_t prefix_len = strlen(prefix);
++    if (strncmp(node->name, prefix, prefix_len) != 0 || node->name[prefix_len] != '-') {
++        return -1;
++    }
++    return std::stoi(node->name + prefix_len + 1);
++}
++
++static int llama_glm_dsa_required_backend_op_layer(const ggml_tensor * node) {
++    switch (node->op) {
++        case GGML_OP_LIGHTNING_INDEXER:
++            return llama_glm_dsa_layer_from_named_node(node, "indexer_score");
++        case GGML_OP_DSA_SPARSE_MASK:
++            return llama_glm_dsa_layer_from_named_node(node, "dsa_sparse_mask_topk");
++        case GGML_OP_DSA_SPARSE_ATTN:
++            return llama_glm_dsa_layer_from_named_node(node, "dsa_sparse_attn");
++        default:
++            return -1;
++    }
++}
++
++static void llama_glm_dsa_validate_required_backend_ops(
++        const llama_model & model,
++        ggml_backend_sched_t sched,
++        ggml_cgraph * gf) {
++    for (int i = 0; i < ggml_graph_n_nodes(gf); i++) {
++        ggml_tensor * node = ggml_graph_node(gf, i);
++        const char * op_name = llama_glm_dsa_required_backend_op_name(node->op);
++        if (op_name == nullptr) {
++            continue;
++        }
++
++        const int il = llama_glm_dsa_required_backend_op_layer(node);
++        if (il < 0) {
++            throw std::runtime_error(format(
++                    "%s: could not determine layer for %s node '%s'",
++                    __func__, op_name, node->name));
++        }
++
++        ggml_backend_dev_t device_layer = model.dev_layer(il);
++        ggml_backend_dev_t device_op =
++                ggml_backend_get_device(ggml_backend_sched_get_tensor_backend(sched, node));
++        if (device_op != device_layer) {
++            throw std::runtime_error(format(
++                    "%s: layer %d is assigned to device %s but %s is assigned to device %s; "
++                    "backend support is required to avoid CPU fallback",
++                    __func__, il, ggml_backend_dev_name(device_layer), op_name, ggml_backend_dev_name(device_op)));
++        }
++    }
++}
++
++static bool llama_env_enabled(const char * name) {
++    const char * value = getenv(name);
++    return value != nullptr && strcmp(value, "0") != 0 && strcmp(value, "false") != 0 && strcmp(value, "FALSE") != 0;
++}
++
++static bool llama_tensor_name_starts_with(const ggml_tensor * node, const char * prefix) {
++    return node != nullptr && strncmp(node->name, prefix, strlen(prefix)) == 0;
++}
++
++static bool llama_tensor_is_named_compact_glm_dsa_kv(const ggml_tensor * node) {
++    return llama_tensor_name_starts_with(node, "dsa_compact_k_topk_rows") ||
++           llama_tensor_name_starts_with(node, "dsa_compact_v_topk_rows") ||
++           llama_tensor_name_starts_with(node, "dsa_compact_v_topk_view");
++}
++
++static bool llama_glm_dsa_flash_consumes_compact_kv(const ggml_tensor * node) {
++    return node != nullptr &&
++           node->op == GGML_OP_FLASH_ATTN_EXT &&
++           (llama_tensor_is_named_compact_glm_dsa_kv(node->src[1]) ||
++            llama_tensor_is_named_compact_glm_dsa_kv(node->src[2]));
++}
++
++struct llama_glm_dsa_runtime_path_counts {
++    int graph_nodes = 0;
++    int compact_k_rows = 0;
++    int compact_v_rows = 0;
++    int compact_v_view = 0;
++    int compact_flash = 0;
++    int flash_attn = 0;
++    int flash_no_mask = 0;
++    int flash_with_mask = 0;
++    int dsa_sparse_attn = 0;
++    int dsa_sparse_mask = 0;
++    int dense_mask_fill = 0;
++    int dense_mask_topk = 0;
++};
++
++static llama_glm_dsa_runtime_path_counts llama_glm_dsa_count_runtime_path(ggml_cgraph * gf) {
++    llama_glm_dsa_runtime_path_counts counts;
++    counts.graph_nodes = ggml_graph_n_nodes(gf);
++
++    for (int i = 0; i < ggml_graph_n_nodes(gf); ++i) {
++        const ggml_tensor * node = ggml_graph_node(gf, i);
++
++        if (llama_tensor_name_starts_with(node, "dsa_compact_k_topk_rows")) {
++            counts.compact_k_rows += 1;
++        }
++        if (llama_tensor_name_starts_with(node, "dsa_compact_v_topk_rows")) {
++            counts.compact_v_rows += 1;
++        }
++        if (llama_tensor_name_starts_with(node, "dsa_compact_v_topk_view")) {
++            counts.compact_v_view += 1;
++        }
++        if (llama_tensor_name_starts_with(node, "dsa_sparse_mask_fill")) {
++            counts.dense_mask_fill += 1;
++        }
++        if (llama_tensor_name_starts_with(node, "dsa_sparse_mask_topk")) {
++            counts.dense_mask_topk += 1;
++        }
++
++        switch (node->op) {
++            case GGML_OP_FLASH_ATTN_EXT:
++                counts.flash_attn += 1;
++                if (node->src[3] == nullptr) {
++                    counts.flash_no_mask += 1;
++                } else {
++                    counts.flash_with_mask += 1;
++                }
++                if (llama_glm_dsa_flash_consumes_compact_kv(node)) {
++                    counts.compact_flash += 1;
++                }
++                break;
++            case GGML_OP_DSA_SPARSE_ATTN:
++                counts.dsa_sparse_attn += 1;
++                break;
++            case GGML_OP_DSA_SPARSE_MASK:
++                counts.dsa_sparse_mask += 1;
++                break;
++            default:
++                break;
++        }
++    }
++
++    return counts;
++}
++
++static void llama_glm_dsa_log_runtime_path(
++        const llama_model & model,
++        const llama_ubatch & ubatch,
++        ggml_cgraph * gf) {
++    if (model.arch != LLM_ARCH_GLM_DSA || !llama_env_enabled("LLAMA_GLM_DSA_LOG_RUNTIME_PATH")) {
++        return;
++    }
++
++    const llama_glm_dsa_runtime_path_counts counts = llama_glm_dsa_count_runtime_path(gf);
++    const int dense_mask_nodes = counts.dsa_sparse_mask + counts.dense_mask_fill + counts.dense_mask_topk;
++    const bool compact_decode_path =
++            counts.compact_k_rows > 0 &&
++            (counts.compact_v_view > 0 || counts.compact_v_rows > 0) &&
++            counts.compact_flash > 0 &&
++            dense_mask_nodes == 0 &&
++            counts.dsa_sparse_attn == 0;
++
++    LLAMA_LOG_INFO(
++            "llama: glm_dsa_runtime_path tokens=%u graph_nodes=%d compact_decode_path=%d compact_k_rows=%d compact_v_view=%d compact_v_rows=%d compact_flash=%d flash_attn=%d flash_no_mask=%d flash_with_mask=%d dsa_sparse_attn=%d dense_sparse_mask_nodes=%d dsa_sparse_mask=%d dense_mask_fill=%d dense_mask_topk=%d\n",
++            ubatch.n_tokens,
++            counts.graph_nodes,
++            compact_decode_path ? 1 : 0,
++            counts.compact_k_rows,
++            counts.compact_v_view,
++            counts.compact_v_rows,
++            counts.compact_flash,
++            counts.flash_attn,
++            counts.flash_no_mask,
++            counts.flash_with_mask,
++            counts.dsa_sparse_attn,
++            dense_mask_nodes,
++            counts.dsa_sparse_mask,
++            counts.dense_mask_fill,
++            counts.dense_mask_topk);
++}
++
+ llama_context::llama_context(
+         const llama_model & model,
+               llama_context_params params) :
+@@ -580,6 +762,22 @@ void llama_context::sched_reserve() {
+ 
+     resolve_fused_ops(mctx.get(), n_seqs);
+ 
++    const char * LLAMA_GLM_DSA_DISABLE_LIGHTNING_INDEXER = getenv("LLAMA_GLM_DSA_DISABLE_LIGHTNING_INDEXER");
++    const bool glm_dsa_disable_lightning_indexer =
++            LLAMA_GLM_DSA_DISABLE_LIGHTNING_INDEXER && atoi(LLAMA_GLM_DSA_DISABLE_LIGHTNING_INDEXER) != 0;
++    if (model.arch == LLM_ARCH_GLM_DSA && glm_dsa_disable_lightning_indexer) {
++        LLAMA_LOG_WARN("%s: GLM-DSA lightning indexer disabled by LLAMA_GLM_DSA_DISABLE_LIGHTNING_INDEXER\n", __func__);
++    } else if (model.arch == LLM_ARCH_GLM_DSA) {
++        LLAMA_LOG_INFO("%s: resolving GLM-DSA required backend op support:\n", __func__);
++
++        auto * gf = graph_reserve(1, n_seqs, n_outputs, mctx.get(), true);
++        if (!gf) {
++            throw std::runtime_error("failed to reserve graph for GLM-DSA required backend op check");
++        }
++
++        llama_glm_dsa_validate_required_backend_ops(model, sched.get(), gf);
++    }
++
+     // reserve worst-case graph
+     int n_splits_pp = -1;
+     int n_nodes_pp  = -1;
+@@ -1343,6 +1541,8 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
+         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
+     }
+ 
++    llama_glm_dsa_log_runtime_path(model, ubatch, res->get_gf());
++
+     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
+     if (status != GGML_STATUS_SUCCESS) {
+         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
+@@ -2402,12 +2602,20 @@ llm_graph_params llama_context::graph_params(
+                       const llama_ubatch & ubatch,
+             const llama_memory_context_i * mctx,
+                           llm_graph_type   gtype) const {
++    std::vector<int> layer_backend_device_types;
++    layer_backend_device_types.reserve(model.hparams.n_layer_all);
++    for (uint32_t il = 0; il < model.hparams.n_layer_all; ++il) {
++        layer_backend_device_types.push_back((int) ggml_backend_dev_type(model.dev_layer(il)));
++    }
++
+     return {
+         /*.arch        =*/ model.arch,
+         /*.hparams     =*/ model.hparams,
+         /*.cparams     =*/ cparams,
+         /*.ubatch      =*/ ubatch,
+         /*.gtype       =*/ gtype,
++        /*.skippy_glm_dsa_phase_hint =*/ skippy_graph_get_filter().glm_dsa_phase_hint,
++        /*.layer_backend_device_types =*/ std::move(layer_backend_device_types),
+         /*.sched       =*/ sched.get(),
+         /*.backend_cpu =*/ backend_cpu,
+         /*.cvec        =*/ cvec.get(),
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index a75f0b7..8074b89 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -25,6 +25,844 @@ static thread_local skippy_graph_filter g_skippy_graph_filter;
+ static thread_local skippy_activation_tokens g_skippy_activation_tokens;
+ static thread_local skippy_activation_rwkv7_v_first g_skippy_rwkv7_v_first;
+ static thread_local skippy_activation_gemma3n_altup g_skippy_gemma3n_altup;
++static thread_local skippy_activation_glm_dsa_top_k g_skippy_glm_dsa_top_k;
++
++static constexpr uint32_t LLAMA_SKIPPY_GLM_DSA_POLICY_DIRECT_SPARSE_ATTN                   = UINT32_C(1) << 0;
++static constexpr uint32_t LLAMA_SKIPPY_GLM_DSA_POLICY_DIRECT_SPARSE_PREFILL                = UINT32_C(1) << 1;
++static constexpr uint32_t LLAMA_SKIPPY_GLM_DSA_POLICY_DISABLE_COMPACT_FLASH_ATTN           = UINT32_C(1) << 2;
++static constexpr uint32_t LLAMA_SKIPPY_GLM_DSA_POLICY_UNPROVEN_LARGE_DIRECT_SPARSE_PREFILL = UINT32_C(1) << 3;
++
++static bool skippy_env_enabled(const char * name) {
++    const char * value = getenv(name);
++    return value != nullptr && strcmp(value, "0") != 0 && strcmp(value, "false") != 0 && strcmp(value, "FALSE") != 0;
++}
++
++static bool skippy_env_disabled(const char * name) {
++    const char * value = getenv(name);
++    return value != nullptr && (strcmp(value, "0") == 0 || strcmp(value, "false") == 0 || strcmp(value, "FALSE") == 0);
++}
++
++static bool skippy_glm_dsa_fused_sparse_mask_enabled() {
++    return skippy_env_enabled("SKIPPY_GLM_DSA_ENABLE_FUSED_SPARSE_MASK");
++}
++
++static bool skippy_glm_dsa_direct_sparse_attn_enabled() {
++    if (skippy_env_disabled("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_ATTN") ||
++        skippy_env_enabled("SKIPPY_GLM_DSA_DISABLE_DIRECT_SPARSE_ATTN")) {
++        return false;
++    }
++    if (skippy_env_enabled("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_ATTN")) {
++        return true;
++    }
++    const skippy_graph_filter & filter = skippy_graph_get_filter();
++    if (filter.glm_dsa_policy_profile != 0) {
++        return (filter.glm_dsa_policy_flags & LLAMA_SKIPPY_GLM_DSA_POLICY_DIRECT_SPARSE_ATTN) != 0;
++    }
++
++    return true;
++}
++
++static bool skippy_glm_dsa_compact_flash_attn_disabled() {
++    const skippy_graph_filter & filter = skippy_graph_get_filter();
++    if (filter.glm_dsa_policy_profile != 0 &&
++            (filter.glm_dsa_policy_flags & LLAMA_SKIPPY_GLM_DSA_POLICY_DISABLE_COMPACT_FLASH_ATTN) != 0) {
++        return true;
++    }
++    return skippy_env_enabled("SKIPPY_GLM_DSA_DISABLE_COMPACT_FLASH_ATTN");
++}
++
++static bool skippy_glm_dsa_top1_attn_disabled() {
++    return skippy_env_enabled("SKIPPY_GLM_DSA_DISABLE_TOP1_ATTN");
++}
++
++static bool skippy_glm_dsa_all_kv_flash_disabled() {
++    return skippy_env_enabled("SKIPPY_GLM_DSA_DISABLE_ALL_KV_FLASH");
++}
++
++static bool skippy_glm_dsa_direct_sparse_prefill_enabled() {
++    if (skippy_env_disabled("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_PREFILL") ||
++        skippy_env_enabled("SKIPPY_GLM_DSA_DISABLE_DIRECT_SPARSE_PREFILL")) {
++        return false;
++    }
++    if (skippy_env_enabled("SKIPPY_GLM_DSA_ENABLE_DIRECT_SPARSE_PREFILL")) {
++        return true;
++    }
++    const skippy_graph_filter & filter = skippy_graph_get_filter();
++    if (filter.glm_dsa_policy_profile != 0) {
++        return (filter.glm_dsa_policy_flags & LLAMA_SKIPPY_GLM_DSA_POLICY_DIRECT_SPARSE_PREFILL) != 0;
++    }
++
++    return false;
++}
++
++static bool skippy_glm_dsa_unproven_large_direct_sparse_prefill_enabled() {
++    if (skippy_env_enabled("SKIPPY_GLM_DSA_ENABLE_UNPROVEN_LARGE_DIRECT_SPARSE_PREFILL")) {
++        return true;
++    }
++    const skippy_graph_filter & filter = skippy_graph_get_filter();
++    if (filter.glm_dsa_policy_profile != 0) {
++        return (filter.glm_dsa_policy_flags & LLAMA_SKIPPY_GLM_DSA_POLICY_UNPROVEN_LARGE_DIRECT_SPARSE_PREFILL) != 0;
++    }
++    return skippy_env_enabled("SKIPPY_GLM_DSA_ENABLE_UNPROVEN_LARGE_DIRECT_SPARSE_PREFILL");
++}
++
++static int64_t skippy_glm_dsa_direct_sparse_prefill_max_tokens() {
++    const char * value = getenv("SKIPPY_GLM_DSA_DIRECT_SPARSE_PREFILL_MAX_TOKENS");
++    if (value == nullptr || value[0] == '\0') {
++        const skippy_graph_filter & filter = skippy_graph_get_filter();
++        if (filter.glm_dsa_policy_profile != 0 && filter.glm_dsa_short_prefill_max_tokens > 0) {
++            return filter.glm_dsa_short_prefill_max_tokens;
++        }
++        return 8;
++    }
++
++    const int64_t parsed = atoll(value);
++    return parsed <= 0 ? INT64_MAX : parsed;
++}
++
++static int64_t skippy_glm_dsa_dense_sparse_mask_max_bytes() {
++    const char * value = getenv("SKIPPY_GLM_DSA_DENSE_SPARSE_MASK_MAX_BYTES");
++    if (value == nullptr || value[0] == '\0') {
++        const skippy_graph_filter & filter = skippy_graph_get_filter();
++        if (filter.glm_dsa_policy_profile != 0 && filter.glm_dsa_dense_sparse_mask_max_bytes > 0) {
++            return (int64_t) filter.glm_dsa_dense_sparse_mask_max_bytes;
++        }
++        return 512LL * 1024LL * 1024LL;
++    }
++
++    const int64_t parsed = atoll(value);
++    return parsed <= 0 ? INT64_MAX : parsed;
++}
++
++static int64_t skippy_glm_dsa_compact_flash_min_kv() {
++    const char * value = getenv("SKIPPY_GLM_DSA_COMPACT_FLASH_MIN_KV");
++    if (value == nullptr || value[0] == '\0') {
++        const skippy_graph_filter & filter = skippy_graph_get_filter();
++        if (filter.glm_dsa_policy_profile != 0 && filter.glm_dsa_compact_flash_min_kv > 0) {
++            return filter.glm_dsa_compact_flash_min_kv;
++        }
++        return 1;
++    }
++
++    const int64_t parsed = atoll(value);
++    return parsed <= 0 ? 0 : parsed;
++}
++
++static ggml_type llama_glm_dsa_mla_kq_mask_type(const llama_cparams & cparams) {
++    return cparams.flash_attn ? GGML_TYPE_F16 : GGML_TYPE_F32;
++}
++
++static int64_t llama_glm_dsa_kq_mask_nbytes(
++        ggml_type type,
++        int64_t   n_kv,
++        int64_t   n_batch,
++        int64_t   n_stream) {
++    return (int64_t) ggml_row_size(type, n_kv) * n_batch * n_stream;
++}
++
++static bool llama_glm_dsa_verification_batch_shape(
++        const llama_ubatch & ubatch,
++        int64_t             sparse_batch,
++        int64_t             sparse_streams) {
++    if (ubatch.pos == nullptr || ubatch.output == nullptr || ubatch.n_tokens <= 1 || sparse_batch <= 1 || sparse_streams <= 0) {
++        return false;
++    }
++    if (ubatch.n_tokens % sparse_streams != 0 || ubatch.pos[0] <= 0) {
++        return false;
++    }
++    for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
++        if (!ubatch.output[i]) {
++            return false;
++        }
++    }
++    return true;
++}
++
++static bool skippy_glm_dsa_direct_sparse_decision_log_enabled() {
++    return skippy_env_enabled("SKIPPY_GLM_DSA_LOG_DIRECT_SPARSE_DECISIONS");
++}
++
++static bool skippy_glm_dsa_compact_flash_policy_log_enabled() {
++    return skippy_env_enabled("SKIPPY_GLM_DSA_LOG_COMPACT_FLASH_POLICY") ||
++           skippy_glm_dsa_direct_sparse_decision_log_enabled();
++}
++
++static bool skippy_glm_dsa_moe_weighted_sum_enabled() {
++    return skippy_env_enabled("SKIPPY_GLM_DSA_ENABLE_MOE_WEIGHTED_SUM");
++}
++
++static bool skippy_glm_dsa_native_moe_down_enabled() {
++    return skippy_env_enabled("GGML_GLM_DSA_EXPERIMENTAL_NATIVE_MOE_DOWN");
++}
++
++static bool skippy_glm_dsa_q3_down_weighted_parallel_enabled() {
++    return skippy_env_enabled("SKIPPY_GLM_DSA_EXPERIMENTAL_Q3_DOWN_WEIGHTED_PARALLEL");
++}
++
++static bool skippy_glm_dsa_q3_down_weighted_parallel_default_enabled() {
++    if (skippy_env_enabled("GGML_GLM_DSA_DISABLE_Q3_DOWN_WEIGHTED_PARALLEL_DEFAULT") ||
++            skippy_env_enabled("SKIPPY_GLM_DSA_DISABLE_Q3_DOWN_WEIGHTED_PARALLEL_DEFAULT")) {
++        return false;
++    }
++    if (skippy_env_enabled("GGML_GLM_DSA_ENABLE_Q3_DOWN_WEIGHTED_PARALLEL_DEFAULT") ||
++            skippy_env_enabled("SKIPPY_GLM_DSA_ENABLE_Q3_DOWN_WEIGHTED_PARALLEL_DEFAULT")) {
++        return true;
++    }
++    return false;
++}
++
++static bool skippy_glm_dsa_q2_down_weighted_slots_enabled() {
++    return skippy_env_enabled("SKIPPY_GLM_DSA_EXPERIMENTAL_Q2_DOWN_WEIGHTED_SLOTS");
++}
++
++static bool skippy_glm_dsa_q2_down_f16_act_enabled() {
++    return skippy_env_enabled("GGML_METAL_EXPERIMENTAL_Q2_DOWN_F16_ACT") ||
++           skippy_env_enabled("SKIPPY_GLM_DSA_EXPERIMENTAL_Q2_DOWN_F16_ACT");
++}
++
++static bool skippy_glm_dsa_q2_gate_up_prequant_q8_enabled() {
++    return skippy_env_enabled("GGML_METAL_EXPERIMENTAL_Q2_GATE_UP_PREQUANT_Q8");
++}
++
++static bool skippy_glm_dsa_log_moe_down_weighted_slots_decision() {
++    return skippy_env_enabled("SKIPPY_GLM_DSA_LOG_MOE_DOWN_WEIGHTED_SLOTS_DECISION");
++}
++
++static bool skippy_glm_dsa_moe_route_weights_enabled() {
++    if (skippy_env_disabled("SKIPPY_GLM_DSA_ENABLE_MOE_ROUTE_WEIGHTS") ||
++        skippy_env_enabled("SKIPPY_GLM_DSA_DISABLE_MOE_ROUTE_WEIGHTS")) {
++        return false;
++    }
++
++    return true;
++}
++
++static bool skippy_glm_dsa_moe_top_k_enabled() {
++    if (skippy_env_disabled("SKIPPY_GLM_DSA_ENABLE_MOE_TOP_K") ||
++        skippy_env_enabled("SKIPPY_GLM_DSA_DISABLE_MOE_TOP_K")) {
++        return false;
++    }
++
++    return skippy_env_enabled("SKIPPY_GLM_DSA_ENABLE_MOE_TOP_K");
++}
++
++static ggml_tensor * llama_glm_dsa_top_k_for_sparse_attn(ggml_context * ctx, ggml_tensor * top_k) {
++    GGML_ASSERT(top_k != nullptr && "GLM-DSA sparse attention requires top-k indices");
++    GGML_ASSERT(top_k->type == GGML_TYPE_I32 && "GLM-DSA top-k indices must be I32");
++    GGML_ASSERT(top_k->ne[0] > 0 && "GLM-DSA top-k must have at least one selected key");
++    GGML_ASSERT(top_k->ne[1] > 0 && "GLM-DSA top-k must have at least one batch row");
++    GGML_ASSERT(top_k->ne[2] == 1 && "GLM-DSA runtime top-k layout must be [n_top_k, n_batch, 1, n_stream]");
++    GGML_ASSERT(top_k->ne[3] > 0 && "GLM-DSA top-k must have at least one stream");
++
++    // Lower-level sparse ops consume [n_top_k, n_batch, n_top_stream, 1].
++    return ggml_view_4d(
++            ctx,
++            top_k,
++            top_k->ne[0], top_k->ne[1], top_k->ne[3], 1,
++            top_k->nb[1], top_k->nb[3], top_k->nb[2],
++            0);
++}
++
++enum class llama_glm_dsa_sparse_attn_route {
++    DENSE_MASK,
++    DIRECT_SPARSE,
++    COMPACT_FLASH,
++};
++
++static bool llama_glm_dsa_backend_supports_native_sparse(int backend_device_type) {
++    switch (backend_device_type) {
++        case GGML_BACKEND_DEVICE_TYPE_GPU:
++        case GGML_BACKEND_DEVICE_TYPE_IGPU:
++        case GGML_BACKEND_DEVICE_TYPE_ACCEL:
++            return true;
++        case GGML_BACKEND_DEVICE_TYPE_CPU:
++        case GGML_BACKEND_DEVICE_TYPE_META:
++            return false;
++    }
++
++    return false;
++}
++
++static bool llama_glm_dsa_backend_supports_compact_flash(int backend_device_type) {
++    switch (backend_device_type) {
++        case GGML_BACKEND_DEVICE_TYPE_CPU:
++        case GGML_BACKEND_DEVICE_TYPE_GPU:
++        case GGML_BACKEND_DEVICE_TYPE_IGPU:
++        case GGML_BACKEND_DEVICE_TYPE_ACCEL:
++            return true;
++        case GGML_BACKEND_DEVICE_TYPE_META:
++            return false;
++    }
++
++    return false;
++}
++
++static bool llama_glm_dsa_layer_backend_supports_native_sparse(
++        const std::vector<int> & layer_backend_device_types,
++        int il) {
++    if (il < 0 || (size_t) il >= layer_backend_device_types.size()) {
++        return false;
++    }
++
++    return llama_glm_dsa_backend_supports_native_sparse(layer_backend_device_types[il]);
++}
++
++static bool llama_glm_dsa_layer_backend_supports_compact_flash(
++        const std::vector<int> & layer_backend_device_types,
++        int il) {
++    if (il < 0 || (size_t) il >= layer_backend_device_types.size()) {
++        return false;
++    }
++
++    return llama_glm_dsa_backend_supports_compact_flash(layer_backend_device_types[il]);
++}
++
++static bool llama_glm_dsa_all_layer_backends_support_native_sparse(
++        const std::vector<int> & layer_backend_device_types) {
++    if (layer_backend_device_types.empty()) {
++        return false;
++    }
++
++    for (int backend_device_type : layer_backend_device_types) {
++        if (!llama_glm_dsa_backend_supports_native_sparse(backend_device_type)) {
++            return false;
++        }
++    }
++
++    return true;
++}
++
++static bool llama_glm_dsa_all_layer_backends_support_compact_flash(
++        const std::vector<int> & layer_backend_device_types) {
++    if (layer_backend_device_types.empty()) {
++        return false;
++    }
++
++    for (int backend_device_type : layer_backend_device_types) {
++        if (!llama_glm_dsa_backend_supports_compact_flash(backend_device_type)) {
++            return false;
++        }
++    }
++
++    return true;
++}
++
++struct llama_glm_dsa_sparse_attn_policy {
++    llama_glm_dsa_sparse_attn_route route = llama_glm_dsa_sparse_attn_route::DENSE_MASK;
++    const char * phase = "other";
++    const char * direct_selector_reason = "unknown";
++    const char * compact_selector_reason = "unknown";
++    bool direct_enabled = false;
++    bool prefill_enabled = false;
++    bool decode_shape = false;
++    bool verify_shape = false;
++    bool verify_token_shape_allowed = false;
++    bool prefill_observed = false;
++    bool prefill_shape = false;
++    bool large_prefill_shape = false;
++    bool token_shape_allowed = false;
++    bool kq_b_ok = false;
++    bool sinks_ok = false;
++    bool alibi_ok = false;
++    bool soft_cap_ok = false;
++    bool compact_disabled = false;
++    bool compact_large_decode_top_k = false;
++    bool compact_mask_omitted = false;
++    bool compact_kv_ok = false;
++    bool compact_candidate = false;
++    bool backend_sparse_supported = false;
++    bool backend_compact_supported = false;
++    bool flash_attn = false;
++    int64_t direct_sparse_decode_max_top_k = 0;
++    int64_t compact_flash_min_kv = 0;
++
++    bool use_direct_sparse_attn() const {
++        return route == llama_glm_dsa_sparse_attn_route::DIRECT_SPARSE;
++    }
++
++    bool use_compact_flash_attn() const {
++        return route == llama_glm_dsa_sparse_attn_route::COMPACT_FLASH;
++    }
++};
++
++static constexpr int64_t LLAMA_GLM_DSA_DIRECT_SPARSE_DECODE_DEFAULT_MAX_TOP_K = 256;
++
++static int64_t skippy_glm_dsa_direct_sparse_decode_max_top_k() {
++    const char * value = getenv("SKIPPY_GLM_DSA_DIRECT_SPARSE_DECODE_MAX_TOP_K");
++    if (value == nullptr || value[0] == '\0') {
++        const skippy_graph_filter & filter = skippy_graph_get_filter();
++        if (filter.glm_dsa_policy_profile != 0 && filter.glm_dsa_direct_sparse_decode_max_top_k > 0) {
++            return filter.glm_dsa_direct_sparse_decode_max_top_k;
++        }
++        return LLAMA_GLM_DSA_DIRECT_SPARSE_DECODE_DEFAULT_MAX_TOP_K;
++    }
++
++    const int64_t parsed = atoll(value);
++    return parsed <= 0 ? INT64_MAX : parsed;
++}
++
++static llama_glm_dsa_sparse_attn_policy llama_glm_dsa_choose_sparse_attn_policy(
++        int64_t sparse_batch,
++        int64_t sparse_streams,
++        int64_t sparse_kv,
++        int64_t sparse_top_k,
++        int64_t ubatch_tokens,
++        bool    verification_batch,
++        int64_t prefill_cap,
++        int64_t dense_mask_bytes,
++        int64_t dense_mask_limit,
++        bool    direct_sparse_enabled,
++        bool    direct_sparse_prefill_enabled,
++        bool    unproven_large_direct_sparse_prefill_enabled,
++        bool    flash_attn,
++        bool    backend_sparse_supported,
++        bool    backend_compact_supported,
++        bool    compact_flash_disabled,
++        bool    compact_mask_omitted,
++        bool    kq_b_ok,
++        bool    sinks_ok,
++        bool    alibi_ok,
++        bool    soft_cap_ok) {
++    llama_glm_dsa_sparse_attn_policy policy;
++    policy.direct_enabled = direct_sparse_enabled;
++    policy.prefill_enabled = direct_sparse_prefill_enabled;
++    policy.kq_b_ok = kq_b_ok;
++    policy.sinks_ok = sinks_ok;
++    policy.alibi_ok = alibi_ok;
++    policy.soft_cap_ok = soft_cap_ok;
++    policy.compact_disabled = compact_flash_disabled;
++    policy.compact_mask_omitted = compact_mask_omitted;
++    policy.backend_sparse_supported = backend_sparse_supported;
++    policy.backend_compact_supported = backend_compact_supported;
++    policy.flash_attn = flash_attn;
++    policy.direct_sparse_decode_max_top_k = skippy_glm_dsa_direct_sparse_decode_max_top_k();
++    policy.compact_flash_min_kv = skippy_glm_dsa_compact_flash_min_kv();
++
++    const int32_t phase_hint = skippy_graph_get_filter().glm_dsa_phase_hint;
++    const bool phase_hint_auto = phase_hint == SKIPPY_GLM_DSA_PHASE_HINT_AUTO;
++    const bool phase_hint_prefill = phase_hint == SKIPPY_GLM_DSA_PHASE_HINT_PREFILL;
++    const bool phase_hint_decode = phase_hint == SKIPPY_GLM_DSA_PHASE_HINT_DECODE;
++    const bool phase_hint_verify = phase_hint == SKIPPY_GLM_DSA_PHASE_HINT_VERIFY;
++
++    policy.decode_shape =
++            (phase_hint_auto || phase_hint_decode) &&
++            sparse_streams > 0 &&
++            sparse_batch == 1 &&
++            ubatch_tokens == sparse_streams;
++    policy.verify_shape =
++            phase_hint_verify ||
++            (phase_hint_auto && verification_batch);
++    policy.prefill_observed =
++            phase_hint_prefill ||
++            (!policy.decode_shape && !policy.verify_shape && sparse_batch > 1);
++    policy.verify_token_shape_allowed =
++            policy.verify_shape &&
++            direct_sparse_prefill_enabled &&
++            sparse_batch <= prefill_cap;
++    policy.prefill_shape =
++            policy.prefill_observed &&
++            direct_sparse_prefill_enabled &&
++            sparse_batch <= prefill_cap;
++    policy.large_prefill_shape =
++            policy.prefill_observed &&
++            direct_sparse_prefill_enabled &&
++            unproven_large_direct_sparse_prefill_enabled &&
++            sparse_batch > prefill_cap &&
++            dense_mask_bytes > dense_mask_limit;
++    policy.token_shape_allowed =
++            policy.decode_shape ||
++            policy.verify_token_shape_allowed ||
++            policy.prefill_shape ||
++            policy.large_prefill_shape;
++    policy.phase =
++            policy.decode_shape ? "decode" :
++            policy.verify_shape ? "verify" :
++            policy.prefill_observed ? "prefill" :
++            "other";
++
++    policy.compact_large_decode_top_k =
++            policy.decode_shape &&
++            sparse_top_k > policy.direct_sparse_decode_max_top_k;
++    policy.compact_kv_ok = sparse_kv >= policy.compact_flash_min_kv;
++    policy.compact_candidate =
++            !compact_flash_disabled &&
++            policy.decode_shape &&
++            policy.compact_kv_ok &&
++            (policy.compact_large_decode_top_k || compact_mask_omitted);
++    const bool compact_ready =
++            policy.compact_candidate &&
++            backend_compact_supported &&
++            flash_attn &&
++            kq_b_ok &&
++            sinks_ok &&
++            alibi_ok &&
++            soft_cap_ok;
++    if (compact_ready) {
++        policy.route = llama_glm_dsa_sparse_attn_route::COMPACT_FLASH;
++        policy.direct_selector_reason = "compact_flash_selected";
++        policy.compact_selector_reason =
++                compact_mask_omitted ? "decode_compact_mask_omitted" :
++                "decode_compact_large_top_k";
++        return policy;
++    }
++
++    const bool direct_ready =
++            direct_sparse_enabled &&
++            backend_sparse_supported &&
++            policy.token_shape_allowed &&
++            !policy.compact_large_decode_top_k &&
++            !compact_mask_omitted &&
++            kq_b_ok &&
++            sinks_ok &&
++            alibi_ok &&
++            soft_cap_ok;
++    if (direct_ready) {
++        policy.route = llama_glm_dsa_sparse_attn_route::DIRECT_SPARSE;
++        policy.direct_selector_reason =
++                policy.decode_shape ? "decode" :
++                policy.verify_shape ? "verify" :
++                policy.prefill_shape ? "short_prefill" :
++                policy.large_prefill_shape ? "dense_mask_guard_large_prefill" :
++                "unknown";
++    } else {
++        policy.direct_selector_reason =
++                !direct_sparse_enabled ? "direct_sparse_disabled" :
++                !backend_sparse_supported ? "backend_sparse_unsupported" :
++                policy.verify_shape && !direct_sparse_prefill_enabled ? "verify_sparse_disabled" :
++                policy.verify_shape && sparse_batch > prefill_cap ? "verify_batch_over_cap" :
++                policy.prefill_observed && !direct_sparse_prefill_enabled ? "prefill_sparse_disabled" :
++                policy.prefill_observed && sparse_batch > prefill_cap ? "prefill_batch_over_cap" :
++                !policy.token_shape_allowed ? "token_shape_not_allowed" :
++                policy.compact_large_decode_top_k ? "direct_sparse_top_k_too_large" :
++                compact_mask_omitted ? "mla_kq_mask_omitted" :
++                !kq_b_ok ? "kq_b_present" :
++                !sinks_ok ? "sinks_present" :
++                !alibi_ok ? "alibi_present" :
++                !soft_cap_ok ? "soft_cap_present" :
++                "unknown";
++    }
++
++    policy.compact_selector_reason =
++            compact_flash_disabled ? "disabled" :
++            !backend_compact_supported ? "backend_compact_unsupported" :
++            !flash_attn ? "flash_attn_disabled" :
++            !policy.decode_shape ? "not_decode" :
++            !policy.compact_kv_ok ? "kv_below_min" :
++            !policy.compact_large_decode_top_k && !compact_mask_omitted ? "small_decode_top_k" :
++            !kq_b_ok ? "kq_b_present" :
++            !sinks_ok ? "sinks_present" :
++            !alibi_ok ? "alibi_present" :
++            !soft_cap_ok ? "soft_cap_present" :
++            "unknown";
++
++    return policy;
++}
++
++static bool llama_glm_dsa_can_skip_mla_kq_mask_for_compact_decode(
++        const llama_hparams & hparams,
++        const llama_cparams & cparams,
++        const llama_ubatch  & ubatch,
++        const llama_kv_cache_context * mctx_mla,
++        bool backend_compact_supported,
++        bool eligible) {
++    if (!eligible || mctx_mla == nullptr) {
++        return false;
++    }
++
++    const int64_t n_stream = cparams.kv_unified ? 1 : ubatch.n_seqs_unq;
++    if (n_stream <= 0 || ubatch.n_tokens % n_stream != 0) {
++        return false;
++    }
++
++    const int64_t n_batch  = ubatch.n_tokens / n_stream;
++    const int64_t n_kv     = mctx_mla->get_n_kv();
++    const int64_t top_k    = std::min<int64_t>(n_kv, hparams.indexer_top_k);
++    const int64_t nbytes   = llama_glm_dsa_kq_mask_nbytes(
++            llama_glm_dsa_mla_kq_mask_type(cparams),
++            n_kv,
++            n_batch,
++            n_stream);
++
++    const llama_glm_dsa_sparse_attn_policy policy = llama_glm_dsa_choose_sparse_attn_policy(
++            n_batch,
++            n_stream,
++            n_kv,
++            top_k,
++            ubatch.n_tokens,
++            false,
++            skippy_glm_dsa_direct_sparse_prefill_max_tokens(),
++            nbytes,
++            skippy_glm_dsa_dense_sparse_mask_max_bytes(),
++            skippy_glm_dsa_direct_sparse_attn_enabled(),
++            skippy_glm_dsa_direct_sparse_prefill_enabled(),
++            skippy_glm_dsa_unproven_large_direct_sparse_prefill_enabled(),
++            cparams.flash_attn,
++            false,
++            backend_compact_supported,
++            skippy_glm_dsa_compact_flash_attn_disabled(),
++            false,
++            true,
++            true,
++            hparams.f_max_alibi_bias == 0.0f,
++            !hparams.attn_soft_cap);
++
++    return policy.use_compact_flash_attn();
++}
++
++static uint64_t llama_glm_dsa_sparse_attn_route_signature(
++        const llama_hparams & hparams,
++        const llama_cparams & cparams,
++        const llama_ubatch  & ubatch,
++        const llama_kv_cache_context * mctx_mla,
++        int64_t n_kv_used,
++        const std::vector<int> & layer_backend_device_types,
++        bool compact_decode_mla_mask_omitted,
++        bool eligible) {
++    if (!eligible || mctx_mla == nullptr) {
++        return 0;
++    }
++
++    const int64_t n_stream = cparams.kv_unified ? 1 : ubatch.n_seqs_unq;
++    if (n_stream <= 0 || ubatch.n_tokens % n_stream != 0) {
++        return 0;
++    }
++
++    const int64_t n_batch = ubatch.n_tokens / n_stream;
++    const int64_t n_kv    = mctx_mla->get_n_kv();
++    const skippy_activation_glm_dsa_top_k & sideband = skippy_graph_get_glm_dsa_top_k();
++    const int64_t top_k = sideband.values != nullptr ?
++            sideband.n_top_k :
++            std::min<int64_t>(n_kv_used, hparams.indexer_top_k);
++    const int64_t nbytes = llama_glm_dsa_kq_mask_nbytes(
++            llama_glm_dsa_mla_kq_mask_type(cparams),
++            n_kv,
++            n_batch,
++            n_stream);
++
++    uint64_t signature = 17;
++    signature = signature*31 + (uint64_t) n_batch;
++    signature = signature*31 + (uint64_t) n_stream;
++    signature = signature*31 + (uint64_t) n_kv;
++    signature = signature*31 + (uint64_t) top_k;
++    signature = signature*31 + (compact_decode_mla_mask_omitted ? 1 : 0);
++
++    for (size_t il = 0; il < layer_backend_device_types.size(); ++il) {
++        const llama_glm_dsa_sparse_attn_policy policy = llama_glm_dsa_choose_sparse_attn_policy(
++                n_batch,
++                n_stream,
++                n_kv,
++                top_k,
++                ubatch.n_tokens,
++                llama_glm_dsa_verification_batch_shape(ubatch, n_batch, n_stream),
++                skippy_glm_dsa_direct_sparse_prefill_max_tokens(),
++                nbytes,
++                skippy_glm_dsa_dense_sparse_mask_max_bytes(),
++                skippy_glm_dsa_direct_sparse_attn_enabled(),
++                skippy_glm_dsa_direct_sparse_prefill_enabled(),
++                skippy_glm_dsa_unproven_large_direct_sparse_prefill_enabled(),
++                cparams.flash_attn,
++                llama_glm_dsa_layer_backend_supports_native_sparse(layer_backend_device_types, (int) il),
++                llama_glm_dsa_layer_backend_supports_compact_flash(layer_backend_device_types, (int) il),
++                skippy_glm_dsa_compact_flash_attn_disabled(),
++                compact_decode_mla_mask_omitted,
++                true,
++                true,
++                hparams.f_max_alibi_bias == 0.0f,
++                !hparams.attn_soft_cap);
++        signature = signature*31 + (uint64_t) static_cast<int>(policy.route);
++    }
++
++    return signature;
++}
++
++static bool llama_glm_dsa_can_view_compact_v_from_k(
++        const ggml_tensor * k,
++        const ggml_tensor * v,
++        const ggml_tensor * k_top_k,
++        bool                v_trans) {
++    if (v_trans || k == nullptr || v == nullptr || k_top_k == nullptr) {
++        return false;
++    }
++
++    if (k->type != GGML_TYPE_F16 || v->type != GGML_TYPE_F16 || k_top_k->type != GGML_TYPE_F16) {
++        return false;
++    }
++
++    if (v->ne[0] <= 0 || v->ne[0] > k->ne[0]) {
++        return false;
++    }
++
++    if (k_top_k->ne[0] != k->ne[0] || k_top_k->ne[2] != k->ne[2] || k_top_k->ne[3] != k->ne[3]) {
++        return false;
++    }
++
++    for (int i = 1; i < GGML_MAX_DIMS; ++i) {
++        if (v->ne[i] != k->ne[i]) {
++            return false;
++        }
++    }
++
++    for (int i = 0; i < GGML_MAX_DIMS; ++i) {
++        if (v->nb[i] != k->nb[i]) {
++            return false;
++        }
++    }
++
++    return true;
++}
++
++static void skippy_glm_dsa_log_direct_sparse_decision(
++        int     layer,
++        int64_t ubatch_tokens,
++        int64_t sparse_batch,
++        int64_t sparse_streams,
++        int64_t sparse_kv,
++        int64_t sparse_top_k,
++        int64_t prefill_cap,
++        int64_t decode_max_top_k,
++        int64_t dense_mask_bytes,
++        int64_t dense_mask_limit,
++        bool    direct_enabled,
++        bool    prefill_enabled,
++        bool    decode_shape,
++        bool    verify_shape,
++        bool    prefill_shape,
++        bool    large_prefill_shape,
++        bool    token_shape_allowed,
++        bool    backend_sparse_supported,
++        bool    kq_b_ok,
++        bool    sinks_ok,
++        bool    alibi_ok,
++        bool    soft_cap_ok,
++        bool    use_direct,
++        const char * phase,
++        const char * selector_reason) {
++    if (!skippy_glm_dsa_direct_sparse_decision_log_enabled()) {
++        return;
++    }
++
++    const int64_t kv_topk_ratio = sparse_top_k > 0 ? sparse_kv / sparse_top_k : 0;
++
++    LLAMA_LOG_INFO(
++            "skippy: glm_dsa_direct_sparse_decision layer=%d ubatch_tokens=%lld sparse_batch=%lld sparse_streams=%lld prefill_cap=%lld decode_max_top_k=%lld sparse_kv=%lld sparse_top_k=%lld min_kv_topk_ratio=%lld kv_topk_ratio=%lld dense_mask_bytes=%lld dense_mask_limit=%lld phase=%s selector_reason=%s direct_enabled=%d prefill_enabled=%d decode_shape=%d verify_shape=%d prefill_shape=%d large_prefill_shape=%d token_shape_allowed=%d backend_sparse_supported=%d kq_b_ok=%d sinks_ok=%d alibi_ok=%d soft_cap_ok=%d use_direct=%d\n",
++            layer,
++            (long long) ubatch_tokens,
++            (long long) sparse_batch,
++            (long long) sparse_streams,
++            (long long) prefill_cap,
++            (long long) decode_max_top_k,
++            (long long) sparse_kv,
++            (long long) sparse_top_k,
++            0LL,
++            (long long) kv_topk_ratio,
++            (long long) dense_mask_bytes,
++            (long long) dense_mask_limit,
++            phase,
++            selector_reason,
++            direct_enabled ? 1 : 0,
++            prefill_enabled ? 1 : 0,
++            decode_shape ? 1 : 0,
++            verify_shape ? 1 : 0,
++            prefill_shape ? 1 : 0,
++            large_prefill_shape ? 1 : 0,
++            token_shape_allowed ? 1 : 0,
++            backend_sparse_supported ? 1 : 0,
++            kq_b_ok ? 1 : 0,
++            sinks_ok ? 1 : 0,
++            alibi_ok ? 1 : 0,
++            soft_cap_ok ? 1 : 0,
++            use_direct ? 1 : 0);
++}
++
++static void skippy_glm_dsa_log_compact_flash_policy(
++        int     layer,
++        int64_t ubatch_tokens,
++        int64_t visible_kv,
++        int64_t top_k,
++        int64_t decode_max_top_k,
++        int64_t compact_min_kv,
++        bool    disabled,
++        bool    large_decode_top_k,
++        bool    kv_ok,
++        bool    enabled,
++        bool    backend_compact_supported,
++        bool    flash_attn,
++        bool    decode_shape,
++        bool    no_mask,
++        bool    kq_b_ok,
++        bool    sinks_ok,
++        bool    alibi_ok,
++        bool    soft_cap_ok,
++        bool    use_compact,
++        const char * selector_reason) {
++    if (!skippy_glm_dsa_compact_flash_policy_log_enabled()) {
++        return;
++    }
++
++    LLAMA_LOG_INFO(
++            "skippy: glm_dsa_compact_flash_policy layer=%d ubatch_tokens=%lld visible_kv=%lld top_k=%lld decode_max_top_k=%lld compact_min_kv=%lld kv_topk_ratio=%lld forced=%d disabled=%d large_decode_top_k=%d kv_ok=%d enabled=%d backend_compact_supported=%d flash_attn=%d phase=%s decode_shape=%d kq_b_ok=%d sinks_ok=%d alibi_ok=%d soft_cap_ok=%d no_mask=%d use_compact=%d selector_reason=%s\n",
++            layer,
++            (long long) ubatch_tokens,
++            (long long) visible_kv,
++            (long long) top_k,
++            (long long) decode_max_top_k,
++            (long long) compact_min_kv,
++            top_k > 0 ? (long long) (visible_kv/top_k) : 0LL,
++            0,
++            disabled ? 1 : 0,
++            large_decode_top_k ? 1 : 0,
++            kv_ok ? 1 : 0,
++            enabled ? 1 : 0,
++            backend_compact_supported ? 1 : 0,
++            flash_attn ? 1 : 0,
++            decode_shape ? "decode" : "other",
++            decode_shape ? 1 : 0,
++            kq_b_ok ? 1 : 0,
++            sinks_ok ? 1 : 0,
++            alibi_ok ? 1 : 0,
++            soft_cap_ok ? 1 : 0,
++            no_mask ? 1 : 0,
++            use_compact ? 1 : 0,
++            selector_reason);
++}
++
++static void skippy_glm_dsa_log_compact_flash_mask(
++        int     layer,
++        bool    omitted_mla_kq_mask,
++        int64_t visible_kv,
++        int64_t ubatch_tokens,
++        int64_t streams,
++        int64_t max_top_k) {
++    if (!skippy_glm_dsa_compact_flash_policy_log_enabled()) {
++        return;
++    }
++
++    LLAMA_LOG_INFO(
++            "skippy: glm_dsa_compact_flash_mask layer=%d omitted_mla_kq_mask=%d visible_kv=%lld ubatch_tokens=%lld streams=%lld max_top_k=%lld\n",
++            layer,
++            omitted_mla_kq_mask ? 1 : 0,
++            (long long) visible_kv,
++            (long long) ubatch_tokens,
++            (long long) streams,
++            (long long) max_top_k);
++}
++
++static void skippy_glm_dsa_log_all_kv_flash(
++        int     layer,
++        int64_t visible_kv,
++        int64_t top_k,
++        bool    v_trans) {
++    if (!skippy_glm_dsa_compact_flash_policy_log_enabled()) {
++        return;
++    }
++
++    LLAMA_LOG_INFO(
++            "skippy: glm_dsa_all_kv_flash layer=%d visible_kv=%lld top_k=%lld v_trans=%d reason=top_k_covers_visible_kv\n",
++            layer,
++            (long long) visible_kv,
++            (long long) top_k,
++            v_trans ? 1 : 0);
++}
+ 
+ void skippy_graph_set_filter(const skippy_graph_filter & filter) {
+     g_skippy_graph_filter = filter;
+@@ -74,6 +912,18 @@ const skippy_activation_gemma3n_altup & skippy_graph_get_gemma3n_altup() {
+     return g_skippy_gemma3n_altup;
+ }
+ 
++void skippy_graph_set_glm_dsa_top_k(const skippy_activation_glm_dsa_top_k & values) {
++    g_skippy_glm_dsa_top_k = values;
++}
++
++void skippy_graph_clear_glm_dsa_top_k() {
++    g_skippy_glm_dsa_top_k = {};
++}
++
++const skippy_activation_glm_dsa_top_k & skippy_graph_get_glm_dsa_top_k() {
++    return g_skippy_glm_dsa_top_k;
++}
++
+ // dedup helpers
+ 
+ static ggml_tensor * build_attn_inp_kq_mask(
+@@ -213,6 +1063,54 @@ bool llm_graph_input_gemma3n_altup::can_reuse(const llm_graph_params & params) {
+     return values && values->ne[0] == n_embd && values->ne[1] == params.ubatch.n_tokens && values->ne[2] == n_altup;
+ }
+ 
++void llm_graph_input_glm_dsa_top_k::set_input(const llama_ubatch * ubatch) {
++    const skippy_activation_glm_dsa_top_k & sideband = skippy_graph_get_glm_dsa_top_k();
++    GGML_ASSERT(sideband.values != nullptr);
++    GGML_ASSERT(sideband.token_count >= ubatch->n_tokens);
++    GGML_ASSERT(sideband.n_top_k == n_top_k);
++    GGML_ASSERT(sideband.n_stream == n_stream);
++    GGML_ASSERT(n_stream > 0);
++    GGML_ASSERT(((int64_t) ubatch->n_tokens % n_stream) == 0);
++    GGML_ASSERT(values != nullptr);
++    GGML_ASSERT(values->type == GGML_TYPE_I32);
++    GGML_ASSERT(values->ne[0] == n_top_k);
++    GGML_ASSERT(values->ne[1] == (int64_t) ubatch->n_tokens / n_stream);
++    GGML_ASSERT(values->ne[2] == 1);
++    GGML_ASSERT(values->ne[3] == n_stream);
++
++    size_t token_offset = 0;
++    if (sideband.token_count != ubatch->n_tokens &&
++            ubatch->pos != nullptr && ubatch->pos[0] >= sideband.pos_start) {
++        token_offset = static_cast<size_t>(ubatch->pos[0] - sideband.pos_start);
++    }
++    GGML_ASSERT(token_offset <= sideband.token_count);
++    GGML_ASSERT(token_offset + ubatch->n_tokens <= sideband.token_count);
++
++    const int32_t * values_src = sideband.values + token_offset*n_top_k;
++    ggml_backend_tensor_set(values, values_src, 0, ubatch->n_tokens*n_top_k*ggml_element_size(values));
++}
++
++bool llm_graph_input_glm_dsa_top_k::can_reuse(const llm_graph_params & params) {
++    const auto * mctx = static_cast<const llama_kv_cache_dsa_context *>(params.mctx);
++    const int64_t params_n_stream = params.cparams.kv_unified ? 1 : params.ubatch.n_seqs_unq;
++    if (mctx == nullptr || params_n_stream <= 0) {
++        return false;
++    }
++
++    const skippy_activation_glm_dsa_top_k & sideband = skippy_graph_get_glm_dsa_top_k();
++    const int64_t params_n_top_k = sideband.values != nullptr ?
++            sideband.n_top_k :
++            std::min<int64_t>(
++                mctx->get_lid()->get_n_kv(),
++                params.hparams.indexer_top_k);
++
++    return values &&
++           values->ne[0] == params_n_top_k &&
++           values->ne[1] == params.ubatch.n_tokens/params_n_stream &&
++           values->ne[2] == 1 &&
++           values->ne[3] == params_n_stream;
++}
++
+ void llm_graph_input_pos::set_input(const llama_ubatch * ubatch) {
+     if (ubatch->pos && pos) {
+         const int64_t n_tokens = ubatch->n_tokens;
+@@ -611,15 +1509,25 @@ bool llm_graph_input_attn_k::can_reuse(const llm_graph_params & params) {
+ }
+ 
+ void llm_graph_input_attn_k_dsa::set_input(const llama_ubatch * ubatch) {
+-    mctx->get_mla()->set_input_k_idxs(self_k_idxs_mla, ubatch);
++    if (self_k_idxs_mla && self_k_idxs_mla->buffer) {
++        mctx->get_mla()->set_input_k_idxs(self_k_idxs_mla, ubatch);
++    }
+ 
+-    mctx->get_mla()->set_input_kq_mask(self_kq_mask_mla, ubatch, cparams.causal_attn);
++    if (self_kq_mask_mla && self_kq_mask_mla->buffer) {
++        mctx->get_mla()->set_input_kq_mask(self_kq_mask_mla, ubatch, cparams.causal_attn);
++    }
+ 
+-    mctx->get_lid()->set_input_k_idxs(self_k_idxs_lid, ubatch);
++    if (self_k_idxs_lid && self_k_idxs_lid->buffer) {
++        mctx->get_lid()->set_input_k_idxs(self_k_idxs_lid, ubatch);
++    }
+ 
+-    mctx->get_lid()->set_input_kq_mask(self_kq_mask_lid, ubatch, cparams.causal_attn);
++    if (self_kq_mask_lid && self_kq_mask_lid->buffer) {
++        mctx->get_lid()->set_input_kq_mask(self_kq_mask_lid, ubatch, cparams.causal_attn);
++    }
+ 
+-    mctx->get_lid()->set_input_k_rot(self_k_rot_lid);
++    if (self_k_rot_lid && self_k_rot_lid->buffer) {
++        mctx->get_lid()->set_input_k_rot(self_k_rot_lid);
++    }
+ }
+ 
+ bool llm_graph_input_attn_k_dsa::can_reuse(const llm_graph_params & params) {
+@@ -628,12 +1536,38 @@ bool llm_graph_input_attn_k_dsa::can_reuse(const llm_graph_params & params) {
+     this->mctx = mctx;
+ 
+     bool res = true;
++    const bool skip_mla_mask = llama_glm_dsa_can_skip_mla_kq_mask_for_compact_decode(
++            hparams,
++            params.cparams,
++            params.ubatch,
++            mctx->get_mla(),
++            llama_glm_dsa_all_layer_backends_support_compact_flash(params.layer_backend_device_types),
++            glm_dsa_compact_decode_mask_eligible);
+ 
+-    res &= self_k_idxs_mla->ne[0] == params.ubatch.n_tokens;
+-    res &= self_k_idxs_lid->ne[0] == params.ubatch.n_tokens;
++    res &= compact_decode_mla_mask_omitted == skip_mla_mask;
++    res &= glm_dsa_sparse_attn_route_signature == llama_glm_dsa_sparse_attn_route_signature(
++            hparams,
++            params.cparams,
++            params.ubatch,
++            mctx->get_mla(),
++            mctx->get_lid()->get_n_kv_used(),
++            params.layer_backend_device_types,
++            skip_mla_mask,
++            glm_dsa_compact_decode_mask_eligible);
+ 
+-    res &= can_reuse_kq_mask(self_kq_mask_mla, mctx->get_mla(), params.ubatch, params.cparams);
+-    res &= can_reuse_kq_mask(self_kq_mask_lid, mctx->get_lid(), params.ubatch, params.cparams);
++    if (self_k_idxs_mla && self_k_idxs_mla->buffer) {
++        res &= self_k_idxs_mla->ne[0] == params.ubatch.n_tokens;
++    }
++    if (self_k_idxs_lid && self_k_idxs_lid->buffer) {
++        res &= self_k_idxs_lid->ne[0] == params.ubatch.n_tokens;
++    }
++
++    if (self_kq_mask_mla && self_kq_mask_mla->buffer) {
++        res &= can_reuse_kq_mask(self_kq_mask_mla, mctx->get_mla(), params.ubatch, params.cparams);
++    }
++    if (self_kq_mask_lid && self_kq_mask_lid->buffer) {
++        res &= can_reuse_kq_mask(self_kq_mask_lid, mctx->get_lid(), params.ubatch, params.cparams);
++    }
+ 
+     return res;
+ }
+@@ -1316,6 +2250,7 @@ void llm_graph_result::reset() {
+     t_h_nextn     = nullptr;
+     t_skippy_rwkv7_v_first = nullptr;
+     t_skippy_gemma3n_altup = nullptr;
++    t_skippy_glm_dsa_top_k = nullptr;
+ 
+     t_layer_inp.resize(LLAMA_MAX_LAYERS);
+     std::fill(t_layer_inp.begin(), t_layer_inp.end(), nullptr);
+@@ -1368,6 +2303,9 @@ void llm_graph_result::set_outputs(const llm_graph_params & params) {
+     if (t_skippy_gemma3n_altup != nullptr) {
+         ggml_set_output(t_skippy_gemma3n_altup);
+     }
++    if (t_skippy_glm_dsa_top_k != nullptr) {
++        ggml_set_output(t_skippy_glm_dsa_top_k);
++    }
+     {
+         const auto & embeddings_layer_inp = params.cparams.embeddings_layer_inp;
+         for (size_t il = 0; il < embeddings_layer_inp.size(); ++il) {
+@@ -1479,6 +2417,7 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
+     n_ctx_orig       (cparams.n_ctx_orig_yarn),
+     pooling_type     (cparams.pooling_type),
+     rope_type        (hparams.rope_type),
++    layer_backend_device_types(params.layer_backend_device_types),
+     sched            (params.sched),
+     backend_cpu      (params.backend_cpu),
+     cvec             (params.cvec),
+@@ -1924,6 +2863,71 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+     );
+ }
+ 
++struct llm_routed_moe_decode_motif {
++    const char * family = "generic";
++    bool matched = false;
++    bool exact_glm_dsa_q3_decode = false;
++    bool weighted_down_input_compatible = false;
++};
++
++static llm_routed_moe_decode_motif llm_match_routed_moe_decode_motif(
++             llm_arch   arch,
++          ggml_tensor * cur,
++          ggml_tensor * weights,
++          ggml_tensor * down_exps,
++          ggml_tensor * down_exps_b,
++          ggml_tensor * down_exps_s,
++              int64_t   n_embd,
++              int64_t   n_expert_used,
++              int64_t   n_tokens,
++                 bool   weight_before_ffn) {
++    llm_routed_moe_decode_motif motif;
++
++    if (arch == LLM_ARCH_GLM_DSA) {
++        motif.family = "glm_dsa";
++    }
++
++    const bool has_route_weights =
++        weights != nullptr &&
++        weights->type == GGML_TYPE_F32 &&
++        weights->ne[0] == 1 &&
++        weights->ne[1] == n_expert_used &&
++        weights->ne[2] == n_tokens;
++
++    const bool has_selected_act =
++        cur != nullptr &&
++        cur->type == GGML_TYPE_F32 &&
++        cur->ne[1] == n_expert_used &&
++        cur->ne[2] == n_tokens;
++
++    motif.matched =
++        !weight_before_ffn &&
++        n_tokens == 1 &&
++        n_expert_used > 1 &&
++        has_route_weights &&
++        has_selected_act &&
++        down_exps != nullptr &&
++        down_exps_b == nullptr &&
++        down_exps_s == nullptr;
++
++    if (!motif.matched) {
++        return motif;
++    }
++
++    motif.weighted_down_input_compatible =
++        down_exps->type == GGML_TYPE_Q3_K ||
++        down_exps->type == GGML_TYPE_Q2_K;
++
++    motif.exact_glm_dsa_q3_decode =
++        arch == LLM_ARCH_GLM_DSA &&
++        down_exps->type == GGML_TYPE_Q3_K &&
++        n_expert_used == 8 &&
++        n_embd == 6144 &&
++        cur->ne[0] == 2048;
++
++    return motif;
++}
++
+ ggml_tensor * llm_graph_context::build_moe_ffn(
+          ggml_tensor * cur,
+          ggml_tensor * gate_inp,
+@@ -2040,8 +3044,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+     // select experts
+     ggml_tensor * selected_experts = selected_experts_in;
+     if (selected_experts == nullptr) {
+-        selected_experts = ggml_argsort_top_k(ctx0, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
+-        cb(selected_experts->src[0], "ffn_moe_argsort", il);
++        const bool use_moe_top_k =
++                arch == LLM_ARCH_GLM_DSA &&
++                skippy_glm_dsa_moe_top_k_enabled();
++        selected_experts = use_moe_top_k
++                ? ggml_top_k(ctx0, selection_probs, n_expert_used)
++                : ggml_argsort_top_k(ctx0, selection_probs, n_expert_used);
++        if (!use_moe_top_k) {
++            cb(selected_experts->src[0], "ffn_moe_argsort", il);
++        }
+     }
+     cb(selected_experts, "ffn_moe_topk", il);
+ 
+@@ -2054,35 +3065,46 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+         probs = ggml_reshape_3d(ctx0, probs, 1, n_expert, n_tokens);
+     }
+ 
+-    ggml_tensor * weights = ggml_get_rows(ctx0, probs, selected_experts); // [1, n_expert_used, n_tokens]
+-    cb(weights, "ffn_moe_weights", il);
++    const bool use_moe_route_weights =
++            arch == LLM_ARCH_GLM_DSA &&
++            skippy_glm_dsa_moe_route_weights_enabled() &&
++            gating_op != LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT;
+ 
++    ggml_tensor * weights = nullptr;
++    if (use_moe_route_weights) {
++        const float route_scale = w_scale != 0.0f ? w_scale : 1.0f;
++        weights = ggml_moe_route_weights(ctx0, probs, selected_experts, norm_w, 6.103515625e-5, route_scale);
++        cb(weights, "ffn_moe_route_weights", il);
++    } else {
++        weights = ggml_get_rows(ctx0, probs, selected_experts); // [1, n_expert_used, n_tokens]
++        cb(weights, "ffn_moe_weights", il);
++
++        if (gating_op == LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT) {
++            weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
++            weights = ggml_soft_max(ctx0, weights); // [n_expert_used, n_tokens]
++            weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
++            cb(weights, "ffn_moe_weights_softmax", il);
++        }
+ 
+-    if (gating_op == LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT) {
+-        weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
+-        weights = ggml_soft_max(ctx0, weights); // [n_expert_used, n_tokens]
+-        weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
+-        cb(weights, "ffn_moe_weights_softmax", il);
+-    }
+-
+-    if (norm_w) {
+-        weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
++        if (norm_w) {
++            weights = ggml_reshape_2d(ctx0, weights, n_expert_used, n_tokens);
+ 
+-        ggml_tensor * weights_sum = ggml_sum_rows(ctx0, weights); // [1, n_tokens]
+-        cb(weights_sum, "ffn_moe_weights_sum", il);
++            ggml_tensor * weights_sum = ggml_sum_rows(ctx0, weights); // [1, n_tokens]
++            cb(weights_sum, "ffn_moe_weights_sum", il);
+ 
+-        // Avoid division by zero, clamp to smallest number representable by F16
+-        weights_sum = ggml_clamp(ctx0, weights_sum, 6.103515625e-5, INFINITY);
+-        cb(weights_sum, "ffn_moe_weights_sum_clamped", il);
++            // Avoid division by zero, clamp to smallest number representable by F16
++            weights_sum = ggml_clamp(ctx0, weights_sum, 6.103515625e-5, INFINITY);
++            cb(weights_sum, "ffn_moe_weights_sum_clamped", il);
+ 
+-        weights = ggml_div(ctx0, weights, weights_sum); // [n_expert_used, n_tokens]
+-        cb(weights, "ffn_moe_weights_norm", il);
++            weights = ggml_div(ctx0, weights, weights_sum); // [n_expert_used, n_tokens]
++            cb(weights, "ffn_moe_weights_norm", il);
+ 
+-        weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
+-    }
+-    if (w_scale != 0.0f && w_scale != 1.0f) {
+-        weights = ggml_scale(ctx0, weights, w_scale);
+-        cb(weights, "ffn_moe_weights_scaled", il);
++            weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
++        }
++        if (w_scale != 0.0f && w_scale != 1.0f) {
++            weights = ggml_scale(ctx0, weights, w_scale);
++            cb(weights, "ffn_moe_weights_scaled", il);
++        }
+     }
+ 
+     //call early so that topk-moe can be used
+@@ -2090,6 +3112,22 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+ 
+     cur = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
+ 
++    ggml_tensor * gate_up_q8 = nullptr;
++    if (arch == LLM_ARCH_GLM_DSA &&
++            skippy_glm_dsa_q2_gate_up_prequant_q8_enabled() &&
++            gate_up_exps == nullptr &&
++            gate_exps != nullptr &&
++            up_exps != nullptr &&
++            gate_exps_s == nullptr &&
++            up_exps_s == nullptr &&
++            gate_exps->type == GGML_TYPE_Q2_K &&
++            up_exps->type == GGML_TYPE_Q2_K &&
++            cur->type == GGML_TYPE_F32 &&
++            n_tokens == 1) {
++        gate_up_q8 = ggml_cast(ctx0, cur, GGML_TYPE_Q8_0);
++        cb(gate_up_q8, "ffn_moe_gate_up_q8", il);
++    }
++
+     if (weight_before_ffn) {
+         // repeat cur to [n_embd, n_expert_used, n_tokens]
+         ggml_tensor * repeated = ggml_repeat_4d(ctx0, cur, n_embd, n_expert_used, n_tokens, 1);
+@@ -2122,6 +3160,9 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+     } else {
+         // separate gate and up path
+         up = build_lora_mm_id(up_exps, cur, selected_experts, up_exps_s); // [n_ff, n_expert_used, n_tokens]
++        if (gate_up_q8 != nullptr && up->op == GGML_OP_MUL_MAT_ID) {
++            up->src[3] = gate_up_q8;
++        }
+         cb(up, "ffn_moe_up", il);
+ 
+         if (up_exps_s) {
+@@ -2135,6 +3176,9 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+ 
+         if (gate_exps) {
+             cur = build_lora_mm_id(gate_exps, cur, selected_experts, gate_exps_s); // [n_ff, n_expert_used, n_tokens]
++            if (gate_up_q8 != nullptr && cur->op == GGML_OP_MUL_MAT_ID) {
++                cur->src[3] = gate_up_q8;
++            }
+             cb(cur, "ffn_moe_gate", il);
+         } else {
+             cur = up;
+@@ -2223,7 +3267,94 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+             GGML_ABORT("fatal error");
+     }
+ 
++    const llm_routed_moe_decode_motif routed_moe_decode_motif =
++        llm_match_routed_moe_decode_motif(
++            arch,
++            cur,
++            weights,
++            down_exps,
++            down_exps_b,
++            down_exps_s,
++            n_embd,
++            n_expert_used,
++            n_tokens,
++            weight_before_ffn);
++
++    const bool glm_dsa_q3_decode_weighted_down_default =
++        routed_moe_decode_motif.exact_glm_dsa_q3_decode &&
++        skippy_glm_dsa_q3_down_weighted_parallel_default_enabled();
++
++    const bool use_down_weighted_slots =
++        routed_moe_decode_motif.weighted_down_input_compatible &&
++        arch == LLM_ARCH_GLM_DSA &&
++        (glm_dsa_q3_decode_weighted_down_default ||
++         skippy_glm_dsa_q3_down_weighted_parallel_enabled() ||
++         (skippy_glm_dsa_q2_down_weighted_slots_enabled() && down_exps->type == GGML_TYPE_Q2_K)) &&
++        routed_moe_decode_motif.matched;
++
++    if (arch == LLM_ARCH_GLM_DSA &&
++            skippy_glm_dsa_q3_down_weighted_parallel_enabled() &&
++            skippy_glm_dsa_log_moe_down_weighted_slots_decision()) {
++        fprintf(stderr,
++            "skippy: glm_dsa_moe_down_weighted_slots_decision layer=%d use=%d down_type=%s has_down_bias=%d has_down_scale=%d weights_type=%s weights_shape=[%lld,%lld,%lld] cur_type=%s cur_shape=[%lld,%lld,%lld] n_expert_used=%lld n_tokens=%lld\n",
++            il,
++            use_down_weighted_slots ? 1 : 0,
++            ggml_type_name(down_exps->type),
++            down_exps_b != nullptr ? 1 : 0,
++            down_exps_s != nullptr ? 1 : 0,
++            ggml_type_name(weights->type),
++            (long long) weights->ne[0],
++            (long long) weights->ne[1],
++            (long long) weights->ne[2],
++            ggml_type_name(cur->type),
++            (long long) cur->ne[0],
++            (long long) cur->ne[1],
++            (long long) cur->ne[2],
++            (long long) n_expert_used,
++            (long long) n_tokens);
++    }
++
++    if (use_down_weighted_slots) {
++        cur = ggml_mul(ctx0, cur, weights);
++        cb(cur, "ffn_moe_down_weighted_input", il);
++    }
++
++    const bool use_q2_down_f16_act =
++        routed_moe_decode_motif.matched &&
++        arch == LLM_ARCH_GLM_DSA &&
++        down_exps->type == GGML_TYPE_Q2_K &&
++        !use_down_weighted_slots &&
++        skippy_glm_dsa_q2_down_f16_act_enabled();
++
++    if (use_q2_down_f16_act) {
++        cur = ggml_cast(ctx0, cur, GGML_TYPE_F16);
++        cb(cur, "ffn_moe_swiglu_f16", il);
++    }
++
++    const bool use_native_moe_down =
++        skippy_glm_dsa_native_moe_down_enabled() &&
++        arch == LLM_ARCH_GLM_DSA &&
++        n_tokens == 1 &&
++        !weight_before_ffn &&
++        !use_down_weighted_slots &&
++        down_exps_b == nullptr &&
++        down_exps_s == nullptr &&
++        loras->empty() &&
++        (down_exps->type == GGML_TYPE_Q2_K || down_exps->type == GGML_TYPE_Q3_K) &&
++        (cur->type == GGML_TYPE_F32 || cur->type == GGML_TYPE_F16) &&
++        weights->type == GGML_TYPE_F32;
++
++    if (use_native_moe_down) {
++        ggml_tensor * moe_out = ggml_moe_mul_mat_id(ctx0, down_exps, cur, selected_experts, weights);
++        cb(moe_out, "ffn_moe_out", il);
++        ggml_build_forward_expand(gf, moe_out);
++        return moe_out;
++    }
++
+     experts = build_lora_mm_id(down_exps, cur, selected_experts, down_exps_s); // [n_embd, n_expert_used, n_tokens]
++    if (use_down_weighted_slots && experts->op == GGML_OP_MUL_MAT_ID) {
++        experts->op_params[0] = 1;
++    }
+     cb(experts, "ffn_moe_down", il);
+ 
+     if (down_exps_s) {
+@@ -2235,6 +3366,29 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+         cb(experts, "ffn_moe_down_biased", il);
+     }
+ 
++    const bool use_moe_weighted_sum =
++        !weight_before_ffn &&
++        (arch == LLM_ARCH_GLM_DSA || skippy_glm_dsa_moe_weighted_sum_enabled()) &&
++        n_expert_used == hparams.n_expert_used &&
++        n_expert_used > 1 &&
++        weights->type == GGML_TYPE_F32 &&
++        experts->type == GGML_TYPE_F32 &&
++        weights->ne[0] == 1 &&
++        weights->ne[1] == n_expert_used &&
++        weights->ne[2] == n_tokens &&
++        experts->ne[0] == n_embd &&
++        experts->ne[1] == n_expert_used &&
++        experts->ne[2] == n_tokens;
++
++    if (use_moe_weighted_sum) {
++        ggml_tensor * moe_out = ggml_moe_weighted_sum(ctx0, experts, weights);
++        if (use_down_weighted_slots) {
++            moe_out->op_params[0] = 1;
++        }
++        ggml_build_forward_expand(gf, moe_out);
++        cb(moe_out, "ffn_moe_out", il);
++        return moe_out;
++    }
+     if (!weight_before_ffn) {
+         experts = ggml_mul(ctx0, experts, weights);
+         cb(experts, "ffn_moe_weighted", il);
+@@ -2653,6 +3807,170 @@ ggml_tensor * llm_graph_context::build_attn_mha(
+     return cur;
+ }
+ 
++ggml_tensor * llm_graph_context::build_attn_mha_dsa_sparse(
++         ggml_tensor * q,
++         ggml_tensor * k,
++         ggml_tensor * v,
++         ggml_tensor * kq_mask_rows,
++         ggml_tensor * top_k,
++         ggml_tensor * v_mla,
++               float   kq_scale,
++                 int   il) const {
++    const bool v_trans = v->nb[1] > v->nb[2];
++
++    const auto n_stream = k->ne[3];
++
++    q = ggml_view_4d(ctx0, q, q->ne[0], q->ne[1], q->ne[2]/n_stream, n_stream, q->nb[1], q->nb[2], q->nb[3]/n_stream, 0);
++
++    q = ggml_permute(ctx0, q, 0, 2, 1, 3);
++    k = ggml_permute(ctx0, k, 0, 2, 1, 3);
++    v = ggml_permute(ctx0, v, 0, 2, 1, 3);
++
++    GGML_UNUSED(v_trans);
++
++    ggml_tensor * cur = ggml_dsa_sparse_attn(ctx0, q, k, v, kq_mask_rows, top_k, kq_scale);
++    cb(cur, "dsa_sparse_attn", il);
++
++    if (v_mla) {
++        cur = ggml_mul_mat(ctx0, v_mla, cur);
++        cb(cur, "kqv_mla", il);
++    }
++
++    cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
++    cur = ggml_cont_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
++
++    ggml_build_forward_expand(gf, cur);
++
++    return cur;
++}
++
++ggml_tensor * llm_graph_context::build_attn_mha_dsa_compact_flash(
++         ggml_tensor * q,
++         ggml_tensor * k,
++         ggml_tensor * v,
++         ggml_tensor * top_k,
++         ggml_tensor * v_mla,
++               float   kq_scale,
++                 int   il) const {
++    const bool v_trans = v->nb[1] > v->nb[2];
++
++    const auto n_stream = k->ne[3];
++
++    q = ggml_view_4d(ctx0, q, q->ne[0], q->ne[1], q->ne[2]/n_stream, n_stream, q->nb[1], q->nb[2], q->nb[3]/n_stream, 0);
++
++    q = ggml_permute(ctx0, q, 0, 2, 1, 3);
++    k = ggml_permute(ctx0, k, 0, 2, 1, 3);
++    v = ggml_permute(ctx0, v, 0, 2, 1, 3);
++
++    if (v_trans) {
++        v = ggml_transpose(ctx0, v);
++    }
++
++    GGML_ASSERT(top_k->ne[1] == k->ne[2]);
++    GGML_ASSERT(top_k->ne[2] == k->ne[3]);
++    GGML_ASSERT(top_k->ne[1] == v->ne[2]);
++    GGML_ASSERT(top_k->ne[2] == v->ne[3]);
++
++    if (!skippy_glm_dsa_all_kv_flash_disabled() && top_k->ne[0] >= k->ne[1]) {
++        skippy_glm_dsa_log_all_kv_flash(il, k->ne[1], top_k->ne[0], v_trans);
++
++        ggml_tensor * cur = ggml_flash_attn_ext(
++                ctx0,
++                q,
++                k,
++                v,
++                nullptr,
++                kq_scale,
++                hparams.f_max_alibi_bias,
++                hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
++        cb(cur, "fattn", il);
++        ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
++
++        if (v_mla) {
++            cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
++            cur = ggml_mul_mat(ctx0, v_mla, cur);
++            cb(cur, "fattn_mla", il);
++            cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
++            cur = ggml_cont(ctx0, cur);
++        }
++
++        cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
++
++        ggml_build_forward_expand(gf, cur);
++
++        return cur;
++    }
++
++    if (!skippy_glm_dsa_top1_attn_disabled() && top_k->ne[0] == 1) {
++        ggml_tensor * cur = ggml_dsa_top1_attn(ctx0, q, v, top_k);
++        cb(cur, "dsa_top1_attn", il);
++
++        if (v_mla) {
++            cur = ggml_mul_mat(ctx0, v_mla, cur);
++            cb(cur, "fattn_mla", il);
++            cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
++            cur = ggml_cont(ctx0, cur);
++        }
++
++        cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
++
++        ggml_build_forward_expand(gf, cur);
++
++        return cur;
++    }
++
++    ggml_tensor * k_top_k = ggml_get_rows_typed(ctx0, k, top_k);
++    cb(k_top_k, "dsa_compact_k_topk_rows", il);
++    if (k_top_k->type == GGML_TYPE_F32) {
++        k_top_k = ggml_cast(ctx0, k_top_k, GGML_TYPE_F16);
++        cb(k_top_k, "dsa_compact_k_topk_rows_f16", il);
++    }
++
++    ggml_tensor * v_top_k = nullptr;
++    if (llama_glm_dsa_can_view_compact_v_from_k(k, v, k_top_k, v_trans)) {
++        v_top_k = ggml_view_4d(
++                ctx0,
++                k_top_k,
++                v->ne[0], k_top_k->ne[1], k_top_k->ne[2], k_top_k->ne[3],
++                k_top_k->nb[1], k_top_k->nb[2], k_top_k->nb[3],
++                0);
++        cb(v_top_k, "dsa_compact_v_topk_view", il);
++    } else {
++        v_top_k = ggml_get_rows_typed(ctx0, v, top_k);
++        cb(v_top_k, "dsa_compact_v_topk_rows", il);
++        if (v_top_k->type == GGML_TYPE_F32) {
++            v_top_k = ggml_cast(ctx0, v_top_k, GGML_TYPE_F16);
++            cb(v_top_k, "dsa_compact_v_topk_rows_f16", il);
++        }
++    }
++
++    ggml_tensor * cur = ggml_flash_attn_ext(
++            ctx0,
++            q,
++            k_top_k,
++            v_top_k,
++            nullptr,
++            kq_scale,
++            hparams.f_max_alibi_bias,
++            hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
++    cb(cur, "fattn", il);
++    ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
++
++    if (v_mla) {
++        cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
++        cur = ggml_mul_mat(ctx0, v_mla, cur);
++        cb(cur, "fattn_mla", il);
++        cur = ggml_permute(ctx0, cur, 0, 2, 1, 3);
++        cur = ggml_cont(ctx0, cur);
++    }
++
++    cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
++
++    ggml_build_forward_expand(gf, cur);
++
++    return cur;
++}
++
+ llm_graph_input_attn_no_cache * llm_graph_context::build_attn_inp_no_cache() const {
+     auto inp = std::make_unique<llm_graph_input_attn_no_cache>(hparams, cparams);
+ 
+@@ -2955,52 +4273,219 @@ ggml_tensor * llm_graph_context::build_attn(
+         ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il));
+     }
+ 
+-    const auto & kq_mask = inp->get_kq_mask_mla();
++    ggml_tensor * top_k_3d = llama_glm_dsa_top_k_for_sparse_attn(ctx0, top_k);
++
++    const bool roofline_bypass_terminal = ubatch.n_tokens == 1 &&
++            skippy_env_enabled("LLAMA_GLM_DSA_ROOFLINE_BYPASS_ATTN_TERMINAL");
++    const bool roofline_bypass_value_tail = ubatch.n_tokens == 1 &&
++            skippy_env_enabled("LLAMA_GLM_DSA_ROOFLINE_BYPASS_ATTN_VALUE_TAIL");
++    const bool roofline_bypass_output = ubatch.n_tokens == 1 &&
++            skippy_env_enabled("LLAMA_GLM_DSA_ROOFLINE_BYPASS_ATTN_OUTPUT");
++    GGML_ASSERT(
++            (roofline_bypass_terminal ? 1 : 0) +
++            (roofline_bypass_value_tail ? 1 : 0) +
++            (roofline_bypass_output ? 1 : 0) <= 1);
++    const auto roofline_zero_output = [&](ggml_tensor * source, size_t token_stride, const char * name) {
++        GGML_ASSERT(ggml_nelements(source) >= hparams.n_embd*ubatch.n_tokens);
++        ggml_tensor * slice = ggml_view_2d(
++                ctx0, source, hparams.n_embd, ubatch.n_tokens, token_stride, 0);
++        ggml_tensor * result = ggml_scale(ctx0, slice, 0.0f);
++        cb(result, name, il);
++        return result;
++    };
++    const auto finish_attn_output = [&](ggml_tensor * cur) {
++        if (roofline_bypass_output) {
++            return roofline_zero_output(cur, cur->nb[1], "attn_output_roofline_zero");
++        }
++        if (wo) {
++            cur = build_lora_mm(wo, cur, wo_s);
++        }
++        if (wo_b) {
++            cur = ggml_add(ctx0, cur, wo_b);
++        }
++        return cur;
++    };
++    const auto finish_attn_value_tail = [&](ggml_tensor * cur) {
++        if (roofline_bypass_value_tail) {
++            return roofline_zero_output(cur, cur->nb[1], "attn_value_tail_roofline_zero");
++        }
++        return finish_attn_output(cur);
++    };
+ 
+-    GGML_ASSERT(top_k != nullptr);
++    if (roofline_bypass_terminal) {
++        ggml_build_forward_expand(gf, top_k_3d);
++        return roofline_zero_output(q_cur, q_cur->nb[2], "attn_terminal_roofline_zero");
++    }
+ 
+-    // prepare new kq mask - starts filled with -INFINITY
+-    ggml_tensor * kq_mask_all = ggml_fill(ctx0, kq_mask, -INFINITY);
++    ggml_tensor * q = q_cur;
++    ggml_tensor * k = mctx_cur->get_k(ctx0, il);
++    ggml_tensor * v = ggml_view_4d(ctx0, k, v_cur->ne[0], k->ne[1], k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], 0);
++    ggml_tensor * value_projection = roofline_bypass_value_tail ? nullptr : v_mla;
+ 
+-    // reshape KQ mask into tensor with rows of size 1:
+-    // [n_kv, n_batch, 1, n_stream] -> [1, n_kv, n_batch, n_stream]
+-    kq_mask_all = ggml_view_4d(ctx0, kq_mask_all, 1, kq_mask_all->ne[0], kq_mask_all->ne[1], kq_mask_all->ne[3], kq_mask_all->nb[0], kq_mask_all->nb[1], kq_mask_all->nb[2], 0);
++    ggml_tensor * kq_mask = inp->get_kq_mask_mla();
++    ggml_tensor * kq_mask_rows = nullptr;
++    const auto ensure_kq_mask_rows = [&]() -> ggml_tensor * {
++        if (kq_mask == nullptr) {
++            throw std::runtime_error("GLM_DSA compact decode omitted the MLA KQ mask but selected a mask-dependent attention route");
++        }
++        if (kq_mask_rows == nullptr) {
++            // reshape KQ mask into tensor with rows of size 1:
++            // [n_kv, n_batch, 1, n_stream] -> [1, n_kv, n_batch, n_stream]
++            kq_mask_rows = ggml_view_4d(
++                    ctx0, kq_mask,
++                    1, kq_mask->ne[0], kq_mask->ne[1], kq_mask->ne[3],
++                    kq_mask->nb[0], kq_mask->nb[1], kq_mask->nb[2], 0);
++        }
++        return kq_mask_rows;
++    };
+ 
+-    // reshape top_k indices: [n_top_k, n_batch, 1, n_stream] -> [n_top_k, n_batch, n_stream, 1]
+-    ggml_tensor * top_k_3d = ggml_view_4d(ctx0, top_k, top_k->ne[0], top_k->ne[1], top_k->ne[3], 1, top_k->nb[1], top_k->nb[2], top_k->ne[3]*top_k->nb[3], 0);
++    const int64_t n_direct_sparse_stream = cparams.kv_unified ? 1 : ubatch.n_seqs_unq;
++    const int64_t n_direct_sparse_batch = top_k_3d->ne[1];
++    const int64_t n_sparse_kv = mctx_cur->get_n_kv();
++    const int64_t n_sparse_top_k = top_k_3d->ne[0];
++    const int64_t dense_sparse_mask_bytes = llama_glm_dsa_kq_mask_nbytes(
++            llama_glm_dsa_mla_kq_mask_type(cparams),
++            n_sparse_kv,
++            n_direct_sparse_batch,
++            n_direct_sparse_stream);
++    const int64_t direct_sparse_prefill_max_tokens = skippy_glm_dsa_direct_sparse_prefill_max_tokens();
++    const int64_t dense_sparse_mask_limit = skippy_glm_dsa_dense_sparse_mask_max_bytes();
++    const bool direct_sparse_enabled = skippy_glm_dsa_direct_sparse_attn_enabled();
++    const bool direct_sparse_prefill_enabled = skippy_glm_dsa_direct_sparse_prefill_enabled();
++    const bool direct_sparse_kq_b_ok = kq_b == nullptr;
++    const bool direct_sparse_sinks_ok = sinks == nullptr;
++    const bool direct_sparse_alibi_ok = hparams.f_max_alibi_bias == 0.0f;
++    const bool direct_sparse_soft_cap_ok = !hparams.attn_soft_cap;
++    const bool backend_sparse_supported =
++            llama_glm_dsa_layer_backend_supports_native_sparse(layer_backend_device_types, il);
++    const bool backend_compact_supported =
++            llama_glm_dsa_layer_backend_supports_compact_flash(layer_backend_device_types, il);
++    const bool verification_batch = llama_glm_dsa_verification_batch_shape(
++            ubatch,
++            n_direct_sparse_batch,
++            n_direct_sparse_stream);
++    const llama_glm_dsa_sparse_attn_policy sparse_policy = llama_glm_dsa_choose_sparse_attn_policy(
++            n_direct_sparse_batch,
++            n_direct_sparse_stream,
++            n_sparse_kv,
++            n_sparse_top_k,
++            ubatch.n_tokens,
++            verification_batch,
++            direct_sparse_prefill_max_tokens,
++            dense_sparse_mask_bytes,
++            dense_sparse_mask_limit,
++            direct_sparse_enabled,
++            direct_sparse_prefill_enabled,
++            skippy_glm_dsa_unproven_large_direct_sparse_prefill_enabled(),
++            cparams.flash_attn,
++            backend_sparse_supported,
++            backend_compact_supported,
++            skippy_glm_dsa_compact_flash_attn_disabled(),
++            kq_mask == nullptr,
++            direct_sparse_kq_b_ok,
++            direct_sparse_sinks_ok,
++            direct_sparse_alibi_ok,
++            direct_sparse_soft_cap_ok);
++
++    skippy_glm_dsa_log_direct_sparse_decision(
++            il,
++            ubatch.n_tokens,
++            n_direct_sparse_batch,
++            n_direct_sparse_stream,
++            n_sparse_kv,
++            n_sparse_top_k,
++            direct_sparse_prefill_max_tokens,
++            sparse_policy.direct_sparse_decode_max_top_k,
++            dense_sparse_mask_bytes,
++            dense_sparse_mask_limit,
++            sparse_policy.direct_enabled,
++            sparse_policy.prefill_enabled,
++            sparse_policy.decode_shape,
++            sparse_policy.verify_shape,
++            sparse_policy.prefill_shape,
++            sparse_policy.large_prefill_shape,
++            sparse_policy.token_shape_allowed,
++            sparse_policy.backend_sparse_supported,
++            sparse_policy.kq_b_ok,
++            sparse_policy.sinks_ok,
++            sparse_policy.alibi_ok,
++            sparse_policy.soft_cap_ok,
++            sparse_policy.use_direct_sparse_attn(),
++            sparse_policy.phase,
++            sparse_policy.direct_selector_reason);
++
++    skippy_glm_dsa_log_compact_flash_policy(
++            il,
++            ubatch.n_tokens,
++            n_sparse_kv,
++            n_sparse_top_k,
++            sparse_policy.direct_sparse_decode_max_top_k,
++            sparse_policy.compact_flash_min_kv,
++            sparse_policy.compact_disabled,
++            sparse_policy.compact_large_decode_top_k,
++            sparse_policy.compact_kv_ok,
++            sparse_policy.compact_candidate,
++            sparse_policy.backend_compact_supported,
++            sparse_policy.flash_attn,
++            sparse_policy.decode_shape,
++            kq_mask == nullptr,
++            sparse_policy.kq_b_ok,
++            sparse_policy.sinks_ok,
++            sparse_policy.alibi_ok,
++            sparse_policy.soft_cap_ok,
++            sparse_policy.use_compact_flash_attn(),
++            sparse_policy.compact_selector_reason);
++
++    if (sparse_policy.use_compact_flash_attn()) {
++        skippy_glm_dsa_log_compact_flash_mask(
++                il,
++                kq_mask == nullptr,
++                n_sparse_kv,
++                ubatch.n_tokens,
++                n_direct_sparse_stream,
++                n_sparse_top_k);
++
++        ggml_tensor * cur = build_attn_mha_dsa_compact_flash(q, k, v, top_k_3d, value_projection, kq_scale, il);
++        cb(cur, "kqv_out", il);
++        return finish_attn_value_tail(cur);
++    }
++
++    if (sparse_policy.use_direct_sparse_attn()) {
++        ggml_tensor * cur = build_attn_mha_dsa_sparse(q, k, v, ensure_kq_mask_rows(), top_k_3d, value_projection, kq_scale, il);
++        cb(cur, "kqv_out", il);
++        return finish_attn_value_tail(cur);
++    }
++
++    ensure_kq_mask_rows();
++
++    ggml_tensor * kq_mask_top_k = nullptr;
++    if (skippy_glm_dsa_fused_sparse_mask_enabled()) {
++        kq_mask_top_k = ggml_dsa_sparse_mask(ctx0, kq_mask_rows, top_k_3d);
++        cb(kq_mask_top_k, "dsa_sparse_mask_topk", il);
++    } else {
++        // prepare new kq mask - starts filled with -INFINITY
++        ggml_tensor * kq_mask_all = ggml_fill(ctx0, kq_mask, -INFINITY);
++        cb(kq_mask_all, "dsa_sparse_mask_fill", il);
++
++        kq_mask_all = ggml_view_4d(
++                ctx0, kq_mask_all,
++                1, kq_mask_all->ne[0], kq_mask_all->ne[1], kq_mask_all->ne[3],
++                kq_mask_all->nb[0], kq_mask_all->nb[1], kq_mask_all->nb[2], 0);
+ 
+-    // prepare zero-filled tensor with rows of size 1: [1, n_top_k, n_batch, n_stream]
+-    // this will be our source of zero values for unmasking top k mask elements
+-    ggml_tensor * zeros = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, 1, top_k_3d->ne[0], top_k_3d->ne[1], top_k_3d->ne[2]);
+-    zeros = ggml_fill(ctx0, zeros, 0.0f);
++        ggml_tensor * kq_mask_top_k_values = ggml_get_rows(ctx0, kq_mask_rows, top_k_3d);
++        cb(kq_mask_top_k_values, "dsa_sparse_mask_topk", il);
+ 
+-    // modify KQ mask by unmasking elements that are in top_k indices
+-    // ggml_set_rows([1, n_kv, n_batch, n_stream], [1, n_top_k, n_batch, n_stream], [n_top_k, n_batch, n_stream, 1])
+-    ggml_tensor * kq_mask_top_k = ggml_set_rows(ctx0, kq_mask_all, zeros, top_k_3d);
++        kq_mask_top_k = ggml_set_rows(ctx0, kq_mask_all, kq_mask_top_k_values, top_k_3d);
++        cb(kq_mask_top_k, "dsa_sparse_mask_topk", il);
++    }
+ 
+     // reshape to restore the original shape of KQ mask:
+     // [1, n_kv, n_batch, n_stream] -> [n_kv, n_batch, 1, n_stream]
+     kq_mask_top_k = ggml_view_4d(ctx0, kq_mask_top_k, kq_mask_top_k->ne[1], kq_mask_top_k->ne[2], 1, kq_mask_top_k->ne[3], kq_mask_top_k->nb[2], kq_mask_top_k->nb[3], kq_mask_top_k->nb[3], 0);
+ 
+-    // combine with the original kq mask
+-    kq_mask_top_k = ggml_add(ctx0, kq_mask_top_k, kq_mask);
+-
+-    ggml_tensor * q = q_cur;
+-    ggml_tensor * k = mctx_cur->get_k(ctx0, il);
+-    ggml_tensor * v = ggml_view_4d(ctx0, k, v_cur->ne[0], k->ne[1], k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], 0);
+-
+-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask_top_k, sinks, v_mla, kq_scale, il);
++    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask_top_k, sinks, value_projection, kq_scale, il);
+     cb(cur, "kqv_out", il);
+-
+-    if (wo) {
+-        cur = build_lora_mm(wo, cur, wo_s);
+-    }
+-
+-    if (wo_b) {
+-        cur = ggml_add(ctx0, cur, wo_b);
+-    }
+-
+-    return cur;
++    return finish_attn_value_tail(cur);
+ }
+ 
+ ggml_tensor * llm_graph_context::build_attn(
+@@ -3153,12 +4638,38 @@ llm_graph_input_attn_k_dsa * llm_graph_context::build_attn_inp_k_dsa() const {
+     const auto * mctx_cur = static_cast<const llama_kv_cache_dsa_context *>(mctx);
+ 
+     auto inp = std::make_unique<llm_graph_input_attn_k_dsa>(hparams, cparams, mctx_cur);
++    inp->glm_dsa_compact_decode_mask_eligible = arch == LLM_ARCH_GLM_DSA;
++    inp->compact_decode_mla_mask_omitted = llama_glm_dsa_can_skip_mla_kq_mask_for_compact_decode(
++            hparams,
++            cparams,
++            ubatch,
++            mctx_cur->get_mla(),
++            llama_glm_dsa_all_layer_backends_support_compact_flash(layer_backend_device_types),
++            inp->glm_dsa_compact_decode_mask_eligible);
++    inp->glm_dsa_sparse_attn_route_signature = llama_glm_dsa_sparse_attn_route_signature(
++            hparams,
++            cparams,
++            ubatch,
++            mctx_cur->get_mla(),
++            mctx_cur->get_lid()->get_n_kv_used(),
++            layer_backend_device_types,
++            inp->compact_decode_mla_mask_omitted,
++            inp->glm_dsa_compact_decode_mask_eligible);
+ 
+     {
+         inp->self_k_idxs_mla = mctx_cur->get_mla()->build_input_k_idxs(ctx0, ubatch);
+ 
+-        inp->self_kq_mask_mla = build_attn_inp_kq_mask(ctx0, mctx_cur->get_mla(), ubatch, cparams);
+-        inp->self_kq_mask_mla_cnv = inp->self_kq_mask_mla;
++        if (!inp->compact_decode_mla_mask_omitted) {
++            inp->self_kq_mask_mla = build_attn_inp_kq_mask(ctx0, mctx_cur->get_mla(), ubatch, cparams);
++            inp->self_kq_mask_mla_cnv = inp->self_kq_mask_mla;
++        } else if (skippy_glm_dsa_compact_flash_policy_log_enabled()) {
++            LLAMA_LOG_INFO(
++                    "skippy: glm_dsa_compact_flash_mask layer=-1 omitted_mla_kq_mask=1 visible_kv=%u ubatch_tokens=%u streams=%u max_top_k=%u\n",
++                    mctx_cur->get_mla()->get_n_kv(),
++                    ubatch.n_tokens,
++                    cparams.kv_unified ? 1 : ubatch.n_seqs_unq,
++                    std::min<uint32_t>(mctx_cur->get_mla()->get_n_kv(), hparams.indexer_top_k));
++        }
+     }
+ 
+     {
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+index 08af6f7..60f16e3 100644
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -30,12 +30,26 @@ class llama_memory_recurrent_context;
+ class llama_memory_hybrid_context;
+ class llama_memory_hybrid_iswa_context;
+ 
++enum skippy_glm_dsa_phase_hint : int32_t {
++    SKIPPY_GLM_DSA_PHASE_HINT_AUTO = 0,
++    SKIPPY_GLM_DSA_PHASE_HINT_PREFILL = 1,
++    SKIPPY_GLM_DSA_PHASE_HINT_DECODE = 2,
++    SKIPPY_GLM_DSA_PHASE_HINT_VERIFY = 3,
++};
++
+ struct skippy_graph_filter {
+     bool enabled = false;
+     int32_t layer_start = 0;
+     int32_t layer_end = 0;
+     bool include_embeddings = false;
+     bool include_output = false;
++    int32_t glm_dsa_policy_profile = 0;
++    uint32_t glm_dsa_policy_flags = 0;
++    int32_t glm_dsa_short_prefill_max_tokens = 0;
++    int32_t glm_dsa_direct_sparse_decode_max_top_k = 0;
++    uint64_t glm_dsa_dense_sparse_mask_max_bytes = 0;
++    int32_t glm_dsa_compact_flash_min_kv = 0;
++    int32_t glm_dsa_phase_hint = SKIPPY_GLM_DSA_PHASE_HINT_AUTO;
+ };
+ 
+ struct skippy_activation_tokens {
+@@ -56,6 +70,14 @@ struct skippy_activation_gemma3n_altup {
+     uint32_t n_altup = 0;
+ };
+ 
++struct skippy_activation_glm_dsa_top_k {
++    const int32_t * values = nullptr;
++    uint32_t token_count = 0;
++    uint32_t n_top_k = 0;
++    uint32_t n_stream = 0; // runtime layout is I32 [n_top_k, n_batch, 1, n_stream]
++    llama_pos pos_start = 0;
++};
++
+ void skippy_graph_set_filter(const skippy_graph_filter & filter);
+ void skippy_graph_clear_filter();
+ const skippy_graph_filter & skippy_graph_get_filter();
+@@ -68,6 +90,9 @@ const skippy_activation_rwkv7_v_first & skippy_graph_get_rwkv7_v_first();
+ void skippy_graph_set_gemma3n_altup(const skippy_activation_gemma3n_altup & values);
+ void skippy_graph_clear_gemma3n_altup();
+ const skippy_activation_gemma3n_altup & skippy_graph_get_gemma3n_altup();
++void skippy_graph_set_glm_dsa_top_k(const skippy_activation_glm_dsa_top_k & values);
++void skippy_graph_clear_glm_dsa_top_k();
++const skippy_activation_glm_dsa_top_k & skippy_graph_get_glm_dsa_top_k();
+ 
+ // certain models (typically multi-modal) can produce different types of graphs
+ enum llm_graph_type {
+@@ -231,6 +256,22 @@ private:
+     int64_t n_altup;
+ };
+ 
++class llm_graph_input_glm_dsa_top_k : public llm_graph_input_i {
++public:
++    llm_graph_input_glm_dsa_top_k(int64_t n_top_k, int64_t n_stream) : n_top_k(n_top_k), n_stream(n_stream) {}
++    virtual ~llm_graph_input_glm_dsa_top_k() = default;
++
++    void set_input(const llama_ubatch * ubatch) override;
++
++    bool can_reuse(const llm_graph_params & params) override;
++
++    ggml_tensor * values = nullptr; // runtime layout: I32 [n_top_k, n_batch, 1, n_stream]
++
++private:
++    int64_t n_top_k;
++    int64_t n_stream;
++};
++
+ class llm_graph_input_pos : public llm_graph_input_i {
+ public:
+     llm_graph_input_pos(uint32_t n_pos_per_embd) : n_pos_per_embd(n_pos_per_embd) {}
+@@ -498,6 +539,10 @@ public:
+ 
+     ggml_tensor * self_k_rot_lid = nullptr;
+ 
++    bool glm_dsa_compact_decode_mask_eligible = false;
++    bool compact_decode_mla_mask_omitted = false;
++    uint64_t glm_dsa_sparse_attn_route_signature = 0;
++
+     const llama_hparams hparams;
+     const llama_cparams cparams;
+ 
+@@ -758,6 +803,9 @@ struct llm_graph_params {
+     llama_ubatch ubatch; // note: intentionally make a copy
+ 
+     llm_graph_type gtype;
++    int32_t skippy_glm_dsa_phase_hint;
++
++    std::vector<int> layer_backend_device_types;
+ 
+     ggml_backend_sched_t sched;
+     ggml_backend_t backend_cpu;
+@@ -858,6 +906,8 @@ struct llm_graph_params {
+             cparams.causal_attn             == other.cparams.causal_attn             &&
+             arch  == other.arch  &&
+             gtype == other.gtype &&
++            skippy_glm_dsa_phase_hint == other.skippy_glm_dsa_phase_hint &&
++            layer_backend_device_types == other.layer_backend_device_types &&
+             cvec  == other.cvec  &&
+             loras == other.loras &&
+             cross == other.cross;
+@@ -883,6 +933,7 @@ public:
+     ggml_tensor * get_h_nextn()     const { return t_h_nextn; }
+     ggml_tensor * get_skippy_rwkv7_v_first() const { return t_skippy_rwkv7_v_first; }
+     ggml_tensor * get_skippy_gemma3n_altup() const { return t_skippy_gemma3n_altup; }
++    ggml_tensor * get_skippy_glm_dsa_top_k() const { return t_skippy_glm_dsa_top_k; }
+ 
+     ggml_tensor * get_layer_inp(int il) const { return t_layer_inp[il]; }
+ 
+@@ -920,6 +971,7 @@ public:
+     ggml_tensor * t_h_nextn     = nullptr; // [n_embd, n_outputs] hidden state before final output norm
+     ggml_tensor * t_skippy_rwkv7_v_first = nullptr;
+     ggml_tensor * t_skippy_gemma3n_altup = nullptr;
++    ggml_tensor * t_skippy_glm_dsa_top_k = nullptr;
+ 
+     std::vector<ggml_tensor *> t_layer_inp;
+ 
+@@ -1002,6 +1054,8 @@ struct llm_graph_context {
+     const enum llama_pooling_type pooling_type;
+     const enum llama_rope_type    rope_type;
+ 
++    const std::vector<int> & layer_backend_device_types;
++
+     ggml_backend_sched_t sched;
+ 
+     ggml_backend_t backend_cpu; // TODO: needed by build_attn_mha, figure out a way to remove?
+@@ -1159,6 +1213,25 @@ struct llm_graph_context {
+                   float   kq_scale,
+                     int   il) const;
+ 
++    ggml_tensor * build_attn_mha_dsa_sparse(
++            ggml_tensor * q,
++            ggml_tensor * k,
++            ggml_tensor * v,
++            ggml_tensor * kq_mask_rows,
++            ggml_tensor * top_k,
++            ggml_tensor * v_mla,
++                  float   kq_scale,
++                    int   il) const;
++
++    ggml_tensor * build_attn_mha_dsa_compact_flash(
++            ggml_tensor * q,
++            ggml_tensor * k,
++            ggml_tensor * v,
++            ggml_tensor * top_k,
++            ggml_tensor * v_mla,
++                  float   kq_scale,
++                    int   il) const;
++
+     llm_graph_input_attn_no_cache * build_attn_inp_no_cache() const;
+ 
+     ggml_tensor * build_attn(
+@@ -1220,7 +1293,7 @@ struct llm_graph_context {
+             ggml_tensor * kq_b,
+             ggml_tensor * sinks, // [n_head_q]
+             ggml_tensor * v_mla, // [n_embd_head_v_mla, n_embd_head_v, n_head_v]
+-            ggml_tensor * top_k, // [n_indexer_top_k, n_tokens]
++            ggml_tensor * top_k, // runtime layout: I32 [n_top_k, n_batch, 1, n_stream]
+                   float   kq_scale,
+                     int   il) const;
+ 
+diff --git a/src/llama-hparams.h b/src/llama-hparams.h
+index 8be5f28..92626b4 100644
+--- a/src/llama-hparams.h
++++ b/src/llama-hparams.h
+@@ -226,6 +226,10 @@ struct llama_hparams {
+     uint32_t indexer_n_head    = 0;
+     uint32_t indexer_head_size = 0;
+     uint32_t indexer_top_k     = 0;
++    uint32_t indexer_top_k_freq = 0;
++    uint32_t indexer_skip_top_k_offset = 0;
++    bool     indexer_types_present = false;
++    std::array<int32_t, LLAMA_MAX_LAYERS> indexer_types; // -1 unknown, 0 shared, 1 full
+ 
+     // DeepSeek-V4
+     uint32_t dsv4_o_group_count        = 0;
+diff --git a/src/llama-kv-cache-dsa.cpp b/src/llama-kv-cache-dsa.cpp
+index 241c503..6f428d2 100644
+--- a/src/llama-kv-cache-dsa.cpp
++++ b/src/llama-kv-cache-dsa.cpp
+@@ -6,6 +6,7 @@
+ 
+ #include <algorithm>
+ #include <cassert>
++#include <stdexcept>
+ 
+ //
+ // llama_kv_cache_dsa
+@@ -25,12 +26,32 @@ llama_kv_cache_dsa::llama_kv_cache_dsa(
+            llama_swa_type   swa_type,
+     const layer_filter_cb & filter,
+     const  layer_reuse_cb & reuse) :
+-    hparams_lid(model.hparams), n_stream(unified ? 1 : n_seq_max) {
++    hparams_mla(model.hparams),
++    hparams_lid(model.hparams),
++    n_stream(unified ? 1 : n_seq_max) {
+ 
+     LLAMA_LOG_INFO("%s: creating main KV cache, size = %u cells\n", __func__, kv_size);
+ 
++    if (model.arch == LLM_ARCH_GLM_DSA) {
++        const uint32_t n_embd_head_k_cache = model.hparams.n_lora_kv + model.hparams.n_rot();
++        if (n_embd_head_k_cache == 0) {
++            throw std::runtime_error("GLM_DSA MLA KV cache key width must be positive");
++        }
++
++        // GLM-DSA stores compressed MLA keys as one KV head:
++        // [kv_lora_rank + rope_dim, 1, n_tokens].
++        std::fill(hparams_mla.n_head_kv_arr.begin(), hparams_mla.n_head_kv_arr.end(), 1);
++        hparams_mla.n_embd_head_k_full = n_embd_head_k_cache;
++        LLAMA_LOG_INFO(
++                "%s: GLM_DSA MLA KV cache key width = %u (kv_lora_rank = %u, rope_dim = %u)\n",
++                __func__,
++                n_embd_head_k_cache,
++                model.hparams.n_lora_kv,
++                model.hparams.n_rot());
++    }
++
+     kv_mla = std::make_unique<llama_kv_cache>(
+-            model, model.hparams, type_k, type_v,
++            model, hparams_mla, type_k, type_v,
+             v_trans, offload, unified, kv_size, n_seq_max, n_pad,
+             n_swa, swa_type, nullptr, filter, reuse, nullptr);
+ 
+diff --git a/src/llama-kv-cache-dsa.h b/src/llama-kv-cache-dsa.h
+index e2b3309..2e40ec2 100644
+--- a/src/llama-kv-cache-dsa.h
++++ b/src/llama-kv-cache-dsa.h
+@@ -72,7 +72,8 @@ public:
+     llama_kv_cache * get_lid() const;
+ 
+ private:
+-    // we keep indexer KV cache hparams instance here as llama_kv_cache stores only reference to it
++    // we keep cache hparams instances here as llama_kv_cache stores only references to them
++    llama_hparams hparams_mla;
+     llama_hparams hparams_lid;
+     const uint32_t n_stream  = 1;
+ 
+diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
+index 43e9492..e2415a8 100644
+--- a/src/llama-kv-cache.cpp
++++ b/src/llama-kv-cache.cpp
+@@ -321,8 +321,10 @@ llama_kv_cache::llama_kv_cache(
+             ggml_is_quantized(type_k) &&
+             hparams.n_embd_head_k() % 64 == 0;
+ 
+-        // always create Hadamard rotation tensors for DeepSeek V3.2 DSA lightning indexer
+-        if (model.arch == LLM_ARCH_DEEPSEEK32 && hparams.n_embd_head_k_full == hparams.indexer_head_size) {
++        // always create Hadamard rotation tensors for the DSA lightning indexer
++        if (n_embd_head_k_all > 0 &&
++                (model.arch == LLM_ARCH_DEEPSEEK32 || model.arch == LLM_ARCH_GLM_DSA) &&
++                hparams.n_embd_head_k_full == hparams.indexer_head_size) {
+             attn_rot_k = true;
+         }
+ 
+@@ -1709,6 +1711,18 @@ uint32_t llama_kv_cache::get_n_kv(const slot_info & sinfo) const {
+     return result;
+ }
+ 
++uint32_t llama_kv_cache::get_n_kv_used(const slot_info & sinfo) const {
++    uint32_t result = 0;
++
++    for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
++        const auto & cells = v_cells[sinfo.strm[s]];
++
++        result = std::max(cells.used_max_p1(), result);
++    }
++
++    return result;
++}
++
+ ggml_tensor * llama_kv_cache::get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const {
+     const int32_t ikv = map_layer_ids.at(il);
+ 
+@@ -1881,7 +1895,7 @@ ggml_tensor * llama_kv_cache::build_input_v_idxs(ggml_context * ctx, const llama
+ ggml_tensor * llama_kv_cache::build_input_k_rot(ggml_context * ctx) const {
+     ggml_tensor * res = nullptr;
+ 
+-    if (attn_rot_k) {
++    if (attn_rot_k && n_embd_head_k_all > 0) {
+         int nrot = 64;
+ 
+         // TODO: investigate if using the smallest rotation matrix is beneficial also for K (similar as for V)
+@@ -2964,6 +2978,7 @@ llama_kv_cache_context::llama_kv_cache_context(llama_memory_status status) : sta
+ llama_kv_cache_context::llama_kv_cache_context(
+         llama_kv_cache * kv) : status(LLAMA_MEMORY_STATUS_SUCCESS), kv(kv) {
+     n_kv = kv->get_size();
++    n_kv_used = n_kv;
+ 
+     const uint32_t n_stream = kv->get_n_stream();
+ 
+@@ -3019,6 +3034,7 @@ bool llama_kv_cache_context::apply() {
+ 
+     kv->apply_ubatch(sinfos[i_cur], ubatches[i_cur]);
+     n_kv = kv->get_n_kv(sinfos[i_cur]);
++    n_kv_used = kv->get_n_kv_used(sinfos[i_cur]);
+ 
+     return true;
+ }
+@@ -3037,6 +3053,10 @@ uint32_t llama_kv_cache_context::get_n_kv() const {
+     return n_kv;
+ }
+ 
++uint32_t llama_kv_cache_context::get_n_kv_used() const {
++    return n_kv_used;
++}
++
+ ggml_type llama_kv_cache_context::type_k() const {
+     return kv->type_k();
+ }
+diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
+index f856905..14fd78c 100644
+--- a/src/llama-kv-cache.h
++++ b/src/llama-kv-cache.h
+@@ -196,6 +196,7 @@ public:
+     //
+ 
+     uint32_t get_n_kv(const slot_info & sinfo) const;
++    uint32_t get_n_kv_used(const slot_info & sinfo) const;
+ 
+     // get views of the current state of the cache
+     ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
+@@ -395,6 +396,7 @@ public:
+     //
+ 
+     uint32_t get_n_kv() const;
++    uint32_t get_n_kv_used() const;
+ 
+     ggml_type type_k() const;
+     ggml_type type_v() const;
+@@ -463,4 +465,5 @@ private:
+     // a heuristic, to avoid attending the full cache if it is not yet utilized
+     // as the cache gets filled, the benefit from this heuristic disappears
+     int32_t n_kv;
++    int32_t n_kv_used = 0;
+ };
+diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
+index c55ed66..38d81fd 100644
+--- a/src/llama-model-loader.cpp
++++ b/src/llama-model-loader.cpp
+@@ -28,6 +28,10 @@ void llama_model_loader_clear_stage_filter() {
+     g_skippy_filter = {};
+ }
+ 
++const llama_model_loader_stage_filter & llama_model_loader_get_stage_filter() {
++    return g_skippy_filter;
++}
++
+ bool llama_model_loader_last_tensor_filtered() {
+     return g_skippy_last_tensor_filtered;
+ }
+diff --git a/src/llama-model-loader.h b/src/llama-model-loader.h
+index 6876262..c2febdd 100644
+--- a/src/llama-model-loader.h
++++ b/src/llama-model-loader.h
+@@ -31,6 +31,7 @@ struct llama_model_loader_stage_filter {
+ 
+ void llama_model_loader_set_stage_filter(const llama_model_loader_stage_filter & filter);
+ void llama_model_loader_clear_stage_filter();
++const llama_model_loader_stage_filter & llama_model_loader_get_stage_filter();
+ bool llama_model_loader_last_tensor_filtered();
+ 
+ enum llama_fver {
+diff --git a/src/llama-model-saver.cpp b/src/llama-model-saver.cpp
+index a392852..ab83506 100644
+--- a/src/llama-model-saver.cpp
++++ b/src/llama-model-saver.cpp
+@@ -280,6 +280,18 @@ void llama_model_saver::add_kv_from_model() {
+     add_kv(LLM_KV_ATTENTION_INDEXER_HEAD_COUNT,      hparams.indexer_n_head);
+     add_kv(LLM_KV_ATTENTION_INDEXER_KEY_LENGTH,      hparams.indexer_head_size);
+     add_kv(LLM_KV_ATTENTION_INDEXER_TOP_K,           hparams.indexer_top_k);
++    if (hparams.indexer_top_k_freq > 0) {
++        add_kv(LLM_KV_ATTENTION_INDEXER_TOP_K_FREQUENCY, hparams.indexer_top_k_freq);
++        add_kv(LLM_KV_ATTENTION_INDEXER_SKIP_TOP_K_OFFSET, hparams.indexer_skip_top_k_offset);
++    }
++    if (hparams.indexer_types_present) {
++        std::vector<std::string> indexer_types;
++        indexer_types.reserve(hparams.n_layer());
++        for (uint32_t il = 0; il < hparams.n_layer(); ++il) {
++            indexer_types.push_back(hparams.indexer_types[il] == 1 ? "full" : "shared");
++        }
++        add_kv(LLM_KV_ATTENTION_INDEXER_TYPES, indexer_types);
++    }
+     add_kv(LLM_KV_ATTENTION_RECURRENT_LAYERS,        hparams.is_recr_impl, true);
+ 
+     const float rope_scaling_factor = hparams.rope_freq_scale_train == 1.0f ? 0.0f : 1.0f/hparams.rope_freq_scale_train;
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 211dc44..9a2b31b 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -12,6 +12,7 @@
+ #include "llama-kv-cache-iswa.h"
+ #include "llama-kv-cache-dsa.h"
+ #include "llama-kv-cache-dsv4.h"
++#include "llama-graph.h"
+ #include "llama-memory-hybrid.h"
+ #include "llama-memory-hybrid-iswa.h"
+ #include "llama-memory-recurrent.h"
+@@ -1090,15 +1091,29 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
+         ml.get_key(LLM_KV_CONVNEXT_BLOCK_COUNT,      hparams.convnext.n_layer);
+     }
+ 
+-    GGML_ASSERT(hparams.n_expert <= LLAMA_MAX_EXPERTS);
+-    GGML_ASSERT(hparams.n_expert_used <= hparams.n_expert);
++    if (hparams.n_expert > LLAMA_MAX_EXPERTS) {
++        throw std::runtime_error("expert_count exceeds LLAMA_MAX_EXPERTS");
++    }
++    if (hparams.n_expert_used > hparams.n_expert) {
++        throw std::runtime_error("expert_used_count must be less than or equal to expert_count");
++    }
+     if (hparams.n_expert > 0) {
+-        GGML_ASSERT(hparams.n_expert_used > 0);
+-        GGML_ASSERT(hparams.n_expert_groups < hparams.n_expert);
++        if (hparams.n_expert_used == 0) {
++            throw std::runtime_error("expert_used_count must be positive when expert_count is positive");
++        }
++        if (hparams.n_expert_groups >= hparams.n_expert) {
++            throw std::runtime_error("expert_group_count must be less than expert_count");
++        }
+         if (hparams.n_expert_groups > 1) {
+-            GGML_ASSERT(hparams.n_expert % hparams.n_expert_groups == 0);
+-            GGML_ASSERT(hparams.n_group_used > 0);
+-            GGML_ASSERT(hparams.n_group_used < hparams.n_expert_groups);
++            if (hparams.n_expert % hparams.n_expert_groups != 0) {
++                throw std::runtime_error("expert_count must be divisible by expert_group_count");
++            }
++            if (hparams.n_group_used == 0) {
++                throw std::runtime_error("expert_group_used_count must be positive when expert_group_count is greater than one");
++            }
++            if (hparams.n_group_used >= hparams.n_expert_groups) {
++                throw std::runtime_error("expert_group_used_count must be less than expert_group_count");
++            }
+         }
+     } else {
+         GGML_ASSERT(hparams.n_expert_used == 0);
+@@ -1112,6 +1127,7 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
+     std::fill(hparams.rope_sections.begin(), hparams.rope_sections.end(), 0);
+     std::fill(hparams.is_swa_impl.begin(),   hparams.is_swa_impl.end(), 0);
+     std::fill(hparams.is_recr_impl.begin(),  hparams.is_recr_impl.end(),  llm_arch_is_recurrent(ml.get_arch()) ? 1 : 0);
++    std::fill(hparams.indexer_types.begin(), hparams.indexer_types.end(), -1);
+ 
+     std::fill(hparams.xielu_alpha_n.begin(), hparams.xielu_alpha_n.end(), 0.0f);
+     std::fill(hparams.xielu_alpha_p.begin(), hparams.xielu_alpha_p.end(), 0.0f);
+@@ -1234,12 +1250,13 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+     const int n_layer_all = hparams.n_layer_all;
+     const int n_gpu_layers = this->n_gpu_layers();
+ 
+-    const bool use_mmap_buffer = true;
++    const bool use_mmap_buffer = params.use_mmap_buffer;
+ 
+     this->ml = &ml; // to be used by create_tensor() and load_arch_tensors()
+ 
+-    LLAMA_LOG_INFO("%s: loading model tensors, this can take a while... (mmap = %s, direct_io = %s)\n",
+-        __func__, ml.use_mmap ? "true" : "false", ml.use_direct_io ? "true" : "false");
++    LLAMA_LOG_INFO("%s: loading model tensors, this can take a while... (mmap = %s, mmap_prefetch = %s, mmap_buffer = %s, direct_io = %s)\n",
++        __func__, ml.use_mmap ? "true" : "false", params.use_mmap_prefetch ? "true" : "false",
++        params.use_mmap_buffer ? "true" : "false", ml.use_direct_io ? "true" : "false");
+ 
+     // build a list of buffer types for the CPU and GPU devices
+     pimpl->cpu_buft_list = make_cpu_buft_list(devices, params.use_extra_bufts, params.no_host);
+@@ -1502,7 +1519,11 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+         }
+     }
+ 
+-    ml.init_mappings(true, use_mlock ? &pimpl->mlock_mmaps : nullptr);
++    LLAMA_LOG_INFO("%s: initializing mappings for %zu model part(s)\n",
++        __func__, ml.files.size());
++    ml.init_mappings(params.use_mmap_prefetch, use_mlock ? &pimpl->mlock_mmaps : nullptr);
++    LLAMA_LOG_INFO("%s: initialized %zu mapping(s); creating backend buffers for %zu tensor group(s)\n",
++        __func__, ml.mappings.size(), ml.ctx_map.size());
+     pimpl->mappings.reserve(ml.mappings.size());
+ 
+     // create the backend buffers
+@@ -1513,7 +1534,9 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+     const size_t n_max_backend_buffer = ml.ctx_map.size() * ml.files.size();
+     pimpl->ctxs_bufs.reserve(n_max_backend_buffer);
+ 
++    size_t ctx_idx = 0;
+     for (auto & [buft, ctx_ptr] : ml.ctx_map) {
++        ++ctx_idx;
+         ggml_context * ctx = ctx_ptr.get();
+ 
+         // skip contexts without tensors
+@@ -1521,6 +1544,9 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+             continue;
+         }
+ 
++        LLAMA_LOG_INFO("%s: creating backend buffer group %zu/%zu (%s)\n",
++            __func__, ctx_idx, ml.ctx_map.size(), ggml_backend_buft_name(buft));
++
+         llama_buf_map buf_map;
+         buf_map.reserve(n_max_backend_buffer);
+ 
+@@ -1591,6 +1617,9 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+             ggml_backend_buffer_set_usage(buf.get(), GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+         }
+ 
++        LLAMA_LOG_INFO("%s: created backend buffer group %zu/%zu with %zu buffer(s)\n",
++            __func__, ctx_idx, ml.ctx_map.size(), bufs.size());
++
+         pimpl->ctxs_bufs.emplace_back(std::move(ctx_ptr), std::move(bufs));
+ 
+         ctx_buf_maps.emplace_back(ctx, buf_map);
+@@ -1625,11 +1654,19 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+     }
+ 
+     // load tensor data
++    LLAMA_LOG_INFO("%s: loading tensor data for %zu tensor group(s)\n",
++        __func__, ctx_buf_maps.size());
++    size_t load_ctx_idx = 0;
+     for (auto & [ctx, buf_map] : ctx_buf_maps) {
++        ++load_ctx_idx;
++        LLAMA_LOG_INFO("%s: loading tensor data group %zu/%zu\n",
++            __func__, load_ctx_idx, ctx_buf_maps.size());
+         if (!ml.load_all_data(ctx, buf_map, use_mlock ? &pimpl->mlock_mmaps : NULL, params.progress_callback, params.progress_callback_user_data)) {
+             return false;
+         }
+     }
++    LLAMA_LOG_INFO("%s: loaded tensor data for %zu tensor group(s)\n",
++        __func__, ctx_buf_maps.size());
+ 
+     if (use_mmap_buffer) {
+         for (auto & mapping : ml.mappings) {
+@@ -2048,7 +2085,26 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params,
+                 res = nullptr;
+             } break;
+         case LLM_ARCH_DEEPSEEK32:
++        case LLM_ARCH_GLM_DSA:
+             {
++                llama_kv_cache::layer_filter_cb filter = nullptr;
++                const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++                if (hparams.n_layer_nextn > 0 && params.ctx_type == LLAMA_CONTEXT_TYPE_MTP) {
++                    filter = [&](uint32_t il) { return il >= hparams.n_layer(); };
++                } else if (stage_filter.enabled) {
++                    const uint32_t layer_start = std::min<uint32_t>(
++                            std::max<int32_t>(stage_filter.layer_start, 0),
++                            hparams.n_layer());
++                    const uint32_t layer_end = std::min<uint32_t>(
++                            std::max<int32_t>(stage_filter.layer_end, 0),
++                            hparams.n_layer());
++                    filter = [layer_start, layer_end](uint32_t il) {
++                        return il >= layer_start && il < layer_end;
++                    };
++                } else if (hparams.n_layer_nextn > 0) {
++                    filter = [&](uint32_t il) { return il < hparams.n_layer(); };
++                }
++
+                 res = new llama_kv_cache_dsa(
+                         *this,
+                         params.type_k,
+@@ -2061,7 +2117,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params,
+                         1,
+                         hparams.n_swa,
+                         hparams.swa_type,
+-                        nullptr,
++                        filter,
+                         nullptr);
+             } break;
+         // Models that need standard caching should rely on recurrent/hybrid
+@@ -2318,6 +2374,8 @@ llama_model_params llama_model_default_params() {
+         /*.kv_overrides                =*/ nullptr,
+         /*.vocab_only                  =*/ false,
+         /*.use_mmap                    =*/ true,
++        /*.use_mmap_prefetch           =*/ true,
++        /*.use_mmap_buffer             =*/ true,
+         /*.use_direct_io               =*/ false,
+         /*.use_mlock                   =*/ false,
+         /*.check_tensors               =*/ false,
+diff --git a/src/llama-quant.cpp b/src/llama-quant.cpp
+index 78112d9..96572a0 100644
+--- a/src/llama-quant.cpp
++++ b/src/llama-quant.cpp
+@@ -419,7 +419,8 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type
+         return i_layer < n_layers/8 || i_layer >= 7*n_layers/8 || (i_layer - n_layers/8)%3 == 2;
+     };
+     const int n_expert = std::max(1, (int)qs.model.hparams.n_expert);
+-    auto layer_info = [n_expert] (int i_layer, int n_layer, const char * name) {
++    const int n_layer_all = (int) qs.model.hparams.n_layer_all;
++    auto layer_info = [n_expert, n_layer_all] (int i_layer, int n_layer, const char * name) {
+         if (n_expert > 1) {
+             // Believe it or not, "experts" in the FFN of Mixtral-8x7B are not consecutive, but occasionally randomly
+             // sprinkled in the model. Hence, simply dividing i_ffn_down by n_expert does not work
+@@ -428,8 +429,9 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type
+             if (sscanf(name, "blk.%d.", &i_layer) != 1) {
+                 throw std::runtime_error(format("Failed to determine layer for tensor %s", name));
+             }
+-            if (i_layer < 0 || i_layer >= n_layer) {
+-                throw std::runtime_error(format("Bad layer %d for tensor %s. Must be in [0, %d)", i_layer, name, n_layer));
++            const int layer_bound = std::max(n_layer, n_layer_all);
++            if (i_layer < 0 || i_layer >= layer_bound) {
++                throw std::runtime_error(format("Bad layer %d for tensor %s. Must be in [0, %d)", i_layer, name, layer_bound));
+             }
+         }
+         return std::make_pair(i_layer, n_layer);
+diff --git a/src/models/deepseek2.cpp b/src/models/deepseek2.cpp
+index 180fb08..3e96b11 100644
+--- a/src/models/deepseek2.cpp
++++ b/src/models/deepseek2.cpp
+@@ -210,8 +210,18 @@ llama_model_deepseek2::graph::graph(const llama_model & model, const llm_graph_p
+     // inp_pos - contains the positions
+     ggml_tensor * inp_pos = build_inp_pos();
+ 
+-    auto * inp_attn_kv = !is_mla ? build_attn_inp_kv() : nullptr;
+-    auto * inp_attn_k  =  is_mla ? build_attn_inp_k()  : nullptr;
++    bool use_absorbed_mla = is_mla;
++    if (use_absorbed_mla) {
++        for (int il = il_start; il < il_end; ++il) {
++            if (!model.layers[il].wk_b || !model.layers[il].wv_b) {
++                use_absorbed_mla = false;
++                break;
++            }
++        }
++    }
++
++    auto * inp_attn_kv = !use_absorbed_mla ? build_attn_inp_kv() : nullptr;
++    auto * inp_attn_k  =  use_absorbed_mla ? build_attn_inp_k()  : nullptr;
+ 
+     ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
+ 
+@@ -311,7 +321,7 @@ llama_model_deepseek2::graph::graph(const llama_model & model, const llm_graph_p
+             kv_cmpr = build_norm(kv_cmpr, model.layers[il].attn_kv_a_norm, nullptr, LLM_NORM_RMS, il);
+             cb(kv_cmpr, "kv_cmpr", il);
+ 
+-            if (is_mla) {
++            if (use_absorbed_mla) {
+                 // {n_embd_head_qk_nope, n_tokens, n_head}
+                 q_nope = ggml_permute(ctx0, q_nope, 0, 2, 1, 3);
+                 cb(q_nope, "q_nope_perm", il);
+@@ -524,6 +534,9 @@ llama_model_deepseek2::graph_mtp::graph_mtp(const llama_model & model, const llm
+     ggml_set_name(inp->embd, "mtp_h_input");
+ 
+     ggml_tensor * tok_embd_w = layer.nextn.embed_tokens ? layer.nextn.embed_tokens : model.tok_embd;
++    if (!tok_embd_w) {
++        throw std::runtime_error("MTP graph requires nextn.embed_tokens or token_embd");
++    }
+     ggml_tensor * h_input  = inp->embd;
+     ggml_tensor * tok_embd = ggml_get_rows(ctx0, tok_embd_w, inp->tokens);
+     cb(tok_embd, "mtp_tok_embd", il);
+@@ -531,8 +544,9 @@ llama_model_deepseek2::graph_mtp::graph_mtp(const llama_model & model, const llm
+     res->add_input(std::move(inp));
+ 
+     ggml_tensor * inp_pos = build_inp_pos();
+-    auto * inp_attn_kv = !is_mla ? build_attn_inp_kv() : nullptr;
+-    auto * inp_attn_k  =  is_mla ? build_attn_inp_k()  : nullptr;
++    const bool use_absorbed_mla = is_mla && layer.wk_b && layer.wv_b;
++    auto * inp_attn_kv = !use_absorbed_mla ? build_attn_inp_kv() : nullptr;
++    auto * inp_attn_k  =  use_absorbed_mla ? build_attn_inp_k()  : nullptr;
+ 
+     ggml_tensor * h_norm = build_norm(h_input, layer.nextn.hnorm, nullptr, LLM_NORM_RMS, il);
+     cb(h_norm, "mtp_hnorm", il);
+@@ -603,7 +617,7 @@ llama_model_deepseek2::graph_mtp::graph_mtp(const llama_model & model, const llm
+     kv_cmpr = build_norm(kv_cmpr, layer.attn_kv_a_norm, nullptr, LLM_NORM_RMS, il);
+     cb(kv_cmpr, "mtp_kv_cmpr_norm", il);
+ 
+-    if (is_mla) {
++    if (use_absorbed_mla) {
+         q_nope = ggml_permute(ctx0, q_nope, 0, 2, 1, 3);
+         cb(q_nope, "mtp_q_nope_perm", il);
+ 
+diff --git a/src/models/glm-dsa-block.cpp b/src/models/glm-dsa-block.cpp
+new file mode 100644
+index 0000000..0a30936
+--- /dev/null
++++ b/src/models/glm-dsa-block.cpp
+@@ -0,0 +1,95 @@
++#include "glm-dsa-block.h"
++
++#include <algorithm>
++#include <sstream>
++#include <stdexcept>
++
++namespace {
++
++struct full_block_span {
++    int full_layer;
++    int layer_end;
++};
++
++[[noreturn]] void throw_bad_group_size(
++        int full_layer,
++        int actual_size,
++        int expected_size) {
++    std::ostringstream message;
++    message << "GLM_DSA IndexShare group beginning at Full layer " << full_layer
++            << " has " << actual_size << " layer(s), expected " << expected_size;
++    throw std::runtime_error(message.str());
++}
++
++} // namespace
++
++llama_glm_dsa_block_plan llama_glm_dsa_make_block_plan(
++        int n_layers,
++        int execution_begin,
++        int execution_end,
++        int repeating_group_begin,
++        int expected_repeating_group_size,
++        const std::function<bool(int)> & layer_is_full) {
++    if (n_layers <= 0 || execution_begin < 0 || execution_end < execution_begin || execution_end > n_layers) {
++        throw std::runtime_error("GLM_DSA IndexShare block plan has an invalid layer span");
++    }
++    if (!layer_is_full) {
++        throw std::runtime_error("GLM_DSA IndexShare block plan requires a layer-role resolver");
++    }
++
++    std::vector<full_block_span> full_blocks;
++    int current_full = -1;
++    for (int il = 0; il < n_layers; ++il) {
++        if (layer_is_full(il)) {
++            if (current_full >= 0) {
++                full_blocks.push_back({ current_full, il });
++            }
++            current_full = il;
++        } else if (current_full < 0) {
++            std::ostringstream message;
++            message << "GLM_DSA IndexShare Shared layer " << il << " has no preceding Full layer";
++            throw std::runtime_error(message.str());
++        }
++    }
++    if (current_full < 0) {
++        throw std::runtime_error("GLM_DSA IndexShare block plan contains no Full layer");
++    }
++    full_blocks.push_back({ current_full, n_layers });
++
++    llama_glm_dsa_block_plan plan;
++    int ordinal = 0;
++    for (const full_block_span & block : full_blocks) {
++        const int group_size = block.layer_end - block.full_layer;
++        const bool repeating_group = block.full_layer >= repeating_group_begin;
++        if (repeating_group && expected_repeating_group_size > 0 && group_size != expected_repeating_group_size) {
++            throw_bad_group_size(block.full_layer, group_size, expected_repeating_group_size);
++        }
++
++        const int clipped_begin = std::max(block.full_layer, execution_begin);
++        const int clipped_end = std::min(block.layer_end, execution_end);
++        if (clipped_begin >= clipped_end) {
++            ++ordinal;
++            continue;
++        }
++
++        const bool producer_in_execution = clipped_begin == block.full_layer;
++        plan.blocks.push_back({
++            ordinal,
++            block.full_layer,
++            block.full_layer,
++            block.layer_end,
++            clipped_begin,
++            clipped_end,
++            repeating_group,
++            clipped_begin == block.full_layer && clipped_end == block.layer_end,
++            producer_in_execution,
++            !producer_in_execution,
++        });
++        ++ordinal;
++    }
++
++    if (execution_begin < execution_end && plan.blocks.empty()) {
++        throw std::runtime_error("GLM_DSA IndexShare block plan does not cover the execution span");
++    }
++    return plan;
++}
+diff --git a/src/models/glm-dsa-block.h b/src/models/glm-dsa-block.h
+new file mode 100644
+index 0000000..42955cc
+--- /dev/null
++++ b/src/models/glm-dsa-block.h
+@@ -0,0 +1,29 @@
++#pragma once
++
++#include <functional>
++#include <vector>
++
++struct llama_glm_dsa_block_span {
++    int ordinal;
++    int full_layer;
++    int layer_begin;
++    int layer_end;
++    int execution_begin;
++    int execution_end;
++    bool repeating_group;
++    bool complete_execution;
++    bool producer_in_execution;
++    bool needs_input_top_k;
++};
++
++struct llama_glm_dsa_block_plan {
++    std::vector<llama_glm_dsa_block_span> blocks;
++};
++
++llama_glm_dsa_block_plan llama_glm_dsa_make_block_plan(
++        int n_layers,
++        int execution_begin,
++        int execution_end,
++        int repeating_group_begin,
++        int expected_repeating_group_size,
++        const std::function<bool(int)> & layer_is_full);
+diff --git a/src/models/glm-dsa.cpp b/src/models/glm-dsa.cpp
+index 10bf235..455705d 100644
+--- a/src/models/glm-dsa.cpp
++++ b/src/models/glm-dsa.cpp
+@@ -1,5 +1,468 @@
+ #include "models.h"
+ 
++#include "glm-dsa-block.h"
++
++#include "llama-kv-cache-dsa.h"
++
++#include <cctype>
++#include <cstdlib>
++#include <sstream>
++#include <string>
++#include <vector>
++
++static bool llama_glm_dsa_disable_lightning_indexer() {
++    const char * value = getenv("LLAMA_GLM_DSA_DISABLE_LIGHTNING_INDEXER");
++    return value != nullptr && atoi(value) != 0;
++}
++
++static bool llama_glm_dsa_allow_indexshare_tensor_fallback() {
++    const char * value = getenv("LLAMA_GLM_DSA_ALLOW_INDEXSHARE_TENSOR_FALLBACK");
++    return value != nullptr && atoi(value) != 0;
++}
++
++static bool llama_glm_dsa_indexshare_exec_log_enabled() {
++    const char * value = getenv("LLAMA_GLM_DSA_INDEXSHARE_EXEC_LOG");
++    return value != nullptr && atoi(value) != 0;
++}
++
++static bool llama_glm_dsa_block_contract_log_enabled() {
++    const char * value = getenv("LLAMA_GLM_DSA_BLOCK_CONTRACT_LOG");
++    return value != nullptr && atoi(value) != 0;
++}
++
++static bool llama_glm_dsa_roofline_bypass_enabled(const char * name) {
++    const char * value = getenv(name);
++    return value != nullptr && atoi(value) != 0;
++}
++
++static bool llama_glm_dsa_layer_has_indexer(const llama_layer & layer) {
++    const bool has_any =
++            layer.indexer_k_norm   ||
++            layer.indexer_k_norm_b ||
++            layer.indexer_proj     ||
++            layer.indexer_attn_k   ||
++            layer.indexer_attn_q_b;
++
++    const bool has_all =
++            layer.indexer_k_norm   &&
++            layer.indexer_k_norm_b &&
++            layer.indexer_proj     &&
++            layer.indexer_attn_k   &&
++            layer.indexer_attn_q_b;
++
++    if (has_any != has_all) {
++        throw std::runtime_error("GLM_DSA layer has incomplete indexer tensors");
++    }
++
++    return has_all;
++}
++
++static const char * llama_glm_dsa_indexshare_role_source(const llama_hparams & hparams) {
++    if (hparams.indexer_types_present) {
++        return "metadata_types";
++    }
++    if (hparams.indexer_top_k_freq > 0) {
++        return "metadata_frequency";
++    }
++    return "tensor_fallback";
++}
++
++static int llama_glm_dsa_indexshare_freq() {
++    const char * value = getenv("LLAMA_GLM_DSA_INDEXSHARE_FREQ");
++    if (value == nullptr) {
++        return 1;
++    }
++
++    const int freq = atoi(value);
++    return freq > 0 ? freq : 1;
++}
++
++static bool llama_glm_dsa_indexshare_pattern_layer_is_full(const char * pattern, int il, bool * matched) {
++    *matched = false;
++    if (pattern == nullptr || pattern[0] == '\0') {
++        return false;
++    }
++
++    int layer_index = 0;
++    for (const char * p = pattern; *p != '\0'; ++p) {
++        const char value = static_cast<char>(std::toupper(static_cast<unsigned char>(*p)));
++        if (value != 'F' && value != 'S') {
++            continue;
++        }
++        if (layer_index == il) {
++            *matched = true;
++            return value == 'F';
++        }
++        ++layer_index;
++    }
++
++    return false;
++}
++
++static int32_t llama_glm_dsa_indexer_type_from_string(const std::string & value) {
++    if (value == "full") {
++        return 1;
++    }
++    if (value == "shared") {
++        return 0;
++    }
++
++    throw std::runtime_error("GLM_DSA attention.indexer.types values must be \"full\" or \"shared\"");
++}
++
++static bool llama_glm_dsa_frequency_layer_is_full(uint32_t layer, uint32_t offset, uint32_t freq) {
++    return layer < offset || (layer >= offset && ((layer - offset + 1) % freq) == 0);
++}
++
++static void llama_glm_dsa_validate_hparams(const llama_hparams & hparams) {
++    const uint32_t n_rot = hparams.n_rot();
++    if (hparams.n_layer() == 0) {
++        throw std::runtime_error("GLM_DSA effective decoder layer count must be positive");
++    }
++    if (n_rot == 0 || (n_rot % 2) != 0) {
++        throw std::runtime_error("GLM_DSA rope.dimension_count must be positive and even");
++    }
++    if (hparams.n_embd_head_k_mla() <= n_rot) {
++        throw std::runtime_error("GLM_DSA attention.key_length_mla must be greater than rope.dimension_count");
++    }
++    if (hparams.n_embd_head_v_mla() == 0) {
++        throw std::runtime_error("GLM_DSA attention.value_length_mla must be positive");
++    }
++    if (hparams.n_lora_q == 0 || hparams.n_lora_kv == 0) {
++        throw std::runtime_error("GLM_DSA q_lora_rank and kv_lora_rank must be positive");
++    }
++    if (hparams.n_expert == 0) {
++        throw std::runtime_error("GLM_DSA expert_count must be positive");
++    }
++    if (hparams.n_expert_used == 0) {
++        throw std::runtime_error("GLM_DSA expert_used_count must be positive");
++    }
++    if (hparams.n_expert_used > hparams.n_expert) {
++        throw std::runtime_error("GLM_DSA expert_used_count must be less than or equal to expert_count");
++    }
++    if (hparams.n_expert_shared == 0) {
++        throw std::runtime_error("GLM_DSA expert_shared_count must be positive");
++    }
++    if (hparams.n_ff_exp == 0) {
++        throw std::runtime_error("GLM_DSA expert_feed_forward_length must be positive");
++    }
++    if (hparams.n_layer_dense_lead >= hparams.n_layer()) {
++        throw std::runtime_error("GLM_DSA leading_dense_block_count must be less than effective decoder layer count");
++    }
++    if (hparams.indexer_n_head == 0) {
++        throw std::runtime_error("GLM_DSA attention.indexer.head_count must be positive");
++    }
++    if (hparams.indexer_head_size == 0) {
++        throw std::runtime_error("GLM_DSA attention.indexer.key_length must be positive");
++    }
++    if (hparams.indexer_head_size <= n_rot) {
++        throw std::runtime_error("GLM_DSA attention.indexer.key_length must be greater than rope.dimension_count");
++    }
++    if (hparams.indexer_top_k == 0) {
++        throw std::runtime_error("GLM_DSA attention.indexer.top_k must be positive");
++    }
++}
++
++static void llama_glm_dsa_validate_indexer_type_frequency_consistency(const llama_hparams & hparams) {
++    if (!hparams.indexer_types_present || hparams.indexer_top_k_freq == 0) {
++        return;
++    }
++
++    int conflict_count = 0;
++    int first_conflict = -1;
++    for (uint32_t il = 0; il < hparams.n_layer(); ++il) {
++        const bool role_full = hparams.indexer_types[il] == 1;
++        const bool freq_full = llama_glm_dsa_frequency_layer_is_full(
++                il,
++                hparams.indexer_skip_top_k_offset,
++                hparams.indexer_top_k_freq);
++        if (role_full != freq_full) {
++            ++conflict_count;
++            if (first_conflict < 0) {
++                first_conflict = (int) il;
++            }
++        }
++    }
++
++    if (conflict_count > 0) {
++        std::ostringstream message;
++        message << "GLM_DSA attention.indexer.types conflicts with attention.indexer.top_k_frequency at "
++                << conflict_count << " layer(s), first=" << first_conflict;
++        throw std::runtime_error(message.str());
++    }
++}
++
++static bool llama_glm_dsa_metadata_layer_is_full(const llama_hparams & hparams, int il, bool * matched) {
++    *matched = false;
++    if (il < 0 || (uint32_t) il >= hparams.n_layer()) {
++        return false;
++    }
++
++    if (hparams.indexer_types_present) {
++        const int32_t role = hparams.indexer_types[il];
++        if (role < 0) {
++            throw std::runtime_error("GLM_DSA attention.indexer.types has an unset layer role");
++        }
++        *matched = true;
++        return role == 1;
++    }
++
++    if (hparams.indexer_top_k_freq > 0) {
++        const uint32_t layer = (uint32_t) il;
++        *matched = true;
++        return llama_glm_dsa_frequency_layer_is_full(
++                layer,
++                hparams.indexer_skip_top_k_offset,
++                hparams.indexer_top_k_freq);
++    }
++
++    return false;
++}
++
++static void llama_glm_dsa_validate_indexshare_sequence(const llama_hparams & hparams) {
++    bool saw_full = false;
++    bool saw_role = false;
++    for (uint32_t il = 0; il < hparams.n_layer(); ++il) {
++        bool metadata_matched = false;
++        const bool full_layer = llama_glm_dsa_metadata_layer_is_full(hparams, il, &metadata_matched);
++        if (!metadata_matched) {
++            continue;
++        }
++
++        saw_role = true;
++        if (full_layer) {
++            saw_full = true;
++            continue;
++        }
++
++        if (!saw_full) {
++            std::ostringstream message;
++            message << "GLM_DSA IndexShare Shared layer " << il << " has no preceding Full layer";
++            throw std::runtime_error(message.str());
++        }
++    }
++
++    if (saw_role && !saw_full) {
++        throw std::runtime_error("GLM_DSA IndexShare metadata must declare at least one Full layer");
++    }
++}
++
++static void llama_glm_dsa_validate_indexshare_layer_contract(int il, const llama_hparams & hparams, const llama_layer & layer) {
++    const llama_model_loader_stage_filter & stage_filter = llama_model_loader_get_stage_filter();
++    if (stage_filter.enabled && (il < stage_filter.layer_start || il >= stage_filter.layer_end)) {
++        return;
++    }
++
++    const bool has_indexer = llama_glm_dsa_layer_has_indexer(layer);
++
++    bool metadata_matched = false;
++    const bool metadata_full = llama_glm_dsa_metadata_layer_is_full(hparams, il, &metadata_matched);
++    if (!metadata_matched) {
++        return;
++    }
++
++    if (metadata_full && !has_indexer) {
++        std::ostringstream message;
++        message << "GLM_DSA IndexShare metadata declares Full layer " << il << " without indexer tensors";
++        throw std::runtime_error(message.str());
++    }
++    if (!metadata_full && has_indexer) {
++        std::ostringstream message;
++        message << "GLM_DSA IndexShare metadata declares Shared layer " << il << " with indexer tensors";
++        throw std::runtime_error(message.str());
++    }
++}
++
++static void llama_glm_dsa_validate_nextn_indexer_contract(int il, const llama_hparams & hparams, const llama_layer & layer) {
++    if ((uint32_t) il < hparams.n_layer()) {
++        return;
++    }
++
++    const llama_model_loader_stage_filter & stage_filter = llama_model_loader_get_stage_filter();
++    if (stage_filter.enabled && (il < stage_filter.layer_start || il >= stage_filter.layer_end)) {
++        return;
++    }
++
++    if (!llama_glm_dsa_layer_has_indexer(layer)) {
++        std::ostringstream message;
++        message << "GLM_DSA MTP/NextN layer " << il << " requires complete indexer tensors";
++        throw std::runtime_error(message.str());
++    }
++}
++
++static bool llama_glm_dsa_layer_uses_indexer(int il, const llama_hparams & hparams, const llama_layer & layer) {
++    const bool has_indexer = llama_glm_dsa_layer_has_indexer(layer);
++
++    bool metadata_matched = false;
++    const bool metadata_full = llama_glm_dsa_metadata_layer_is_full(hparams, il, &metadata_matched);
++    if (metadata_matched) {
++        if (metadata_full && !has_indexer) {
++            throw std::runtime_error("GLM_DSA IndexShare metadata selects a Full layer without indexer tensors");
++        }
++        return metadata_full;
++    }
++
++    bool pattern_matched = false;
++    const bool pattern_full = llama_glm_dsa_indexshare_pattern_layer_is_full(
++            getenv("LLAMA_GLM_DSA_INDEXSHARE_PATTERN"),
++            il,
++            &pattern_matched);
++    if (pattern_matched) {
++        if (pattern_full && !has_indexer) {
++            throw std::runtime_error("GLM_DSA IndexShare pattern selects a Full layer without indexer tensors");
++        }
++        return pattern_full;
++    }
++
++    if (!has_indexer) {
++        return false;
++    }
++
++    const int freq = llama_glm_dsa_indexshare_freq();
++    return freq <= 1 || (il % freq) == 0;
++}
++
++static void llama_glm_dsa_log_indexshare_exec(
++        int  il,
++        bool full_layer,
++        bool has_input_top_k,
++        bool stage_filtered,
++        int  layer_start,
++        int  layer_end) {
++    if (!llama_glm_dsa_indexshare_exec_log_enabled()) {
++        return;
++    }
++
++    LLAMA_LOG_INFO(
++            "%s: GLM_DSA IndexShare exec layer=%d role=%s input_top_k=%d stage_filtered=%d layer_start=%d layer_end=%d\n",
++            __func__,
++            il,
++            full_layer ? "full" : "shared",
++            has_input_top_k ? 1 : 0,
++            stage_filtered ? 1 : 0,
++            layer_start,
++            layer_end);
++}
++
++static void llama_glm_dsa_log_indexshare_top_k(int il, const ggml_tensor * top_k, const ggml_tensor * indexer_score) {
++    if (!llama_glm_dsa_indexshare_exec_log_enabled()) {
++        return;
++    }
++
++    LLAMA_LOG_INFO(
++            "%s: GLM_DSA IndexShare top_k layer=%d source=indexer width=%lld score_width=%lld\n",
++            __func__,
++            il,
++            (long long) (top_k ? top_k->ne[0] : 0),
++            (long long) (indexer_score ? indexer_score->ne[0] : 0));
++}
++
++static void llama_glm_dsa_log_indexshare_consume(int il, const ggml_tensor * top_k) {
++    if (!llama_glm_dsa_indexshare_exec_log_enabled()) {
++        return;
++    }
++
++    LLAMA_LOG_INFO(
++            "%s: GLM_DSA IndexShare consume layer=%d source=last_top_k width=%lld batch=%lld stream=%lld\n",
++            __func__,
++            il,
++            (long long) (top_k ? top_k->ne[0] : 0),
++            (long long) (top_k ? top_k->ne[1] : 0),
++            (long long) (top_k ? top_k->ne[3] : 0));
++}
++
++static void llama_glm_dsa_log_block_plan(
++        const llama_glm_dsa_block_plan & plan,
++        int expected_group_size) {
++    if (!llama_glm_dsa_block_contract_log_enabled()) {
++        return;
++    }
++
++    for (const llama_glm_dsa_block_span & block : plan.blocks) {
++        LLAMA_LOG_INFO(
++            "%s: GLM_DSA block ordinal=%d full_layer=%d group=[%d,%d) execution=[%d,%d) repeating=%d expected_group_size=%d complete_execution=%d producer_in_execution=%d needs_input_top_k=%d\n",
++            __func__,
++            block.ordinal,
++            block.full_layer,
++            block.layer_begin,
++            block.layer_end,
++            block.execution_begin,
++            block.execution_end,
++            block.repeating_group ? 1 : 0,
++            expected_group_size,
++            block.complete_execution ? 1 : 0,
++            block.producer_in_execution ? 1 : 0,
++            block.needs_input_top_k ? 1 : 0);
++    }
++}
++
++static void llama_glm_dsa_log_indexshare_contract(
++        const llama_model & model,
++        const llama_hparams & hparams,
++        bool stage_filtered,
++        int  layer_start,
++        int  layer_end) {
++    if (!llama_glm_dsa_indexshare_exec_log_enabled()) {
++        return;
++    }
++
++    int full_layers = 0;
++    int shared_layers = 0;
++    int selected_indexer_tensor_layers = 0;
++    int total_indexer_tensor_layers = 0;
++    int selected_full_layers = 0;
++    int out_of_stage_full_layers = 0;
++
++    for (uint32_t il = 0; il < hparams.n_layer(); ++il) {
++        bool metadata_matched = false;
++        bool full_layer = llama_glm_dsa_metadata_layer_is_full(hparams, il, &metadata_matched);
++        if (!metadata_matched) {
++            full_layer = llama_glm_dsa_layer_has_indexer(model.layers[il]);
++        }
++
++        if (full_layer) {
++            ++full_layers;
++        } else {
++            ++shared_layers;
++        }
++
++        const bool has_indexer = llama_glm_dsa_layer_has_indexer(model.layers[il]);
++        if (has_indexer) {
++            ++total_indexer_tensor_layers;
++        }
++
++        const bool selected = !stage_filtered || ((int) il >= layer_start && (int) il < layer_end);
++        if (selected) {
++            if (has_indexer) {
++                ++selected_indexer_tensor_layers;
++            }
++            if (full_layer) {
++                ++selected_full_layers;
++            }
++        } else if (full_layer) {
++            ++out_of_stage_full_layers;
++        }
++    }
++
++    LLAMA_LOG_INFO(
++            "%s: GLM_DSA IndexShare source=%s full_layers=%d shared_layers=%d indexer_tensor_layers=%d target_indexer_tensor_layers=%d filtered_indexer_groups=%d out_of_stage_indexer_groups=%d stage_filtered=%d layer_start=%d layer_end=%d top_k=%u top_k_frequency=%u skip_top_k_offset=%u nextn_layers=%u\n",
++            __func__,
++            llama_glm_dsa_indexshare_role_source(hparams),
++            full_layers,
++            shared_layers,
++            selected_indexer_tensor_layers,
++            total_indexer_tensor_layers,
++            selected_full_layers,
++            out_of_stage_full_layers,
++            stage_filtered ? 1 : 0,
++            layer_start,
++            layer_end,
++            hparams.indexer_top_k,
++            hparams.indexer_top_k_freq,
++            hparams.indexer_skip_top_k_offset,
++            hparams.n_layer_nextn);
++}
++
+ void llama_model_glm_dsa::load_arch_hparams(llama_model_loader & ml) {
+     ml.get_key(LLM_KV_EXPERT_FEED_FORWARD_LENGTH,     hparams.n_ff_exp);
+     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,    hparams.f_norm_rms_eps);
+@@ -26,25 +489,63 @@ void llama_model_glm_dsa::load_arch_hparams(llama_model_loader & ml) {
+     ml.get_key(LLM_KV_ATTENTION_INDEXER_KEY_LENGTH, hparams.indexer_head_size);
+     ml.get_key(LLM_KV_ATTENTION_INDEXER_TOP_K,      hparams.indexer_top_k);
+ 
++    ml.get_key(LLM_KV_NEXTN_PREDICT_LAYERS, hparams.n_layer_nextn, false);
++    if (hparams.n_layer_nextn >= hparams.n_layer_all) {
++        throw std::runtime_error("GLM_DSA nextn_predict_layers must be less than block_count");
++    }
++    llama_glm_dsa_validate_hparams(hparams);
++    const bool has_indexer_top_k_freq =
++            ml.get_key(LLM_KV_ATTENTION_INDEXER_TOP_K_FREQUENCY, hparams.indexer_top_k_freq, false);
++    const bool has_indexer_skip_top_k_offset =
++            ml.get_key(LLM_KV_ATTENTION_INDEXER_SKIP_TOP_K_OFFSET, hparams.indexer_skip_top_k_offset, false);
++    if (has_indexer_top_k_freq && hparams.indexer_top_k_freq == 0) {
++        throw std::runtime_error("GLM_DSA attention.indexer.top_k_frequency must be positive when present");
++    }
++    if (has_indexer_top_k_freq && !has_indexer_skip_top_k_offset) {
++        throw std::runtime_error("GLM_DSA attention.indexer.skip_top_k_offset is required when top_k_frequency is present");
++    }
++
++    std::vector<std::string> indexer_types;
++    const bool has_indexer_types = ml.get_arr(LLM_KV_ATTENTION_INDEXER_TYPES, indexer_types, false);
++    if (has_indexer_types) {
++        if (indexer_types.size() != hparams.n_layer()) {
++            throw std::runtime_error("GLM_DSA attention.indexer.types length must match effective decoder layer count");
++        }
++        hparams.indexer_types_present = true;
++        for (size_t il = 0; il < indexer_types.size(); ++il) {
++            hparams.indexer_types[il] = llama_glm_dsa_indexer_type_from_string(indexer_types[il]);
++        }
++    }
++    if (!has_indexer_types && !has_indexer_top_k_freq && !llama_glm_dsa_allow_indexshare_tensor_fallback()) {
++        throw std::runtime_error("GLM_DSA IndexShare metadata requires attention.indexer.types or attention.indexer.top_k_frequency");
++    }
++    llama_glm_dsa_validate_indexer_type_frequency_consistency(hparams);
++    llama_glm_dsa_validate_indexshare_sequence(hparams);
++
+     // Expert gating function (GLM-4.5 uses sigmoid)
+     ml.get_key(LLM_KV_EXPERT_GATING_FUNC,          hparams.expert_gating_func, false);
+     if (hparams.expert_gating_func == LLAMA_EXPERT_GATING_FUNC_TYPE_NONE) {
+         hparams.expert_gating_func =  LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID;
+     }
+ 
+-    // NextN/MTP parameters
+-    ml.get_key(LLM_KV_NEXTN_PREDICT_LAYERS, hparams.n_layer_nextn, false);
+-    GGML_ASSERT(hparams.n_layer_nextn < hparams.n_layer_all && "n_layer_nextn must be < n_layer_impl");
+-
+     switch (hparams.n_layer()) {
++        case 78: type = LLM_TYPE_744B_A40B; break; // GLM-5.2 target layers + 1 native MTP block
+         case 79: type = LLM_TYPE_744B_A40B; break;
+         default: type = LLM_TYPE_UNKNOWN;
+     }
+ }
+ 
+-void llama_model_glm_dsa::load_arch_tensors(llama_model_loader &) {
++void llama_model_glm_dsa::load_arch_tensors(llama_model_loader & ml) {
+     LLAMA_LOAD_LOCALS;
+     const int64_t n_expert_shared = hparams.n_expert_shared;
++    uint32_t n_vocab_tensor = vocab.n_tokens();
++    const bool has_vocab_size = ml.get_key(LLM_KV_VOCAB_SIZE, n_vocab_tensor, false);
++    if (!has_vocab_size) {
++        const ggml_tensor * tok_embd_meta = ml.get_tensor_meta(tn(LLM_TENSOR_TOKEN_EMBD, "weight").str().c_str());
++        if (tok_embd_meta != nullptr && tok_embd_meta->ne[0] == n_embd && tok_embd_meta->ne[1] > n_vocab_tensor) {
++            n_vocab_tensor = tok_embd_meta->ne[1];
++        }
++    }
+ 
+     const bool is_mla = hparams.is_mla();
+     if (!is_mla) {
+@@ -63,14 +564,14 @@ void llama_model_glm_dsa::load_arch_tensors(llama_model_loader &) {
+ 
+     const int64_t n_ff_exp        = hparams.n_ff_exp;
+ 
+-    tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
++    tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab_tensor}, 0);
+ 
+     // output
+     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
+     // try to load output.weight, if not found, use token_embd (tied embeddings)
+-    output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab}, TENSOR_NOT_REQUIRED);
++    output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab_tensor}, TENSOR_NOT_REQUIRED);
+     if (!output) {
+-        output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, TENSOR_DUPLICATED);
++        output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab_tensor}, TENSOR_DUPLICATED);
+     }
+ 
+     for (int i = 0; i < n_layer_all; ++i) {
+@@ -87,20 +588,43 @@ void llama_model_glm_dsa::load_arch_tensors(llama_model_loader &) {
+ 
+         layer.wkv_a_mqa = create_tensor(tn(LLM_TENSOR_ATTN_KV_A_MQA, "weight", i), {n_embd, kv_lora_rank + n_embd_head_qk_rope}, flags);
+ 
+-        // note: only old legacy GGUF files will have the unsplit wkv_b tensor in
+-        layer.wk_b = create_tensor(tn(LLM_TENSOR_ATTN_K_B, "weight", i), {n_embd_head_qk_nope, kv_lora_rank, n_head}, flags);
+-        layer.wv_b = create_tensor(tn(LLM_TENSOR_ATTN_V_B, "weight", i), {kv_lora_rank, n_embd_head_v_mla, n_head}, flags);
++        layer.wk_b = create_tensor(tn(LLM_TENSOR_ATTN_K_B, "weight", i), {n_embd_head_qk_nope, kv_lora_rank, n_head}, flags | TENSOR_NOT_REQUIRED);
++        layer.wv_b = create_tensor(tn(LLM_TENSOR_ATTN_V_B, "weight", i), {kv_lora_rank, n_embd_head_v_mla, n_head}, flags | TENSOR_NOT_REQUIRED);
++        layer.wkv_b = create_tensor(tn(LLM_TENSOR_ATTN_KV_B, "weight", i), {kv_lora_rank, n_head * (n_embd_head_qk_nope + n_embd_head_v_mla)}, flags | TENSOR_NOT_REQUIRED | TENSOR_SKIP_IF_VIRTUAL);
++        const llama_model_loader_stage_filter & stage_filter = llama_model_loader_get_stage_filter();
++        const bool layer_selected =
++                !stage_filter.enabled ||
++                (i >= stage_filter.layer_start && i < stage_filter.layer_end);
++        if (layer_selected) {
++            if (layer.wkv_b) {
++                throw std::runtime_error("GLM_DSA sparse attention does not support unsplit attn_kv_b tensors");
++            }
++            if (!layer.wk_b || !layer.wv_b) {
++                throw std::runtime_error("GLM_DSA sparse attention requires split attn_k_b and attn_v_b tensors");
++            }
++        }
+ 
+         layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_head * n_embd_head_v_mla, n_embd}, flags);
+ 
+         layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {n_embd}, flags);
+ 
+-        // DSA indexer
+-        layer.indexer_k_norm   = create_tensor(tn(LLM_TENSOR_INDEXER_K_NORM,   "weight", i), {hparams.indexer_head_size}, flags | TENSOR_NOT_REQUIRED);
+-        layer.indexer_k_norm_b = create_tensor(tn(LLM_TENSOR_INDEXER_K_NORM,   "bias",   i), {hparams.indexer_head_size}, flags | TENSOR_NOT_REQUIRED);
+-        layer.indexer_proj     = create_tensor(tn(LLM_TENSOR_INDEXER_PROJ,     "weight", i), {n_embd, hparams.indexer_n_head}, flags | TENSOR_NOT_REQUIRED);
+-        layer.indexer_attn_k   = create_tensor(tn(LLM_TENSOR_INDEXER_ATTN_K,   "weight", i), {n_embd, hparams.indexer_head_size}, flags | TENSOR_NOT_REQUIRED);
+-        layer.indexer_attn_q_b = create_tensor(tn(LLM_TENSOR_INDEXER_ATTN_Q_B, "weight", i), {q_lora_rank, hparams.indexer_n_head * hparams.indexer_head_size}, flags | TENSOR_NOT_REQUIRED);
++        // GLM-DSA IndexShare metadata describes target decoder layers only. Native MTP
++        // blocks can still carry full decoder-shaped tensors and complete indexer tensors.
++        bool indexer_metadata_matched = false;
++        const bool indexer_metadata_full =
++                i < (int) hparams.n_layer() &&
++                llama_glm_dsa_metadata_layer_is_full(hparams, i, &indexer_metadata_matched);
++        const bool skip_virtual_indexer =
++                indexer_metadata_matched && !indexer_metadata_full;
++        const int indexer_flags =
++                flags | TENSOR_NOT_REQUIRED | (skip_virtual_indexer ? TENSOR_SKIP_IF_VIRTUAL : 0);
++        layer.indexer_k_norm   = create_tensor(tn(LLM_TENSOR_INDEXER_K_NORM,   "weight", i), {hparams.indexer_head_size}, indexer_flags);
++        layer.indexer_k_norm_b = create_tensor(tn(LLM_TENSOR_INDEXER_K_NORM,   "bias",   i), {hparams.indexer_head_size}, indexer_flags);
++        layer.indexer_proj     = create_tensor(tn(LLM_TENSOR_INDEXER_PROJ,     "weight", i), {n_embd, hparams.indexer_n_head}, indexer_flags);
++        layer.indexer_attn_k   = create_tensor(tn(LLM_TENSOR_INDEXER_ATTN_K,   "weight", i), {n_embd, hparams.indexer_head_size}, indexer_flags);
++        layer.indexer_attn_q_b = create_tensor(tn(LLM_TENSOR_INDEXER_ATTN_Q_B, "weight", i), {q_lora_rank, hparams.indexer_n_head * hparams.indexer_head_size}, indexer_flags);
++        llama_glm_dsa_validate_indexshare_layer_contract(i, hparams, layer);
++        llama_glm_dsa_validate_nextn_indexer_contract(i, hparams, layer);
+         if (i < (int) hparams.n_layer_dense_lead) {
+             layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", i), {n_embd,   n_ff}, flags);
+             layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {  n_ff, n_embd}, flags);
+@@ -134,13 +658,474 @@ void llama_model_glm_dsa::load_arch_tensors(llama_model_loader &) {
+             layer.nextn.hnorm            = create_tensor(tn(LLM_TENSOR_NEXTN_HNORM, "weight", i), { n_embd }, flags);
+ 
+             // Optional tensors
+-            layer.nextn.embed_tokens     = create_tensor(tn(LLM_TENSOR_NEXTN_EMBED_TOKENS, "weight", i), { n_embd, n_vocab }, flags | TENSOR_NOT_REQUIRED);
+-            layer.nextn.shared_head_head = create_tensor(tn(LLM_TENSOR_NEXTN_SHARED_HEAD_HEAD, "weight", i), { n_embd, n_vocab }, flags | TENSOR_NOT_REQUIRED);
++            layer.nextn.embed_tokens     = create_tensor(tn(LLM_TENSOR_NEXTN_EMBED_TOKENS, "weight", i), { n_embd, n_vocab_tensor }, flags | TENSOR_NOT_REQUIRED);
++            layer.nextn.shared_head_head = create_tensor(tn(LLM_TENSOR_NEXTN_SHARED_HEAD_HEAD, "weight", i), { n_embd, n_vocab_tensor }, flags | TENSOR_NOT_REQUIRED);
+             layer.nextn.shared_head_norm = create_tensor(tn(LLM_TENSOR_NEXTN_SHARED_HEAD_NORM, "weight", i), { n_embd }, flags | TENSOR_NOT_REQUIRED);
+         }
+     }
+ }
+ 
++llama_model_glm_dsa::graph::graph(const llama_model & model, const llm_graph_params & params) :
++    llm_graph_context(params) {
++    const bool is_mla = hparams.is_mla();
++    GGML_ASSERT(is_mla);
++
++    const int64_t n_embd_head_k = hparams.n_embd_head_k_mla();
++    const int64_t n_embd_head_v = hparams.n_embd_head_v_mla();
++    GGML_UNUSED(n_embd_head_v);
++
++    const int64_t n_embd_head_qk_rope = hparams.n_rot();
++    const int64_t n_embd_head_qk_nope = n_embd_head_k - n_embd_head_qk_rope;
++
++    const int64_t n_indexer_head = hparams.indexer_n_head;
++    const int64_t n_embd_indexer_head = hparams.indexer_head_size;
++    const int64_t n_embd_indexer_head_rope = hparams.n_rot();
++    const int64_t n_embd_indexer_head_nope = n_embd_indexer_head - n_embd_indexer_head_rope;
++    GGML_ASSERT(n_embd_indexer_head_nope >= 0);
++    const uint32_t n_indexer_top_k = hparams.indexer_top_k;
++
++    const uint32_t kv_lora_rank = hparams.n_lora_kv;
++
++    GGML_ASSERT(ext_factor >= 0.0f);
++    const float attn_factor_org = attn_factor * (1.0f + 0.1f * logf(1.0f / freq_scale));
++    const float mscale   = attn_factor_org * (1.0f + 0.1f * hparams.rope_yarn_log_mul * logf(1.0f / freq_scale));
++    const float kq_scale = 1.0f * mscale * mscale / sqrtf(float(n_embd_head_k));
++
++    ggml_tensor * cur;
++    ggml_tensor * inpL;
++
++    const int effective_n_layers = n_layer;
++    const skippy_graph_filter & stage_filter = skippy_graph_get_filter();
++    const bool stage_filtered = stage_filter.enabled;
++    const int il_start = stage_filtered ? stage_filter.layer_start : 0;
++    const int il_end   = stage_filtered ?
++            std::min(stage_filter.layer_end, effective_n_layers) :
++            effective_n_layers;
++
++    for (int il = il_start; il < il_end; ++il) {
++        if (!model.layers[il].wk_b || !model.layers[il].wv_b) {
++            throw std::runtime_error("GLM_DSA sparse attention requires split K_B and V_B tensors");
++        }
++    }
++
++    inpL = build_inp_embd(stage_filtered && il_start > 0 ? nullptr : model.tok_embd);
++
++    ggml_tensor * inp_pos = build_inp_pos();
++    llm_graph_input_attn_k_dsa * inp_attn_dsa = build_attn_inp_k_dsa();
++    ggml_tensor * inp_out_ids = (!stage_filtered || stage_filter.include_output) ? build_inp_out_ids() : nullptr;
++    ggml_tensor * last_top_k = nullptr;
++    ggml_tensor * input_top_k = nullptr;
++
++    const int expected_group_size = int(hparams.indexer_top_k_freq);
++    const int repeating_group_begin = expected_group_size > 0 ?
++        std::max(0, int(hparams.indexer_skip_top_k_offset) - 1) : 0;
++    const llama_glm_dsa_block_plan block_plan = llama_glm_dsa_make_block_plan(
++        effective_n_layers,
++        il_start,
++        il_end,
++        repeating_group_begin,
++        expected_group_size,
++        [&](int il) {
++            bool metadata_matched = false;
++            const bool metadata_full = llama_glm_dsa_metadata_layer_is_full(
++                hparams, il, &metadata_matched);
++            return metadata_matched ? metadata_full :
++                llama_glm_dsa_layer_uses_indexer(il, hparams, model.layers[il]);
++        });
++    llama_glm_dsa_log_block_plan(block_plan, expected_group_size);
++
++    if (stage_filtered && il_start > 0 && il_start < effective_n_layers &&
++            !block_plan.blocks.empty() && block_plan.blocks.front().needs_input_top_k) {
++        const int64_t n_stream = cparams.kv_unified ? 1 : ubatch.n_seqs_unq;
++        GGML_ASSERT(n_stream > 0);
++        GGML_ASSERT(ubatch.n_tokens % n_stream == 0);
++        const int64_t n_batch = ubatch.n_tokens / n_stream;
++        const skippy_activation_glm_dsa_top_k & sideband = skippy_graph_get_glm_dsa_top_k();
++        const int64_t n_top_k = sideband.values != nullptr ?
++                sideband.n_top_k :
++                std::min<int64_t>(inp_attn_dsa->mctx->get_lid()->get_n_kv(), n_indexer_top_k);
++
++        auto inp = std::make_unique<llm_graph_input_glm_dsa_top_k>(n_top_k, n_stream);
++        inp->values = ggml_new_tensor_4d(ctx0, GGML_TYPE_I32, n_top_k, n_batch, 1, n_stream);
++        cb(inp->values, "inp_glm_dsa_top_k", -1);
++        ggml_set_input(inp->values);
++        last_top_k  = inp->values;
++        input_top_k = inp->values;
++        res->add_input(std::move(inp));
++    }
++
++    llama_glm_dsa_log_indexshare_contract(model, hparams, stage_filtered, il_start, il_end);
++
++    const bool roofline_bypass_attention = n_tokens == 1 && llama_glm_dsa_roofline_bypass_enabled(
++        "LLAMA_GLM_DSA_ROOFLINE_BYPASS_ATTENTION");
++    const bool roofline_bypass_after_q_b = n_tokens == 1 && llama_glm_dsa_roofline_bypass_enabled(
++        "LLAMA_GLM_DSA_ROOFLINE_BYPASS_AFTER_Q_B");
++    const bool roofline_bypass_before_cache = n_tokens == 1 && llama_glm_dsa_roofline_bypass_enabled(
++        "LLAMA_GLM_DSA_ROOFLINE_BYPASS_BEFORE_CACHE");
++    const bool roofline_bypass_dense_ffn = n_tokens == 1 && llama_glm_dsa_roofline_bypass_enabled(
++        "LLAMA_GLM_DSA_ROOFLINE_BYPASS_DENSE_FFN");
++    const bool roofline_bypass_routed_moe = n_tokens == 1 && llama_glm_dsa_roofline_bypass_enabled(
++        "LLAMA_GLM_DSA_ROOFLINE_BYPASS_ROUTED_MOE");
++    const bool roofline_bypass_shared_expert = n_tokens == 1 && llama_glm_dsa_roofline_bypass_enabled(
++        "LLAMA_GLM_DSA_ROOFLINE_BYPASS_SHARED_EXPERT");
++
++    const auto build_layer = [&](int il) {
++        ggml_tensor * inpSA = inpL;
++
++        cur = build_norm(inpL, model.layers[il].attn_norm, NULL, LLM_NORM_RMS, il);
++        cb(cur, "attn_norm", il);
++
++        {
++            ggml_tensor * qr = ggml_mul_mat(ctx0, model.layers[il].wq_a, cur);
++            cb(qr, "qr", il);
++
++            qr = build_norm(qr, model.layers[il].attn_q_a_norm, nullptr, LLM_NORM_RMS, il);
++            cb(qr, "qr", il);
++
++            ggml_tensor * top_k = last_top_k;
++            const bool uses_indexer = llama_glm_dsa_layer_uses_indexer(il, hparams, model.layers[il]);
++            llama_glm_dsa_log_indexshare_exec(il, uses_indexer, top_k != nullptr, stage_filtered, il_start, il_end);
++
++            if (uses_indexer) {
++                ggml_tensor * indexer_q = ggml_mul_mat(ctx0, model.layers[il].indexer_attn_q_b, qr);
++                cb(indexer_q, "indexer_q", il);
++
++                ggml_tensor * indexer_q_pe =
++                    ggml_view_3d(ctx0, indexer_q, n_embd_indexer_head_rope, n_indexer_head, n_tokens,
++                                 ggml_row_size(indexer_q->type, n_embd_indexer_head),
++                                 ggml_row_size(indexer_q->type, n_embd_indexer_head) * n_indexer_head, 0);
++                cb(indexer_q_pe, "indexer_q_pe", il);
++
++                ggml_tensor * indexer_q_nope =
++                    ggml_view_3d(ctx0, indexer_q, n_embd_indexer_head_nope, n_indexer_head, n_tokens,
++                                 ggml_row_size(indexer_q->type, n_embd_indexer_head),
++                                 ggml_row_size(indexer_q->type, n_embd_indexer_head) * n_indexer_head,
++                                 ggml_row_size(indexer_q->type, n_embd_indexer_head_rope));
++                cb(indexer_q_nope, "indexer_q_nope", il);
++
++                indexer_q_pe = ggml_rope_ext(
++                    ctx0, indexer_q_pe, inp_pos, nullptr, n_rot, LLAMA_ROPE_TYPE_NEOX,
++                    n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor,
++                    beta_fast, beta_slow);
++                cb(indexer_q_pe, "indexer_q_pe", il);
++                indexer_q = ggml_concat(ctx0, indexer_q_pe, indexer_q_nope, 0);
++                cb(indexer_q, "indexer_q", il);
++
++                ggml_tensor * indexer_k = ggml_mul_mat(ctx0, model.layers[il].indexer_attn_k, cur);
++                cb(indexer_k, "indexer_k", il);
++
++                indexer_k = build_norm(indexer_k, model.layers[il].indexer_k_norm, model.layers[il].indexer_k_norm_b, LLM_NORM, il);
++                cb(indexer_k, "indexer_k", il);
++
++                ggml_tensor * indexer_k_pe =
++                    ggml_view_3d(ctx0, indexer_k, n_embd_indexer_head_rope, 1, n_tokens,
++                                 ggml_row_size(indexer_k->type, n_embd_indexer_head),
++                                 ggml_row_size(indexer_k->type, n_embd_indexer_head) * 1, 0);
++                cb(indexer_k_pe, "indexer_k_pe", il);
++
++                ggml_tensor * indexer_k_nope =
++                    ggml_view_3d(ctx0, indexer_k, n_embd_indexer_head_nope, 1, n_tokens,
++                                 ggml_row_size(indexer_k->type, n_embd_indexer_head),
++                                 ggml_row_size(indexer_k->type, n_embd_indexer_head) * 1,
++                                 ggml_row_size(indexer_k->type, n_embd_indexer_head_rope));
++                cb(indexer_k_nope, "indexer_k_nope", il);
++
++                indexer_k_pe = ggml_rope_ext(
++                    ctx0, indexer_k_pe, inp_pos, nullptr, n_rot, LLAMA_ROPE_TYPE_NEOX,
++                    n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor,
++                    beta_fast, beta_slow);
++                cb(indexer_k_pe, "indexer_k_pe", il);
++                indexer_k = ggml_concat(ctx0, indexer_k_pe, indexer_k_nope, 0);
++                cb(indexer_k, "indexer_k", il);
++
++                indexer_q = ggml_mul_mat(ctx0, inp_attn_dsa->self_k_rot_lid, indexer_q);
++                cb(indexer_q, "indexer_q", il);
++                indexer_k = ggml_mul_mat(ctx0, inp_attn_dsa->self_k_rot_lid, indexer_k);
++                cb(indexer_k, "indexer_k", il);
++
++                const auto * mctx_lid = inp_attn_dsa->mctx->get_lid();
++                const auto & k_idxs_lid = inp_attn_dsa->get_k_idxs_lid();
++                ggml_build_forward_expand(gf, mctx_lid->cpy_k(ctx0, indexer_k, k_idxs_lid, il));
++
++                ggml_tensor * indexer_weights = ggml_mul_mat(ctx0, model.layers[il].indexer_proj, cur);
++                cb(indexer_weights, "indexer_weights", il);
++
++                indexer_k = mctx_lid->get_k(ctx0, il);
++
++                const auto n_stream = indexer_k->ne[3];
++                indexer_q = ggml_view_4d(ctx0, indexer_q, indexer_q->ne[0], indexer_q->ne[1], indexer_q->ne[2]/n_stream, n_stream, indexer_q->nb[1], indexer_q->nb[2], indexer_q->nb[3]/n_stream, 0);
++                indexer_weights = ggml_view_4d(ctx0, indexer_weights, indexer_weights->ne[0], indexer_weights->ne[1]/n_stream, indexer_weights->ne[2], n_stream, indexer_weights->nb[1], indexer_weights->nb[2]/n_stream, indexer_weights->nb[3]/n_stream, 0);
++                indexer_weights = ggml_scale(
++                    ctx0,
++                    indexer_weights,
++                    1.0f / sqrtf(float(n_embd_indexer_head * n_indexer_head)));
++                cb(indexer_weights, "indexer_weights", il);
++
++                ggml_tensor * indexer_score = nullptr;
++                ggml_tensor * indexer_kq_mask = inp_attn_dsa->get_kq_mask_lid();
++                if (llama_glm_dsa_disable_lightning_indexer()) {
++                    indexer_q = ggml_permute(ctx0, indexer_q, 0, 2, 1, 3);
++                    cb(indexer_q, "indexer_q", il);
++                    indexer_k = ggml_permute(ctx0, indexer_k, 0, 2, 1, 3);
++                    cb(indexer_k, "indexer_k", il);
++
++                    ggml_tensor * indexer_kq = ggml_mul_mat(ctx0, indexer_k, indexer_q);
++                    cb(indexer_kq, "indexer_kq", il);
++
++                    indexer_kq = ggml_cont(ctx0, ggml_permute(ctx0, indexer_kq, 2, 1, 0, 3));
++                    cb(indexer_kq, "indexer_kq", il);
++
++                    indexer_score = ggml_relu(ctx0, indexer_kq);
++                    cb(indexer_score, "indexer_score", il);
++
++                    indexer_score = ggml_mul(ctx0, indexer_score, indexer_weights);
++                    cb(indexer_score, "indexer_score", il);
++
++                    indexer_score = ggml_sum_rows(ctx0, indexer_score);
++                    cb(indexer_score, "indexer_score", il);
++
++                    indexer_score = ggml_cont(ctx0, ggml_permute(ctx0, indexer_score, 2, 1, 0, 3));
++                    indexer_score = ggml_add(ctx0, indexer_score, indexer_kq_mask);
++                } else {
++                    // The fused indexer consumes cached K as [head_size, 1, n_kv, n_stream].
++                    // Do not apply the dense KQ path's K permutation here.
++                    cb(indexer_k, "indexer_k", il);
++
++                    indexer_score = ggml_lightning_indexer(
++                        ctx0, indexer_q, indexer_k, indexer_weights, indexer_kq_mask);
++                }
++                cb(indexer_score, "indexer_score", il);
++
++                const uint32_t n_score = uint32_t(indexer_score->ne[0]);
++                const uint32_t n_kv = inp_attn_dsa->mctx->get_lid()->get_n_kv_used();
++                const uint32_t n_top_k = std::min(std::min(n_score, n_kv), n_indexer_top_k);
++                if (n_top_k == 0) {
++                    throw std::runtime_error("GLM_DSA IndexShare requires at least one KV entry before top-k selection");
++                }
++                top_k = ggml_cont(ctx0, ggml_top_k(ctx0, indexer_score, n_top_k));
++                cb(top_k, "top_k", il);
++                llama_glm_dsa_log_indexshare_top_k(il, top_k, indexer_score);
++                last_top_k = top_k;
++            } else if (!top_k) {
++                throw std::runtime_error("GLM_DSA split starts inside an IndexShare consumer group without top-k sideband input");
++            } else {
++                llama_glm_dsa_log_indexshare_consume(il, top_k);
++            }
++
++            if (roofline_bypass_attention) {
++                cur = ggml_scale(ctx0, inpSA, 0.0f);
++                cb(cur, "attn_roofline_zero", il);
++            } else {
++                ggml_tensor * q = ggml_mul_mat(ctx0, model.layers[il].wq_b, qr);
++                cb(q, "q", il);
++
++                if (roofline_bypass_after_q_b) {
++                    ggml_build_forward_expand(gf, q);
++                    cur = ggml_scale(ctx0, inpSA, 0.0f);
++                    cb(cur, "attn_after_q_b_roofline_zero", il);
++                } else {
++                ggml_tensor * q_nope =
++                    ggml_view_3d(ctx0, q, n_embd_head_qk_nope, n_head, n_tokens, ggml_row_size(q->type, n_embd_head_k),
++                                 ggml_row_size(q->type, n_embd_head_k) * n_head, 0);
++                cb(q_nope, "q_nope", il);
++
++                ggml_tensor * q_pe = ggml_view_3d(
++                    ctx0, q, n_embd_head_qk_rope, n_head, n_tokens, ggml_row_size(q->type, n_embd_head_k),
++                    ggml_row_size(q->type, n_embd_head_k) * n_head, ggml_row_size(q->type, n_embd_head_qk_nope));
++                cb(q_pe, "q_pe", il);
++
++                ggml_tensor * kv_cmpr_pe = ggml_mul_mat(ctx0, model.layers[il].wkv_a_mqa, cur);
++                cb(kv_cmpr_pe, "kv_cmpr_pe", il);
++
++            ggml_tensor * kv_cmpr =
++                ggml_view_2d(ctx0, kv_cmpr_pe, kv_lora_rank, n_tokens,
++                             ggml_row_size(kv_cmpr_pe->type, kv_lora_rank + n_embd_head_qk_rope), 0);
++            cb(kv_cmpr, "kv_cmpr", il);
++
++            ggml_tensor * k_pe = ggml_view_3d(ctx0, kv_cmpr_pe, n_embd_head_qk_rope, 1, n_tokens,
++                                              ggml_row_size(kv_cmpr_pe->type, kv_lora_rank + n_embd_head_qk_rope),
++                                              ggml_row_size(kv_cmpr_pe->type, kv_lora_rank + n_embd_head_qk_rope),
++                                              ggml_row_size(kv_cmpr_pe->type, kv_lora_rank));
++            cb(k_pe, "k_pe", il);
++
++            kv_cmpr = build_norm(kv_cmpr, model.layers[il].attn_kv_a_norm, nullptr, LLM_NORM_RMS, il);
++            cb(kv_cmpr, "kv_cmpr", il);
++
++            q_nope = ggml_permute(ctx0, q_nope, 0, 2, 1, 3);
++            cb(q_nope, "q_nope_perm", il);
++
++            ggml_tensor * q_nope_absorbed = ggml_mul_mat(ctx0, model.layers[il].wk_b, q_nope);
++            cb(q_nope_absorbed, "q_nope_absorbed", il);
++
++            q_nope_absorbed = ggml_permute(ctx0, q_nope_absorbed, 0, 2, 1, 3);
++            cb(q_nope_absorbed, "q_nope_absorbed_perm", il);
++
++            q_pe = ggml_rope_ext(
++                ctx0, q_pe, inp_pos, nullptr, n_rot, rope_type,
++                n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor,
++                beta_fast, beta_slow);
++            cb(q_pe, "q_pe", il);
++            ggml_tensor * Qcur = ggml_concat(ctx0, q_nope_absorbed, q_pe, 0);
++            cb(Qcur, "Qcur", il);
++
++            kv_cmpr = ggml_reshape_3d(ctx0, kv_cmpr, kv_lora_rank, 1, n_tokens);
++            cb(kv_cmpr, "kv_cmpr_reshape", il);
++
++            k_pe = ggml_rope_ext(
++                ctx0, k_pe, inp_pos, nullptr, n_rot, rope_type,
++                n_ctx_orig, freq_base, freq_scale, ext_factor, attn_factor,
++                beta_fast, beta_slow);
++            cb(k_pe, "k_pe", il);
++            ggml_tensor * Kcur = ggml_concat(ctx0, kv_cmpr, k_pe, 0);
++            cb(Kcur, "Kcur", il);
++
++            ggml_tensor * Vcur = kv_cmpr;
++            cb(Vcur, "Vcur", il);
++
++                if (roofline_bypass_before_cache) {
++                    ggml_build_forward_expand(gf, Qcur);
++                    ggml_build_forward_expand(gf, Kcur);
++                    ggml_build_forward_expand(gf, Vcur);
++                    cur = ggml_scale(ctx0, inpSA, 0.0f);
++                    cb(cur, "attn_before_cache_roofline_zero", il);
++                } else {
++                    cur = build_attn(inp_attn_dsa,
++                            model.layers[il].wo, NULL, model.layers[il].wo_s,
++                            Qcur, Kcur, Vcur, nullptr, nullptr, model.layers[il].wv_b, top_k, kq_scale, il);
++                }
++                }
++            }
++        }
++
++        if (il == il_end - 1 && inp_out_ids && cparams.embeddings_nextn_masked) {
++            cur   = ggml_get_rows(ctx0, cur, inp_out_ids);
++            inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
++        }
++
++        ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
++        cb(ffn_inp, "ffn_inp", il);
++
++        cur = build_norm(ffn_inp, model.layers[il].ffn_norm, NULL, LLM_NORM_RMS, il);
++        cb(cur, "ffn_norm", il);
++
++        if ((uint32_t) il < hparams.n_layer_dense_lead) {
++            if (roofline_bypass_dense_ffn) {
++                cur = ggml_scale(ctx0, cur, 0.0f);
++                cb(cur, "ffn_dense_roofline_zero", il);
++            } else {
++                cur = build_ffn(cur,
++                    model.layers[il].ffn_up, NULL, model.layers[il].ffn_up_s,
++                    model.layers[il].ffn_gate, NULL, model.layers[il].ffn_gate_s,
++                    model.layers[il].ffn_down, NULL, model.layers[il].ffn_down_s,
++                    NULL, LLM_FFN_SILU, LLM_FFN_PAR, il);
++                cb(cur, "ffn_out", il);
++            }
++        } else {
++            if (roofline_bypass_routed_moe && roofline_bypass_shared_expert) {
++                cur = ggml_scale(ctx0, cur, 0.0f);
++                cb(cur, "ffn_moe_all_roofline_zero", il);
++            } else {
++                ggml_tensor * moe_out = nullptr;
++                if (roofline_bypass_routed_moe) {
++                    moe_out = ggml_scale(ctx0, cur, 0.0f);
++                    cb(moe_out, "ffn_moe_routed_roofline_zero", il);
++                } else {
++                    moe_out = build_moe_ffn(cur,
++                        model.layers[il].ffn_gate_inp,
++                        model.layers[il].ffn_up_exps,
++                        model.layers[il].ffn_gate_exps,
++                        model.layers[il].ffn_down_exps,
++                        model.layers[il].ffn_exp_probs_b,
++                        n_expert, n_expert_used,
++                        LLM_FFN_SILU, hparams.expert_weights_norm,
++                        hparams.expert_weights_scale,
++                        (llama_expert_gating_func_type) hparams.expert_gating_func,
++                        il,
++                        nullptr,
++                        model.layers[il].ffn_gate_up_exps,
++                        model.layers[il].ffn_up_exps_s,
++                        model.layers[il].ffn_gate_exps_s,
++                        model.layers[il].ffn_down_exps_s);
++                    cb(moe_out, "ffn_moe_out", il);
++                }
++
++                ggml_tensor * ffn_shexp = nullptr;
++                if (roofline_bypass_shared_expert) {
++                    ffn_shexp = ggml_scale(ctx0, cur, 0.0f);
++                    cb(ffn_shexp, "ffn_shared_roofline_zero", il);
++                } else {
++                    ffn_shexp = build_ffn(cur,
++                        model.layers[il].ffn_up_shexp, NULL, model.layers[il].ffn_up_shexp_s,
++                        model.layers[il].ffn_gate_shexp, NULL, model.layers[il].ffn_gate_shexp_s,
++                        model.layers[il].ffn_down_shexp, NULL, model.layers[il].ffn_down_shexp_s,
++                        NULL, LLM_FFN_SILU, LLM_FFN_PAR, il);
++                    cb(ffn_shexp, "ffn_shexp", il);
++                }
++
++                cur = ggml_add(ctx0, moe_out, ffn_shexp);
++                cb(cur, "ffn_out", il);
++            }
++        }
++        cur = ggml_add(ctx0, cur, ffn_inp);
++
++        cur = build_cvec(cur, il);
++        cb(cur, "l_out", il);
++
++        inpL = cur;
++    };
++
++    for (const llama_glm_dsa_block_span & block : block_plan.blocks) {
++        for (int il = block.execution_begin; il < block.execution_end; ++il) {
++            build_layer(il);
++        }
++    }
++    cur = inpL;
++
++    if (roofline_bypass_attention || roofline_bypass_after_q_b || roofline_bypass_before_cache) {
++        ggml_build_forward_expand(gf, inp_pos);
++        if (input_top_k != nullptr) {
++            ggml_build_forward_expand(gf, input_top_k);
++        }
++    }
++
++    if (stage_filtered && stage_filter.layer_end < effective_n_layers && last_top_k != nullptr) {
++        res->t_skippy_glm_dsa_top_k = last_top_k;
++        if (roofline_bypass_attention || roofline_bypass_after_q_b || roofline_bypass_before_cache) {
++            ggml_build_forward_expand(gf, last_top_k);
++        }
++    }
++
++    if (stage_filtered && !stage_filter.include_output) {
++        if (!cparams.embeddings_nextn_masked && inp_out_ids) {
++            cur = ggml_get_rows(ctx0, cur, inp_out_ids);
++        }
++
++        cb(cur, "stage_boundary", il_end - 1);
++        res->t_embd = cur;
++        ggml_build_forward_expand(gf, cur);
++        return;
++    }
++
++    cur = build_norm(cur, model.output_norm, NULL, LLM_NORM_RMS, -1);
++
++    cb(cur, "h_nextn", -1);
++    res->t_h_nextn = cur;
++
++    if (!cparams.embeddings_nextn_masked && inp_out_ids) {
++        cur = ggml_get_rows(ctx0, cur, inp_out_ids);
++    }
++
++    cb(cur, "result_norm", -1);
++    res->t_embd = cur;
++
++    cur = ggml_mul_mat(ctx0, model.output, cur);
++
++    cb(cur, "result_output", -1);
++    res->t_logits = cur;
++
++    ggml_build_forward_expand(gf, cur);
++}
++
+ std::unique_ptr<llm_graph_context> llama_model_glm_dsa::build_arch_graph(const llm_graph_params & params) const {
+     if (params.gtype == LLM_GRAPH_TYPE_DECODER_MTP) {
+         return std::make_unique<graph_mtp>(*this, params);
+diff --git a/src/models/models.h b/src/models/models.h
+index b40f981..80edb0d 100644
+--- a/src/models/models.h
++++ b/src/models/models.h
+@@ -1220,9 +1220,12 @@ struct llama_model_glm_dsa : public llama_model_base {
+     void load_arch_hparams(llama_model_loader & ml) override;
+     void load_arch_tensors(llama_model_loader & ml) override;
+ 
+-    using graph = llama_model_deepseek2::graph;
+     using graph_mtp = llama_model_deepseek2::graph_mtp;
+ 
++    struct graph : public llm_graph_context {
++        graph(const llama_model & model, const llm_graph_params & params);
++    };
++
+     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
+ };
+ 
+-- 
+2.54.0 (Apple Git-157)
+

@@ -64,6 +64,8 @@ fn write_local_configs(
             n_batch: None,
             n_ubatch: None,
             n_gpu_layers: args.n_gpu_layers,
+            mmap: None,
+            mlock: false,
             cache_type_k: args.cache_type_k.clone(),
             cache_type_v: args.cache_type_v.clone(),
             flash_attn_type: StageFlashAttentionType::Auto,

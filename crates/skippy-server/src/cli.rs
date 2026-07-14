@@ -13,7 +13,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Command {
     Serve(ServeArgs),
-    ServeBinary(ServeBinaryArgs),
+    ServeBinary(Box<ServeBinaryArgs>),
     #[command(name = "probe-downstream")]
     ProbeDownstream(ProbeDownstreamArgs),
     #[command(name = "serve-openai")]
@@ -186,6 +186,10 @@ pub struct ServeBinaryArgs {
         help = "Override n_gpu_layers for the embedded OpenAI draft model. Defaults to the stage config n_gpu_layers."
     )]
     pub openai_draft_n_gpu_layers: Option<i32>,
+    #[arg(long, default_value_t = 0)]
+    pub openai_ngram_min: usize,
+    #[arg(long, default_value_t = 0)]
+    pub openai_ngram_max: usize,
 }
 
 #[derive(Parser)]

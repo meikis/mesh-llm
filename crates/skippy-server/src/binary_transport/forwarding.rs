@@ -245,6 +245,8 @@ mod tests {
             n_batch: None,
             n_ubatch: None,
             n_gpu_layers: -1,
+            mmap: None,
+            mlock: false,
             cache_type_k: "f16".to_string(),
             cache_type_v: "f16".to_string(),
             flash_attn_type: FlashAttentionType::Auto,
@@ -253,6 +255,7 @@ mod tests {
             use_mmap_buffer: true,
             selected_device: None::<StageDevice>,
             kv_cache: None::<StageKvCacheConfig>,
+            native_mtp_enabled: true,
             load_mode: LoadMode::RuntimeSlice,
             bind_addr: "127.0.0.1:0".to_string(),
             upstream: Some(PeerConfig {

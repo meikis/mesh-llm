@@ -1623,62 +1623,89 @@ where
             }
         };
 
-        if let Some(coordinator) = standby_coordinator {
-            loop {
-                tokio::select! {
-                    result = peer_rx.changed() => {
-                        if result.is_err() {
-                            return None;
-                        }
-                        if split_standby_coordinator_present(node, coordinator).await {
-                            continue;
-                        }
-                        let _ = emit_event(OutputEvent::Info {
-                            message: format!(
-                                "Split runtime coordinator {} is no longer visible; retrying split planning",
-                                coordinator.fmt_short()
-                            ),
-                            context: Some(format!("model={model_ref}")),
-                        });
-                        break;
-                    }
-                    _ = tokio::time::sleep(SPLIT_STANDBY_RETRY_INTERVAL) => {
-                        if split_standby_coordinator_present(node, coordinator).await {
-                            continue;
-                        }
-                        break;
-                    }
-                    result = stop_rx.changed() => {
-                        if result.is_err() || *stop_rx.borrow() {
-                            return None;
-                        }
-                    }
+        let should_retry = if let Some(coordinator) = standby_coordinator {
+            wait_for_split_coordinator_departure(
+                node,
+                coordinator,
+                &mut peer_rx,
+                stop_rx,
+                model_ref,
+            )
+            .await
+        } else {
+            wait_for_split_participants(&mut peer_rx, stop_rx).await
+        };
+        if !should_retry {
+            return None;
+        }
+    }
+}
+
+async fn wait_for_split_coordinator_departure(
+    node: &mesh::Node,
+    coordinator: iroh::EndpointId,
+    peer_rx: &mut tokio::sync::watch::Receiver<usize>,
+    stop_rx: &mut tokio::sync::watch::Receiver<bool>,
+    model_ref: &str,
+) -> bool {
+    loop {
+        tokio::select! {
+            result = peer_rx.changed() => {
+                if result.is_err() {
+                    return false;
+                }
+                if split_standby_coordinator_present(node, coordinator).await {
+                    continue;
+                }
+                let _ = emit_event(OutputEvent::Info {
+                    message: format!(
+                        "Split runtime coordinator {} is no longer visible; retrying split planning",
+                        coordinator.fmt_short()
+                    ),
+                    context: Some(format!("model={model_ref}")),
+                });
+                return true;
+            }
+            _ = tokio::time::sleep(SPLIT_STANDBY_RETRY_INTERVAL) => {
+                if !split_standby_coordinator_present(node, coordinator).await {
+                    return true;
                 }
             }
-        } else {
-            tokio::select! {
-                result = peer_rx.changed() => {
-                    if result.is_err() {
-                        return None;
-                    }
-                    tokio::select! {
-                        _ = tokio::time::sleep(Duration::from_secs(2)) => {}
-                        result = stop_rx.changed() => {
-                            if result.is_err() || *stop_rx.borrow() {
-                                return None;
-                            }
-                        }
-                    }
-                }
-                _ = tokio::time::sleep(SPLIT_STANDBY_RETRY_INTERVAL) => {}
-                result = stop_rx.changed() => {
-                    if result.is_err() || *stop_rx.borrow() {
-                        return None;
-                    }
+            result = stop_rx.changed() => {
+                if result.is_err() || *stop_rx.borrow() {
+                    return false;
                 }
             }
         }
     }
+}
+
+async fn wait_for_split_participants(
+    peer_rx: &mut tokio::sync::watch::Receiver<usize>,
+    stop_rx: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    tokio::select! {
+        result = peer_rx.changed() => {
+            if result.is_err() {
+                return false;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                result = stop_rx.changed() => {
+                    if result.is_err() || *stop_rx.borrow() {
+                        return false;
+                    }
+                }
+            }
+        }
+        _ = tokio::time::sleep(SPLIT_STANDBY_RETRY_INTERVAL) => {}
+        result = stop_rx.changed() => {
+            if result.is_err() || *stop_rx.borrow() {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 async fn split_standby_coordinator_present(

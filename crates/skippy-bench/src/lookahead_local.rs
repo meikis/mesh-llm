@@ -77,7 +77,7 @@ pub fn lookahead_local(args: LookaheadLocalArgs) -> Result<()> {
     let mut lookahead = lookahead_model
         .create_session()
         .context("create lookahead session")?;
-    let warm_tokens = args.max_tokens.min(16).max(1);
+    let warm_tokens = args.max_tokens.clamp(1, 16);
     let _ = run_serial(&mut serial, &prompt_tokens, warm_tokens)?;
     let _ = run_lookahead(
         &mut lookahead,
@@ -239,6 +239,8 @@ fn runtime_config(
         n_threads: None,
         n_threads_batch: None,
         n_gpu_layers: args.n_gpu_layers,
+        mmap: None,
+        mlock: false,
         selected_backend_device: None,
         cache_type_k: parse_cache_type("f16")?,
         cache_type_v: parse_cache_type("f16")?,

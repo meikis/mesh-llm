@@ -44,6 +44,7 @@ impl DraftRunner {
                 layer_end: layer_count,
                 ctx_size,
                 lane_count: 1,
+                branch_sequence_capacity: 0,
                 n_batch: None,
                 n_ubatch: None,
                 n_threads: None,
@@ -58,9 +59,12 @@ impl DraftRunner {
                 include_embeddings: true,
                 include_output: true,
                 filter_tensors_on_load: true,
+                mlock: false,
+                mmap: Some(true),
                 use_mmap: true,
                 use_mmap_prefetch: true,
                 use_mmap_buffer: true,
+                glm_dsa_policy: None,
             },
         )
         .with_context(|| format!("open draft model {}", path.display()))?;

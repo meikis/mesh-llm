@@ -32,8 +32,10 @@ use skippy_runtime::ModelInfo;
 use skippy_server::{
     DEFAULT_EMBEDDED_MAX_TOKENS, EmbeddedOpenAiArgs, EmbeddedRuntimeOptions, EmbeddedRuntimeStatus,
     EmbeddedServerHandle, EmbeddedState, OpenAiGuardrailsConfig, OpenAiGuardrailsStatus,
-    OpenAiGuardrailsTarget, SkippyRuntimeHandle, binary_transport::WireCondition,
-    embedded_openai_backend, telemetry::Telemetry, telemetry::TelemetryLevel,
+    OpenAiGuardrailsTarget, SkippyRuntimeHandle, binary_transport::PredictionReturnHub,
+    binary_transport::PredictionReturnListener, binary_transport::WireCondition,
+    embedded_openai_backend, runtime_state::RuntimeState, telemetry::Telemetry,
+    telemetry::TelemetryLevel,
 };
 
 pub use certification::{
@@ -136,6 +138,8 @@ pub(crate) struct SkippyModelLoadOptions {
     pub(crate) model_path: PathBuf,
     pub(crate) ctx_size: u32,
     pub(crate) n_gpu_layers: i32,
+    pub(crate) mmap: Option<bool>,
+    pub(crate) mlock: bool,
     pub(crate) cache_type_k: String,
     pub(crate) cache_type_v: String,
     pub(crate) n_batch: Option<u32>,
@@ -221,6 +225,8 @@ impl SkippyModelLoadOptions {
             model_path: model_path.into(),
             ctx_size: 4096,
             n_gpu_layers: -1,
+            mmap: None,
+            mlock: false,
             cache_type_k: "f16".to_string(),
             cache_type_v: "f16".to_string(),
             n_batch: None,
@@ -350,6 +356,7 @@ pub(crate) struct SkippyModelHandle {
     started_at_unix_nanos: i64,
     status: Arc<Mutex<HandleState>>,
     _materialized_pin: Option<materialization::MaterializedStagePin>,
+    _prediction_return_listener: Option<PredictionReturnListener>,
 }
 
 pub(crate) struct SkippyHttpHandle {
@@ -381,6 +388,67 @@ impl SkippyHttpHandle {
     pub(crate) async fn shutdown(self) -> Result<()> {
         self.server.shutdown().await
     }
+}
+
+/// Builds `EmbeddedOpenAiArgs`, filling most fields from `embedded_args` and
+/// taking only the handful that differ per load path as parameters.
+fn embedded_openai_args_from(
+    embedded_args: resolver::ResolvedEmbeddedOpenAiArgs,
+    config: StageConfig,
+    runtime: Arc<Mutex<RuntimeState>>,
+    prediction_returns: Option<Arc<PredictionReturnHub>>,
+    telemetry: Telemetry,
+    hook_policy: Option<Arc<dyn OpenAiHookPolicy>>,
+) -> Result<EmbeddedOpenAiArgs> {
+    Ok(EmbeddedOpenAiArgs {
+        bind_addr: "127.0.0.1:0"
+            .parse()
+            .expect("static bind address should parse"),
+        config,
+        runtime,
+        model_id: embedded_args.model_id,
+        default_max_tokens: embedded_args.default_max_tokens,
+        request_defaults: embedded_args.request_defaults,
+        topology: None,
+        generation_concurrency: embedded_args.generation_concurrency,
+        prefill_chunk_size: embedded_args.prefill_chunk_size,
+        prefill_chunk_policy: embedded_args.prefill_chunk_policy,
+        prefill_chunk_schedule: embedded_args.prefill_chunk_schedule,
+        prefill_adaptive_start: embedded_args.prefill_adaptive_start,
+        prefill_adaptive_step: embedded_args.prefill_adaptive_step,
+        prefill_adaptive_max: embedded_args.prefill_adaptive_max,
+        draft_model_path: embedded_args.draft_model_path,
+        spd_manifest_path: None,
+        spd_fixture_path: None,
+        spd_model_path: None,
+        spd_top_k: 0,
+        spd_n_gpu_layers: None,
+        spd_replay_fallback: false,
+        spd_optimistic_decode: false,
+        spd_rolling_executor: false,
+        spd_optimistic_min_logit_margin: None,
+        speculative_window_min: embedded_args.speculative_window_min,
+        speculative_window: embedded_args.speculative_window,
+        adaptive_speculative_window: embedded_args.adaptive_speculative_window,
+        draft_n_gpu_layers: embedded_args.draft_n_gpu_layers,
+        ngram_simple: embedded_args.ngram_simple,
+        ngram_size_n: embedded_args.ngram_size_n,
+        ngram_min: embedded_args.ngram_min,
+        ngram_max: embedded_args.ngram_max,
+        native_mtp_enabled: embedded_args.native_mtp_enabled,
+        native_mtp_draft_model_path: embedded_args.native_mtp_draft_model_path,
+        native_mtp_max_tokens: embedded_args.native_mtp_max_tokens,
+        native_mtp_min_tokens: embedded_args.native_mtp_min_tokens,
+        activation_width: embedded_args.activation_width,
+        wire_dtype: embedded_args.wire_dtype,
+        reply_credit_limit: embedded_args.reply_credit_limit,
+        downstream_connect_timeout_secs: embedded_args.downstream_connect_timeout_secs,
+        downstream_wire_condition: WireCondition::new(0.0, None)?,
+        prediction_returns,
+        telemetry,
+        hook_policy,
+        openai_guardrails: None,
+    })
 }
 
 impl SkippyModelHandle {
@@ -424,52 +492,18 @@ impl SkippyModelHandle {
                 options.default_max_tokens,
                 options.generation_concurrency,
                 family_policy.activation_wire_dtype.into(),
+                options.native_mtp_enabled,
             )
         });
         let openai_guardrails = options.openai_guardrails.clone();
-        let binding = embedded_openai_backend(EmbeddedOpenAiArgs {
-            bind_addr: "127.0.0.1:0"
-                .parse()
-                .expect("static bind address should parse"),
-            config: stage_config.clone(),
-            topology: None,
-            runtime: runtime.runtime(),
-            model_id: embedded_args.model_id,
-            default_max_tokens: embedded_args.default_max_tokens,
-            request_defaults: embedded_args.request_defaults,
-            generation_concurrency: embedded_args.generation_concurrency,
-            prefill_chunk_size: embedded_args.prefill_chunk_size,
-            prefill_chunk_policy: embedded_args.prefill_chunk_policy,
-            prefill_chunk_schedule: embedded_args.prefill_chunk_schedule,
-            prefill_adaptive_start: embedded_args.prefill_adaptive_start,
-            prefill_adaptive_step: embedded_args.prefill_adaptive_step,
-            prefill_adaptive_max: embedded_args.prefill_adaptive_max,
-            draft_model_path: embedded_args.draft_model_path,
-            spd_manifest_path: None,
-            spd_fixture_path: None,
-            spd_model_path: None,
-            spd_top_k: 1,
-            spd_n_gpu_layers: None,
-            spd_replay_fallback: false,
-            spd_optimistic_decode: false,
-            spd_rolling_executor: false,
-            spd_optimistic_min_logit_margin: None,
-            speculative_window_min: embedded_args.speculative_window_min,
-            speculative_window: embedded_args.speculative_window,
-            adaptive_speculative_window: embedded_args.adaptive_speculative_window,
-            ngram_simple: embedded_args.ngram_simple,
-            ngram_size_n: embedded_args.ngram_size_n,
-            draft_n_gpu_layers: embedded_args.draft_n_gpu_layers,
-            activation_width: embedded_args.activation_width,
-            wire_dtype: embedded_args.wire_dtype,
-            reply_credit_limit: embedded_args.reply_credit_limit,
-            downstream_connect_timeout_secs: embedded_args.downstream_connect_timeout_secs,
-            downstream_wire_condition: WireCondition::new(0.0, None)?,
-            prediction_returns: None,
+        let binding = embedded_openai_backend(embedded_openai_args_from(
+            embedded_args,
+            stage_config.clone(),
+            runtime.runtime(),
+            None,
             telemetry,
             hook_policy,
-            openai_guardrails: None,
-        })
+        )?)
         .context("construct skippy OpenAI backend")?;
         let backend = wrap_host_guardrail_backend(
             binding.backend,
@@ -489,6 +523,7 @@ impl SkippyModelHandle {
                 last_error: None,
             })),
             _materialized_pin: None,
+            _prediction_return_listener: None,
         })
     }
 
@@ -532,52 +567,18 @@ impl SkippyModelHandle {
                 options.default_max_tokens,
                 options.generation_concurrency,
                 family_policy.activation_wire_dtype.into(),
+                options.native_mtp_enabled,
             )
         });
         let openai_guardrails = options.openai_guardrails.clone();
-        let binding = embedded_openai_backend(EmbeddedOpenAiArgs {
-            bind_addr: "127.0.0.1:0"
-                .parse()
-                .expect("static bind address should parse"),
-            config: stage_config.clone(),
-            topology: None,
-            runtime: runtime.runtime(),
-            model_id: embedded_args.model_id,
-            default_max_tokens: embedded_args.default_max_tokens,
-            request_defaults: embedded_args.request_defaults,
-            generation_concurrency: embedded_args.generation_concurrency,
-            prefill_chunk_size: embedded_args.prefill_chunk_size,
-            prefill_chunk_policy: embedded_args.prefill_chunk_policy,
-            prefill_chunk_schedule: embedded_args.prefill_chunk_schedule,
-            prefill_adaptive_start: embedded_args.prefill_adaptive_start,
-            prefill_adaptive_step: embedded_args.prefill_adaptive_step,
-            prefill_adaptive_max: embedded_args.prefill_adaptive_max,
-            draft_model_path: embedded_args.draft_model_path,
-            spd_manifest_path: None,
-            spd_fixture_path: None,
-            spd_model_path: None,
-            spd_top_k: 1,
-            spd_n_gpu_layers: None,
-            spd_replay_fallback: false,
-            spd_optimistic_decode: false,
-            spd_rolling_executor: false,
-            spd_optimistic_min_logit_margin: None,
-            speculative_window_min: embedded_args.speculative_window_min,
-            speculative_window: embedded_args.speculative_window,
-            adaptive_speculative_window: embedded_args.adaptive_speculative_window,
-            ngram_simple: embedded_args.ngram_simple,
-            ngram_size_n: embedded_args.ngram_size_n,
-            draft_n_gpu_layers: embedded_args.draft_n_gpu_layers,
-            activation_width: embedded_args.activation_width,
-            wire_dtype: embedded_args.wire_dtype,
-            reply_credit_limit: embedded_args.reply_credit_limit,
-            downstream_connect_timeout_secs: embedded_args.downstream_connect_timeout_secs,
-            downstream_wire_condition: WireCondition::new(0.0, None)?,
-            prediction_returns: None,
+        let binding = embedded_openai_backend(embedded_openai_args_from(
+            embedded_args,
+            stage_config.clone(),
+            runtime.runtime(),
+            None,
             telemetry,
             hook_policy,
-            openai_guardrails: None,
-        })
+        )?)
         .context("construct skippy OpenAI backend")?;
         let backend = wrap_host_guardrail_backend(
             binding.backend,
@@ -597,6 +598,7 @@ impl SkippyModelHandle {
                 last_error: None,
             })),
             _materialized_pin: None,
+            _prediction_return_listener: None,
         })
     }
 
@@ -613,6 +615,7 @@ impl SkippyModelHandle {
         let wire_dtype = family_policy_for_stage_config(&config)
             .activation_wire_dtype
             .into();
+        let native_mtp_enabled = config.native_mtp_enabled;
         Self::load_stage0_config_with_openai_args(
             config,
             resolver::ResolvedEmbeddedOpenAiArgs::embedded_stage_defaults(
@@ -621,6 +624,7 @@ impl SkippyModelHandle {
                 generation_concurrency,
                 activation_width,
                 wire_dtype,
+                native_mtp_enabled,
             ),
             hook_policy,
             telemetry,
@@ -709,49 +713,24 @@ impl SkippyModelHandle {
             runtime_config.clone(),
             telemetry.level,
         );
-        let binding = embedded_openai_backend(EmbeddedOpenAiArgs {
-            bind_addr: "127.0.0.1:0"
-                .parse()
-                .expect("static bind address should parse"),
-            config: runtime_config.clone(),
-            topology: None,
-            runtime: runtime.runtime(),
-            model_id: embedded_args.model_id,
-            default_max_tokens: embedded_args.default_max_tokens,
-            request_defaults: embedded_args.request_defaults,
-            generation_concurrency: embedded_args.generation_concurrency,
-            prefill_chunk_size: embedded_args.prefill_chunk_size,
-            prefill_chunk_policy: embedded_args.prefill_chunk_policy,
-            prefill_chunk_schedule: embedded_args.prefill_chunk_schedule,
-            prefill_adaptive_start: embedded_args.prefill_adaptive_start,
-            prefill_adaptive_step: embedded_args.prefill_adaptive_step,
-            prefill_adaptive_max: embedded_args.prefill_adaptive_max,
-            draft_model_path: embedded_args.draft_model_path,
-            spd_manifest_path: None,
-            spd_fixture_path: None,
-            spd_model_path: None,
-            spd_top_k: 1,
-            spd_n_gpu_layers: None,
-            spd_replay_fallback: false,
-            spd_optimistic_decode: false,
-            spd_rolling_executor: false,
-            spd_optimistic_min_logit_margin: None,
-            speculative_window_min: embedded_args.speculative_window_min,
-            speculative_window: embedded_args.speculative_window,
-            adaptive_speculative_window: embedded_args.adaptive_speculative_window,
-            ngram_simple: embedded_args.ngram_simple,
-            ngram_size_n: embedded_args.ngram_size_n,
-            draft_n_gpu_layers: embedded_args.draft_n_gpu_layers,
-            activation_width: embedded_args.activation_width,
-            wire_dtype: embedded_args.wire_dtype,
-            reply_credit_limit: embedded_args.reply_credit_limit,
-            downstream_connect_timeout_secs: embedded_args.downstream_connect_timeout_secs,
-            downstream_wire_condition: WireCondition::new(0.0, None)?,
-            prediction_returns: None,
+        let prediction_return_listener = if runtime_config.downstream.is_some() {
+            Some(PredictionReturnListener::start(
+                runtime_config.bind_addr.parse()?,
+            )?)
+        } else {
+            None
+        };
+        let prediction_returns = prediction_return_listener
+            .as_ref()
+            .map(PredictionReturnListener::hub);
+        let binding = embedded_openai_backend(embedded_openai_args_from(
+            embedded_args,
+            runtime_config.clone(),
+            runtime.runtime(),
+            prediction_returns,
             telemetry,
             hook_policy,
-            openai_guardrails: None,
-        })
+        )?)
         .context("construct skippy stage 0 OpenAI backend")?;
         let backend = wrap_host_guardrail_backend(
             binding.backend,
@@ -771,6 +750,7 @@ impl SkippyModelHandle {
                 last_error: None,
             })),
             _materialized_pin: materialized_pin,
+            _prediction_return_listener: prediction_return_listener,
         })
     }
 
@@ -833,49 +813,24 @@ impl SkippyModelHandle {
             runtime_config.clone(),
             telemetry.level,
         );
-        let binding = embedded_openai_backend(EmbeddedOpenAiArgs {
-            bind_addr: "127.0.0.1:0"
-                .parse()
-                .expect("static bind address should parse"),
-            config: runtime_config.clone(),
-            topology: None,
-            runtime: runtime.runtime(),
-            model_id: embedded_args.model_id,
-            default_max_tokens: embedded_args.default_max_tokens,
-            request_defaults: embedded_args.request_defaults,
-            generation_concurrency: embedded_args.generation_concurrency,
-            prefill_chunk_size: embedded_args.prefill_chunk_size,
-            prefill_chunk_policy: embedded_args.prefill_chunk_policy,
-            prefill_chunk_schedule: embedded_args.prefill_chunk_schedule,
-            prefill_adaptive_start: embedded_args.prefill_adaptive_start,
-            prefill_adaptive_step: embedded_args.prefill_adaptive_step,
-            prefill_adaptive_max: embedded_args.prefill_adaptive_max,
-            draft_model_path: embedded_args.draft_model_path,
-            spd_manifest_path: None,
-            spd_fixture_path: None,
-            spd_model_path: None,
-            spd_top_k: 1,
-            spd_n_gpu_layers: None,
-            spd_replay_fallback: false,
-            spd_optimistic_decode: false,
-            spd_rolling_executor: false,
-            spd_optimistic_min_logit_margin: None,
-            speculative_window_min: embedded_args.speculative_window_min,
-            speculative_window: embedded_args.speculative_window,
-            adaptive_speculative_window: embedded_args.adaptive_speculative_window,
-            ngram_simple: embedded_args.ngram_simple,
-            ngram_size_n: embedded_args.ngram_size_n,
-            draft_n_gpu_layers: embedded_args.draft_n_gpu_layers,
-            activation_width: embedded_args.activation_width,
-            wire_dtype: embedded_args.wire_dtype,
-            reply_credit_limit: embedded_args.reply_credit_limit,
-            downstream_connect_timeout_secs: embedded_args.downstream_connect_timeout_secs,
-            downstream_wire_condition: WireCondition::new(0.0, None)?,
-            prediction_returns: None,
+        let prediction_return_listener = if runtime_config.downstream.is_some() {
+            Some(PredictionReturnListener::start(
+                runtime_config.bind_addr.parse()?,
+            )?)
+        } else {
+            None
+        };
+        let prediction_returns = prediction_return_listener
+            .as_ref()
+            .map(PredictionReturnListener::hub);
+        let binding = embedded_openai_backend(embedded_openai_args_from(
+            embedded_args,
+            runtime_config.clone(),
+            runtime.runtime(),
+            prediction_returns,
             telemetry,
             hook_policy,
-            openai_guardrails: None,
-        })
+        )?)
         .context("construct skippy stage 0 OpenAI backend")?;
         let backend = wrap_host_guardrail_backend(
             binding.backend,
@@ -895,6 +850,7 @@ impl SkippyModelHandle {
                 last_error: None,
             })),
             _materialized_pin: materialized_pin,
+            _prediction_return_listener: prediction_return_listener,
         })
     }
 
@@ -1081,6 +1037,8 @@ pub(crate) fn single_stage_config(options: &SkippyModelLoadOptions) -> Result<St
         n_batch: options.n_batch,
         n_ubatch: options.n_ubatch,
         n_gpu_layers: options.n_gpu_layers,
+        mmap: options.mmap,
+        mlock: options.mlock,
         cache_type_k: options.cache_type_k.clone(),
         cache_type_v: options.cache_type_v.clone(),
         flash_attn_type: options.flash_attn_type,
@@ -1089,6 +1047,7 @@ pub(crate) fn single_stage_config(options: &SkippyModelLoadOptions) -> Result<St
         use_mmap_buffer: true,
         selected_device: options.selected_device.clone().map(Into::into),
         kv_cache: None,
+        native_mtp_enabled: options.native_mtp_enabled,
         load_mode: LoadMode::RuntimeSlice,
         bind_addr: "127.0.0.1:0".to_string(),
         upstream: None,

@@ -412,10 +412,8 @@ impl LookaheadState {
         }
         let previous = self.levels.clone();
         self.levels[0] = previous[1].iter().copied().skip(1).collect();
-        for level in 1..self.levels.len() - 1 {
-            self.levels[level] = previous[level + 1].clone();
-        }
         let last = self.levels.len() - 1;
+        self.levels[1..last].clone_from_slice(&previous[2..]);
         self.levels[last] = predictions.to_vec();
     }
 }

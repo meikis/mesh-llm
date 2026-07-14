@@ -13,6 +13,9 @@ impl StageOpenAiBackend {
                     max_tokens: request.max_tokens,
                     sampling: request.sampling,
                     chat_sampling_metadata: request.chat_sampling_metadata,
+                    native_mtp_enabled: request.native_mtp_enabled,
+                    native_mtp_max_tokens: request.native_mtp_max_tokens,
+                    native_mtp_min_tokens: request.native_mtp_min_tokens,
                     hook_request: request.hook_request,
                     hook_runtime: request.hook_runtime,
                     cancellation: request.cancellation,
@@ -230,8 +233,12 @@ impl StageOpenAiBackend {
                                 &message,
                                 chunk,
                                 None,
-                                false,
-                                0,
+                                BinaryStageExecutionOptions::new(
+                                    false,
+                                    0,
+                                    request.native_mtp_enabled,
+                                )
+                                .with_native_mtp_max_tokens(request.native_mtp_max_tokens),
                             )
                             .map_err(openai_backend_error)?
                             .2;
@@ -621,7 +628,10 @@ impl StageOpenAiBackend {
                 },
             )?;
             let mut fused_reached_stop = false;
-            let mut native_mtp = NativeMtpN1Verifier::default();
+            let mut native_mtp = NativeMtpVerifier::default();
+            let native_mtp_options = NativeMtpDecodeOptions::from_env()
+                .with_window(request.native_mtp_max_tokens, request.native_mtp_min_tokens);
+            let mut native_mtp_counters = NativeMtpDecodeCounters::default();
             let native_mtp_batched_verify = native_mtp_batched_verify_enabled();
             let native_mtp_reject_cooldown_tokens = native_mtp_reject_cooldown_tokens();
             let native_mtp_defer_reject_trim = native_mtp_defer_reject_trim_enabled();
@@ -668,7 +678,7 @@ impl StageOpenAiBackend {
                         native_mtp.observe_target_token(
                             current,
                             ms_to_us(fused.execution.downstream_wait_ms),
-                            fused.native_mtp_draft,
+                            fused.native_mtp_draft.clone(),
                             NativeMtpDraftOrigin::InitialSerial,
                         )
                     } else {
@@ -791,6 +801,7 @@ impl StageOpenAiBackend {
                 adaptive_window_min: if request.draft.is_some()
                     || request.spd.is_some()
                     || request.ngram_simple
+                    || request.ngram_max > 0
                 {
                     adaptive_window
                 } else {
@@ -907,6 +918,55 @@ impl StageOpenAiBackend {
                 let token_timer = PhaseTimer::start();
                 let native_mtp_remaining =
                     (request.max_tokens as usize).saturating_sub(decoded_tokens);
+                let can_run_generic_native_mtp_verify = native_mtp_options.batched_verify
+                    && native_mtp_reject_cooldown_remaining == 0
+                    && draft_guard.is_none()
+                    && request.spd.is_none()
+                    && ngram_source.is_none()
+                    && request.ngram_max == 0
+                    && native_mtp_remaining >= 2;
+                let pending_generic_native_mtp_draft = can_run_generic_native_mtp_verify
+                    .then(|| native_mtp.take_pending_draft())
+                    .flatten();
+                if let Some(pending_native_mtp_draft) = pending_generic_native_mtp_draft {
+                    match self.execute_native_mtp_batched_verify(
+                        &request,
+                        downstream,
+                        &session_key,
+                        request_id,
+                        session_id,
+                        prefill_token_count,
+                        &wire_sampling,
+                        &native_mtp_options,
+                        pending_native_mtp_draft,
+                        &mut current,
+                        decode_step,
+                        &mut decoded_tokens,
+                        &mut context_tokens,
+                        &mut exact_replay_tokens,
+                        &mut native_mtp,
+                        &mut native_mtp_counters,
+                        &mut native_mtp_reject_cooldown_remaining,
+                        &mut native_mtp_suppress_cooldown_drafts_remaining,
+                        &mut decode_stage0_compute_ms,
+                        &mut decode_runtime_lock_wait_ms,
+                        &mut decode_runtime_lock_wait_max_ms,
+                        &mut decode_runtime_lock_hold_ms,
+                        &mut decode_runtime_lock_hold_max_ms,
+                        &mut decode_runtime_lock_acquires,
+                        &mut decode_forward_activation_encode_ms,
+                        &mut decode_output_activation_bytes,
+                        &mut decode_forward_activation_bytes,
+                        &mut decode_forward_write_ms,
+                        &mut decode_downstream_wait_ms,
+                        &mut on_token,
+                    )? {
+                        BatchedVerifyControl::ReachedStop => break,
+                        BatchedVerifyControl::Continue => continue,
+                    }
+                }
+                let native_mtp_remaining =
+                    (request.max_tokens as usize).saturating_sub(decoded_tokens);
                 let can_run_native_mtp_batched_verify = native_mtp_batched_verify
                     && native_mtp_reject_cooldown_remaining == 0
                     && draft_guard.is_none()
@@ -919,7 +979,12 @@ impl StageOpenAiBackend {
                 if let Some(pending_native_mtp_draft) = pending_native_mtp_draft {
                     let batched_token_timer =
                         self.telemetry.is_debug_enabled().then(PhaseTimer::start);
-                    let native_mtp_draft_token = pending_native_mtp_draft.token;
+                    let native_mtp_draft_token =
+                        pending_native_mtp_draft
+                            .tokens
+                            .first()
+                            .copied()
+                            .ok_or_else(|| OpenAiError::backend("native MTP draft was empty"))?;
                     let native_mtp_draft_origin = pending_native_mtp_draft.origin;
                     let verify_inputs = [current, native_mtp_draft_token];
                     let message = embedded_verify_message(
@@ -956,11 +1021,13 @@ impl StageOpenAiBackend {
                         &verify.reply.predicted_tokens,
                         verify_inputs.len(),
                     );
-                    let native_mtp_decision = native_mtp.observe_taken_draft_verification(
-                        native_mtp_draft_token,
-                        target_token,
-                        ms_to_us(verify.elapsed_ms),
-                    );
+                    let native_mtp_decision = native_mtp
+                        .observe_taken_draft_span(
+                            &[native_mtp_draft_token],
+                            &[target_token],
+                            ms_to_us(verify.elapsed_ms),
+                        )
+                        .first_decision;
                     let accepted =
                         matches!(native_mtp_decision, NativeMtpVerification::Accepted { .. });
                     native_mtp_batched_verification_count += 1;
@@ -1023,7 +1090,7 @@ impl StageOpenAiBackend {
                     }
                     if verify_next_mtp_draft_adopted {
                         native_mtp.observe_next_draft(
-                            verify_next_mtp_draft,
+                            verify_next_mtp_draft.clone(),
                             NativeMtpDraftOrigin::VerifyNext,
                         );
                     }
@@ -1108,10 +1175,10 @@ impl StageOpenAiBackend {
                             "llama_stage.native_mtp.verify_next_draft_adopted".to_string(),
                             json!(verify_next_mtp_draft_adopted),
                         );
-                        if let Some(next_draft) = verify_next_mtp_draft {
+                        if let Some(next_draft) = verify_next_mtp_draft.as_ref() {
                             token_attrs.insert(
                                 "llama_stage.native_mtp.verify_next_draft_token".to_string(),
-                                json!(next_draft.token),
+                                json!(next_draft.tokens.first().copied()),
                             );
                             token_attrs.insert(
                                 "llama_stage.native_mtp.verify_next_draft_compute_us".to_string(),
@@ -1199,7 +1266,11 @@ impl StageOpenAiBackend {
                     }
                     continue;
                 }
-                if draft_guard.is_some() || request.spd.is_some() || ngram_source.is_some() {
+                if draft_guard.is_some()
+                    || request.spd.is_some()
+                    || ngram_source.is_some()
+                    || request.ngram_max > 0
+                {
                     let remaining = (request.max_tokens as usize).saturating_sub(decoded_tokens);
                     if remaining == 0 {
                         break;
@@ -1235,6 +1306,16 @@ impl StageOpenAiBackend {
                             .map_err(openai_backend_error)?;
                         if !draft_tokens.is_empty() {
                             proposal_source = "draft-model";
+                        }
+                    }
+                    if draft_tokens.is_empty() && request.ngram_max > 0 {
+                        draft_tokens = propose_ngram_tokens(
+                            &context_tokens,
+                            request.ngram_min,
+                            proposal_limit.min(request.ngram_max),
+                        );
+                        if !draft_tokens.is_empty() {
+                            proposal_source = "ngram";
                         }
                     }
                     let draft_propose_ms = propose_timer.elapsed_ms();
@@ -1671,6 +1752,7 @@ impl StageOpenAiBackend {
                 if suppress_cooldown_draft {
                     native_mtp.clear_pending_draft();
                     native_mtp_suppressed_cooldown_draft_count += 1;
+                    native_mtp_counters.observe_suppressed_cooldown_draft();
                     native_mtp_suppress_cooldown_drafts_remaining =
                         native_mtp_suppress_cooldown_drafts_remaining.saturating_sub(1);
                 }
@@ -1678,7 +1760,7 @@ impl StageOpenAiBackend {
                     current,
                     ms_to_us(downstream_wait_ms),
                     native_mtp_draft,
-                    if native_mtp_batched_verification_count == 0 {
+                    if native_mtp_counters.batched_verification_count() == 0 {
                         NativeMtpDraftOrigin::InitialSerial
                     } else {
                         NativeMtpDraftOrigin::SerialAfterGap
@@ -1889,6 +1971,7 @@ impl StageOpenAiBackend {
                 "llama_stage.native_mtp.verify_next_draft_adopted_count".to_string(),
                 json!(native_mtp_verify_next_draft_adopted_count),
             );
+            native_mtp_counters.insert_summary_attrs(&mut decode_attrs, native_mtp_options);
             self.emit_openai_summary("stage.openai_decode", decode_timer, decode_attrs);
             Ok(())
         })();

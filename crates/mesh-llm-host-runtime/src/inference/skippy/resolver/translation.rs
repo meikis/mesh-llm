@@ -27,6 +27,12 @@ use super::types::{
     ResolvedSkippyConfig, ResolvedStageKvCache,
 };
 
+/// Default maximum number of draft tokens for native MTP sidecar probes when
+/// no explicit `draft_max_tokens` is configured. Three tokens is a reasonable
+/// default: long enough to confirm or reject the draft trajectory without
+/// over-committing speculative decode resources.
+const DEFAULT_NATIVE_MTP_MAX_TOKENS: usize = 3;
+
 impl ResolvedSkippyConfig {
     pub(crate) fn to_model_load_options(
         &self,
@@ -80,6 +86,8 @@ impl ResolvedSkippyConfig {
 
         options.default_max_tokens = self.request_defaults.max_tokens;
         options.n_gpu_layers = self.hardware.gpu_layers;
+        options.mmap = self.hardware.mmap;
+        options.mlock = self.hardware.mlock;
         if let Some(projector_path) = self.hardware.projector_path.clone() {
             options = options.with_projector_path(projector_path);
         }
@@ -238,23 +246,42 @@ impl ResolvedSkippyConfig {
             } else {
                 1
             },
-            speculative_window: if mode == "draft" {
-                self.speculative.draft_max_tokens as usize
-            } else if mode == "ngram" {
-                self.speculative.ngram_max as usize
-            } else {
-                0
-            },
+            speculative_window: self.speculative_window_for_embedded(mode),
             adaptive_speculative_window: mode == "ngram"
                 && self.speculative.ngram_min < self.speculative.ngram_max,
             ngram_simple: mode == "ngram",
             ngram_size_n: 12,
-            draft_n_gpu_layers: if mode == "draft" {
+            draft_n_gpu_layers: if mode == "draft" || self.speculative.native_mtp_enabled {
                 self.speculative.draft_n_gpu_layers
             } else {
                 None
             },
+            ngram_min: if mode == "ngram" {
+                self.speculative.ngram_min as usize
+            } else {
+                0
+            },
+            ngram_max: if mode == "ngram" {
+                self.speculative.ngram_max as usize
+            } else {
+                0
+            },
             native_mtp_enabled: self.speculative.native_mtp_enabled,
+            native_mtp_draft_model_path: if self.speculative.native_mtp_enabled {
+                self.speculative.draft_model_path.clone()
+            } else {
+                None
+            },
+            native_mtp_max_tokens: if self.speculative.native_mtp_enabled {
+                self.speculative.draft_max_tokens as usize
+            } else {
+                0
+            },
+            native_mtp_min_tokens: if self.speculative.native_mtp_enabled {
+                self.speculative.draft_min_tokens as usize
+            } else {
+                0
+            },
             activation_width,
             wire_dtype: self.skippy.activation_wire_dtype.into(),
             reply_credit_limit: None,
@@ -277,23 +304,25 @@ impl ResolvedSkippyConfig {
             if self.skippy.prefill_controls_explicit {
                 bail!("skippy prefill chunk controls require staged serving");
             }
-            if self.speculative.explicit {
-                bail!("speculative draft controls require staged serving");
-            }
         }
         Ok(())
     }
 
-    fn speculative_mode_for_embedded(&self, staged: bool) -> &'static str {
-        if !staged {
-            return "disabled";
-        }
+    fn speculative_mode_for_embedded(&self, _staged: bool) -> &'static str {
         if self.speculative.mode == "draft" && self.speculative.draft_model_path.is_some() {
             "draft"
-        } else if self.speculative.mode == "ngram" {
+        } else if self.speculative.mode == "ngram" && self.speculative.ngram_min > 0 {
             "ngram"
         } else {
             "disabled"
+        }
+    }
+
+    fn speculative_window_for_embedded(&self, mode: &str) -> usize {
+        match mode {
+            "draft" => self.speculative.draft_max_tokens as usize,
+            "ngram" => self.speculative.ngram_max as usize,
+            _ => 0,
         }
     }
 
@@ -364,6 +393,7 @@ impl ResolvedEmbeddedOpenAiArgs {
         default_max_tokens: u32,
         generation_concurrency: usize,
         wire_dtype: skippy_protocol::binary::WireActivationDType,
+        native_mtp_enabled: bool,
     ) -> Self {
         Self {
             model_id: Some(model_id),
@@ -383,7 +413,16 @@ impl ResolvedEmbeddedOpenAiArgs {
             ngram_simple: false,
             ngram_size_n: 12,
             draft_n_gpu_layers: None,
-            native_mtp_enabled: true,
+            ngram_min: 0,
+            ngram_max: 0,
+            native_mtp_enabled,
+            native_mtp_draft_model_path: None,
+            native_mtp_max_tokens: if native_mtp_enabled {
+                DEFAULT_NATIVE_MTP_MAX_TOKENS
+            } else {
+                0
+            },
+            native_mtp_min_tokens: 0,
             activation_width: 0,
             wire_dtype,
             reply_credit_limit: None,
@@ -397,6 +436,7 @@ impl ResolvedEmbeddedOpenAiArgs {
         generation_concurrency: usize,
         activation_width: i32,
         wire_dtype: skippy_protocol::binary::WireActivationDType,
+        native_mtp_enabled: bool,
     ) -> Self {
         Self {
             model_id,
@@ -416,7 +456,16 @@ impl ResolvedEmbeddedOpenAiArgs {
             ngram_simple: false,
             ngram_size_n: 12,
             draft_n_gpu_layers: None,
-            native_mtp_enabled: true,
+            ngram_min: 0,
+            ngram_max: 0,
+            native_mtp_enabled,
+            native_mtp_draft_model_path: None,
+            native_mtp_max_tokens: if native_mtp_enabled {
+                DEFAULT_NATIVE_MTP_MAX_TOKENS
+            } else {
+                0
+            },
+            native_mtp_min_tokens: 0,
             activation_width,
             wire_dtype,
             reply_credit_limit: None,
@@ -451,7 +500,7 @@ impl ResolvedEmbeddedOpenAiArgs {
             spd_manifest_path: None,
             spd_fixture_path: None,
             spd_model_path: None,
-            spd_top_k: 1,
+            spd_top_k: 0,
             spd_n_gpu_layers: None,
             spd_replay_fallback: false,
             spd_optimistic_decode: false,
@@ -463,6 +512,12 @@ impl ResolvedEmbeddedOpenAiArgs {
             ngram_simple: self.ngram_simple,
             ngram_size_n: self.ngram_size_n,
             draft_n_gpu_layers: self.draft_n_gpu_layers,
+            ngram_min: self.ngram_min,
+            ngram_max: self.ngram_max,
+            native_mtp_enabled: self.native_mtp_enabled,
+            native_mtp_draft_model_path: self.native_mtp_draft_model_path,
+            native_mtp_max_tokens: self.native_mtp_max_tokens,
+            native_mtp_min_tokens: self.native_mtp_min_tokens,
             activation_width: self.activation_width,
             wire_dtype: self.wire_dtype,
             reply_credit_limit: self.reply_credit_limit,

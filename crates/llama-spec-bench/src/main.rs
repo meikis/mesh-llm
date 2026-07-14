@@ -271,6 +271,7 @@ fn open_full_model(path: &Path, ctx_size: u32, n_gpu_layers: i32) -> Result<Stag
             layer_end: layer_count,
             ctx_size,
             lane_count: 1,
+            branch_sequence_capacity: 0,
             n_batch: None,
             n_ubatch: None,
             n_threads: None,
@@ -282,9 +283,15 @@ fn open_full_model(path: &Path, ctx_size: u32, n_gpu_layers: i32) -> Result<Stag
             flash_attn_type: skippy_runtime::FlashAttentionType::Auto,
             load_mode: RuntimeLoadMode::RuntimeSlice,
             projector_path: None,
+            use_mmap: true,
+            use_mmap_prefetch: true,
+            use_mmap_buffer: true,
             include_embeddings: true,
             include_output: true,
             filter_tensors_on_load: false,
+            mlock: false,
+            mmap: Some(true),
+            glm_dsa_policy: None,
         },
     )
 }

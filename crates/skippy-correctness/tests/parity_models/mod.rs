@@ -1090,11 +1090,14 @@ fn open_stage_model(path: &StagePath, shape: StageShape, n_gpu_layers: i32) -> R
             layer_end: shape.layer_end,
             ctx_size: CTX_SIZE,
             lane_count: 4,
+            branch_sequence_capacity: 0,
             n_batch: None,
             n_ubatch: None,
             n_threads: None,
             n_threads_batch: None,
             n_gpu_layers,
+            mmap: None,
+            mlock: false,
             selected_backend_device: None,
             cache_type_k: GGML_TYPE_F16,
             cache_type_v: GGML_TYPE_F16,
@@ -1107,6 +1110,7 @@ fn open_stage_model(path: &StagePath, shape: StageShape, n_gpu_layers: i32) -> R
             use_mmap: true,
             use_mmap_prefetch: true,
             use_mmap_buffer: true,
+            glm_dsa_policy: None,
         },
     )
     .with_context(|| {

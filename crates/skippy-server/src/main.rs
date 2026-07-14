@@ -13,7 +13,7 @@ use skippy_server::{
 async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Serve(args) => serve(args).await,
-        Command::ServeBinary(args) => serve_binary(args).await,
+        Command::ServeBinary(args) => serve_binary(*args).await,
         Command::ProbeDownstream(args) => probe_downstream(args),
         Command::ServeOpenAi(args) => serve_openai(args).await,
         Command::ExampleConfig => {

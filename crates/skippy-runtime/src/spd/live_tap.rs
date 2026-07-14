@@ -364,6 +364,8 @@ fn open_live_stage_model(
         n_threads: None,
         n_threads_batch: None,
         n_gpu_layers: config.n_gpu_layers,
+        mmap: None,
+        mlock: false,
         selected_backend_device: selected_backend_device_for_stage(config, stage_index)?,
         cache_type_k: GGML_TYPE_F16,
         cache_type_v: GGML_TYPE_F16,

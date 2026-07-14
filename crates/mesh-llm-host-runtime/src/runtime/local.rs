@@ -671,11 +671,13 @@ fn scan_layer_package_metadata(
     //
     // The package_ref looks like "hf://meshllm/Qwen3-layers@rev" which resolves
     // to a local cache directory.  Try to find shared/metadata.gguf there.
-    let package_ref = &package.package_ref;
-    let local_ref = skippy::resolve_hf_package_to_local(package_ref, 0, 0, false, false).ok()?;
-    let metadata_path = std::path::Path::new(&local_ref).join("shared/metadata.gguf");
-    if metadata_path.is_file() {
-        return models::gguf::scan_gguf_compact_meta(&metadata_path);
+    if let Ok(local_ref) =
+        skippy::resolve_hf_package_to_local(&package.package_ref, 0, 0, false, false)
+    {
+        let metadata_path = std::path::Path::new(&local_ref).join("shared/metadata.gguf");
+        if metadata_path.is_file() {
+            return models::gguf::scan_gguf_compact_meta(&metadata_path);
+        }
     }
     // Fallback: try scanning the source model directly (works for local packages).
     if package.source_model_path.is_file() {
@@ -3990,6 +3992,19 @@ mod tests {
         push_u32_kv(&mut bytes, "llama.attention.head_count_kv", 8);
         push_u32_kv(&mut bytes, "llama.attention.key_length", 128);
         fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn split_metadata_reads_a_synthetic_direct_gguf_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let model_path = temp.path().join("model.gguf");
+        write_fake_gguf_model(&model_path);
+        let package = skippy::synthetic_direct_gguf_package("test/model", &model_path).unwrap();
+
+        let metadata = scan_layer_package_metadata(&package).expect("direct GGUF metadata");
+
+        assert_eq!(metadata.context_length, 8192);
+        assert_eq!(metadata.embedding_size, 4096);
     }
 
     fn write_test_layer_package(dir: &Path, source_model_bytes: u64) {

@@ -163,6 +163,9 @@ unload or replan.
 - `layer-package` loads a local `model-package.json` directory, validates the
   manifest and selected part files, then opens those GGUF parts directly through
   the stage ABI.
+- `layer-package` explicitly enables mmap-backed loading by default so selected
+  GGUF parts remain file-backed instead of being eagerly copied into a second
+  weight buffer. Set `mmap` to `false` in the stage config to opt out.
 - Package selection validates manifest schema, ABI version, selected part sizes,
   duplicate layers, and required layer presence before runtime load.
 - If a layer package declares `projectors` with `kind: "mmproj"`, package-backed

@@ -1256,6 +1256,14 @@ fn should_attach_package_projector(config: &StageConfig) -> bool {
     config.stage_index == 0 && config.layer_start == 0
 }
 
+fn effective_model_mmap(load_mode: &LoadMode, mmap: Option<bool>) -> Option<bool> {
+    if load_mode == &LoadMode::LayerPackage {
+        Some(mmap.unwrap_or(true))
+    } else {
+        mmap
+    }
+}
+
 fn runtime_config_from_stage_config(
     config: &StageConfig,
     overrides: &RuntimeLaunchOverrides,
@@ -1285,7 +1293,7 @@ fn runtime_config_from_stage_config(
         n_threads,
         n_threads_batch,
         n_gpu_layers: config.n_gpu_layers,
-        mmap: config.mmap,
+        mmap: effective_model_mmap(&config.load_mode, config.mmap),
         mlock: config.mlock,
         selected_backend_device: config
             .selected_device
@@ -1352,8 +1360,8 @@ mod tests {
     use skippy_runtime::FlashAttentionType as RuntimeFlashAttentionType;
 
     use super::{
-        RuntimeLaunchOverrides, create_indexed_lane_resource, runtime_config_from_stage_config,
-        should_attach_package_projector,
+        RuntimeLaunchOverrides, create_indexed_lane_resource, effective_model_mmap,
+        runtime_config_from_stage_config, should_attach_package_projector,
     };
 
     #[test]
@@ -1638,6 +1646,28 @@ mod tests {
         assert_eq!(runtime_config.n_threads_batch, None);
         assert_eq!(runtime_config.n_batch, None);
         assert_eq!(runtime_config.n_ubatch, None);
+    }
+
+    #[test]
+    fn layer_package_mmap_is_enabled_by_default_and_can_be_disabled() {
+        assert_eq!(
+            effective_model_mmap(&LoadMode::LayerPackage, None),
+            Some(true)
+        );
+        assert_eq!(
+            effective_model_mmap(&LoadMode::LayerPackage, Some(false)),
+            Some(false)
+        );
+        assert_eq!(
+            effective_model_mmap(&LoadMode::LayerPackage, Some(true)),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn non_package_loads_preserve_llama_mmap_auto_mode() {
+        assert_eq!(effective_model_mmap(&LoadMode::RuntimeSlice, None), None);
+        assert_eq!(effective_model_mmap(&LoadMode::ArtifactSlice, None), None);
     }
 
     #[test]

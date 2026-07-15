@@ -20,6 +20,23 @@ pub(in crate::frontend) struct NativeMtpDecodeOptions {
     pub(in crate::frontend) ngram_max_proposal_tokens: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::frontend) enum NativeMtpTrimAction {
+    None,
+    FullSession,
+}
+
+pub(in crate::frontend) fn native_mtp_trim_action(
+    committed_positions: usize,
+    consumed_positions: usize,
+) -> NativeMtpTrimAction {
+    if committed_positions == consumed_positions {
+        NativeMtpTrimAction::None
+    } else {
+        NativeMtpTrimAction::FullSession
+    }
+}
+
 impl NativeMtpDecodeOptions {
     pub(in crate::frontend) fn from_env() -> Self {
         Self {

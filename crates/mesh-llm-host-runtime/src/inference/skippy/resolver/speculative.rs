@@ -49,23 +49,14 @@ pub(super) fn resolve_speculative_config(
         global_config.and_then(|config| config.strategy.as_deref()),
         Some("auto"),
     );
-    let native_mtp_enabled = match strategy.as_str() {
-        "auto" => {
-            auto_defaults_enabled
-                && package_generation_or_direct_default_supports_native_mtp(
-                    package_generation,
-                    model_path,
-                )
-        }
-        "mtp" => {
-            if !supports_native_mtp {
-                bail!("skippy speculative.strategy = \"mtp\" requires proven native MTP support");
-            }
-            true
-        }
-        "disabled" => false,
-        _ => bail!("skippy speculative.strategy must be auto, disabled, or mtp"),
-    };
+    let (strategy, native_mtp_enabled) = resolve_native_mtp_strategy(
+        strategy,
+        auto_defaults_enabled,
+        supports_native_mtp,
+        package_generation,
+        model_path,
+        native_mtp_env_override(),
+    )?;
     let mode = pick_string_owned(
         model_config.and_then(|config| config.mode.as_deref()),
         global_config.and_then(|config| config.mode.as_deref()),
@@ -146,6 +137,63 @@ pub(super) fn resolve_speculative_config(
         ngram_min,
         ngram_max,
     })
+}
+
+const NATIVE_MTP_ENABLED_ENV: &str = "SKIPPY_NATIVE_MTP_ENABLED";
+
+fn native_mtp_env_override() -> Option<bool> {
+    let value = std::env::var(NATIVE_MTP_ENABLED_ENV).ok()?;
+    parse_native_mtp_env_override(&value)
+}
+
+fn parse_native_mtp_env_override(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn resolve_native_mtp_strategy(
+    strategy: String,
+    auto_defaults_enabled: bool,
+    supports_native_mtp: bool,
+    package_generation: Option<&PackageGenerationInfo>,
+    model_path: &Path,
+    environment_override: Option<bool>,
+) -> Result<(String, bool)> {
+    if let Some(enabled) = environment_override {
+        if enabled && !supports_native_mtp {
+            bail!("{NATIVE_MTP_ENABLED_ENV}=1 requires proven native MTP support for this model");
+        }
+        return Ok((
+            if enabled {
+                "mtp".to_string()
+            } else {
+                "disabled".to_string()
+            },
+            enabled,
+        ));
+    }
+
+    let native_mtp_enabled = match strategy.as_str() {
+        "auto" => {
+            auto_defaults_enabled
+                && package_generation_or_direct_default_supports_native_mtp(
+                    package_generation,
+                    model_path,
+                )
+        }
+        "mtp" => {
+            if !supports_native_mtp {
+                bail!("skippy speculative.strategy = \"mtp\" requires proven native MTP support");
+            }
+            true
+        }
+        "disabled" => false,
+        _ => bail!("skippy speculative.strategy must be auto, disabled, or mtp"),
+    };
+    Ok((strategy, native_mtp_enabled))
 }
 
 fn reject_unsupported_speculative_runtime_fields(
@@ -339,4 +387,53 @@ fn incompatible_draft_pair_reason(
 fn infer_family_from_path_string(path: &Path) -> Option<String> {
     infer_family_capability(&path.display().to_string(), 0, 0)
         .map(|capability| capability.family_id.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{parse_native_mtp_env_override, resolve_native_mtp_strategy};
+
+    #[test]
+    fn parses_native_mtp_environment_override() {
+        assert_eq!(parse_native_mtp_env_override(" true "), Some(true));
+        assert_eq!(parse_native_mtp_env_override("OFF"), Some(false));
+        assert_eq!(parse_native_mtp_env_override("invalid"), None);
+    }
+
+    #[test]
+    fn native_mtp_override_disables_an_auto_detected_model() {
+        let (strategy, enabled) = resolve_native_mtp_strategy(
+            "auto".to_string(),
+            true,
+            true,
+            None,
+            Path::new("/tmp/model.gguf"),
+            Some(false),
+        )
+        .unwrap();
+
+        assert_eq!(strategy, "disabled");
+        assert!(!enabled);
+    }
+
+    #[test]
+    fn native_mtp_override_requires_proven_model_support() {
+        let error = resolve_native_mtp_strategy(
+            "disabled".to_string(),
+            true,
+            false,
+            None,
+            Path::new("/tmp/model.gguf"),
+            Some(true),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("SKIPPY_NATIVE_MTP_ENABLED=1 requires proven native MTP support")
+        );
+    }
 }

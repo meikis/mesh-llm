@@ -128,7 +128,7 @@ pub(super) fn resolved_harness_commit(
     Ok(Some(commit))
 }
 
-fn run_artifacts(definition: EvalDefinition, run_dir: &Path) -> Vec<RunArtifact> {
+pub(super) fn run_artifacts(definition: EvalDefinition, run_dir: &Path) -> Vec<RunArtifact> {
     let mut artifacts = vec![
         RunArtifact {
             kind: "stdout",
@@ -140,10 +140,18 @@ fn run_artifacts(definition: EvalDefinition, run_dir: &Path) -> Vec<RunArtifact>
         },
     ];
     match definition.id {
-        EvalId::SpeedBench => artifacts.push(RunArtifact {
-            kind: "speed-bench-json",
-            path: speed_bench_output_path(run_dir).display().to_string(),
-        }),
+        EvalId::SpeedBench => artifacts.extend([
+            RunArtifact {
+                kind: "speed-bench-json",
+                path: speed_bench_output_path(run_dir).display().to_string(),
+            },
+            RunArtifact {
+                kind: "speed-bench-response-timings",
+                path: speed_bench_response_timings_path(run_dir)
+                    .display()
+                    .to_string(),
+            },
+        ]),
         EvalId::SweBenchPro => artifacts.extend([
             RunArtifact {
                 kind: "swe-bench-pro-sweagent-results",
@@ -415,6 +423,10 @@ fn string_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
 
 pub(super) fn speed_bench_output_path(run_dir: &Path) -> PathBuf {
     run_dir.join("raw/speed-bench.json")
+}
+
+pub(super) fn speed_bench_response_timings_path(run_dir: &Path) -> PathBuf {
+    run_dir.join("raw/speed-bench-response-timings.jsonl")
 }
 
 pub(super) fn swe_bench_pro_output_path(run_dir: &Path) -> PathBuf {

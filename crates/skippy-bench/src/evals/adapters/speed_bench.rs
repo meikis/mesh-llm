@@ -1,9 +1,14 @@
-use super::super::{run::speed_bench_output_path, *};
+use super::super::{
+    run::{speed_bench_output_path, speed_bench_response_timings_path},
+    *,
+};
 
 const AUTH_LAUNCHER: &str = r#"from __future__ import annotations
 import os
 import runpy
 import sys
+import json
+import threading
 from urllib.parse import urlparse
 
 import requests
@@ -27,6 +32,32 @@ def authorized_request(self, method, url, **kwargs):
     return original_request(self, method, url, **kwargs)
 
 requests.sessions.Session.request = authorized_request
+
+timings_path = os.environ.get("SKIPPY_BENCH_RESPONSE_TIMINGS_PATH")
+timings_lock = threading.Lock()
+original_json = requests.models.Response.json
+
+def capture_response_timings(self, *args, **kwargs):
+    response = original_json(self, *args, **kwargs)
+    timings = response.get("timings") if isinstance(response, dict) else None
+    if (
+        timings_path
+        and isinstance(timings, dict)
+        and not getattr(self, "_skippy_timings_captured", False)
+    ):
+        # Preserve only scalar timing counters; never copy request or response content.
+        safe_timings = {
+            key: value
+            for key, value in timings.items()
+            if isinstance(key, str) and isinstance(value, (bool, int, float))
+        }
+        with timings_lock:
+            with open(timings_path, "a", encoding="utf-8") as output:
+                output.write(json.dumps({"timings": safe_timings}, sort_keys=True) + "\\n")
+        self._skippy_timings_captured = True
+    return response
+
+requests.models.Response.json = capture_response_timings
 script = sys.argv.pop(1)
 sys.argv[0] = script
 runpy.run_path(script, run_name="__main__")
@@ -80,6 +111,12 @@ pub(in crate::evals) fn speed_bench_command(
         )
         .env("UV_CACHE_DIR", cache_root.join("uv").display().to_string())
         .env("SKIPPY_BENCH_BASE_URL", args.base_url.clone())
+        .env(
+            "SKIPPY_BENCH_RESPONSE_TIMINGS_PATH",
+            speed_bench_response_timings_path(run_dir)
+                .display()
+                .to_string(),
+        )
         .secret_env("SKIPPY_BENCH_API_KEY", args.api_key.clone());
     Ok(command)
 }

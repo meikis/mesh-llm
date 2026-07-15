@@ -96,6 +96,10 @@ impl VerifyWindowScheduler {
         self.in_flight.len() < self.config.depth
     }
 
+    pub(super) fn depth(&self) -> usize {
+        self.config.depth()
+    }
+
     pub(super) fn mark_direct_prediction_return(&mut self) {
         self.stats.direct_prediction_return = true;
     }

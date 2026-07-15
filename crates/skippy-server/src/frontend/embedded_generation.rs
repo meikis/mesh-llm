@@ -862,13 +862,16 @@ impl StageOpenAiBackend {
             };
             let mut verify_window_scheduler =
                 VerifyWindowScheduler::new(VerifyWindowPipelineConfig::from_env());
-            let pipeline_enabled = request.native_mtp_enabled && draft_guard.is_none();
-            if pipeline_enabled && !direct_prediction_return_opened {
+            let native_mtp_verify_windows_enabled =
+                request.native_mtp_enabled && draft_guard.is_none();
+            let pipelined_decode_enabled =
+                native_mtp_verify_windows_enabled && verify_window_scheduler.depth() > 1;
+            if native_mtp_verify_windows_enabled && !direct_prediction_return_opened {
                 return Err(OpenAiError::backend(
                     "native MTP verify windows require direct prediction return",
                 ));
             }
-            if pipeline_enabled {
+            if native_mtp_verify_windows_enabled {
                 verify_window_scheduler.mark_direct_prediction_return();
             }
             let mut pipelined_windows = VecDeque::new();
@@ -890,7 +893,50 @@ impl StageOpenAiBackend {
                 let token_timer = PhaseTimer::start();
                 let native_mtp_remaining =
                     (request.max_tokens as usize).saturating_sub(decoded_tokens);
-                if pipeline_enabled {
+                if native_mtp_verify_windows_enabled
+                    && !pipelined_decode_enabled
+                    && native_mtp_reject_cooldown_remaining == 0
+                    && native_mtp_remaining >= 2
+                    && let Some(pending_native_mtp_draft) = native_mtp.take_pending_draft()
+                {
+                    match self.execute_native_mtp_verify_window(
+                        &request,
+                        downstream,
+                        &session_key,
+                        request_id,
+                        session_id,
+                        prefill_token_count,
+                        &wire_sampling,
+                        &native_mtp_options,
+                        &mut verify_window_scheduler,
+                        pending_native_mtp_draft,
+                        &mut current,
+                        decode_step,
+                        &mut decoded_tokens,
+                        &mut context_tokens,
+                        &mut exact_replay_tokens,
+                        &mut native_mtp,
+                        &mut native_mtp_counters,
+                        &mut native_mtp_reject_cooldown_remaining,
+                        &mut native_mtp_suppress_cooldown_drafts_remaining,
+                        &mut decode_stage0_compute_ms,
+                        &mut decode_runtime_lock_wait_ms,
+                        &mut decode_runtime_lock_wait_max_ms,
+                        &mut decode_runtime_lock_hold_ms,
+                        &mut decode_runtime_lock_hold_max_ms,
+                        &mut decode_runtime_lock_acquires,
+                        &mut decode_forward_activation_encode_ms,
+                        &mut decode_output_activation_bytes,
+                        &mut decode_forward_activation_bytes,
+                        &mut decode_forward_write_ms,
+                        &mut decode_downstream_wait_ms,
+                        &mut on_token,
+                    )? {
+                        NativeMtpVerifyWindowControl::ReachedStop => break,
+                        NativeMtpVerifyWindowControl::Continue => continue,
+                    }
+                }
+                if pipelined_decode_enabled {
                     if pipelined.is_none()
                         && pipelined_windows.is_empty()
                         && native_mtp_reject_cooldown_remaining == 0

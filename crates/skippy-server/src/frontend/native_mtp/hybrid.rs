@@ -1,3 +1,5 @@
+use openai_frontend::{OpenAiError, OpenAiResult};
+
 use super::NativeMtpDecodeOptions;
 use crate::frontend::speculative::propose_ngram_tokens;
 
@@ -72,6 +74,15 @@ pub(in crate::frontend) struct NativeMtpHybridProposal {
 }
 
 impl NativeMtpHybridProposal {
+    pub(in crate::frontend) fn from_native_mtp_tokens(tokens: Vec<i32>) -> Self {
+        Self {
+            tokens,
+            ngram_span_available: false,
+            ngram_anchor_agreed: false,
+            ngram_anchor_disagreed: false,
+        }
+    }
+
     pub(in crate::frontend) fn tokens(&self) -> &[i32] {
         &self.tokens
     }
@@ -96,6 +107,61 @@ impl NativeMtpHybridProposal {
             ngram_anchor_disagreed: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::frontend) struct NativeMtpVerifyWindowDecision {
+    pub(in crate::frontend) accepted_proposal_tokens: usize,
+    pub(in crate::frontend) commit_count: usize,
+    pub(in crate::frontend) rejected: bool,
+}
+
+pub(in crate::frontend) fn classify_native_mtp_verify_window<F>(
+    proposal_tokens: &[i32],
+    predicted_tokens: &[i32],
+    generated_len: usize,
+    max_new_tokens: usize,
+    mut token_is_eog: F,
+) -> OpenAiResult<NativeMtpVerifyWindowDecision>
+where
+    F: FnMut(i32) -> OpenAiResult<bool>,
+{
+    let required_predictions = proposal_tokens.len().saturating_add(1);
+    if predicted_tokens.len() < required_predictions {
+        return Err(OpenAiError::backend(format!(
+            "native MTP verify window returned too few tokens: got {} expected {}",
+            predicted_tokens.len(),
+            required_predictions
+        )));
+    }
+
+    let mut accepted_proposal_tokens = 0usize;
+    for (index, proposal_token) in proposal_tokens.iter().enumerate() {
+        let predicted = predicted_tokens[index];
+        let commit_count = index + 1;
+        if predicted != *proposal_token {
+            return Ok(NativeMtpVerifyWindowDecision {
+                accepted_proposal_tokens,
+                commit_count,
+                rejected: true,
+            });
+        }
+
+        accepted_proposal_tokens += 1;
+        if token_is_eog(predicted)? || generated_len + commit_count >= max_new_tokens {
+            return Ok(NativeMtpVerifyWindowDecision {
+                accepted_proposal_tokens,
+                commit_count,
+                rejected: false,
+            });
+        }
+    }
+
+    Ok(NativeMtpVerifyWindowDecision {
+        accepted_proposal_tokens,
+        commit_count: required_predictions.min(max_new_tokens.saturating_sub(generated_len)),
+        rejected: false,
+    })
 }
 
 #[cfg(test)]
@@ -133,5 +199,29 @@ mod tests {
         assert_eq!(proposal.tokens(), &[9]);
         assert!(proposal.ngram_span_available());
         assert!(proposal.ngram_anchor_disagreed());
+    }
+
+    #[test]
+    fn verify_window_commits_the_extra_target_after_full_accept() {
+        let decision =
+            classify_native_mtp_verify_window(&[11, 12, 13], &[11, 12, 13, 14], 0, 8, |_| {
+                Ok(false)
+            })
+            .unwrap();
+
+        assert_eq!(decision.accepted_proposal_tokens, 3);
+        assert_eq!(decision.commit_count, 4);
+        assert!(!decision.rejected);
+    }
+
+    #[test]
+    fn verify_window_commits_the_target_correction_after_rejection() {
+        let decision =
+            classify_native_mtp_verify_window(&[11, 12], &[11, 42, 99], 0, 8, |_| Ok(false))
+                .unwrap();
+
+        assert_eq!(decision.accepted_proposal_tokens, 1);
+        assert_eq!(decision.commit_count, 2);
+        assert!(decision.rejected);
     }
 }

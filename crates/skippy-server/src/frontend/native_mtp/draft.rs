@@ -45,6 +45,16 @@ pub(in crate::frontend) enum NativeMtpDraftOrigin {
     VerifyNext,
 }
 
+impl NativeMtpDraftOrigin {
+    pub(in crate::frontend) fn label(self) -> &'static str {
+        match self {
+            Self::InitialSerial => "initial_serial",
+            Self::SerialAfterGap => "serial_after_gap",
+            Self::VerifyNext => "verify_next",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

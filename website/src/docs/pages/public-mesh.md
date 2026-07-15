@@ -1,6 +1,8 @@
 # Public Mesh
 
-Use the public mesh when you want to try discovery without naming your own private mesh.
+Use a public mesh when you want Mesh to find a published listing through the
+Nostr directory. This is different from a private mesh joined with a shared
+invite token and from LAN-only mDNS mode.
 
 Join as a serving node:
 

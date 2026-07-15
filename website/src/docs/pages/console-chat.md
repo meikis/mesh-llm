@@ -45,5 +45,5 @@ If no models are listed, the model did not load or no serving peer is available.
 
 ```sh
 mesh-llm stop
-mesh-llm serve --discover my-private-mesh --model unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL
+mesh-llm serve --mesh-name my-private-mesh --model unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL
 ```

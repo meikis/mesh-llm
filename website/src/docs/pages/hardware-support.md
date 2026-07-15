@@ -31,14 +31,20 @@ Add another machine when:
 - you want a second machine to serve a different model
 - you want a laptop to use a workstation through a local API
 
-Start every serving machine with the same private mesh name:
+Start the first serving machine and copy its invite token:
 
 ```sh
-mesh-llm serve --discover my-private-mesh --model <model-ref>
+mesh-llm serve --mesh-name my-private-mesh --model <model-ref>
+```
+
+Join additional serving machines with the token:
+
+```sh
+mesh-llm serve --join <invite-token> --model <model-ref>
 ```
 
 Join from an API-only laptop:
 
 ```sh
-mesh-llm client --discover my-private-mesh
+mesh-llm client --join <invite-token>
 ```

@@ -97,6 +97,7 @@ pub fn search_catalog_json_payload(
         .take(limit)
         .map(|model| {
             let model_ref = remote_catalog_model_ref(model);
+            let layer_package_ref = remote_catalog::find_layer_package(&model_ref);
             json!({
                 "name": model.name,
                 "repo_id": model.source_repo(),
@@ -105,6 +106,13 @@ pub fn search_catalog_json_payload(
                 "description": model.description,
                 "fit": model.size.as_deref().and_then(fit_code_for_size_label),
                 "ref": model_ref,
+                "artifact": if layer_package_ref.is_some() {
+                    "layer-package"
+                } else {
+                    catalog_model_kind_code(model)
+                },
+                "layer_package_ref": layer_package_ref,
+                "serve": format!("mesh-llm serve --model {model_ref}"),
                 "show": format!("mesh-llm models show {model_ref}"),
                 "download": format!("mesh-llm models download {model_ref}"),
                 "draft": remote_catalog_model_draft_ref(model),
@@ -956,6 +964,28 @@ mod tests {
             result["show"],
             serde_json::json!(format!("mesh-llm models show {model_ref}"))
         );
+    }
+
+    #[test]
+    fn search_catalog_json_payload_preserves_mlx_artifact_kind() {
+        let mut model = test_remote_catalog_model();
+        model.name = "Llama-3.2-3B-Instruct-4bit".to_string();
+        model.file = "model.safetensors".to_string();
+        model.repo = "mlx-community/Llama-3.2-3B-Instruct-4bit".to_string();
+        model.source_file = "model.safetensors".to_string();
+
+        let payload = search_catalog_json_payload(
+            "llama",
+            SearchArtifactFilter::Mlx,
+            SearchSort::Trending,
+            &[model],
+            1,
+        );
+
+        let result = &payload["results"][0];
+        assert_eq!(result["type"], serde_json::json!("mlx"));
+        assert_eq!(result["artifact"], serde_json::json!("mlx"));
+        assert!(result["layer_package_ref"].is_null());
     }
 
     #[test]

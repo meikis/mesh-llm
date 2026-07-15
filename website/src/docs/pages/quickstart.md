@@ -57,16 +57,17 @@ On interactive macOS and Linux terminals, setup can offer to install and enable 
 Use this model first on a 12GB+ machine:
 
 ```sh
-mesh-llm serve --discover my-private-mesh --model unsloth/gemma-4-E4B-it-GGUF:UD-Q4_K_XL
+mesh-llm serve --mesh-name my-private-mesh --model unsloth/gemma-4-E4B-it-GGUF:UD-Q4_K_XL
 ```
 
 On Windows PowerShell:
 
 ```powershell
-mesh-llm serve --discover my-private-mesh --model unsloth/gemma-4-E4B-it-GGUF:UD-Q4_K_XL
+mesh-llm serve --mesh-name my-private-mesh --model unsloth/gemma-4-E4B-it-GGUF:UD-Q4_K_XL
 ```
 
-Keep this terminal open. A ready node exposes:
+Keep this terminal open and save the invite token it prints. The mesh name is a
+label; the invite token is what connects another machine. A ready node exposes:
 
 | Surface | URL |
 |---|---|
@@ -131,10 +132,13 @@ For tools without a Mesh launcher, configure an OpenAI-compatible provider with 
 
 ## 7. Add another machine
 
-Install Mesh on another machine and run the same command with the same mesh name:
+Install Mesh on another machine and join with the invite token printed by the
+first node:
 
 ```sh
-mesh-llm serve --discover my-private-mesh --model unsloth/gemma-4-E4B-it-GGUF:UD-Q4_K_XL
+mesh-llm serve --join <invite-token> --model unsloth/gemma-4-E4B-it-GGUF:UD-Q4_K_XL
 ```
 
-Mesh nodes using the same private mesh name find each other and advertise their models to the same local API.
+The machines now advertise their models to the same mesh. For an explicitly
+LAN-only setup, including Linux firewall notes, see
+[Private Meshes](/docs/pages/private-meshes/).

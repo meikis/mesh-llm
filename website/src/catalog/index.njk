@@ -7,6 +7,7 @@ permalink: /catalog/index.html
 <header class="shell page-hero">
   <h1>Catalog</h1>
   <p class="lead">Browse mesh-ready models, layer packages, Hugging Face repositories, hardware guidance, and commands for public or private meshes.</p>
+  <p>Copy a model ref, inspect it with <code>mesh-llm models show &lt;ref&gt;</code>, then run the same ref with <code>mesh-llm serve --model &lt;ref&gt;</code>. Mesh selects a listed layer package automatically.</p>
 </header>
 
 <main class="shell catalog">
@@ -89,13 +90,15 @@ permalink: /catalog/index.html
     </table>
 
     <div class="catalog-foot">
-      <span class="live" id="catalog-count">Loading live catalog data from Hugging Face...</span>
+      <span class="live" id="catalog-count">Loading the Mesh catalog...</span>
       <div class="pg"></div>
     </div>
   </div>
 </main>
 
-<script>
+<script type="module">
+  import { loadPublishedCatalogRows } from '/assets/catalog-data.js';
+
   const catalogRows = document.getElementById('catalog-rows');
   const catalogCount = document.getElementById('catalog-count');
   const searchInput = document.getElementById('catalog-search');
@@ -104,8 +107,6 @@ permalink: /catalog/index.html
   const filterHardware = document.getElementById('filter-hardware');
   const filterSource = document.getElementById('filter-source');
   const catalogTable = document.getElementById('catalog-table');
-  const rowsEndpoint = 'https://datasets-server.huggingface.co/rows?dataset=meshllm%2Fcatalog&config=default&split=train&offset=0&length=100';
-
   var PAGE_SIZE = 10;
   var currentPage = 1;
   var filteredRows = [];
@@ -246,7 +247,7 @@ permalink: /catalog/index.html
       `;
     }).join('');
 
-    catalogCount.textContent = `Loaded ${rows.length} live catalog entries from Hugging Face.`;
+    catalogCount.textContent = `Loaded ${rows.length} entries from the Mesh catalog.`;
     if (typeof lucide !== 'undefined') lucide.createIcons();
   }
 
@@ -378,17 +379,13 @@ permalink: /catalog/index.html
     });
   });
 
-  fetch(rowsEndpoint)
-    .then(function (response) {
-      if (!response.ok) throw new Error('HTTP ' + response.status);
-      return response.json();
-    })
-    .then(function (data) {
-      if (!Array.isArray(data.rows) || data.rows.length === 0) throw new Error('No rows returned');
-      renderRows(data.rows);
+  loadPublishedCatalogRows()
+    .then(function (rows) {
+      if (!Array.isArray(rows) || rows.length === 0) throw new Error('No catalog entries returned');
+      renderRows(rows.map(function (row) { return { row: row }; }));
       applyFilters();
     })
     .catch(function (error) {
-      catalogCount.innerHTML = 'Using static fallback rows. <span class="error">Live Hugging Face catalog unavailable: ' + escapeHtml(error.message) + '</span>';
+      catalogCount.innerHTML = 'Using static fallback rows. <span class="error">Catalog snapshot unavailable: ' + escapeHtml(error.message) + '</span>';
     });
 </script>

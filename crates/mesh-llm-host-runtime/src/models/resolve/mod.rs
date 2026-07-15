@@ -38,6 +38,8 @@ pub struct ModelDetails {
     pub size_label: Option<String>,
     pub description: Option<String>,
     pub draft: Option<String>,
+    /// Catalog-selected Skippy layer package used in preference to the source GGUF.
+    pub layer_package_ref: Option<String>,
     pub capabilities: ModelCapabilities,
 }
 
@@ -314,6 +316,7 @@ pub async fn show_exact_model(input: &str) -> Result<ModelDetails> {
                 size_label: model.size.clone(),
                 description: model.description.clone(),
                 draft: remote_catalog_model_draft_ref(&model),
+                layer_package_ref: None,
                 capabilities: capabilities::infer_remote_catalog_capabilities(&model),
             })
         }
@@ -366,6 +369,7 @@ pub async fn show_exact_model(input: &str) -> Result<ModelDetails> {
                 size_label,
                 description: catalog.as_ref().and_then(|model| model.description.clone()),
                 draft: catalog.as_ref().and_then(remote_catalog_model_draft_ref),
+                layer_package_ref: None,
                 capabilities,
             })
         }
@@ -432,6 +436,7 @@ where
             size_label,
             description: None,
             draft: None,
+            layer_package_ref: None,
             capabilities: ModelCapabilities::default(),
         });
         progress(ShowVariantsProgress::Inspecting {

@@ -1,17 +1,27 @@
 # Publish Mesh
 
-A publish mesh exposes a reachable endpoint for a mesh you operate. Use it when you want other clients or machines to join a known mesh without relying on local discovery.
+A published mesh advertises an invite through the public Nostr directory. Use
+it when people should be able to find the mesh without receiving its invite
+token out of band.
 
 Start a serving node:
 
 ```sh
-mesh-llm serve --auto
+mesh-llm serve --publish --mesh-name my-public-mesh --model <model-ref>
 ```
 
-Share the published endpoint or invite details with the machines that should join:
+Other serving machines can discover it by name:
 
 ```sh
-mesh-llm client --auto
+mesh-llm serve --discover my-public-mesh --model <model-ref>
 ```
 
-For production deployments, keep the public endpoint as an API entry point and keep model-serving machines behind the mesh boundary.
+Join as an API-only client:
+
+```sh
+mesh-llm client --discover my-public-mesh
+```
+
+Publishing is separate from admission policy. Apply owner, trust, or release
+attestation requirements when a publicly listed mesh must restrict which nodes
+can join.

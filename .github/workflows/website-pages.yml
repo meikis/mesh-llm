@@ -43,8 +43,14 @@ jobs:
         working-directory: website
         run: npm run clean
 
+      - name: Test catalog data mapping
+        working-directory: website
+        run: npm test
+
       - name: Build public website
         working-directory: website
+        env:
+          MESH_CATALOG_REQUIRE_FRESH: "1"
         run: npm run build
 
       - name: Stage Pages artifact

@@ -170,14 +170,24 @@ Switches:
 ### Common runtime options
 
 - `--join <TOKEN>`: join a specific mesh using an invite token (repeatable).
-- `--discover [NAME]`: discover a mesh and join it. With a name, joins the mesh matching that name. Without a name, behaves like `--auto`.
+- `--discover [NAME]`: discover a public mesh through Nostr and join it. With
+  a name, joins the mesh matching that name. Without a name, behaves like
+  `--auto`. Private and mDNS meshes still require `--join <token>`.
 - `--mesh-discovery-mode <nostr|mdns>`: choose the discovery provider. `nostr`
   is the default public/WAN-capable mode. `mdns` browses LAN DNS-SD records,
   requires a supplied matching invite token for join material and LAN detail
   proof, and disables public iroh relays plus raw STUN startup probing. LAN
   detail endpoints are only advertised when the management API is reachable
   from LAN peers, for example with `--listen-all`.
-- `--auto`: auto-join the best discovered mesh.
+
+  A normal private `--join <token>` does not require mDNS: the token carries
+  the bootstrap information and the default mode prefers direct paths with
+  managed relay fallback. Select `mdns` only when you explicitly want
+  LAN-only discovery and transport. Mesh implements mDNS in-process and does
+  not depend on Avahi, although the host firewall must allow mDNS multicast on
+  UDP port `5353`. Allow Mesh's UDP `47654` LAN dial-back beacon as well for
+  the most reliable relay-less direct path.
+- `--auto`: auto-join the best public mesh discovered through Nostr.
 - `--model <MODEL>`: model to serve (catalog id from `models recommended`, HF ref/URL, or path).
 - `--gguf <GGUF>`: serve a specific local GGUF file directly (repeatable).
 - `--port <PORT>`: API port (default `9337`).
@@ -252,6 +262,8 @@ Subcommands:
 ### `models recommended`
 
 Run this when you want the official built-in model IDs (catalog IDs) and sizes.
+The output includes the exact `serve --model` command and identifies models that
+resolve to a prepared layer package.
 
 Switches:
 
@@ -285,6 +297,9 @@ pinned stage artifacts.
 ### `models search`
 
 Use this to find something you can actually download and run (GGUF or MLX).
+The default searches the wider Hugging Face Hub. Add `--catalog` for the curated
+Mesh catalog. Within the catalog, entries with a layer package are prepared for
+multi-machine serving; catalog membership alone does not imply a layer package.
 
 Usage:
 
@@ -305,6 +320,9 @@ Switches:
 ### `models show`
 
 Use this when you want to sanity-check one exact model ref before you download or serve it.
+The output includes the exact serve command. If a catalog layer package exists,
+it also shows the source-GGUF-to-package resolution; keep using the source model
+ref in `serve --model`.
 
 Usage:
 
@@ -795,6 +813,17 @@ Resolution order:
 2. exact HF ref
 3. HF URL
 4. bare-name discovery
+
+Catalog behavior:
+
+1. `models recommended` and `models search --catalog` return refs accepted by
+   `models show`, `models download`, and `serve --model`.
+2. Catalog entries with a layer package are prepared for multi-machine serving;
+   other catalog entries remain single-model artifacts.
+3. A source GGUF ref with a catalog layer package resolves to that package
+   automatically. Users do not need to substitute a `meshllm/*-layers` ref.
+4. `models show` displays the selected artifact and the command for serving the
+   same ref.
 
 GGUF behavior:
 

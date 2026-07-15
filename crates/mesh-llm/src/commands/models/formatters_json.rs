@@ -29,6 +29,9 @@ fn show_payload(details: &ModelDetails, variants: Option<&[ModelDetails]>) -> Va
             .and_then(fit_code_for_size_label),
         "description": details.description,
         "draft": details.draft,
+        "artifact": if details.layer_package_ref.is_some() { "layer-package" } else { model_kind_code(details.kind) },
+        "layer_package_ref": details.layer_package_ref,
+        "serve_command": format!("mesh-llm serve --model {}", details.exact_ref),
         "capabilities": capabilities_json(details.capabilities),
         "download_url": details.download_url,
         "machine": local_capacity_json(),
@@ -46,6 +49,9 @@ fn show_payload(details: &ModelDetails, variants: Option<&[ModelDetails]>) -> Va
                         .size_label
                         .as_deref()
                         .and_then(fit_code_for_size_label),
+                    "artifact": if variant.layer_package_ref.is_some() { "layer-package" } else { model_kind_code(variant.kind) },
+                    "layer_package_ref": variant.layer_package_ref,
+                    "serve_command": format!("mesh-llm serve --model {}", variant.exact_ref),
                     "download_url": variant.download_url,
                 })
             })
@@ -144,6 +150,7 @@ impl ModelsFormatter for JsonFormatter {
             .map(|model| {
                 let model_capabilities = catalog_model_capabilities(model);
                 let model_ref = remote_catalog_model_ref(model);
+                let layer_package_ref = remote_catalog::find_layer_package(&model_ref);
                 json!({
                     "name": model.name,
                     "size": model.size,
@@ -151,6 +158,13 @@ impl ModelsFormatter for JsonFormatter {
                     "draft": remote_catalog_model_draft_ref(model),
                     "type": catalog_model_kind_code(model),
                     "ref": model_ref,
+                    "artifact": if layer_package_ref.is_some() {
+                        "layer-package"
+                    } else {
+                        catalog_model_kind_code(model)
+                    },
+                    "layer_package_ref": layer_package_ref,
+                    "serve": format!("mesh-llm serve --model {model_ref}"),
                     "show": format!("mesh-llm models show {model_ref}"),
                     "download": format!("mesh-llm models download {model_ref}"),
                     "capabilities": capabilities_json(model_capabilities),
@@ -283,6 +297,7 @@ mod tests {
             size_label: Some("49.9GB".to_string()),
             description: None,
             draft: None,
+            layer_package_ref: Some("hf://meshllm/Qwen3.6-35B-A3B-BF16-layers".to_string()),
             capabilities: ModelCapabilities::default(),
         };
         let variants = vec![
@@ -295,6 +310,7 @@ mod tests {
                 size_label: Some("49.9GB".to_string()),
                 description: None,
                 draft: None,
+                layer_package_ref: Some("hf://meshllm/Qwen3.6-35B-A3B-BF16-layers".to_string()),
                 capabilities: ModelCapabilities::default(),
             },
             ModelDetails {
@@ -306,6 +322,7 @@ mod tests {
                 size_label: Some("21.3GB".to_string()),
                 description: None,
                 draft: None,
+                layer_package_ref: None,
                 capabilities: ModelCapabilities::default(),
             },
         ];
@@ -314,6 +331,15 @@ mod tests {
         let emitted_variants = payload["variants"].as_array().expect("variants array");
 
         assert_eq!(payload["ref"], "unsloth/Qwen3.6-35B-A3B-GGUF:BF16");
+        assert_eq!(payload["artifact"], "layer-package");
+        assert_eq!(
+            payload["layer_package_ref"],
+            "hf://meshllm/Qwen3.6-35B-A3B-BF16-layers"
+        );
+        assert_eq!(
+            payload["serve_command"],
+            "mesh-llm serve --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16"
+        );
         assert_eq!(emitted_variants.len(), 2);
         assert_eq!(
             emitted_variants[0]["ref"],
@@ -323,6 +349,17 @@ mod tests {
             emitted_variants[1]["ref"],
             "unsloth/Qwen3.6-35B-A3B-GGUF:Q4_K_M"
         );
+        assert_eq!(emitted_variants[0]["artifact"], "layer-package");
+        assert_eq!(
+            emitted_variants[0]["layer_package_ref"],
+            "hf://meshllm/Qwen3.6-35B-A3B-BF16-layers"
+        );
+        assert_eq!(
+            emitted_variants[0]["serve_command"],
+            "mesh-llm serve --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16"
+        );
+        assert_eq!(emitted_variants[1]["artifact"], "gguf");
+        assert!(emitted_variants[1]["layer_package_ref"].is_null());
     }
 
     #[test]

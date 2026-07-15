@@ -110,6 +110,36 @@ Join from an API-only client:
 mesh-llm client --join <token>
 ```
 
+A mesh name is only a human-readable label. Reusing the same `--mesh-name` or
+`--discover` value on another machine does not grant access to a private mesh;
+additional nodes must use its invite token.
+
+### LAN-only private mesh
+
+The commands above prefer direct connections but can use managed relays when a
+direct path is unavailable. To keep discovery and transport on one LAN, select
+mDNS mode on every node while still sharing the private invite token:
+
+```bash
+# first machine
+mesh-llm serve --mesh-discovery-mode mdns --mesh-name home-lab --model Qwen3-8B-Q4_K_M
+
+# additional GPU node
+mesh-llm serve --mesh-discovery-mode mdns --join <token> --model Qwen3-8B-Q4_K_M
+
+# API-only client
+mesh-llm client --mesh-discovery-mode mdns --join <token>
+```
+
+mDNS advertisements intentionally omit reusable invite tokens. Mesh implements
+mDNS in-process and does not depend on Avahi, but the LAN firewall must permit
+mDNS multicast on UDP port `5353`. On NixOS, allow UDP `5353` directly or use
+`services.avahi.openFirewall` when Avahi is enabled. For the most reliable
+relay-less direct path, also allow Mesh's LAN dial-back beacon on UDP `47654`.
+That beacon is Mesh traffic, not mDNS or Avahi. If inbound UDP is otherwise
+blocked, set and allow a fixed `--bind-port` on every node for the actual QUIC
+connection.
+
 ### Multi-interface Linux and Docker hosts
 
 On Linux hosts with several kernel-visible interfaces, especially

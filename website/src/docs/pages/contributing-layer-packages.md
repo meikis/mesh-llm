@@ -24,8 +24,8 @@ If the package is generated on Hugging Face infrastructure, publish the package 
 
 [meshllm/catalog](https://huggingface.co/datasets/meshllm/catalog)
 
-When the PR is merged, the hourly catalog refresh regenerates `catalog_rows.jsonl`. The website catalog then picks up the new row through the Hugging Face Dataset Viewer API.
+On the next website deployment, the build reads the same canonical `entries/**/*.json` tree as the CLI and publishes a same-origin catalog snapshot. No separately maintained row projection needs to catch up before the model appears. A maintainer can also run the Public Website Deploy workflow manually when a catalog change should be published immediately.
 
 ## Catalog PR behavior
 
-Catalog PRs should be reviewable as metadata changes. The website reads flattened catalog rows, but the source of truth remains the catalog dataset entries and package repositories.
+Catalog PRs should be reviewable as metadata changes. The source of truth for both the website and CLI is the catalog entry tree and its referenced package repositories.

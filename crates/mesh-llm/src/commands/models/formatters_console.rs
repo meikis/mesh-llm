@@ -1,9 +1,9 @@
 use super::formatters::{
     ConsoleFormatter, DownloadRenderInput, DownloadStats, InstalledRow, ModelsFormatter,
-    SearchFormatter, catalog_model_capabilities, filter_label, fit_hint_for_size_label,
-    format_count, format_installed_size, format_relative_timestamp, format_source_label,
-    huggingface_cache_dir, huggingface_repo_url, installed_model_kind, model_kind_code, sort_label,
-    variant_selector_label,
+    SearchFormatter, catalog_model_capabilities, catalog_model_kind_code, filter_label,
+    fit_hint_for_size_label, format_count, format_installed_size, format_relative_timestamp,
+    format_source_label, huggingface_cache_dir, huggingface_repo_url, installed_model_kind,
+    model_kind_code, sort_label, variant_selector_label,
 };
 use anyhow::Result;
 use mesh_llm_host_runtime::command_support::models::{
@@ -220,6 +220,16 @@ impl SearchFormatter for ConsoleFormatter {
             let size = model.size.as_deref().unwrap_or("unknown size");
             writeln!(&mut output, "• {}  {}", model.name, size)?;
             writeln!(&mut output, "  ref: {}", model_ref)?;
+            if let Some(package_ref) = remote_catalog::find_layer_package(&model_ref) {
+                writeln!(&mut output, "  artifact: layer package ({package_ref})")?;
+            } else {
+                writeln!(
+                    &mut output,
+                    "  artifact: source {}",
+                    catalog_model_kind_code(model).to_ascii_uppercase()
+                )?;
+            }
+            writeln!(&mut output, "  serve: mesh-llm serve --model {model_ref}")?;
             if let Some(description) = model.description.as_deref() {
                 writeln!(&mut output, "  {}", description)?;
             }
@@ -352,6 +362,16 @@ impl ModelsFormatter for ConsoleFormatter {
             let size = model.size.as_deref().unwrap_or("unknown size");
             writeln!(&mut output, "• {}  {}", model.name, size)?;
             writeln!(&mut output, "  ref: {}", model_ref)?;
+            if let Some(package_ref) = remote_catalog::find_layer_package(&model_ref) {
+                writeln!(&mut output, "  artifact: layer package ({package_ref})")?;
+            } else {
+                writeln!(
+                    &mut output,
+                    "  artifact: source {}",
+                    catalog_model_kind_code(model).to_ascii_uppercase()
+                )?;
+            }
+            writeln!(&mut output, "  serve: mesh-llm serve --model {model_ref}")?;
             if let Some(description) = model.description.as_deref() {
                 writeln!(&mut output, "  {}", description)?;
             }
@@ -483,6 +503,15 @@ impl ModelsFormatter for ConsoleFormatter {
         if let Some(draft) = details.draft.as_deref() {
             println!("🧠 Draft: {draft}");
         }
+        if let Some(package_ref) = details.layer_package_ref.as_deref() {
+            println!("Artifact: Skippy layer package");
+            println!("Package: {package_ref}");
+            println!("Resolution: source GGUF → catalog layer package");
+        } else if model_kind_code(details.kind) == "gguf" {
+            println!("Artifact: source GGUF");
+        }
+        println!("Serve:");
+        println!("   mesh-llm serve --model {}", details.exact_ref);
         println!("Capabilities:");
         println!("  💬 text");
         if details.capabilities.multimodal_label().is_some() {

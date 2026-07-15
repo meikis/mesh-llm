@@ -328,7 +328,15 @@ pub async fn run_model_show(model_ref: &str, json_output: bool) -> Result<()> {
     if interactive {
         eprintln!("🔎 Resolving model details from Hugging Face...");
     }
-    let details = show_exact_model(model_ref).await?;
+    let mut details = show_exact_model(model_ref).await?;
+    let package_query = details.exact_ref.clone();
+    details.layer_package_ref = tokio::task::spawn_blocking(move || {
+        remote_catalog::ensure_catalog()
+            .ok()
+            .and_then(|_| remote_catalog::find_layer_package(&package_query))
+    })
+    .await
+    .map_err(anyhow::Error::from)?;
     if interactive {
         eprintln!(
             "✅ Resolved model details ({:.1}s)",
@@ -378,7 +386,12 @@ pub async fn run_model_show(model_ref: &str, json_output: bool) -> Result<()> {
                 variants_started.elapsed().as_secs_f32()
             );
         }
-        variants
+        variants.map(|mut variants| {
+            for variant in &mut variants {
+                variant.layer_package_ref = remote_catalog::find_layer_package(&variant.exact_ref);
+            }
+            variants
+        })
     } else {
         None
     };

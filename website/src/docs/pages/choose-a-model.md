@@ -16,23 +16,38 @@ These Unsloth Gemma 4 GGUF refs are starting points, not guarantees. Fit depends
 
 If loading fails, try the next smaller row or a smaller quant.
 
+## Find a curated model
+
+Start with the models curated for Mesh:
+
+```sh
+mesh-llm models recommended
+mesh-llm models search gemma --catalog
+```
+
+Without `--catalog`, `models search` searches the wider Hugging Face Hub. Those
+results can still work, but Mesh does not curate their metadata or guarantee
+that they are compatible. In the catalog, models marked with an available layer
+package are the ones prepared for multi-machine serving.
+
 ## Inspect before serving
 
 ```sh
 mesh-llm models show unsloth/gemma-4-E4B-it-GGUF:UD-Q4_K_XL
 ```
 
-Search the catalog:
-
-```sh
-mesh-llm models search gemma
-```
+`models show` prints the exact serve command and whether the source GGUF maps to
+a catalog layer package. Keep using the displayed source model ref; Mesh selects
+the package automatically when one is available.
 
 ## Serve the selected model
 
 ```sh
-mesh-llm serve --discover my-private-mesh --model unsloth/gemma-4-E4B-it-GGUF:UD-Q4_K_XL
+mesh-llm serve --mesh-name my-private-mesh --model unsloth/gemma-4-E4B-it-GGUF:UD-Q4_K_XL
 ```
+
+The ref passed to `serve --model` is the same ref accepted by `models show`; you
+do not need to discover or type a separate `meshllm/*-layers` repository name.
 
 ## When to add machines
 

@@ -6,10 +6,16 @@ If you are just trying Mesh for the first time, do not start here. Run the [Quic
 
 ## Add serving machines
 
-Run the same private mesh name on each machine:
+Start the first machine and copy the invite token it prints:
 
 ```sh
-mesh-llm serve --discover my-private-mesh --model <model-ref>
+mesh-llm serve --mesh-name my-private-mesh --model <model-ref>
+```
+
+Join each additional serving machine with that token and the same model ref:
+
+```sh
+mesh-llm serve --join <invite-token> --model <model-ref>
 ```
 
 Each serving node advertises its available models. Your local API stays:
@@ -23,18 +29,28 @@ http://localhost:9337/v1
 Search for a model:
 
 ```sh
-mesh-llm models search gemma
+mesh-llm models search gemma --catalog
+mesh-llm models show unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M
 ```
 
-Serve a selected ref:
+Serve the same ref printed by the catalog or `models show`:
 
 ```sh
-mesh-llm serve --discover my-private-mesh --model unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M
+mesh-llm serve --mesh-name my-private-mesh --model unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M
 ```
+
+Use the invite token from this node when adding the other machines. Reusing a
+private mesh name without its token creates a separate mesh.
 
 ## Layer packages
 
 Some catalog entries include layer packages. A layer package is a prepared artifact Mesh can use to place parts of a supported model across machines. You still send requests to one local endpoint.
+
+Users select the source model ref, such as
+`unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_M`. When the catalog maps that ref to a
+layer package, `models show` displays the mapping and `serve --model` resolves it
+automatically. The `meshllm/*-layers` repository is an implementation artifact,
+not a second model name users need to find.
 
 Use layer packages when:
 

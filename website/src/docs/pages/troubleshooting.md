@@ -23,7 +23,7 @@ curl -s http://localhost:3131/api/status | jq .
 If this fails, start a node:
 
 ```sh
-mesh-llm serve --discover my-private-mesh --model unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL
+mesh-llm serve --mesh-name my-private-mesh --model unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL
 ```
 
 ## Is a model available?
@@ -36,7 +36,7 @@ If no models are listed, the model did not load or no serving peer is available.
 
 ```sh
 mesh-llm stop
-mesh-llm serve --discover my-private-mesh --model unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL
+mesh-llm serve --mesh-name my-private-mesh --model unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL
 ```
 
 ## Is the console reachable?
@@ -70,7 +70,31 @@ mesh-llm goose
 For first-run testing, prefer a private mesh:
 
 ```sh
-mesh-llm serve --discover my-private-mesh --model unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL
+mesh-llm serve --mesh-name my-private-mesh --model unsloth/gemma-4-E2B-it-GGUF:UD-Q4_K_XL
 ```
 
 Then move back to `mesh-llm serve --auto` once the local install and model path work.
+
+## Private machines do not become peers
+
+Do not try to connect private nodes by reusing a mesh name. A name is only a
+label. Start the first node, copy its invite token, and pass that token to each
+additional machine:
+
+```sh
+# First machine
+mesh-llm serve --mesh-name my-private-mesh --model <model-ref>
+
+# Additional machine
+mesh-llm serve --join <invite-token> --model <model-ref>
+```
+
+If you selected `--mesh-discovery-mode mdns` for LAN-only operation, use it on
+both machines. Mesh implements mDNS in-process and does not require Avahi, but
+the host firewall must allow mDNS multicast on UDP port `5353`. On NixOS you
+can allow UDP `5353` directly; `services.avahi.openFirewall` is another way to
+open it when Avahi is enabled. For the most reliable relay-less direct path,
+also allow Mesh's LAN dial-back beacon on UDP `47654`; that port is Mesh
+traffic, not mDNS or Avahi. If inbound UDP is otherwise blocked, also choose a
+fixed `--bind-port` on each node and allow that UDP port for the actual QUIC
+connection.

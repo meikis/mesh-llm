@@ -13,11 +13,15 @@ mesh-llm stop
 mesh-llm serve --auto
 ```
 
-For a private mesh, restart with the same mesh name and model you used before:
+For a multi-node private mesh, restart each joining node with its invite token;
+a mesh name alone does not reconnect it:
 
 ```sh
-mesh-llm serve --discover my-private-mesh --model unsloth/gemma-4-E4B-it-GGUF:UD-Q4_K_XL
+mesh-llm serve --join <invite-token> --model unsloth/gemma-4-E4B-it-GGUF:UD-Q4_K_XL
 ```
+
+A standalone private node can start a new mesh with `--mesh-name` and will print
+a new invite token for machines added later.
 
 ## Switch flavors
 

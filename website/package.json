@@ -6,9 +6,11 @@
     "node": ">=20"
   },
   "scripts": {
+    "test": "node --test ./scripts/*.test.mjs",
+    "build:catalog": "node ./scripts/refresh-catalog-data.mjs",
     "build:css": "tailwindcss -i ./src/assets/site.tailwind.css -o ./src/assets/site.generated.css --minify",
     "build:pagefind": "pagefind --site ../docs",
-    "build": "npm run build:css && eleventy && npm run build:pagefind",
+    "build": "npm run build:catalog && npm run build:css && eleventy && npm run build:pagefind",
     "watch:css": "tailwindcss -i ./src/assets/site.tailwind.css -o ./src/assets/site.generated.css --watch",
     "dev": "npm run build:css && eleventy && npm run build:pagefind && sh -c 'npm run watch:css & css_pid=$!; eleventy --serve --watch --incremental --port=8765; kill $css_pid'",
     "clean": "node ./scripts/clean-generated-site.mjs"

@@ -1277,6 +1277,8 @@ struct GenerationCacheStats {
     native_mtp_decode_telemetry: Option<NativeMtpDecodeTelemetry>,
     verify_window_pipeline_stats: Option<VerifyWindowPipelineStats>,
     speculative_stats: Option<OpenAiSpeculativeStats>,
+    prompt_ms: f64,
+    predicted_ms: f64,
 }
 
 impl Default for GenerationCacheStats {
@@ -1291,6 +1293,8 @@ impl Default for GenerationCacheStats {
             native_mtp_decode_telemetry: None,
             verify_window_pipeline_stats: None,
             speculative_stats: None,
+            prompt_ms: 0.0,
+            predicted_ms: 0.0,
         }
     }
 }
@@ -2337,6 +2341,8 @@ where
             native_mtp_decode_telemetry: cache_stats.native_mtp_decode_telemetry,
             verify_window_pipeline_stats: cache_stats.verify_window_pipeline_stats,
             speculative_stats: cache_stats.speculative_stats,
+            prompt_ms: cache_stats.prompt_ms,
+            predicted_ms: cache_stats.predicted_ms,
             text: self.text,
             finish_reason: self.finish_reason,
             detokenize_ms: self.metrics.detokenize_ms,
@@ -2358,6 +2364,8 @@ struct GeneratedText {
     native_mtp_decode_telemetry: Option<NativeMtpDecodeTelemetry>,
     verify_window_pipeline_stats: Option<VerifyWindowPipelineStats>,
     speculative_stats: Option<OpenAiSpeculativeStats>,
+    prompt_ms: f64,
+    predicted_ms: f64,
     text: String,
     finish_reason: FinishReason,
     detokenize_ms: f64,
@@ -2372,12 +2380,20 @@ impl GeneratedText {
     }
 
     fn timings(&self) -> Option<BTreeMap<String, Value>> {
-        if !self.native_mtp_stats.enabled() {
-            return None;
-        }
-
         let stats = self.native_mtp_stats;
         let mut timings = BTreeMap::from([
+            ("prompt_n".to_string(), json!(self.prompt_tokens)),
+            ("prompt_ms".to_string(), json!(self.prompt_ms)),
+            (
+                "prompt_per_second".to_string(),
+                json!(tokens_per_second(self.prompt_tokens, self.prompt_ms)),
+            ),
+            ("predicted_n".to_string(), json!(self.completion_tokens)),
+            ("predicted_ms".to_string(), json!(self.predicted_ms)),
+            (
+                "predicted_per_second".to_string(),
+                json!(tokens_per_second(self.completion_tokens, self.predicted_ms)),
+            ),
             ("draft_n".to_string(), json!(stats.drafted_tokens)),
             ("draft_n_accepted".to_string(), json!(stats.accepted_tokens)),
             (
@@ -2407,6 +2423,14 @@ impl GeneratedText {
             stats.insert_response_timings(&mut timings);
         }
         Some(timings)
+    }
+}
+
+fn tokens_per_second(token_count: u32, elapsed_ms: f64) -> f64 {
+    if elapsed_ms > 0.0 {
+        f64::from(token_count) * 1_000.0 / elapsed_ms
+    } else {
+        0.0
     }
 }
 

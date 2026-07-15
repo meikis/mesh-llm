@@ -601,6 +601,7 @@ impl StageOpenAiBackend {
                     request.activation_width,
                 ),
             );
+            cache_stats.prompt_ms = prefill_timer.elapsed_ms();
             self.emit_openai_phase("stage.openai_prefill", prefill_timer, prefill_attrs);
 
             let message = generation_config_message(
@@ -1255,7 +1256,7 @@ impl StageOpenAiBackend {
                                 );
                                 attrs.insert(
                                     "llama_stage.spec.proposal_source".to_string(),
-                                    json!("native_mtp_anchored_ngram"),
+                                    json!("composite_mtp_ngram"),
                                 );
                                 attrs.insert(
                                     "llama_stage.verify_window_id".to_string(),
@@ -1909,6 +1910,7 @@ impl StageOpenAiBackend {
             ));
             cache_stats.verify_window_pipeline_stats = Some(verify_window_scheduler.stats());
             cache_stats.speculative_stats = Some(speculative_stats.clone());
+            cache_stats.predicted_ms = decode_timer.elapsed_ms();
             native_mtp_stats.insert_attrs(&mut decode_attrs);
             native_mtp_counters.insert_summary_attrs(&mut decode_attrs, native_mtp_options);
             self.emit_openai_summary("stage.openai_decode", decode_timer, decode_attrs);

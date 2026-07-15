@@ -120,8 +120,8 @@ pub(in crate::frontend) struct NativeMtpDecodeCounters {
     verify_next_accepted_count: usize,
     verify_next_draft_available_count: usize,
     verify_next_draft_adopted_count: usize,
-    hybrid_anchor_available_count: usize,
-    hybrid_ngram_span_available_count: usize,
+    hybrid_native_prefix_available_count: usize,
+    hybrid_ngram_continuation_available_count: usize,
     hybrid_proposal_token_count: usize,
     hybrid_accepted_token_count: usize,
     hybrid_accepted_tail_token_count: usize,
@@ -191,8 +191,10 @@ impl NativeMtpDecodeCounters {
         proposal: &NativeMtpHybridProposal,
         accepted_token_count: usize,
     ) {
-        self.hybrid_anchor_available_count += usize::from(proposal.native_mtp_token_count() > 0);
-        self.hybrid_ngram_span_available_count += usize::from(proposal.ngram_span_available());
+        self.hybrid_native_prefix_available_count +=
+            usize::from(proposal.native_mtp_token_count() > 0);
+        self.hybrid_ngram_continuation_available_count +=
+            usize::from(proposal.ngram_span_available());
         self.hybrid_proposal_token_count += proposal.tokens().len();
         self.hybrid_accepted_token_count += accepted_token_count;
         self.hybrid_accepted_tail_token_count +=
@@ -305,12 +307,12 @@ impl NativeMtpDecodeCounters {
             json!(self.verify_next_draft_adopted_count),
         );
         attrs.insert(
-            "llama_stage.native_mtp.hybrid_anchor_available_count".to_string(),
-            json!(self.hybrid_anchor_available_count),
+            "llama_stage.native_mtp.hybrid_native_prefix_available_count".to_string(),
+            json!(self.hybrid_native_prefix_available_count),
         );
         attrs.insert(
-            "llama_stage.native_mtp.hybrid_ngram_span_available_count".to_string(),
-            json!(self.hybrid_ngram_span_available_count),
+            "llama_stage.native_mtp.hybrid_ngram_continuation_available_count".to_string(),
+            json!(self.hybrid_ngram_continuation_available_count),
         );
         attrs.insert(
             "llama_stage.native_mtp.hybrid_proposal_token_count".to_string(),
@@ -368,12 +370,12 @@ impl NativeMtpDecodeCounters {
             json!(self.verify_window_verification_count),
         );
         timings.insert(
-            "native_mtp_ngram_anchor_available".to_string(),
-            json!(self.hybrid_anchor_available_count),
+            "native_mtp_hybrid_native_prefix_available".to_string(),
+            json!(self.hybrid_native_prefix_available_count),
         );
         timings.insert(
-            "native_mtp_ngram_span_available".to_string(),
-            json!(self.hybrid_ngram_span_available_count),
+            "native_mtp_hybrid_ngram_continuation_available".to_string(),
+            json!(self.hybrid_ngram_continuation_available_count),
         );
         timings.insert(
             "native_mtp_hybrid_proposed_tokens".to_string(),

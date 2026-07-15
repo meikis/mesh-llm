@@ -1099,6 +1099,8 @@ fn chat_response_from_parsed_message_separates_reasoning_content() {
         native_mtp_decode_telemetry: None,
         verify_window_pipeline_stats: None,
         speculative_stats: None,
+        prompt_ms: 20.0,
+        predicted_ms: 100.0,
         text: "Checked facts first.</think>Final answer.".to_string(),
         finish_reason: FinishReason::Stop,
         detokenize_ms: 0.0,
@@ -1132,6 +1134,37 @@ fn chat_response_from_parsed_message_separates_reasoning_content() {
         .expect("completion native MTP timings");
     assert_eq!(timings.get("draft_n"), Some(&json!(7)));
     assert_eq!(timings.get("draft_n_accepted"), Some(&json!(5)));
+    assert_eq!(timings.get("predicted_per_second"), Some(&json!(70.0)));
+}
+
+#[test]
+fn generated_text_timings_are_present_without_native_mtp() {
+    let output = GeneratedText {
+        prompt_tokens: 4,
+        completion_tokens: 8,
+        cache_status: "disabled",
+        cached_prompt_tokens: 0,
+        matched_prefix_tokens: 0,
+        suffix_prefill_tokens: 0,
+        cache_hit_kind: None,
+        native_mtp_stats: NativeMtpStats::default(),
+        native_mtp_decode_telemetry: None,
+        verify_window_pipeline_stats: None,
+        speculative_stats: None,
+        prompt_ms: 20.0,
+        predicted_ms: 100.0,
+        text: "Paris".to_string(),
+        finish_reason: FinishReason::Stop,
+        detokenize_ms: 0.0,
+        text_emit_ms: 0.0,
+        eog_check_ms: 0.0,
+    };
+
+    let timings = output.timings().expect("standard timings");
+    assert_eq!(timings.get("draft_n"), Some(&json!(0)));
+    assert_eq!(timings.get("draft_n_accepted"), Some(&json!(0)));
+    assert_eq!(timings.get("prompt_per_second"), Some(&json!(200.0)));
+    assert_eq!(timings.get("predicted_per_second"), Some(&json!(80.0)));
 }
 
 #[test]

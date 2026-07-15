@@ -3,19 +3,13 @@ use std::collections::VecDeque;
 use super::embedded_execution::DispatchedEmbeddedStage;
 use super::*;
 
-struct PipelinedMtpWindow {
+struct PipelinedCompositeWindow {
     window: VerifyWindow,
-    candidate: i32,
-    is_mtp_anchor: bool,
+    input_tokens: Vec<i32>,
+    proposal_tokens: Vec<i32>,
+    expected_free_target: Option<i32>,
+    native_mtp_token_count: usize,
     dispatched: DispatchedEmbeddedStage,
-}
-
-struct MtpAnchoredPipeline {
-    proposal: NativeMtpHybridProposal,
-    origin: NativeMtpDraftOrigin,
-    candidates: VecDeque<i32>,
-    accepted_tokens: usize,
-    next_draft: Option<NativeMtpDraft>,
 }
 
 impl StageOpenAiBackend {
@@ -862,8 +856,10 @@ impl StageOpenAiBackend {
             };
             let mut verify_window_scheduler =
                 VerifyWindowScheduler::new(VerifyWindowPipelineConfig::from_env());
+            let composite_sidecar_enabled =
+                native_mtp_options.ngram_hybrid && draft_guard.is_none();
             let native_mtp_verify_windows_enabled =
-                request.native_mtp_enabled && draft_guard.is_none();
+                (request.native_mtp_enabled || composite_sidecar_enabled) && draft_guard.is_none();
             let pipelined_decode_enabled =
                 native_mtp_verify_windows_enabled && verify_window_scheduler.depth() > 1;
             if native_mtp_verify_windows_enabled && !direct_prediction_return_opened {
@@ -877,6 +873,8 @@ impl StageOpenAiBackend {
             let mut pipelined_windows = VecDeque::new();
             let mut pipelined = None;
             let mut pipelined_current = current;
+            let mut composite_proposal_buffer = None;
+            let mut adaptive_verify_window = AdaptiveVerifyWindow::new(native_mtp_options);
             for decode_step in decoded_tokens as u32..request.max_tokens {
                 if fused_reached_stop {
                     break;
@@ -897,8 +895,11 @@ impl StageOpenAiBackend {
                     && !pipelined_decode_enabled
                     && native_mtp_reject_cooldown_remaining == 0
                     && native_mtp_remaining >= 2
-                    && let Some(pending_native_mtp_draft) = native_mtp.take_pending_draft()
                 {
+                    let pending_native_mtp_draft = composite_proposal_buffer
+                        .is_none()
+                        .then(|| native_mtp.take_pending_draft())
+                        .flatten();
                     match self.execute_native_mtp_verify_window(
                         &request,
                         downstream,
@@ -910,6 +911,8 @@ impl StageOpenAiBackend {
                         &native_mtp_options,
                         &mut verify_window_scheduler,
                         pending_native_mtp_draft,
+                        &mut composite_proposal_buffer,
+                        &mut adaptive_verify_window,
                         &mut current,
                         decode_step,
                         &mut decoded_tokens,
@@ -934,55 +937,78 @@ impl StageOpenAiBackend {
                     )? {
                         NativeMtpVerifyWindowControl::ReachedStop => break,
                         NativeMtpVerifyWindowControl::Continue => continue,
+                        NativeMtpVerifyWindowControl::NoProposal => {}
                     }
                 }
                 if pipelined_decode_enabled {
                     if pipelined.is_none()
                         && pipelined_windows.is_empty()
                         && native_mtp_reject_cooldown_remaining == 0
-                        && let Some(pending) = native_mtp.take_pending_draft()
                     {
-                        if pending.tokens.len() == 1 {
-                            let proposal =
-                                MtpAnchoredNgramExtender::from_options(native_mtp_options).extend(
-                                    pending.tokens[0],
-                                    &context_tokens,
-                                    native_mtp_remaining,
-                                );
+                        let pending = native_mtp.take_pending_draft();
+                        let native_mtp_origin = pending.as_ref().map(|draft| draft.origin);
+                        let native_mtp_tokens = pending
+                            .as_ref()
+                            .map(|draft| {
+                                draft
+                                    .tokens
+                                    .iter()
+                                    .copied()
+                                    .take(native_mtp_options.max_draft_tokens)
+                                    .take(native_mtp_remaining.saturating_sub(1))
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        let native_mtp_tokens =
+                            if native_mtp_tokens.len() >= native_mtp_options.min_draft_tokens {
+                                native_mtp_tokens.as_slice()
+                            } else {
+                                &[]
+                            };
+                        let proposal = CompositeProposalProvider::from_options(native_mtp_options)
+                            .propose(native_mtp_tokens, &context_tokens, native_mtp_remaining);
+                        if !proposal.tokens().is_empty() {
                             pipelined_current = current;
-                            pipelined = Some(MtpAnchoredPipeline {
-                                candidates: proposal.tokens().iter().copied().collect(),
+                            pipelined = Some(CompositeProposalPipeline::new(
                                 proposal,
-                                origin: pending.origin,
-                                accepted_tokens: 0,
-                                next_draft: None,
-                            });
-                        } else {
-                            native_mtp.observe_next_draft(
-                                Some(NativeMtpDraft {
-                                    tokens: pending.tokens,
-                                    proposal_compute_us: 0,
-                                }),
-                                pending.origin,
-                            );
+                                if native_mtp_tokens.is_empty() {
+                                    None
+                                } else {
+                                    native_mtp_origin
+                                },
+                            ));
                         }
                     }
                     if let Some(pipeline) = pipelined.as_mut() {
                         while verify_window_scheduler.has_capacity()
-                            && decoded_tokens + pipelined_windows.len()
+                            && decoded_tokens
+                                + pipelined_windows
+                                    .iter()
+                                    .map(|window: &PipelinedCompositeWindow| {
+                                        window.input_tokens.len()
+                                    })
+                                    .sum::<usize>()
                                 < request.max_tokens as usize
                         {
-                            let is_mtp_anchor =
-                                pipeline.candidates.len() == pipeline.proposal.tokens().len();
-                            let Some(candidate) = pipeline.candidates.pop_front() else {
+                            let Some(planned) = pipeline.next_window(
+                                adaptive_verify_window.width(pipeline.candidate_len()),
+                            ) else {
                                 break;
                             };
-                            let offset = pipelined_windows.len();
+                            let proposal_tokens = planned.proposal_tokens().to_vec();
+                            let expected_free_target = planned.expected_free_target();
+                            let native_mtp_token_count = planned.native_mtp_token_count();
+                            let offset = pipelined_windows
+                                .iter()
+                                .map(|window: &PipelinedCompositeWindow| window.input_tokens.len())
+                                .sum::<usize>();
                             let window = verify_window_scheduler.open(
                                 prefill_token_count + decoded_tokens + offset,
                                 decoded_tokens + offset,
                             )?;
-                            let input = [pipelined_current];
+                            let mut input_tokens = Vec::with_capacity(proposal_tokens.len() + 1);
+                            input_tokens.push(pipelined_current);
+                            input_tokens.extend_from_slice(&proposal_tokens);
                             let message = embedded_verify_window_message(
                                 request.wire_dtype,
                                 VerifyWindowMessageArgs {
@@ -992,7 +1018,7 @@ impl StageOpenAiBackend {
                                     prompt_token_count: request.prompt_token_ids.len(),
                                     pos_start: window.base_position,
                                     decode_step: window.decode_step,
-                                    tokens: &input,
+                                    tokens: &input_tokens,
                                     sampling: wire_sampling.clone(),
                                     checkpoint: false,
                                 },
@@ -1002,15 +1028,20 @@ impl StageOpenAiBackend {
                                 downstream,
                                 &session_key,
                                 &message,
-                                &input,
+                                &input_tokens,
                             )?;
-                            pipelined_windows.push_back(PipelinedMtpWindow {
+                            pipelined_windows.push_back(PipelinedCompositeWindow {
                                 window,
-                                candidate,
-                                is_mtp_anchor,
+                                input_tokens,
+                                proposal_tokens,
+                                expected_free_target,
+                                native_mtp_token_count,
                                 dispatched,
                             });
-                            pipelined_current = candidate;
+                            let Some(next_current) = expected_free_target else {
+                                break;
+                            };
+                            pipelined_current = next_current;
                         }
                         if let Some(window) = pipelined_windows.pop_front() {
                             let verify = self.complete_dispatched_stage_message_direct(
@@ -1026,29 +1057,43 @@ impl StageOpenAiBackend {
                                     "verify window scheduler lost FIFO state",
                                 ));
                             }
-                            let target =
-                                *verify.reply.predicted_tokens.first().ok_or_else(|| {
-                                    OpenAiError::backend(
-                                        "pipelined verify window returned no target token",
-                                    )
-                                })?;
-                            let accepted = target == window.candidate;
-                            if window.is_mtp_anchor {
+                            let native_mtp_verify_decision = classify_native_mtp_verify_window(
+                                &window.proposal_tokens,
+                                &verify.reply.predicted_tokens,
+                                decoded_tokens,
+                                request.max_tokens as usize,
+                                |token| token_is_eog_with_runtime(&self.runtime, token),
+                            )?;
+                            let fully_accepted_window = !native_mtp_verify_decision.rejected
+                                && native_mtp_verify_decision.accepted_proposal_tokens
+                                    == window.proposal_tokens.len();
+                            let free_target_matches =
+                                window.expected_free_target.is_none_or(|expected| {
+                                    verify
+                                        .reply
+                                        .predicted_tokens
+                                        .get(window.proposal_tokens.len())
+                                        == Some(&expected)
+                                });
+                            let pipeline_continues = fully_accepted_window && free_target_matches;
+                            if window.native_mtp_token_count > 0 {
                                 let pipeline = pipelined.as_ref().expect("pipeline retained");
-                                let anchor_span = native_mtp.observe_taken_draft_span(
-                                    &[window.candidate],
+                                let span = native_mtp.observe_taken_draft_span(
+                                    &window.proposal_tokens[..window.native_mtp_token_count],
                                     &verify.reply.predicted_tokens,
                                     ms_to_us(verify.elapsed_ms),
                                 );
-                                native_mtp_counters.observe_verify_window_verification(
-                                    pipeline.origin,
-                                    !anchor_span.rejected,
-                                );
+                                for index in 0..span.accepted_count + usize::from(span.rejected) {
+                                    native_mtp_counters.observe_verify_window_verification(
+                                        pipeline.origin().expect("native MTP candidate has origin"),
+                                        index < span.accepted_count,
+                                    );
+                                }
                             }
                             speculative_stats.windows += 1;
-                            speculative_stats.draft_tokens += 1;
+                            speculative_stats.draft_tokens += window.proposal_tokens.len();
                             speculative_stats.primary_verify_requests += 1;
-                            speculative_stats.primary_verify_tokens += 1;
+                            speculative_stats.primary_verify_tokens += window.input_tokens.len();
                             speculative_stats.primary_verify_elapsed_ms += verify.elapsed_ms;
                             speculative_stats.primary_verify_stage0_compute_ms +=
                                 verify.stats.stage0_compute_ms;
@@ -1086,14 +1131,21 @@ impl StageOpenAiBackend {
                                 .saturating_add(verify.stats.forward_activation_bytes);
                             decode_forward_write_ms += verify.stats.forward_write_ms;
                             decode_downstream_wait_ms += verify.stats.downstream_wait_ms;
-                            if accepted {
-                                speculative_stats.accepted_tokens += 1;
+                            if fully_accepted_window {
+                                let accepted_candidate_tokens = window.proposal_tokens.len()
+                                    + usize::from(
+                                        window.expected_free_target.is_some()
+                                            && free_target_matches,
+                                    );
+                                speculative_stats.accepted_tokens += accepted_candidate_tokens;
                                 speculative_stats.full_accept_windows += 1;
                                 let pipeline = pipelined.as_mut().expect("pipeline retained");
-                                pipeline.accepted_tokens += 1;
-                                pipeline.next_draft = NativeMtpDraft::from_verify_prediction_tokens(
-                                    &verify.reply.predicted_tokens,
-                                    1,
+                                pipeline.observe_accepted(accepted_candidate_tokens);
+                                pipeline.set_next_draft(
+                                    NativeMtpDraft::from_verify_prediction_tokens(
+                                        &verify.reply.predicted_tokens,
+                                        window.input_tokens.len(),
+                                    ),
                                 );
                             } else {
                                 speculative_stats.rejected_tokens += 1;
@@ -1101,13 +1153,31 @@ impl StageOpenAiBackend {
                                 speculative_stats.early_reject_windows += 1;
                                 speculative_stats.first_reject_position_sum += 1;
                             }
-                            current = target;
-                            decoded_tokens += 1;
-                            exact_replay_tokens.push(current);
-                            context_tokens.push(current);
-                            let reached_stop = on_token(current)? == TokenControl::Stop
-                                || decoded_tokens >= request.max_tokens as usize;
-                            if !accepted || reached_stop {
+                            let mut reached_stop = false;
+                            for token in verify
+                                .reply
+                                .predicted_tokens
+                                .iter()
+                                .copied()
+                                .take(native_mtp_verify_decision.commit_count)
+                            {
+                                current = token;
+                                decoded_tokens += 1;
+                                exact_replay_tokens.push(current);
+                                context_tokens.push(current);
+                                if on_token(current)? == TokenControl::Stop
+                                    || decoded_tokens >= request.max_tokens as usize
+                                {
+                                    reached_stop = true;
+                                    break;
+                                }
+                            }
+                            adaptive_verify_window.observe(pipeline_continues);
+                            native_mtp_counters.observe_adaptive_verify_window(
+                                window.proposal_tokens.len(),
+                                adaptive_verify_window.current_tokens(),
+                            );
+                            if !pipeline_continues || reached_stop {
                                 let stale_count = pipelined_windows.len();
                                 let stale_drain_timer = PhaseTimer::start();
                                 while let Some(stale) = pipelined_windows.pop_front() {
@@ -1127,20 +1197,20 @@ impl StageOpenAiBackend {
                                 );
                                 let pipeline = pipelined.take().expect("pipeline retained");
                                 native_mtp_counters.observe_hybrid_proposal(
-                                    pipeline.proposal.ngram_span_available(),
-                                    pipeline.proposal.ngram_anchor_agreed(),
-                                    pipeline.proposal.ngram_anchor_disagreed(),
-                                    pipeline.proposal.tokens().len(),
-                                    pipeline.accepted_tokens,
+                                    pipeline.proposal(),
+                                    pipeline.accepted_tokens(),
                                 );
                                 native_mtp.clear_pending_draft();
-                                if !accepted && native_mtp_options.reject_cooldown_tokens > 0 {
+                                if native_mtp_verify_decision.rejected
+                                    && pipeline.origin().is_some()
+                                    && native_mtp_options.reject_cooldown_tokens > 0
+                                {
                                     native_mtp_reject_cooldown_remaining =
                                         native_mtp_options.reject_cooldown_tokens;
                                     native_mtp_suppress_cooldown_drafts_remaining =
                                         native_mtp_options.suppress_cooldown_draft_limit;
                                 }
-                                if !accepted || stale_count > 0 {
+                                if native_mtp_verify_decision.rejected || stale_count > 0 {
                                     let trim = self.trim_embedded_stage_session(
                                         &request,
                                         downstream,
@@ -1158,22 +1228,19 @@ impl StageOpenAiBackend {
                             } else if pipelined_windows.is_empty()
                                 && pipelined
                                     .as_ref()
-                                    .is_some_and(|pipeline| pipeline.candidates.is_empty())
+                                    .is_some_and(|pipeline| !pipeline.has_remaining_candidates())
                             {
-                                let pipeline = pipelined.take().expect("pipeline retained");
-                                let next_draft_available = pipeline.next_draft.is_some();
+                                let mut pipeline = pipelined.take().expect("pipeline retained");
+                                let next_draft_available = pipeline.next_draft().is_some();
                                 native_mtp_counters.observe_hybrid_proposal(
-                                    pipeline.proposal.ngram_span_available(),
-                                    pipeline.proposal.ngram_anchor_agreed(),
-                                    pipeline.proposal.ngram_anchor_disagreed(),
-                                    pipeline.proposal.tokens().len(),
-                                    pipeline.accepted_tokens,
+                                    pipeline.proposal(),
+                                    pipeline.accepted_tokens(),
                                 );
                                 native_mtp_counters.observe_verify_next_draft(
                                     next_draft_available,
                                     next_draft_available,
                                 );
-                                if let Some(next_draft) = pipeline.next_draft {
+                                if let Some(next_draft) = pipeline.take_next_draft() {
                                     native_mtp.observe_next_draft(
                                         Some(next_draft),
                                         NativeMtpDraftOrigin::VerifyNext,
@@ -1196,7 +1263,7 @@ impl StageOpenAiBackend {
                                 );
                                 attrs.insert(
                                     "llama_stage.verify_window.accepted".to_string(),
-                                    json!(accepted),
+                                    json!(pipeline_continues),
                                 );
                                 attrs.insert(
                                     "llama_stage.verify_window.in_flight_after".to_string(),
@@ -1772,13 +1839,8 @@ impl StageOpenAiBackend {
                 speculative_stats.recovery_ms += trim.elapsed_ms;
             }
             if let Some(pipeline) = pipelined.take() {
-                native_mtp_counters.observe_hybrid_proposal(
-                    pipeline.proposal.ngram_span_available(),
-                    pipeline.proposal.ngram_anchor_agreed(),
-                    pipeline.proposal.ngram_anchor_disagreed(),
-                    pipeline.proposal.tokens().len(),
-                    pipeline.accepted_tokens,
-                );
+                native_mtp_counters
+                    .observe_hybrid_proposal(pipeline.proposal(), pipeline.accepted_tokens());
                 native_mtp.clear_pending_draft();
             }
             let mut decode_attrs = self.openai_attrs(request.ids);

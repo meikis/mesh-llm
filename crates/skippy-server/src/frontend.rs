@@ -1721,6 +1721,19 @@ fn chat_response_from_generated_text(
     .with_timings(output.timings())
 }
 
+fn completion_response_from_generated_text(
+    model: String,
+    output: &GeneratedText,
+) -> CompletionResponse {
+    CompletionResponse::new_with_reason(
+        model,
+        output.text.clone(),
+        output.usage(),
+        output.finish_reason,
+    )
+    .with_timings(output.timings())
+}
+
 fn parsed_chat_message_from_json(
     message_json: &str,
     request: &ChatCompletionRequest,

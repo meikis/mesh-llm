@@ -195,12 +195,7 @@ impl OpenAiBackend for StageOpenAiBackend {
             )
             .await?;
         let response_timer = PhaseTimer::start();
-        let response = CompletionResponse::new_with_reason(
-            request.model,
-            output.text.clone(),
-            output.usage(),
-            output.finish_reason,
-        );
+        let response = completion_response_from_generated_text(request.model, &output);
         let mut response_attrs = self.openai_attrs(&ids);
         response_attrs.insert(
             "llama_stage.openai_operation".to_string(),

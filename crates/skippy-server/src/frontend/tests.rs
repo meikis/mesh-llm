@@ -1124,6 +1124,14 @@ fn chat_response_from_parsed_message_separates_reasoning_content() {
     );
     assert_eq!(message.tool_calls, None);
     assert_eq!(response.choices[0].finish_reason, Some(FinishReason::Stop));
+
+    let completion = completion_response_from_generated_text("qwen".to_string(), &output);
+    let timings = completion
+        .timings
+        .as_ref()
+        .expect("completion native MTP timings");
+    assert_eq!(timings.get("draft_n"), Some(&json!(7)));
+    assert_eq!(timings.get("draft_n_accepted"), Some(&json!(5)));
 }
 
 #[test]

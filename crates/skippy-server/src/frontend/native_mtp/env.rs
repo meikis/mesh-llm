@@ -4,6 +4,8 @@ const SUPPRESS_COOLDOWN_DRAFT_LIMIT_ENV: &str = "SKIPPY_NATIVE_MTP_SUPPRESS_COOL
 const NGRAM_HYBRID_ENV: &str = "SKIPPY_NATIVE_MTP_NGRAM_HYBRID";
 const NGRAM_SIZE_ENV: &str = "SKIPPY_NATIVE_MTP_NGRAM_SIZE";
 const NGRAM_MAX_PROPOSAL_TOKENS_ENV: &str = "SKIPPY_NATIVE_MTP_NGRAM_MAX_PROPOSAL_TOKENS";
+const VERIFY_WINDOW_MIN_TOKENS_ENV: &str = "SKIPPY_NATIVE_MTP_VERIFY_WINDOW_MIN_TOKENS";
+const VERIFY_WINDOW_MAX_TOKENS_ENV: &str = "SKIPPY_NATIVE_MTP_VERIFY_WINDOW_MAX_TOKENS";
 
 pub(in crate::frontend) fn native_mtp_reject_cooldown_tokens() -> usize {
     parse_usize_env(REJECT_COOLDOWN_TOKENS_ENV, 0)
@@ -26,7 +28,15 @@ pub(in crate::frontend) fn native_mtp_ngram_size() -> usize {
 }
 
 pub(in crate::frontend) fn native_mtp_ngram_max_proposal_tokens() -> usize {
-    parse_usize_env(NGRAM_MAX_PROPOSAL_TOKENS_ENV, 4)
+    parse_usize_env(NGRAM_MAX_PROPOSAL_TOKENS_ENV, 10)
+}
+
+pub(in crate::frontend) fn native_mtp_verify_window_min_tokens() -> usize {
+    parse_usize_env(VERIFY_WINDOW_MIN_TOKENS_ENV, 1).max(1)
+}
+
+pub(in crate::frontend) fn native_mtp_verify_window_max_tokens() -> usize {
+    parse_usize_env(VERIFY_WINDOW_MAX_TOKENS_ENV, 4).max(1)
 }
 
 fn truthy_env(value: Option<&str>) -> bool {

@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use super::{OpenAiError, OpenAiResult};
 
@@ -20,8 +20,47 @@ impl VerifyWindowPipelineConfig {
         }
     }
 
-    pub(super) fn enabled(self) -> bool {
-        self.depth > 1
+    pub(super) fn depth(self) -> usize {
+        self.depth
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(super) struct VerifyWindowPipelineStats {
+    depth: usize,
+    direct_prediction_return: bool,
+    opened_windows: usize,
+    max_in_flight: usize,
+    stale_discarded: usize,
+    stale_drain_ms: f64,
+}
+
+impl VerifyWindowPipelineStats {
+    pub(super) fn insert_response_timings(self, timings: &mut BTreeMap<String, serde_json::Value>) {
+        timings.insert(
+            "verify_window_depth".to_string(),
+            serde_json::json!(self.depth),
+        );
+        timings.insert(
+            "verify_window_direct_prediction_return".to_string(),
+            serde_json::json!(self.direct_prediction_return),
+        );
+        timings.insert(
+            "verify_window_opened".to_string(),
+            serde_json::json!(self.opened_windows),
+        );
+        timings.insert(
+            "verify_window_max_in_flight".to_string(),
+            serde_json::json!(self.max_in_flight),
+        );
+        timings.insert(
+            "verify_window_stale_discarded".to_string(),
+            serde_json::json!(self.stale_discarded),
+        );
+        timings.insert(
+            "verify_window_stale_drain_ms".to_string(),
+            serde_json::json!(self.stale_drain_ms),
+        );
     }
 }
 
@@ -37,7 +76,7 @@ pub(super) struct VerifyWindowScheduler {
     config: VerifyWindowPipelineConfig,
     next_id: i32,
     in_flight: VecDeque<VerifyWindow>,
-    stale_discard_count: usize,
+    stats: VerifyWindowPipelineStats,
 }
 
 impl VerifyWindowScheduler {
@@ -46,16 +85,19 @@ impl VerifyWindowScheduler {
             config,
             next_id: 1,
             in_flight: VecDeque::new(),
-            stale_discard_count: 0,
+            stats: VerifyWindowPipelineStats {
+                depth: config.depth(),
+                ..VerifyWindowPipelineStats::default()
+            },
         }
-    }
-
-    pub(super) fn enabled(&self) -> bool {
-        self.config.enabled()
     }
 
     pub(super) fn has_capacity(&self) -> bool {
         self.in_flight.len() < self.config.depth
+    }
+
+    pub(super) fn mark_direct_prediction_return(&mut self) {
+        self.stats.direct_prediction_return = true;
     }
 
     pub(super) fn open(
@@ -79,6 +121,8 @@ impl VerifyWindowScheduler {
             decode_step,
         };
         self.in_flight.push_back(window.clone());
+        self.stats.opened_windows = self.stats.opened_windows.saturating_add(1);
+        self.stats.max_in_flight = self.stats.max_in_flight.max(self.in_flight.len());
         Ok(window)
     }
 
@@ -101,12 +145,13 @@ impl VerifyWindowScheduler {
     pub(super) fn discard_stale(&mut self) -> usize {
         let discarded = self.in_flight.len();
         self.in_flight.clear();
-        self.stale_discard_count = self.stale_discard_count.saturating_add(discarded);
+        self.stats.stale_discarded = self.stats.stale_discarded.saturating_add(discarded);
         discarded
     }
 
-    pub(super) fn record_stale_discarded(&mut self, count: usize) {
-        self.stale_discard_count = self.stale_discard_count.saturating_add(count);
+    pub(super) fn record_stale_discarded(&mut self, count: usize, drain_ms: f64) {
+        self.stats.stale_discarded = self.stats.stale_discarded.saturating_add(count);
+        self.stats.stale_drain_ms += drain_ms;
     }
 
     pub(super) fn in_flight_len(&self) -> usize {
@@ -114,7 +159,11 @@ impl VerifyWindowScheduler {
     }
 
     pub(super) fn stale_discard_count(&self) -> usize {
-        self.stale_discard_count
+        self.stats.stale_discarded
+    }
+
+    pub(super) fn stats(&self) -> VerifyWindowPipelineStats {
+        self.stats
     }
 }
 
@@ -135,6 +184,10 @@ mod tests {
         assert_eq!(scheduler.complete_next(first.id).unwrap(), first);
         assert_eq!(scheduler.complete_next(second.id).unwrap(), second);
         assert_eq!(first.id, 1);
+        assert_eq!(scheduler.stats().depth, 2);
+        assert_eq!(scheduler.stats().opened_windows, 2);
+        assert_eq!(scheduler.stats().max_in_flight, 2);
+        assert!(!scheduler.stats().direct_prediction_return);
     }
 
     #[test]
@@ -148,5 +201,6 @@ mod tests {
         assert_eq!(scheduler.discard_stale(), 3);
         assert_eq!(scheduler.stale_discard_count(), 3);
         assert_eq!(scheduler.in_flight_len(), 0);
+        assert_eq!(scheduler.stats().stale_discarded, 3);
     }
 }

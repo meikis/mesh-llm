@@ -1096,6 +1096,9 @@ fn chat_response_from_parsed_message_separates_reasoning_content() {
             verification_compute_us: 200,
             ..NativeMtpStats::default()
         },
+        native_mtp_decode_telemetry: None,
+        verify_window_pipeline_stats: None,
+        speculative_stats: None,
         text: "Checked facts first.</think>Final answer.".to_string(),
         finish_reason: FinishReason::Stop,
         detokenize_ms: 0.0,

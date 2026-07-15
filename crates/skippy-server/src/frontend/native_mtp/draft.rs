@@ -45,16 +45,6 @@ pub(in crate::frontend) enum NativeMtpDraftOrigin {
     VerifyNext,
 }
 
-impl NativeMtpDraftOrigin {
-    pub(in crate::frontend) fn label(self) -> &'static str {
-        match self {
-            Self::InitialSerial => "initial_serial",
-            Self::SerialAfterGap => "serial_after_gap",
-            Self::VerifyNext => "verify_next",
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,13 +98,13 @@ mod tests {
     }
 
     #[test]
-    fn pending_draft_keeps_origin_label() {
+    fn pending_draft_keeps_origin() {
         let pending = PendingNativeMtpDraft {
             tokens: vec![12, 13],
             origin: NativeMtpDraftOrigin::VerifyNext,
         };
 
         assert_eq!(pending.tokens, vec![12, 13]);
-        assert_eq!(pending.origin.label(), "verify_next");
+        assert_eq!(pending.origin, NativeMtpDraftOrigin::VerifyNext);
     }
 }

@@ -1267,7 +1267,6 @@ fn prompt_cache_retention_label(retention: openai_frontend::PromptCacheRetention
     }
 }
 
-#[derive(Clone, Copy)]
 struct GenerationCacheStats {
     status: &'static str,
     cached_prompt_tokens: u32,
@@ -1275,6 +1274,9 @@ struct GenerationCacheStats {
     suffix_prefill_tokens: u32,
     hit_kind: Option<&'static str>,
     native_mtp_stats: NativeMtpStats,
+    native_mtp_decode_telemetry: Option<NativeMtpDecodeTelemetry>,
+    verify_window_pipeline_stats: Option<VerifyWindowPipelineStats>,
+    speculative_stats: Option<OpenAiSpeculativeStats>,
 }
 
 impl Default for GenerationCacheStats {
@@ -1286,6 +1288,9 @@ impl Default for GenerationCacheStats {
             suffix_prefill_tokens: 0,
             hit_kind: None,
             native_mtp_stats: NativeMtpStats::default(),
+            native_mtp_decode_telemetry: None,
+            verify_window_pipeline_stats: None,
+            speculative_stats: None,
         }
     }
 }
@@ -2316,6 +2321,9 @@ where
             suffix_prefill_tokens: cache_stats.suffix_prefill_tokens,
             cache_hit_kind: cache_stats.hit_kind,
             native_mtp_stats: cache_stats.native_mtp_stats,
+            native_mtp_decode_telemetry: cache_stats.native_mtp_decode_telemetry,
+            verify_window_pipeline_stats: cache_stats.verify_window_pipeline_stats,
+            speculative_stats: cache_stats.speculative_stats,
             text: self.text,
             finish_reason: self.finish_reason,
             detokenize_ms: self.metrics.detokenize_ms,
@@ -2334,6 +2342,9 @@ struct GeneratedText {
     suffix_prefill_tokens: u32,
     cache_hit_kind: Option<&'static str>,
     native_mtp_stats: NativeMtpStats,
+    native_mtp_decode_telemetry: Option<NativeMtpDecodeTelemetry>,
+    verify_window_pipeline_stats: Option<VerifyWindowPipelineStats>,
+    speculative_stats: Option<OpenAiSpeculativeStats>,
     text: String,
     finish_reason: FinishReason,
     detokenize_ms: f64,
@@ -2353,7 +2364,7 @@ impl GeneratedText {
         }
 
         let stats = self.native_mtp_stats;
-        Some(BTreeMap::from([
+        let mut timings = BTreeMap::from([
             ("draft_n".to_string(), json!(stats.drafted_tokens)),
             ("draft_n_accepted".to_string(), json!(stats.accepted_tokens)),
             (
@@ -2372,7 +2383,17 @@ impl GeneratedText {
                 "native_mtp_verification_compute_us".to_string(),
                 json!(stats.verification_compute_us),
             ),
-        ]))
+        ]);
+        if let Some(telemetry) = self.native_mtp_decode_telemetry {
+            telemetry.insert_response_timings(&mut timings);
+        }
+        if let Some(stats) = self.verify_window_pipeline_stats {
+            stats.insert_response_timings(&mut timings);
+        }
+        if let Some(stats) = self.speculative_stats.as_ref() {
+            stats.insert_response_timings(&mut timings);
+        }
+        Some(timings)
     }
 }
 

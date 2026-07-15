@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct OpenAiSpeculativeStats {
     pub(super) windows: usize,
     pub(super) draft_tokens: usize,
@@ -88,6 +88,25 @@ pub(super) fn propose_ngram_tokens(
 }
 
 impl OpenAiSpeculativeStats {
+    pub(super) fn insert_response_timings(&self, timings: &mut BTreeMap<String, Value>) {
+        timings.insert(
+            "verify_window_verify_elapsed_ms".to_string(),
+            json!(self.primary_verify_elapsed_ms),
+        );
+        timings.insert(
+            "verify_window_stage0_compute_ms".to_string(),
+            json!(self.primary_verify_stage0_compute_ms),
+        );
+        timings.insert(
+            "verify_window_forward_write_ms".to_string(),
+            json!(self.primary_verify_forward_write_ms),
+        );
+        timings.insert(
+            "verify_window_downstream_wait_ms".to_string(),
+            json!(self.primary_verify_downstream_wait_ms),
+        );
+    }
+
     pub(super) fn observe_verify_decision(
         &mut self,
         decision: VerifyWindowDecision,

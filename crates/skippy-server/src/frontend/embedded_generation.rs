@@ -862,16 +862,15 @@ impl StageOpenAiBackend {
             };
             let mut verify_window_scheduler =
                 VerifyWindowScheduler::new(VerifyWindowPipelineConfig::from_env());
-            let pipeline_requested = verify_window_scheduler.enabled()
-                && request.native_mtp_enabled
-                && native_mtp_options.ngram_hybrid
-                && draft_guard.is_none();
-            if pipeline_requested && !direct_prediction_return_opened {
+            let pipeline_enabled = request.native_mtp_enabled && draft_guard.is_none();
+            if pipeline_enabled && !direct_prediction_return_opened {
                 return Err(OpenAiError::backend(
-                    "MTP-anchored verify-window pipelining requires direct prediction return",
+                    "native MTP verify windows require direct prediction return",
                 ));
             }
-            let pipeline_enabled = pipeline_requested;
+            if pipeline_enabled {
+                verify_window_scheduler.mark_direct_prediction_return();
+            }
             let mut pipelined_windows = VecDeque::new();
             let mut pipelined = None;
             let mut pipelined_current = current;
@@ -894,6 +893,7 @@ impl StageOpenAiBackend {
                 if pipeline_enabled {
                     if pipelined.is_none()
                         && pipelined_windows.is_empty()
+                        && native_mtp_reject_cooldown_remaining == 0
                         && let Some(pending) = native_mtp.take_pending_draft()
                     {
                         if pending.tokens.len() == 1 {
@@ -994,7 +994,7 @@ impl StageOpenAiBackend {
                                     &verify.reply.predicted_tokens,
                                     ms_to_us(verify.elapsed_ms),
                                 );
-                                native_mtp_counters.observe_batched_verification(
+                                native_mtp_counters.observe_verify_window_verification(
                                     pipeline.origin,
                                     !anchor_span.rejected,
                                 );
@@ -1063,6 +1063,7 @@ impl StageOpenAiBackend {
                                 || decoded_tokens >= request.max_tokens as usize;
                             if !accepted || reached_stop {
                                 let stale_count = pipelined_windows.len();
+                                let stale_drain_timer = PhaseTimer::start();
                                 while let Some(stale) = pipelined_windows.pop_front() {
                                     let stale_reply = self
                                         .complete_dispatched_stage_message_direct(
@@ -1074,7 +1075,10 @@ impl StageOpenAiBackend {
                                     verify_window_scheduler
                                         .complete_next(stale_reply.reply.window.window_id)?;
                                 }
-                                verify_window_scheduler.record_stale_discarded(stale_count);
+                                verify_window_scheduler.record_stale_discarded(
+                                    stale_count,
+                                    stale_drain_timer.elapsed_ms(),
+                                );
                                 let pipeline = pipelined.take().expect("pipeline retained");
                                 native_mtp_counters.observe_hybrid_proposal(
                                     pipeline.proposal.ngram_span_available(),
@@ -1164,50 +1168,6 @@ impl StageOpenAiBackend {
                             }
                             continue;
                         }
-                    }
-                }
-                let can_run_native_mtp_batched_verify = native_mtp_options.batched_verify
-                    && native_mtp_reject_cooldown_remaining == 0
-                    && draft_guard.is_none()
-                    && native_mtp_remaining >= 2;
-                let pending_native_mtp_draft = can_run_native_mtp_batched_verify
-                    .then(|| native_mtp.take_pending_draft())
-                    .flatten();
-                if let Some(pending_native_mtp_draft) = pending_native_mtp_draft {
-                    match self.execute_native_mtp_batched_verify(
-                        &request,
-                        downstream,
-                        &session_key,
-                        request_id,
-                        session_id,
-                        prefill_token_count,
-                        &wire_sampling,
-                        &native_mtp_options,
-                        pending_native_mtp_draft,
-                        &mut current,
-                        decode_step,
-                        &mut decoded_tokens,
-                        &mut context_tokens,
-                        &mut exact_replay_tokens,
-                        &mut native_mtp,
-                        &mut native_mtp_counters,
-                        &mut native_mtp_reject_cooldown_remaining,
-                        &mut native_mtp_suppress_cooldown_drafts_remaining,
-                        &mut decode_stage0_compute_ms,
-                        &mut decode_runtime_lock_wait_ms,
-                        &mut decode_runtime_lock_wait_max_ms,
-                        &mut decode_runtime_lock_hold_ms,
-                        &mut decode_runtime_lock_hold_max_ms,
-                        &mut decode_runtime_lock_acquires,
-                        &mut decode_forward_activation_encode_ms,
-                        &mut decode_output_activation_bytes,
-                        &mut decode_forward_activation_bytes,
-                        &mut decode_forward_write_ms,
-                        &mut decode_downstream_wait_ms,
-                        &mut on_token,
-                    )? {
-                        BatchedVerifyControl::ReachedStop => break,
-                        BatchedVerifyControl::Continue => continue,
                     }
                 }
                 if draft_guard.is_some() || request.ngram_max > 0 {
@@ -1659,7 +1619,7 @@ impl StageOpenAiBackend {
                     current,
                     ms_to_us(downstream_wait_ms),
                     native_mtp_draft,
-                    if native_mtp_counters.batched_verification_count() == 0 {
+                    if native_mtp_counters.verify_window_verification_count() == 0 {
                         NativeMtpDraftOrigin::InitialSerial
                     } else {
                         NativeMtpDraftOrigin::SerialAfterGap
@@ -1743,6 +1703,7 @@ impl StageOpenAiBackend {
             }
             if !pipelined_windows.is_empty() {
                 let stale_count = pipelined_windows.len();
+                let stale_drain_timer = PhaseTimer::start();
                 while let Some(stale) = pipelined_windows.pop_front() {
                     let stale_reply = self.complete_dispatched_stage_message_direct(
                         &request,
@@ -1752,7 +1713,8 @@ impl StageOpenAiBackend {
                     )?;
                     verify_window_scheduler.complete_next(stale_reply.reply.window.window_id)?;
                 }
-                verify_window_scheduler.record_stale_discarded(stale_count);
+                verify_window_scheduler
+                    .record_stale_discarded(stale_count, stale_drain_timer.elapsed_ms());
                 let trim = self.trim_embedded_stage_session(
                     &request,
                     downstream,
@@ -1833,6 +1795,12 @@ impl StageOpenAiBackend {
             speculative_stats.insert_attrs(&mut decode_attrs);
             let native_mtp_stats = native_mtp.stats();
             cache_stats.native_mtp_stats = native_mtp_stats;
+            cache_stats.native_mtp_decode_telemetry = Some(NativeMtpDecodeTelemetry::new(
+                native_mtp_options,
+                native_mtp_counters,
+            ));
+            cache_stats.verify_window_pipeline_stats = Some(verify_window_scheduler.stats());
+            cache_stats.speculative_stats = Some(speculative_stats.clone());
             native_mtp_stats.insert_attrs(&mut decode_attrs);
             native_mtp_counters.insert_summary_attrs(&mut decode_attrs, native_mtp_options);
             self.emit_openai_summary("stage.openai_decode", decode_timer, decode_attrs);

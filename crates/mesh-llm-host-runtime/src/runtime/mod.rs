@@ -10,6 +10,7 @@ mod options;
 mod proxy;
 mod release_attestation;
 mod split_planning;
+mod split_status;
 pub(crate) mod survey;
 pub(crate) mod wakeable;
 
@@ -1585,10 +1586,7 @@ where
             Ok(SplitRuntimeStart::Standby { coordinator }) => {
                 drop(startup_load_guard);
                 let _ = emit_event(OutputEvent::Info {
-                    message: format!(
-                        "Split runtime coordinator is {}; standing by for stage assignment",
-                        coordinator.fmt_short()
-                    ),
+                    message: split_status::standby_message(node, model_ref, coordinator).await,
                     context: Some(format!("model={model_ref}")),
                 });
                 startup_reset_model_target(target_tx, model_name, console_state).await;

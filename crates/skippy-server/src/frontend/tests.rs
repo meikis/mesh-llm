@@ -1168,6 +1168,63 @@ fn generated_text_timings_are_present_without_native_mtp() {
 }
 
 #[test]
+fn generated_text_timings_prefer_composite_proposal_totals() {
+    let mut counters = NativeMtpDecodeCounters::default();
+    let proposal = CompositeProposalProvider::from_options(NativeMtpDecodeOptions {
+        max_draft_tokens: 1,
+        min_draft_tokens: 0,
+        reject_cooldown_tokens: 0,
+        suppress_cooldown_drafts: false,
+        suppress_cooldown_draft_limit: 0,
+        ngram_hybrid: true,
+        ngram_size: 2,
+        ngram_max_proposal_tokens: 4,
+        verify_window_min_tokens: 1,
+        verify_window_max_tokens: 4,
+    })
+    .propose(&[], &[1, 2, 3, 9, 1, 2, 3], 4);
+    counters.observe_hybrid_proposal(&proposal, 4);
+    let output = GeneratedText {
+        prompt_tokens: 4,
+        completion_tokens: 8,
+        cache_status: "disabled",
+        cached_prompt_tokens: 0,
+        matched_prefix_tokens: 0,
+        suffix_prefill_tokens: 0,
+        cache_hit_kind: None,
+        native_mtp_stats: NativeMtpStats::default(),
+        native_mtp_decode_telemetry: Some(NativeMtpDecodeTelemetry::new(
+            NativeMtpDecodeOptions {
+                max_draft_tokens: 1,
+                min_draft_tokens: 0,
+                reject_cooldown_tokens: 0,
+                suppress_cooldown_drafts: false,
+                suppress_cooldown_draft_limit: 0,
+                ngram_hybrid: true,
+                ngram_size: 2,
+                ngram_max_proposal_tokens: 4,
+                verify_window_min_tokens: 1,
+                verify_window_max_tokens: 4,
+            },
+            counters,
+        )),
+        verify_window_pipeline_stats: None,
+        speculative_stats: None,
+        prompt_ms: 20.0,
+        predicted_ms: 100.0,
+        text: "ok".to_string(),
+        finish_reason: FinishReason::Stop,
+        detokenize_ms: 0.0,
+        text_emit_ms: 0.0,
+        eog_check_ms: 0.0,
+    };
+
+    let timings = output.timings().expect("timings");
+    assert_eq!(timings.get("draft_n"), Some(&json!(4)));
+    assert_eq!(timings.get("draft_n_accepted"), Some(&json!(4)));
+}
+
+#[test]
 fn hidden_reasoning_visibility_removes_reasoning_content() {
     let parsed = ParsedChatMessage {
         content: Some("Final answer.".to_string()),

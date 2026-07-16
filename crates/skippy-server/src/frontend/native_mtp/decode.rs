@@ -442,6 +442,13 @@ impl NativeMtpDecodeTelemetry {
         Self { options, counters }
     }
 
+    pub(in crate::frontend) fn composite_proposal_totals(self) -> Option<(u64, u64)> {
+        (self.counters.hybrid_proposal_token_count > 0).then_some((
+            self.counters.hybrid_proposal_token_count as u64,
+            self.counters.hybrid_accepted_token_count as u64,
+        ))
+    }
+
     pub(in crate::frontend) fn insert_response_timings(
         self,
         timings: &mut BTreeMap<String, Value>,
@@ -621,5 +628,21 @@ mod tests {
         assert!(window.observe(false));
         assert_eq!(window.current_tokens(), 1);
         assert!(!window.observe(false));
+    }
+
+    #[test]
+    fn composite_proposal_totals_include_pure_ngram_candidates() {
+        let mut counters = NativeMtpDecodeCounters::default();
+        let proposal = CompositeProposalProvider::from_options(options()).propose(
+            &[],
+            &[1, 2, 3, 9, 1, 2, 3],
+            4,
+        );
+        counters.observe_hybrid_proposal(&proposal, 4);
+
+        assert_eq!(
+            NativeMtpDecodeTelemetry::new(options(), counters).composite_proposal_totals(),
+            Some((4, 4))
+        );
     }
 }

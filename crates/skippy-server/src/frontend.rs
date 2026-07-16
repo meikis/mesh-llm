@@ -2411,6 +2411,10 @@ impl GeneratedText {
 
     fn timings(&self) -> Option<BTreeMap<String, Value>> {
         let stats = self.native_mtp_stats;
+        let (drafted_tokens, accepted_tokens) = self
+            .native_mtp_decode_telemetry
+            .and_then(NativeMtpDecodeTelemetry::composite_proposal_totals)
+            .unwrap_or((stats.drafted_tokens, stats.accepted_tokens));
         let mut timings = BTreeMap::from([
             ("prompt_n".to_string(), json!(self.prompt_tokens)),
             ("prompt_ms".to_string(), json!(self.prompt_ms)),
@@ -2424,8 +2428,8 @@ impl GeneratedText {
                 "predicted_per_second".to_string(),
                 json!(tokens_per_second(self.completion_tokens, self.predicted_ms)),
             ),
-            ("draft_n".to_string(), json!(stats.drafted_tokens)),
-            ("draft_n_accepted".to_string(), json!(stats.accepted_tokens)),
+            ("draft_n".to_string(), json!(drafted_tokens)),
+            ("draft_n_accepted".to_string(), json!(accepted_tokens)),
             (
                 "native_mtp_rejected".to_string(),
                 json!(stats.rejected_tokens),

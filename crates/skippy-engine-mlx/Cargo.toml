@@ -3,13 +3,17 @@
 # Serves HF safetensors tensor models over mesh-llm's REAL OpenAI-compatible
 # frontend (`openai-frontend::OpenAiBackend`), goose-style, on Apple Silicon.
 #
-# This crate is intentionally its OWN cargo workspace (note the empty
-# `[workspace]` table below) so it does NOT join the main mesh-llm workspace.
-# Reason: it path-depends on a sibling checkout of the safemlx fork at
-# ../../../safemlx, which is external to this repo. Making it a normal workspace
-# member would force every `cargo build`/CI run to resolve that external path,
-# breaking builds for anyone without the checkout. Promotion to a real member
-# (with safemlx pinned to a git rev) is documented in WIRING.md.
+# It depends on the MLX-in-Rust stack (safemlx / safemlx-lm) pinned to a specific
+# PUBLIC commit of github.com/jbg/safemlx. This is a deliberate git-rev pin, not
+# a private fork: safemlx's crates.io releases currently produce garbage output
+# for dense models (Qwen3, Llama) — verified this to be a library bug, not a
+# prompting/template issue — while a recent upstream commit serves them
+# correctly. We pin that commit and will swap to a normal version pin once
+# safemlx cuts a working release. See WIRING.md.
+#
+# The crate keeps its OWN `[workspace]` table for now so the heavy MLX native
+# build (CMake + full MLX C++ compile) never runs in unrelated builds/CI.
+# Promotion to a real workspace member is documented in WIRING.md.
 [package]
 name = "skippy-engine-mlx"
 version = "0.0.0"
@@ -47,14 +51,15 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# MLX stack (pinned to the safemlx fork checkout; see WIRING.md for git-pin plan).
-# Same feature set goose uses: accelerate + metal + safetensors.
-safemlx = { path = "../../../safemlx/safemlx", default-features = false, features = [
+# MLX stack — pinned to a specific PUBLIC commit of github.com/jbg/safemlx.
+# See the header comment for why this is a git-rev pin rather than a crates.io
+# version pin. Same feature set goose uses: accelerate + metal + safetensors.
+safemlx = { git = "https://github.com/jbg/safemlx", rev = "4e53c5e", default-features = false, features = [
     "accelerate",
     "metal",
     "safetensors",
 ], optional = true }
-safemlx-lm = { path = "../../../safemlx/safemlx-lm", optional = true }
+safemlx-lm = { git = "https://github.com/jbg/safemlx", rev = "4e53c5e", optional = true }
 # Standalone tokenizer for incremental (streaming) detokenization without
 # borrowing the model. `onig` matches safemlx-lm so the build dedupes.
 tokenizers = { version = "0.23", default-features = false, features = [

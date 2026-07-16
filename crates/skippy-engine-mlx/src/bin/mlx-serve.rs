@@ -25,13 +25,6 @@ mod real {
         #[arg(long)]
         model_id: Option<String>,
 
-        /// JIT-quantize eligible dense weights to this bit width on load (e.g. 4, 8).
-        #[arg(short, long)]
-        quantize: Option<i32>,
-
-        #[arg(long, default_value_t = 64)]
-        quant_group_size: i32,
-
         #[arg(long, default_value_t = 512)]
         default_max_tokens: usize,
 
@@ -61,8 +54,6 @@ mod real {
         let config = MlxEngineConfig {
             model_dir: cli.model.clone(),
             model_id: model_id.clone(),
-            quantize_bits: cli.quantize,
-            quant_group_size: cli.quant_group_size,
             default_max_tokens: cli.default_max_tokens,
             max_tokens_cap: cli.max_tokens_cap,
         };

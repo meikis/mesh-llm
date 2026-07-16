@@ -3,10 +3,10 @@
 This crate is a **working, self-contained MLX (Metal) serving engine** that
 already serves HF safetensors models over mesh-llm's real OpenAI frontend
 (`openai_frontend::router_for`). It is intentionally standalone right now — its
-own cargo workspace, path-depending the local safemlx fork — so it does not
-perturb the main workspace or CI. This document is the concrete plan to promote
-it into the shipped binary so that **on a Mac, `mesh-llm serve` can run an MLX
-tensor model and users can pick one from `/v1/models`.**
+own cargo workspace — so the heavy MLX native build never runs in unrelated
+builds/CI. This document is the concrete plan to promote it into the shipped
+binary so that **on a Mac, `mesh-llm serve` can run an MLX tensor model and
+users can pick one from `/v1/models`.**
 
 ## What already works (this crate, today)
 
@@ -16,19 +16,38 @@ tensor model and users can pick one from `/v1/models`.**
   `chat_completion_stream` (SSE), with usage accounting and incremental
   detokenization.
 - `mlx-serve` bin — `router_for(Arc<MlxBackend>)` + `axum::serve`.
-- Verified on Apple Silicon (Metal): `/v1/models`, non-stream chat, and stream
-  chat all return real Qwen3-0.6B generations. Source precision ~321 tok/s;
-  JIT-4bit ~604 tok/s (see `../../spikes/mlx-solo/FINDINGS.md`).
+- Verified on Apple Silicon (Metal), source precision, over the real frontend:
+  Qwen3-0.6B (non-stream + streaming) and SmolLM2 (Llama arch) both generate
+  **coherent** output. Source precision ~321 tok/s (see
+  `../../spikes/mlx-solo/FINDINGS.md`).
+
+## Dependency: why a git-rev pin (not crates.io)
+
+`Cargo.toml` pins `safemlx` / `safemlx-lm` to a specific **public** commit of
+`github.com/jbg/safemlx` (`rev = "4e53c5e"`), not a crates.io version. This is a
+deliberate, reproducible git pin — **not a private fork and no local patches**:
+
+- safemlx's **published** crates (both `0.1.5` and `0.4.1`) produce **garbage
+  output for dense models** (Qwen3 *and* Llama both emit repeated-token gibberish
+  with this exact same crate code). This was verified to be a **library bug**,
+  not a prompting/template problem — the Qwen3 chat template is confirmed applied
+  correctly, and greedy sampling (`temp=0` → argmax) is used.
+- The pinned upstream commit serves those families correctly. Swapping the same
+  crate between published and the git pin flips the output coherent↔gibberish,
+  which isolates the cause to the safemlx version.
+- **Action item:** swap the git-rev pin for a normal version pin once safemlx
+  cuts a crates.io release that serves dense models correctly.
+- No JIT quantization is used (plain `LoadedModel::load`), so none of the
+  quant-path loader quirks apply; this path needs zero source patches.
 
 ## Promotion plan (the actual PR)
 
-### 1. Make it a real workspace member with a pinned safemlx
+### 1. Make it a real workspace member
 
 - Add `crates/skippy-engine-mlx` to root `Cargo.toml` `members` and remove its
-  local `[workspace]` table.
-- Replace the `path = "../../../safemlx/..."` deps with **git-rev pins** of
-  `jbg/safemlx` (published crates are broken for Qwen3 — see FINDINGS §"supply
-  chain"). Carry the two small loader fixes as a patch/branch until upstreamed.
+  local `[workspace]` table. The safemlx deps are already git-rev pinned to a
+  public commit (see "Dependency" above), so nothing else changes about them —
+  a workspace member with a git dependency is fine.
 - Keep the crate's `mlx` feature; gate all MLX code with
   `#[cfg(all(feature = "mlx", target_os = "macos"))]` (already done).
 - Update `scripts/affected-crates.sh`, `scripts/plan-clippy-batches.sh`,
@@ -43,14 +62,16 @@ In `crates/mesh-llm-host-runtime/Cargo.toml`:
 
 ```toml
 [target.'cfg(target_os = "macos")'.dependencies]
-skippy-engine-mlx = { path = "../skippy-engine-mlx", optional = true }
+skippy-engine-mlx = { path = "../skippy-engine-mlx", features = ["mlx"], optional = true }
 
 [features]
-mlx = ["dep:skippy-engine-mlx", "skippy-engine-mlx/mlx"]
+mlx = ["dep:skippy-engine-mlx"]
 ```
 
-Propagate a `mlx` feature up through `crates/mesh-llm/Cargo.toml`, and enable it
-by default only on macOS builds in the release packaging.
+(The `path` here is the in-repo crate path once it is a workspace member; its own
+safemlx deps stay git-rev pinned.) Propagate a `mlx` feature up through
+`crates/mesh-llm/Cargo.toml`, and enable it by default only on macOS builds in
+the release packaging.
 
 ### 3. Add an `Mlx` variant to the launch enum
 
@@ -123,6 +144,22 @@ routes to the MLX engine.
   tool parsing and thinking-output filtering worth porting later; this crate
   streams raw model text (including `<think>` blocks) for now.
 - **Draft/speculative decoding** (goose's `gemma4_mtp`).
+- **JIT quantization on load.** safemlx can affine-quantize dense weights at load
+  time (~604 tok/s 4-bit in earlier spikes), but it is deliberately excluded here
+  to keep the first PR to the goose-style plain-load path.
+
+## Future: Linux + NVIDIA (CUDA)
+
+MLX is **not Apple-only** — `jbg/safemlx` supports **Linux + NVIDIA GPUs via
+CUDA** (a `cuda` cargo feature, plus `nccl` for multi-GPU), gated in
+`safemlx-sys/build.rs` with a hard `panic!` to Linux targets, for both
+`x86_64-linux` and `sbsa-linux` (ARM). The generation code
+(`LoadedModel::load` + `generate_with_cache`) is backend-independent — only the
+native build backend differs (Metal vs CUDA). So a later change could serve MLX
+on Linux/NVIDIA mesh nodes by widening the gate from `target_os = "macos"` to
+also allow `cfg(all(target_os = "linux", feature = "cuda"))` and enabling
+`safemlx/cuda`. This is **out of scope for this PR** (Mac/Metal first) and is
+tracked as future research; ROCm/Vulkan/Windows are not supported upstream.
 
 ## Testing the promoted path
 

@@ -22,8 +22,7 @@ use tokio::sync::mpsc;
 use safemlx::transforms::async_eval;
 use safemlx::{Device, DeviceType, Stream};
 use safemlx_lm::models::input::{InputPart, ModelInput};
-use safemlx_lm::models::{LoadedModel, ModelLoadOptions};
-use safemlx_lm::quantization::AffineQuantization;
+use safemlx_lm::models::LoadedModel;
 use safemlx_lm::sampler::DefaultSampler;
 
 /// How the worker should load and run a model.
@@ -31,9 +30,6 @@ use safemlx_lm::sampler::DefaultSampler;
 pub struct MlxEngineConfig {
     pub model_dir: PathBuf,
     pub model_id: String,
-    /// JIT-quantize eligible dense weights to this bit width on load (Metal only).
-    pub quantize_bits: Option<i32>,
-    pub quant_group_size: i32,
     pub default_max_tokens: usize,
     pub max_tokens_cap: usize,
 }
@@ -141,18 +137,9 @@ fn load_engine(config: &MlxEngineConfig) -> Result<LoadedEngine> {
     let stream = Stream::new_with_device(&Device::new(DeviceType::Gpu, 0));
     let weights_stream = Stream::new_with_device(&Device::new(DeviceType::Cpu, 0));
 
-    let options = match config.quantize_bits {
-        Some(bits) => ModelLoadOptions::with_quantization(AffineQuantization::new(
-            config.quant_group_size,
-            bits,
-        )?),
-        None => ModelLoadOptions::default(),
-    };
-
     let started = Instant::now();
-    let model =
-        LoadedModel::load_with_options(&config.model_dir, options, &stream, &weights_stream)
-            .map_err(|e| anyhow!("load {}: {e}", config.model_dir.display()))?;
+    let model = LoadedModel::load(&config.model_dir, &stream, &weights_stream)
+        .map_err(|e| anyhow!("load {}: {e}", config.model_dir.display()))?;
     stream.synchronize().map_err(|e| anyhow!("sync: {e}"))?;
 
     let tokenizer = tokenizers::Tokenizer::from_file(config.model_dir.join("tokenizer.json"))

@@ -2709,6 +2709,12 @@ struct StageTopologyState {
     statuses: HashMap<String, StageRuntimeStatus>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StageStatusRefreshFailure {
+    MissingFromRuntime,
+    Transient,
+}
+
 impl StageTopologyState {
     fn record_topology(&mut self, topology: StageTopologyInstance) {
         self.topologies.insert(
@@ -2793,13 +2799,20 @@ impl StageTopologyState {
         );
     }
 
-    fn record_status_refresh_failure(&mut self, status: &StageRuntimeStatus, error: String) {
+    fn record_status_refresh_failure(
+        &mut self,
+        status: &StageRuntimeStatus,
+        failure: StageStatusRefreshFailure,
+    ) {
+        if failure == StageStatusRefreshFailure::Transient {
+            return;
+        }
         self.record_status(stage_runtime_status_from_snapshot(
             status.node_id,
             stage_snapshot_from_runtime_status(
                 status,
                 crate::inference::skippy::StageRuntimeState::Failed,
-                Some(error),
+                Some("stage status missing from runtime".to_string()),
             ),
         ));
     }
@@ -3242,74 +3255,117 @@ impl Node {
     pub async fn refresh_stage_runtime_statuses(&self, timeout: std::time::Duration) {
         let active_statuses = self.stage_topologies.lock().await.active_statuses();
         for status in active_statuses {
-            if status.stage_index == 0 {
-                continue;
+            self.refresh_stage_runtime_status(status, timeout).await;
+        }
+    }
+
+    async fn refresh_stage_runtime_status(
+        &self,
+        status: StageRuntimeStatus,
+        timeout: std::time::Duration,
+    ) {
+        if status.stage_index == 0 {
+            return;
+        }
+        let Some(peer_id) = status.node_id else {
+            return;
+        };
+        let filter = crate::inference::skippy::StageStatusFilter {
+            topology_id: Some(status.topology_id.clone()),
+            run_id: Some(status.run_id.clone()),
+            stage_id: Some(status.stage_id.clone()),
+        };
+        let refresh = self.request_stage_status(peer_id, filter);
+        match tokio::time::timeout(timeout, refresh).await {
+            Ok(Ok(response)) => {
+                self.record_stage_status_refresh(&status, peer_id, response)
+                    .await;
             }
-            let Some(peer_id) = status.node_id else {
-                continue;
-            };
-            let filter = crate::inference::skippy::StageStatusFilter {
-                topology_id: Some(status.topology_id.clone()),
-                run_id: Some(status.run_id.clone()),
-                stage_id: Some(status.stage_id.clone()),
-            };
-            let refresh = async {
-                if peer_id == self.endpoint.id() {
-                    self.query_local_stage_status(filter)
-                        .await
-                        .map(crate::inference::skippy::StageControlResponse::Status)
-                } else {
-                    self.send_stage_control(
-                        peer_id,
-                        crate::inference::skippy::StageControlRequest::Status(filter),
-                    )
-                    .await
-                }
-            };
-            match tokio::time::timeout(timeout, refresh).await {
-                Ok(Ok(crate::inference::skippy::StageControlResponse::Status(statuses))) => {
-                    if statuses.is_empty() {
-                        self.stage_topologies
-                            .lock()
-                            .await
-                            .record_status_refresh_failure(
-                                &status,
-                                "stage status missing from runtime".to_string(),
-                            );
-                    } else {
-                        for status in statuses {
-                            self.record_stage_status(Some(peer_id), status).await;
-                        }
-                    }
-                }
-                Ok(Ok(crate::inference::skippy::StageControlResponse::Ready(ready))) => {
-                    self.record_stage_status(Some(peer_id), ready.status).await;
-                }
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => {
-                    self.stage_topologies
-                        .lock()
-                        .await
-                        .record_status_refresh_failure(&status, error.to_string());
-                }
-                Err(_) => {
+            Ok(Err(error)) => {
+                self.record_transient_stage_status_refresh_failure(&status, peer_id, Some(&error))
+                    .await;
+            }
+            Err(_) => {
+                self.record_transient_stage_status_refresh_failure(&status, peer_id, None)
+                    .await;
+            }
+        }
+    }
+
+    async fn record_stage_status_refresh(
+        &self,
+        status: &StageRuntimeStatus,
+        peer_id: EndpointId,
+        response: crate::inference::skippy::StageControlResponse,
+    ) {
+        match response {
+            crate::inference::skippy::StageControlResponse::Status(statuses) => {
+                if statuses.is_empty() {
                     self.stage_topologies
                         .lock()
                         .await
                         .record_status_refresh_failure(
-                            &status,
-                            "stage status refresh timed out".to_string(),
+                            status,
+                            StageStatusRefreshFailure::MissingFromRuntime,
                         );
-                    tracing::debug!(
-                        topology_id = %status.topology_id,
-                        run_id = %status.run_id,
-                        stage_id = %status.stage_id,
-                        peer = %peer_id.fmt_short(),
-                        "stage status refresh timed out; marking stage failed"
-                    );
+                    return;
+                }
+                for status in statuses {
+                    self.record_stage_status(Some(peer_id), status).await;
                 }
             }
+            crate::inference::skippy::StageControlResponse::Ready(ready) => {
+                self.record_stage_status(Some(peer_id), ready.status).await;
+            }
+            _ => {}
         }
+    }
+
+    async fn record_transient_stage_status_refresh_failure(
+        &self,
+        status: &StageRuntimeStatus,
+        peer_id: EndpointId,
+        error: Option<&anyhow::Error>,
+    ) {
+        self.stage_topologies
+            .lock()
+            .await
+            .record_status_refresh_failure(status, StageStatusRefreshFailure::Transient);
+        match error {
+            Some(error) => tracing::debug!(
+                topology_id = %status.topology_id,
+                run_id = %status.run_id,
+                stage_id = %status.stage_id,
+                peer = %peer_id.fmt_short(),
+                error = %error,
+                "stage status refresh failed; retaining last stage status"
+            ),
+            None => tracing::debug!(
+                topology_id = %status.topology_id,
+                run_id = %status.run_id,
+                stage_id = %status.stage_id,
+                peer = %peer_id.fmt_short(),
+                "stage status refresh timed out; retaining last stage status"
+            ),
+        }
+    }
+
+    async fn request_stage_status(
+        &self,
+        peer_id: EndpointId,
+        filter: crate::inference::skippy::StageStatusFilter,
+    ) -> Result<crate::inference::skippy::StageControlResponse> {
+        if peer_id == self.endpoint.id() {
+            return self
+                .query_local_stage_status(filter)
+                .await
+                .map(crate::inference::skippy::StageControlResponse::Status);
+        }
+        self.send_stage_control(
+            peer_id,
+            crate::inference::skippy::StageControlRequest::Status(filter),
+        )
+        .await
     }
 
     pub(crate) async fn record_stage_status(

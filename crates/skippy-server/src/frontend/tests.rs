@@ -2313,7 +2313,7 @@ fn explicit_chat_request_values_override_request_defaults() {
     assert_eq!(sampling.penalty_last_n, 24);
     assert_eq!(sampling.logit_bias.len(), 1);
     let template_options = chat_template_options(&request, &test_request_defaults()).unwrap();
-    assert_eq!(template_options.enable_thinking, None);
+    assert_eq!(template_options.enable_thinking, Some(false));
     assert_eq!(
         template_options.reasoning_format,
         Some(ChatReasoningFormat::Hidden)
@@ -2385,7 +2385,7 @@ fn request_defaults_do_not_make_logprobs_executable() {
 }
 
 #[test]
-fn canonical_reasoning_does_not_override_chat_template_thinking() {
+fn canonical_reasoning_overrides_chat_template_thinking() {
     let request: ChatCompletionRequest = serde_json::from_value(json!({
         "model": "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M",
         "messages": [{"role": "user", "content": "hello"}],
@@ -2395,7 +2395,7 @@ fn canonical_reasoning_does_not_override_chat_template_thinking() {
 
     let options =
         chat_template_options(&request, &EmbeddedOpenAiRequestDefaults::default()).unwrap();
-    assert_eq!(options.enable_thinking, None);
+    assert_eq!(options.enable_thinking, Some(false));
     assert_eq!(options.reasoning_format, Some(ChatReasoningFormat::Hidden));
 }
 
@@ -2433,7 +2433,7 @@ fn request_default_reasoning_format_controls_chat_parser_mode() {
 }
 
 #[test]
-fn reasoning_effort_does_not_override_chat_template_thinking() {
+fn reasoning_effort_overrides_chat_template_thinking() {
     let request: ChatCompletionRequest = serde_json::from_value(json!({
         "model": "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M",
         "messages": [{"role": "user", "content": "hello"}],
@@ -2443,12 +2443,12 @@ fn reasoning_effort_does_not_override_chat_template_thinking() {
 
     let options =
         chat_template_options(&request, &EmbeddedOpenAiRequestDefaults::default()).unwrap();
-    assert_eq!(options.enable_thinking, None);
+    assert_eq!(options.enable_thinking, Some(false));
     assert_eq!(options.reasoning_format, Some(ChatReasoningFormat::Hidden));
 }
 
 #[test]
-fn top_level_reasoning_effort_does_not_override_chat_template_thinking() {
+fn top_level_reasoning_effort_overrides_chat_template_thinking() {
     let request: ChatCompletionRequest = serde_json::from_value(json!({
         "model": "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M",
         "messages": [{"role": "user", "content": "hello"}],
@@ -2458,12 +2458,12 @@ fn top_level_reasoning_effort_does_not_override_chat_template_thinking() {
 
     let options =
         chat_template_options(&request, &EmbeddedOpenAiRequestDefaults::default()).unwrap();
-    assert_eq!(options.enable_thinking, None);
+    assert_eq!(options.enable_thinking, Some(false));
     assert_eq!(options.reasoning_format, Some(ChatReasoningFormat::Hidden));
 }
 
 #[test]
-fn provider_enable_thinking_does_not_override_chat_template_thinking() {
+fn provider_enable_thinking_overrides_chat_template_thinking() {
     let request: ChatCompletionRequest = serde_json::from_value(json!({
         "model": "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M",
         "messages": [{"role": "user", "content": "hello"}],
@@ -2474,12 +2474,12 @@ fn provider_enable_thinking_does_not_override_chat_template_thinking() {
 
     let options =
         chat_template_options(&request, &EmbeddedOpenAiRequestDefaults::default()).unwrap();
-    assert_eq!(options.enable_thinking, None);
+    assert_eq!(options.enable_thinking, Some(true));
     assert_eq!(options.reasoning_format, Some(ChatReasoningFormat::Hidden));
 }
 
 #[test]
-fn chat_template_kwargs_enable_thinking_does_not_override_template() {
+fn chat_template_kwargs_enable_thinking_overrides_template() {
     let request: ChatCompletionRequest = serde_json::from_value(json!({
         "model": "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M",
         "messages": [{"role": "user", "content": "hello"}],
@@ -2489,12 +2489,12 @@ fn chat_template_kwargs_enable_thinking_does_not_override_template() {
 
     let options =
         chat_template_options(&request, &EmbeddedOpenAiRequestDefaults::default()).unwrap();
-    assert_eq!(options.enable_thinking, None);
+    assert_eq!(options.enable_thinking, Some(false));
     assert_eq!(options.reasoning_format, Some(ChatReasoningFormat::Hidden));
 }
 
 #[test]
-fn thinking_boolean_aliases_do_not_override_chat_template_thinking() {
+fn thinking_boolean_aliases_override_chat_template_thinking() {
     for field in openai_frontend::THINKING_BOOLEAN_ALIASES {
         let request: ChatCompletionRequest = serde_json::from_value(json!({
             "model": "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M",
@@ -2506,7 +2506,7 @@ fn thinking_boolean_aliases_do_not_override_chat_template_thinking() {
             chat_template_options(&request, &EmbeddedOpenAiRequestDefaults::default())
                 .unwrap()
                 .enable_thinking,
-            None,
+            Some(false),
             "top-level alias {field}"
         );
 
@@ -2520,14 +2520,14 @@ fn thinking_boolean_aliases_do_not_override_chat_template_thinking() {
             chat_template_options(&request, &EmbeddedOpenAiRequestDefaults::default())
                 .unwrap()
                 .enable_thinking,
-            None,
+            Some(false),
             "chat_template_kwargs alias {field}"
         );
     }
 }
 
 #[test]
-fn reasoning_budget_does_not_override_chat_template_thinking() {
+fn reasoning_budget_overrides_chat_template_thinking() {
     let request: ChatCompletionRequest = serde_json::from_value(json!({
         "model": "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M",
         "messages": [{"role": "user", "content": "hello"}],
@@ -2538,7 +2538,7 @@ fn reasoning_budget_does_not_override_chat_template_thinking() {
         chat_template_options(&request, &EmbeddedOpenAiRequestDefaults::default())
             .unwrap()
             .enable_thinking,
-        None
+        Some(true)
     );
 
     let request: ChatCompletionRequest = serde_json::from_value(json!({
@@ -2552,7 +2552,7 @@ fn reasoning_budget_does_not_override_chat_template_thinking() {
         chat_template_options(&request, &EmbeddedOpenAiRequestDefaults::default())
             .unwrap()
             .enable_thinking,
-        None
+        Some(false)
     );
 }
 

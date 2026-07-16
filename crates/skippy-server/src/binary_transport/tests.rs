@@ -1,6 +1,7 @@
 use super::{
     binary_full_prefill_record_identities, decode_record_tokens_sideband,
-    is_decode_frame_batch_candidate, native_mtp_enabled_from, prepare_binary_stage_connection,
+    forwarded_stage_message_timed, input_activation_frame, is_decode_frame_batch_candidate,
+    native_mtp_enabled_from, prepare_binary_stage_connection,
     restore_prefill_decode_as_decode_message, token_sideband_or_fill,
     warm_downstream_preconnect_enabled_from,
 };
@@ -15,11 +16,15 @@ use std::{
 use crate::kv_integration::KvStageIntegration;
 use crate::runtime_state::RuntimeState;
 use skippy_protocol::binary::{
-    StageReplyStats, StageSamplingConfig, StageStateHeader, StageWireMessage, WireActivationDType,
-    WireMessageKind,
+    ACTIVATION_FLAG_GLM_DSA_TOP_K, MAX_STAGE_SIDEBAND_VALUES, StageReplyStats, StageSamplingConfig,
+    StageStateHeader, StageWireMessage, WireActivationDType, WireMessageKind, read_stage_message,
+    state_flags, write_stage_message,
 };
 use skippy_protocol::{
     LoadMode, PeerConfig, StageConfig, StageKvCacheConfig, StageKvCacheMode, StageKvCachePayload,
+};
+use skippy_runtime::{
+    ActivationDesc, ActivationFrame, RuntimeActivationDType, RuntimeActivationLayout,
 };
 
 type BinaryEvictionFn = fn(
@@ -208,6 +213,134 @@ fn restore_prefill_decode_as_decode_preserves_chat_metadata() {
     assert_eq!(decode.chat_sampling_metadata.as_deref(), Some(metadata));
     assert!(decode.activation.is_empty());
     assert!(decode.positions.is_empty());
+}
+
+#[test]
+fn input_activation_frame_reattaches_glm_dsa_top_k_sideband() {
+    let config = prefix_cache_test_config();
+    let mut state = StageStateHeader::new(WireMessageKind::DecodeEmbd, WireActivationDType::F32);
+    state.flags |= state_flags::GLM_DSA_TOP_K_SIDEBAND;
+    state.source_stage_index = 0;
+    let mut raw_bytes = Vec::new();
+    for value in [3_i32, 1, 2, 0] {
+        raw_bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    let hidden = vec![0_u8; 16];
+    let mut message = StageWireMessage {
+        kind: WireMessageKind::DecodeEmbd,
+        pos_start: 3,
+        token_count: 1,
+        state,
+        request_id: 11,
+        session_id: 13,
+        sampling: None,
+        chat_sampling_metadata: None,
+        tokens: vec![104],
+        positions: vec![3],
+        activation: hidden.clone(),
+        raw_bytes: raw_bytes.clone(),
+    };
+
+    let frame = input_activation_frame(&config, None, &mut message, 4)
+        .unwrap()
+        .unwrap();
+
+    let mut expected_payload = hidden;
+    expected_payload.extend_from_slice(&raw_bytes);
+    assert_eq!(frame.payload, expected_payload);
+    assert_eq!(
+        frame.desc.flags & ACTIVATION_FLAG_GLM_DSA_TOP_K,
+        ACTIVATION_FLAG_GLM_DSA_TOP_K
+    );
+    assert_eq!(frame.desc.payload_bytes, expected_payload.len() as u64);
+    assert_eq!(frame.desc.token_count, 1);
+    assert_eq!(frame.desc.layer_end, config.layer_start as i32);
+}
+
+fn f32_activation_frame_with_large_glm_dsa_top_k_sideband() -> ActivationFrame {
+    let mut payload = Vec::new();
+    for value in [1.0_f32, 2.0] {
+        payload.extend_from_slice(&value.to_le_bytes());
+    }
+    let sideband_offset = payload.len();
+    let sideband_i32_count = MAX_STAGE_SIDEBAND_VALUES + 1;
+    payload.resize(
+        payload.len() + sideband_i32_count * std::mem::size_of::<i32>(),
+        0,
+    );
+    payload[sideband_offset..sideband_offset + 4].copy_from_slice(&17_i32.to_le_bytes());
+    let last_i32_offset = payload.len() - std::mem::size_of::<i32>();
+    payload[last_i32_offset..].copy_from_slice(&23_i32.to_le_bytes());
+
+    ActivationFrame {
+        desc: ActivationDesc {
+            version: 1,
+            dtype: RuntimeActivationDType::F32,
+            layout: RuntimeActivationLayout::TokenMajor,
+            producer_stage_index: 0,
+            layer_start: 0,
+            layer_end: 1,
+            token_count: 1,
+            sequence_count: 1,
+            payload_bytes: payload.len() as u64,
+            flags: ACTIVATION_FLAG_GLM_DSA_TOP_K,
+        },
+        payload,
+    }
+}
+
+#[test]
+fn large_glm_dsa_top_k_sideband_round_trips_from_forwarder_to_receiver() {
+    let config = prefix_cache_test_config();
+    let mut state = StageStateHeader::new(WireMessageKind::DecodeEmbd, WireActivationDType::F32);
+    state.source_stage_index = 0;
+    let incoming = StageWireMessage {
+        kind: WireMessageKind::DecodeEmbd,
+        pos_start: 3,
+        token_count: 1,
+        state,
+        request_id: 11,
+        session_id: 13,
+        sampling: None,
+        chat_sampling_metadata: None,
+        tokens: vec![104],
+        positions: vec![3],
+        activation: Vec::new(),
+        raw_bytes: Vec::new(),
+    };
+    let output = f32_activation_frame_with_large_glm_dsa_top_k_sideband();
+    let expected_sideband_bytes = (MAX_STAGE_SIDEBAND_VALUES + 1) * std::mem::size_of::<i32>();
+
+    let forwarded =
+        forwarded_stage_message_timed(&config, &incoming, &output, WireActivationDType::F32, 2)
+            .unwrap();
+    assert_eq!(forwarded.message.activation.len(), 8);
+    assert_eq!(forwarded.message.raw_bytes.len(), expected_sideband_bytes);
+    assert_eq!(
+        forwarded.message.state.flags & state_flags::GLM_DSA_TOP_K_SIDEBAND,
+        state_flags::GLM_DSA_TOP_K_SIDEBAND
+    );
+
+    let mut encoded = Vec::new();
+    write_stage_message(&mut encoded, &forwarded.message, WireActivationDType::F32).unwrap();
+    let mut decoded = read_stage_message(encoded.as_slice(), 2).unwrap();
+    assert_eq!(decoded.raw_bytes.len(), expected_sideband_bytes);
+
+    let frame = input_activation_frame(&config, None, &mut decoded, 2)
+        .unwrap()
+        .unwrap();
+    assert_eq!(frame.payload.len(), output.payload.len());
+    assert_eq!(&frame.payload[..8], &output.payload[..8]);
+    assert_eq!(&frame.payload[8..12], &17_i32.to_le_bytes());
+    assert_eq!(
+        &frame.payload[frame.payload.len() - 4..],
+        &23_i32.to_le_bytes()
+    );
+    assert_eq!(
+        frame.desc.flags & ACTIVATION_FLAG_GLM_DSA_TOP_K,
+        ACTIVATION_FLAG_GLM_DSA_TOP_K
+    );
+    assert_eq!(frame.desc.payload_bytes, output.payload.len() as u64);
 }
 
 #[test]

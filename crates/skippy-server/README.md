@@ -16,11 +16,11 @@ the first stage.
 
 The full request/reply path is tip-to-tip: token IDs enter at the driver-facing
 tip, and activations flow through the stage chain. Stage protocol generation 3
-is a compatibility-breaking contract: prediction-bearing replies return
-directly from the final/readout tip to the driver-facing stage instead of being
-relayed back through intermediate stages. Middle-out is the prefill optimization
-inside that path, where internal boundary activations are handed downstream
-while local compute advances.
+introduced direct prediction returns from the final/readout tip to the
+driver-facing stage. The current generation 4 preserves that path and adds
+versioned raw activation sidebands for GLM-DSA IndexShare top-k state. Middle-out
+is the prefill optimization inside that path, where internal boundary
+activations are handed downstream while local compute advances.
 
 ```mermaid
 flowchart LR
@@ -80,10 +80,11 @@ unload or replan.
 ## Notes
 
 - `serve-binary` is the tuned binary stage-to-stage path.
-- `serve-binary` participates in the breaking generation-3 stage protocol.
-  Stage compatibility requires `stage-generation-3`; direct prediction return is
-  part of that generation's contract, so older chained-reply peers are rejected
-  during split planning instead of being mixed into a generation-3 topology.
+- `serve-binary` participates in the breaking generation-4 stage protocol.
+  Stage compatibility requires `stage-generation-4`; direct prediction return
+  and typed raw activation sidebands are part of that generation's contract, so
+  older peers are rejected during split planning instead of being mixed into a
+  generation-4 topology.
 - `serve-binary` accepts upstream protocol connections concurrently. Model
   execution remains serialized by the per-process runtime lock, but readiness,
   abandoned, or broken connections do not monopolize the listener and block the
@@ -99,7 +100,7 @@ unload or replan.
   `/v1/completions` using the shared `openai-frontend` crate for a local
   final/single-stage config with no downstream peer. Split serving uses
   embedded stage-0 OpenAI serving from `serve-binary --openai-bind-addr` because
-  generation-3 prediction returns flow directly from the final stage to stage 0.
+  generation-4 prediction returns flow directly from the final stage to stage 0.
   The older standalone `serve-openai --first-stage-addr` adapter is no longer
   supported. `--model-id` is the exact served model id to advertise
   and accept, for example `org/repo:Q4_K_M`; it is not parsed as stage topology.

@@ -5,10 +5,11 @@ use super::{
     invalid_data,
 };
 
-pub const STAGE_STATE_VERSION: i32 = 6;
+pub const STAGE_STATE_VERSION: i32 = 7;
 pub const MAX_STAGE_LOGIT_BIAS: usize = 256;
 pub const MAX_STAGE_PREDICTED_TOKENS: usize = 262_144;
 pub const MAX_STAGE_SIDEBAND_VALUES: usize = 1_048_576;
+pub const MAX_STAGE_RAW_SIDEBAND_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_STAGE_CHAT_SAMPLING_METADATA_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_STAGE_STATE_IMPORT_BYTES: usize = 512 * 1024 * 1024;
 pub const MAX_STAGE_ACTIVATION_BYTES: usize = 512 * 1024 * 1024;
@@ -189,10 +190,12 @@ pub mod state_flags {
     pub const CHAT_SAMPLING_METADATA: i32 = 1 << 5;
     pub const RWKV7_V_FIRST_SIDEBAND: i32 = 1 << 6;
     pub const GEMMA3N_ALTUP_SIDEBAND: i32 = 1 << 7;
+    pub const GLM_DSA_TOP_K_SIDEBAND: i32 = 1 << 11;
 }
 
 pub const ACTIVATION_FLAG_RWKV7_V_FIRST: u64 = 1 << 0;
 pub const ACTIVATION_FLAG_GEMMA3N_ALTUP: u64 = 1 << 1;
+pub const ACTIVATION_FLAG_GLM_DSA_TOP_K: u64 = 1 << 3;
 
 pub fn activation_frame_flags_from_state_flags(flags: i32) -> u64 {
     let mut frame_flags = 0;
@@ -201,6 +204,9 @@ pub fn activation_frame_flags_from_state_flags(flags: i32) -> u64 {
     }
     if (flags & state_flags::GEMMA3N_ALTUP_SIDEBAND) != 0 {
         frame_flags |= ACTIVATION_FLAG_GEMMA3N_ALTUP;
+    }
+    if (flags & state_flags::GLM_DSA_TOP_K_SIDEBAND) != 0 {
+        frame_flags |= ACTIVATION_FLAG_GLM_DSA_TOP_K;
     }
     frame_flags
 }
@@ -212,6 +218,9 @@ pub fn activation_state_flags_from_frame_flags(flags: u64) -> i32 {
     }
     if (flags & ACTIVATION_FLAG_GEMMA3N_ALTUP) != 0 {
         state |= state_flags::GEMMA3N_ALTUP_SIDEBAND;
+    }
+    if (flags & ACTIVATION_FLAG_GLM_DSA_TOP_K) != 0 {
+        state |= state_flags::GLM_DSA_TOP_K_SIDEBAND;
     }
     state
 }
@@ -423,6 +432,13 @@ impl StageWireMessage {
                     .saturating_mul(std::mem::size_of::<i32>()),
             )
             .saturating_add(self.activation.len())
+            .saturating_add(
+                if (self.state.flags & state_flags::GLM_DSA_TOP_K_SIDEBAND) != 0 {
+                    std::mem::size_of::<i32>().saturating_add(self.raw_bytes.len())
+                } else {
+                    0
+                },
+            )
     }
 
     pub fn request_epoch(&self) -> StageRequestEpoch {

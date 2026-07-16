@@ -1,0 +1,232 @@
+From cec19064929ff68789c11dd3d3993bddabadde14 Mon Sep 17 00:00:00 2001
+From: James Dumay <jameswdumay@gmail.com>
+Date: Wed, 15 Jul 2026 12:10:14 +1000
+Subject: [PATCH 16/20] add GLM-5.2 IndexShare schedule metadata across GGUF
+ conversion, loading, validation, and saving
+
+Assisted-by: Codex
+---
+ conversion/glm.py           |  6 ++++
+ gguf-py/gguf/constants.py   |  1 +
+ gguf-py/gguf/gguf_writer.py |  4 +++
+ src/llama-arch.cpp          |  1 +
+ src/llama-arch.h            |  1 +
+ src/llama-hparams.cpp       |  8 ++++++
+ src/llama-hparams.h         |  6 ++++
+ src/llama-model-saver.cpp   |  6 ++++
+ src/models/glm-dsa.cpp      | 57 ++++++++++++++++++++++++++++++++++++-
+ 9 files changed, 89 insertions(+), 1 deletion(-)
+
+diff --git a/conversion/glm.py b/conversion/glm.py
+index 895cefc2..9068df8e 100644
+--- a/conversion/glm.py
++++ b/conversion/glm.py
+@@ -237,6 +237,12 @@ class GlmMoeDsaModel(DeepseekV2Model):
+         self.gguf_writer.add_indexer_head_count(self.hparams["index_n_heads"])
+         self.gguf_writer.add_indexer_key_length(self.hparams["index_head_dim"])
+         self.gguf_writer.add_indexer_top_k(self.hparams["index_topk"])
++        if (indexer_types := self.hparams.get("indexer_types")) is not None:
++            if len(indexer_types) != self.hparams["num_hidden_layers"]:
++                raise ValueError("indexer_types must contain one entry per target layer")
++            if invalid := set(indexer_types) - {"full", "shared"}:
++                raise ValueError(f"unsupported indexer_types values: {sorted(invalid)}")
++            self.gguf_writer.add_indexer_types([indexer_type == "full" for indexer_type in indexer_types])
+ 
+ 
+ @ModelBase.register("SolarOpenForCausalLM")
+diff --git a/gguf-py/gguf/constants.py b/gguf-py/gguf/constants.py
+index 869e436a..7038950e 100644
+--- a/gguf-py/gguf/constants.py
++++ b/gguf-py/gguf/constants.py
+@@ -200,6 +200,7 @@ class Keys:
+             HEAD_COUNT = "{arch}.attention.indexer.head_count"
+             KEY_LENGTH = "{arch}.attention.indexer.key_length"
+             TOP_K      = "{arch}.attention.indexer.top_k"
++            TYPES      = "{arch}.attention.indexer.types"
+ 
+     class HyperConnection:
+         COUNT                = "{arch}.hyper_connection.count"
+diff --git a/gguf-py/gguf/gguf_writer.py b/gguf-py/gguf/gguf_writer.py
+index 1e277f06..bb215967 100644
+--- a/gguf-py/gguf/gguf_writer.py
++++ b/gguf-py/gguf/gguf_writer.py
+@@ -793,6 +793,10 @@ class GGUFWriter:
+     def add_indexer_top_k(self, top_k: int) -> None:
+         self.add_uint32(Keys.Attention.Indexer.TOP_K.format(arch=self.arch), top_k)
+ 
++    def add_indexer_types(self, value: Sequence[bool]) -> None:
++        key = Keys.Attention.Indexer.TYPES.format(arch=self.arch)
++        self.add_array(key, value)
++
+     def add_max_alibi_bias(self, bias: float) -> None:
+         self.add_float32(Keys.Attention.MAX_ALIBI_BIAS.format(arch=self.arch), bias)
+ 
+diff --git a/src/llama-arch.cpp b/src/llama-arch.cpp
+index b890e66f..58bd043d 100644
+--- a/src/llama-arch.cpp
++++ b/src/llama-arch.cpp
+@@ -251,6 +251,7 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
+     { LLM_KV_ATTENTION_INDEXER_HEAD_COUNT,           "%s.attention.indexer.head_count"           },
+     { LLM_KV_ATTENTION_INDEXER_KEY_LENGTH,           "%s.attention.indexer.key_length"           },
+     { LLM_KV_ATTENTION_INDEXER_TOP_K,                "%s.attention.indexer.top_k"                },
++    { LLM_KV_ATTENTION_INDEXER_TYPES,                "%s.attention.indexer.types"                },
+     { LLM_KV_ATTENTION_OUTPUT_GROUP_COUNT,           "%s.attention.output_group_count"           },
+     { LLM_KV_ATTENTION_OUTPUT_LORA_RANK,             "%s.attention.output_lora_rank"             },
+     { LLM_KV_ATTENTION_COMPRESS_ROPE_FREQ_BASE,      "%s.attention.compress_rope_freq_base"      },
+diff --git a/src/llama-arch.h b/src/llama-arch.h
+index a4f5091e..081f1a39 100644
+--- a/src/llama-arch.h
++++ b/src/llama-arch.h
+@@ -256,6 +256,7 @@ enum llm_kv {
+     LLM_KV_ATTENTION_INDEXER_HEAD_COUNT,
+     LLM_KV_ATTENTION_INDEXER_KEY_LENGTH,
+     LLM_KV_ATTENTION_INDEXER_TOP_K,
++    LLM_KV_ATTENTION_INDEXER_TYPES,
+     LLM_KV_ATTENTION_OUTPUT_GROUP_COUNT,
+     LLM_KV_ATTENTION_OUTPUT_LORA_RANK,
+     LLM_KV_ATTENTION_COMPRESS_ROPE_FREQ_BASE,
+diff --git a/src/llama-hparams.cpp b/src/llama-hparams.cpp
+index 9d0683d2..846d4c69 100644
+--- a/src/llama-hparams.cpp
++++ b/src/llama-hparams.cpp
+@@ -248,6 +248,14 @@ bool llama_hparams::is_mla() const {
+     return n_embd_head_k_mla_impl != 0 && n_embd_head_v_mla_impl != 0;
+ }
+ 
++bool llama_hparams::is_indexer_full(uint32_t il) const {
++    if (il < n_layer()) {
++        return is_indexer_full_impl[il];
++    }
++
++    GGML_ABORT("%s: il (%u) out of bounds (n_layer: %u)\n", __func__, il, n_layer());
++}
++
+ uint32_t llama_hparams::n_embd_head_k_mla() const {
+     return is_mla() ? n_embd_head_k_mla_impl : n_embd_head_k();
+ }
+diff --git a/src/llama-hparams.h b/src/llama-hparams.h
+index 8be5f28f..747754fc 100644
+--- a/src/llama-hparams.h
++++ b/src/llama-hparams.h
+@@ -227,6 +227,10 @@ struct llama_hparams {
+     uint32_t indexer_head_size = 0;
+     uint32_t indexer_top_k     = 0;
+ 
++    // Indexer is "full" (1) or "shared" (0)
++    // Shared indexers reuse top-k from previous full layer
++    std::array<uint32_t, LLAMA_MAX_LAYERS> is_indexer_full_impl;
++
+     // DeepSeek-V4
+     uint32_t dsv4_o_group_count        = 0;
+     uint32_t dsv4_o_lora_rank          = 0;
+@@ -302,6 +306,8 @@ struct llama_hparams {
+ 
+     bool is_swa(uint32_t il) const;
+ 
++    bool is_indexer_full(uint32_t il) const;
++
+     void set_recr_pattern(uint32_t n_pattern, bool dense_first = false);
+ 
+     // whether or not the given layer is recurrent (for hybrid models)
+diff --git a/src/llama-model-saver.cpp b/src/llama-model-saver.cpp
+index a3928523..cf568e99 100644
+--- a/src/llama-model-saver.cpp
++++ b/src/llama-model-saver.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <cstdint>
+ #include <string>
++#include <vector>
+ 
+ bool llama_model_saver_supports_arch(llm_arch arch) {
+     switch (arch) {
+@@ -280,6 +281,11 @@ void llama_model_saver::add_kv_from_model() {
+     add_kv(LLM_KV_ATTENTION_INDEXER_HEAD_COUNT,      hparams.indexer_n_head);
+     add_kv(LLM_KV_ATTENTION_INDEXER_KEY_LENGTH,      hparams.indexer_head_size);
+     add_kv(LLM_KV_ATTENTION_INDEXER_TOP_K,           hparams.indexer_top_k);
++    if (model->arch == LLM_ARCH_GLM_DSA) {
++        const std::vector<uint32_t> indexer_types(
++            hparams.is_indexer_full_impl.begin(), hparams.is_indexer_full_impl.begin() + hparams.n_layer());
++        add_kv(LLM_KV_ATTENTION_INDEXER_TYPES, indexer_types);
++    }
+     add_kv(LLM_KV_ATTENTION_RECURRENT_LAYERS,        hparams.is_recr_impl, true);
+ 
+     const float rope_scaling_factor = hparams.rope_freq_scale_train == 1.0f ? 0.0f : 1.0f/hparams.rope_freq_scale_train;
+diff --git a/src/models/glm-dsa.cpp b/src/models/glm-dsa.cpp
+index 10bf235f..25a7e1be 100644
+--- a/src/models/glm-dsa.cpp
++++ b/src/models/glm-dsa.cpp
+@@ -1,5 +1,55 @@
++#include "llama-kv-cache-dsa.h"
+ #include "models.h"
+ 
++// https://huggingface.co/zai-org/GLM-5.2/blob/main/config.json#L26
++const std::array<uint32_t, LLAMA_MAX_LAYERS> GLM_DSA_DEFAULT_INDEXER_TYPES = {
++    1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1,
++    0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0,
++};
++
++static void load_indexer_types(llama_model_loader & ml, llama_hparams & hparams) {
++    hparams.is_indexer_full_impl = GLM_DSA_DEFAULT_INDEXER_TYPES;
++
++    const std::string key    = ml.llm_kv(LLM_KV_ATTENTION_INDEXER_TYPES);
++    const int         key_id = gguf_find_key(ml.metadata, key.c_str());
++    if (key_id < 0) {
++        return;
++    }
++    if (gguf_get_kv_type(ml.metadata, key_id) != GGUF_TYPE_ARRAY) {
++        throw std::runtime_error(key + " must be an array");
++    }
++
++    const enum gguf_type element_type = gguf_get_arr_type(ml.metadata, key_id);
++    if (element_type == GGUF_TYPE_STRING) {
++        std::vector<std::string> values;
++        ml.get_arr(LLM_KV_ATTENTION_INDEXER_TYPES, values);
++        if (values.size() != hparams.n_layer()) {
++            throw std::runtime_error(format("%s has wrong array length; expected %u, got %u", key.c_str(),
++                                            hparams.n_layer(), static_cast<uint32_t>(values.size())));
++        }
++        for (uint32_t il = 0; il < hparams.n_layer(); ++il) {
++            if (values[il] == "full") {
++                hparams.is_indexer_full_impl[il] = 1;
++            } else if (values[il] == "shared") {
++                hparams.is_indexer_full_impl[il] = 0;
++            } else {
++                throw std::runtime_error(format("%s[%u] must be 'full' or 'shared'", key.c_str(), il));
++            }
++        }
++        return;
++    }
++
++    if (element_type != GGUF_TYPE_BOOL && element_type != GGUF_TYPE_UINT32 && element_type != GGUF_TYPE_INT32) {
++        throw std::runtime_error(key + " must contain strings, bools, or 32-bit integers");
++    }
++    ml.get_key_or_arr(LLM_KV_ATTENTION_INDEXER_TYPES, hparams.is_indexer_full_impl, hparams.n_layer(), false);
++    for (uint32_t il = 0; il < hparams.n_layer(); ++il) {
++        if (hparams.is_indexer_full_impl[il] > 1) {
++            throw std::runtime_error(format("%s[%u] must be 0 or 1", key.c_str(), il));
++        }
++    }
++}
++
+ void llama_model_glm_dsa::load_arch_hparams(llama_model_loader & ml) {
+     ml.get_key(LLM_KV_EXPERT_FEED_FORWARD_LENGTH,     hparams.n_ff_exp);
+     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,    hparams.f_norm_rms_eps);
+@@ -36,8 +86,13 @@ void llama_model_glm_dsa::load_arch_hparams(llama_model_loader & ml) {
+     ml.get_key(LLM_KV_NEXTN_PREDICT_LAYERS, hparams.n_layer_nextn, false);
+     GGML_ASSERT(hparams.n_layer_nextn < hparams.n_layer_all && "n_layer_nextn must be < n_layer_impl");
+ 
++    load_indexer_types(ml, hparams);
++    if (!hparams.is_indexer_full(0)) {
++        throw std::runtime_error("GLM-DSA indexer schedule must start with a full layer");
++    }
++
+     switch (hparams.n_layer()) {
+-        case 79: type = LLM_TYPE_744B_A40B; break;
++        case 78: type = LLM_TYPE_744B_A40B; break;
+         default: type = LLM_TYPE_UNKNOWN;
+     }
+ }
+-- 
+2.54.0 (Apple Git-157)
+

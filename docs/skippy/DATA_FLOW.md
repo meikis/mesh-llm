@@ -79,6 +79,16 @@ With the same four stages and 10 ms inter-stage delay, the no-spec decode hot
 path becomes `S0 -> S1 -> S2 -> S3 -> S0`: four hops, or about 40 ms before
 compute. That removes two serialized reply hops from every generated token.
 
+## Generation 4 Typed Activation Sidebands
+
+The current stage generation keeps generation 3's direct prediction return and
+adds bounded raw activation sidebands. GLM-DSA uses this channel to carry the
+producer layer's IndexShare top-k indices across a stage boundary without
+encoding integer indices as floating-point activations. Peers advertise
+`stage-generation-4`; generation-3 peers are rejected during split planning,
+and the binary state-header version rejects mismatched direct connections before
+either side can misread the following frame.
+
 ## Relative Sizes
 
 | Flow | Size |

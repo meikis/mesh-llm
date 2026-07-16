@@ -5,6 +5,8 @@ use openai_frontend::{OpenAiError, OpenAiResult};
 use super::NativeMtpDecodeOptions;
 use crate::frontend::speculative::propose_ngram_tokens;
 
+const MIN_NGRAM_EXTENSION_TOKENS: usize = 2;
+
 /// Builds one speculative candidate from a native-MTP prefix and an optional
 /// N-gram continuation. The continuation always starts after the MTP prefix;
 /// it never replaces an MTP prediction with a historical token.
@@ -60,6 +62,9 @@ impl CompositeProposalProvider {
         ngram_context.extend_from_slice(context_tokens);
         ngram_context.extend_from_slice(native_mtp_tokens);
         let ngram_tokens = propose_ngram_tokens(&ngram_context, self.ngram_size, ngram_limit);
+        let ngram_tokens = (ngram_tokens.len() >= MIN_NGRAM_EXTENSION_TOKENS)
+            .then_some(ngram_tokens)
+            .unwrap_or_default();
         let ngram_span_available = !ngram_tokens.is_empty();
         let mut tokens = native_mtp_tokens.to_vec();
         tokens.extend(ngram_tokens);
@@ -364,6 +369,17 @@ mod tests {
 
         assert_eq!(proposal.tokens(), &[9, 10]);
         assert_eq!(proposal.native_mtp_token_count(), 2);
+        assert_eq!(proposal.ngram_token_count(), 0);
+        assert!(!proposal.ngram_span_available());
+    }
+
+    #[test]
+    fn ignores_a_one_token_ngram_tail() {
+        let provider = CompositeProposalProvider::from_options(options());
+        let proposal = provider.propose(&[9], &[1, 2, 3, 9, 1, 2, 3], 2);
+
+        assert_eq!(proposal.tokens(), &[9]);
+        assert_eq!(proposal.native_mtp_token_count(), 1);
         assert_eq!(proposal.ngram_token_count(), 0);
         assert!(!proposal.ngram_span_available());
     }

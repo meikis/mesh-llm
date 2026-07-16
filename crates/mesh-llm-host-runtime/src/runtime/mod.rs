@@ -3538,7 +3538,7 @@ async fn prepare_runtime_startup(
 
 // Snapshot update checks are advisory. Serving must not wait on Hub reachability.
 fn spawn_advisory_startup_task(task: impl FnOnce() + Send + 'static) {
-    let _ = tokio::task::spawn_blocking(task);
+    std::mem::drop(tokio::task::spawn_blocking(task));
 }
 
 pub(crate) async fn run() -> Result<()> {

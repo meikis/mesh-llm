@@ -325,8 +325,17 @@ fn direct_gguf_layer_weight_bytes(
 ) -> Result<Vec<u64>> {
     let mut tensors = Vec::new();
     for source_file in source_files {
-        let info = skippy_runtime::ModelInfo::open(&source_file.path)
-            .with_context(|| format!("open GGUF metadata {}", source_file.path.display()))?;
+        let info = match skippy_runtime::ModelInfo::open(&source_file.path) {
+            Ok(info) => info,
+            Err(error) => {
+                tracing::debug!(
+                    path = %source_file.path.display(),
+                    error = %error,
+                    "GGUF tensor layout unavailable; using capacity-based split planning"
+                );
+                return Ok(Vec::new());
+            }
+        };
         tensors.extend(
             info.tensors()
                 .with_context(|| format!("read GGUF tensors {}", source_file.path.display()))?,

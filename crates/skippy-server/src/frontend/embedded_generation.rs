@@ -932,7 +932,7 @@ impl StageOpenAiBackend {
                                 native_mtp_tokens,
                                 native_mtp_remaining.saturating_sub(native_mtp_tokens.len()),
                             ),
-                        );
+                        )?;
                     if let Some(parallel_verify_width) = proposal.parallel_verify_width(
                         adaptive_verify_window.width(proposal.tokens().len()),
                         verify_window_scheduler.depth(),
@@ -1360,7 +1360,7 @@ impl StageOpenAiBackend {
                             &context_tokens,
                             request.ngram_min,
                             proposal_limit.min(request.ngram_max),
-                        );
+                        )?;
                         if !draft_tokens.is_empty() {
                             proposal_source = "ngram";
                         }

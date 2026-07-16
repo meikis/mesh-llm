@@ -1183,7 +1183,7 @@ fn generated_text_timings_prefer_composite_proposal_totals() {
         verify_window_min_tokens: 1,
         verify_window_max_tokens: 4,
     })
-    .propose(&[], &[1, 2, 3, 9, 1, 2, 3], 4);
+    .propose(&[], &[0, 0, 2, 3, 9, 1, 7, 8, 2, 3], 4);
     counters.observe_hybrid_proposal(&proposal, 4);
     let output = GeneratedText {
         prompt_tokens: 4,

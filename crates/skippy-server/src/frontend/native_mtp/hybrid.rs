@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use openai_frontend::{OpenAiError, OpenAiResult};
 
 use super::NativeMtpDecodeOptions;
-use crate::frontend::speculative::propose_ngram_tokens_with_min_prior_matches;
+use crate::frontend::speculative::propose_ngram_tokens;
 
 const MIN_NGRAM_EXTENSION_TOKENS: usize = 2;
 
@@ -41,6 +41,7 @@ impl CompositeProposalProvider {
             max_proposal_tokens,
             max_proposal_tokens,
         )
+        .expect("llama.cpp N-gram proposal succeeds")
     }
 
     pub(in crate::frontend) fn propose_with_ngram_extension(
@@ -49,34 +50,31 @@ impl CompositeProposalProvider {
         context_tokens: &[i32],
         max_proposal_tokens: usize,
         max_ngram_extension_tokens: usize,
-    ) -> NativeMtpHybridProposal {
+    ) -> OpenAiResult<NativeMtpHybridProposal> {
         let max_proposal_tokens = max_proposal_tokens.min(self.max_proposal_tokens);
         let native_mtp_tokens =
             &native_mtp_tokens[..native_mtp_tokens.len().min(max_proposal_tokens)];
         if !self.enabled || self.max_proposal_tokens == 0 || max_ngram_extension_tokens == 0 {
-            return NativeMtpHybridProposal::from_native_mtp_tokens(native_mtp_tokens.to_vec());
+            return Ok(NativeMtpHybridProposal::from_native_mtp_tokens(
+                native_mtp_tokens.to_vec(),
+            ));
         }
 
         let ngram_limit = max_proposal_tokens
             .saturating_sub(native_mtp_tokens.len())
             .min(max_ngram_extension_tokens);
         let ngram_tokens = if native_mtp_tokens.is_empty() {
-            propose_ngram_tokens_with_min_prior_matches(
-                context_tokens,
-                self.ngram_size,
-                ngram_limit,
-                1,
-            )
+            propose_ngram_tokens(context_tokens, self.ngram_size, ngram_limit)?
         } else {
             // Preserve the #875 anchor rule for native MTP: the most recent
             // earlier occurrence of the configured context N-gram supplies a
             // complete span. Its leading tokens must agree with MTP, and only
             // its remaining tokens become the sidecar tail below.
-            propose_mtp_anchored_ngram_tokens(
+            propose_ngram_tokens(
                 context_tokens,
                 self.ngram_size,
                 native_mtp_tokens.len().saturating_add(ngram_limit),
-            )
+            )?
         };
         let ngram_span_available = ngram_tokens.len() > native_mtp_tokens.len();
         let ngram_mtp_prefix_agreed = !native_mtp_tokens.is_empty()
@@ -98,46 +96,15 @@ impl CompositeProposalProvider {
         };
         let mut tokens = native_mtp_tokens.to_vec();
         tokens.extend(ngram_tokens);
-        NativeMtpHybridProposal {
+        Ok(NativeMtpHybridProposal {
             native_mtp_token_count: native_mtp_tokens.len(),
             ngram_token_count: tokens.len().saturating_sub(native_mtp_tokens.len()),
             tokens,
             ngram_span_available,
             ngram_mtp_prefix_agreed,
             ngram_mtp_prefix_disagreed,
-        }
+        })
     }
-}
-
-/// Returns the continuation after the most recent earlier occurrence of the
-/// exact configured N-gram suffix. This is deliberately a single-prior,
-/// fixed-width lookup: it is the anchor policy that produced the #875 GLM MTP
-/// result, and differs from the conservative pure N-gram sidecar policy.
-fn propose_mtp_anchored_ngram_tokens(
-    context_tokens: &[i32],
-    ngram_size: usize,
-    max_proposal_tokens: usize,
-) -> Vec<i32> {
-    if ngram_size == 0 || max_proposal_tokens == 0 || context_tokens.len() <= ngram_size {
-        return Vec::new();
-    }
-
-    let suffix_start = context_tokens.len() - ngram_size;
-    let suffix = &context_tokens[suffix_start..];
-    for candidate_start in (0..suffix_start).rev() {
-        let candidate_end = candidate_start + ngram_size;
-        if &context_tokens[candidate_start..candidate_end] != suffix {
-            continue;
-        }
-        let proposal_start = candidate_end;
-        let proposal_end = context_tokens
-            .len()
-            .min(proposal_start.saturating_add(max_proposal_tokens));
-        if proposal_start < proposal_end {
-            return context_tokens[proposal_start..proposal_end].to_vec();
-        }
-    }
-    Vec::new()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -448,6 +415,10 @@ where
 mod tests {
     use super::*;
 
+    fn context_with_upstream_span() -> [i32; 10] {
+        [0, 0, 2, 3, 9, 1, 7, 8, 2, 3]
+    }
+
     fn options() -> NativeMtpDecodeOptions {
         NativeMtpDecodeOptions {
             max_draft_tokens: 1,
@@ -467,9 +438,9 @@ mod tests {
     #[test]
     fn appends_ngram_tail_after_native_mtp_prefix() {
         let provider = CompositeProposalProvider::from_options(options());
-        let proposal = provider.propose(&[9], &[1, 2, 3, 9, 1, 2, 3, 9, 1, 2, 3], 4);
+        let proposal = provider.propose(&[9], &context_with_upstream_span(), 4);
 
-        assert_eq!(proposal.tokens(), &[9, 1, 2, 3]);
+        assert_eq!(proposal.tokens(), &[9, 1, 7, 8]);
         assert_eq!(proposal.native_mtp_token_count(), 1);
         assert_eq!(proposal.ngram_token_count(), 3);
         assert!(proposal.ngram_span_available());
@@ -480,7 +451,7 @@ mod tests {
     #[test]
     fn keeps_native_mtp_prefix_when_ngram_prefix_disagrees() {
         let provider = CompositeProposalProvider::from_options(options());
-        let proposal = provider.propose(&[8], &[1, 2, 3, 9, 1, 2, 3, 9, 1, 2, 3], 4);
+        let proposal = provider.propose(&[8], &context_with_upstream_span(), 4);
 
         assert_eq!(proposal.tokens(), &[8]);
         assert!(proposal.ngram_span_available());
@@ -491,10 +462,9 @@ mod tests {
     #[test]
     fn requires_every_native_mtp_token_to_match_before_extending() {
         let provider = CompositeProposalProvider::from_options(options());
-        let context = [1, 2, 3, 9, 10, 11, 1, 2, 3, 9, 10, 11, 1, 2, 3];
-        let proposal = provider.propose(&[9, 10], &context, 4);
+        let proposal = provider.propose(&[9, 1], &context_with_upstream_span(), 4);
 
-        assert_eq!(proposal.tokens(), &[9, 10, 11, 1]);
+        assert_eq!(proposal.tokens(), &[9, 1, 7, 8]);
         assert_eq!(proposal.native_mtp_token_count(), 2);
         assert_eq!(proposal.ngram_token_count(), 2);
         assert!(proposal.ngram_mtp_prefix_agreed());
@@ -503,9 +473,9 @@ mod tests {
     #[test]
     fn falls_back_to_pure_ngram_without_native_mtp_tokens() {
         let provider = CompositeProposalProvider::from_options(options());
-        let proposal = provider.propose(&[], &[1, 2, 3, 9, 1, 2, 3], 4);
+        let proposal = provider.propose(&[], &context_with_upstream_span(), 4);
 
-        assert_eq!(proposal.tokens(), &[9, 1, 2, 3]);
+        assert_eq!(proposal.tokens(), &[9, 1, 7, 8]);
         assert_eq!(proposal.native_mtp_token_count(), 0);
         assert!(proposal.is_pure_ngram());
         assert!(proposal.ngram_span_available());
@@ -525,9 +495,9 @@ mod tests {
     #[test]
     fn uses_a_single_prior_fixed_ngram_anchor_for_native_mtp() {
         let provider = CompositeProposalProvider::from_options(options());
-        let proposal = provider.propose(&[9], &[1, 2, 3, 9, 1, 2, 3], 4);
+        let proposal = provider.propose(&[9], &context_with_upstream_span(), 4);
 
-        assert_eq!(proposal.tokens(), &[9, 1, 2, 3]);
+        assert_eq!(proposal.tokens(), &[9, 1, 7, 8]);
         assert_eq!(proposal.native_mtp_token_count(), 1);
         assert_eq!(proposal.ngram_token_count(), 3);
         assert!(proposal.ngram_span_available());
@@ -535,23 +505,9 @@ mod tests {
     }
 
     #[test]
-    fn anchored_ngram_uses_the_most_recent_prior_continuation() {
-        let tokens = propose_mtp_anchored_ngram_tokens(&[1, 2, 9, 4, 1, 2, 8, 7, 1, 2], 2, 4);
-
-        assert_eq!(tokens, vec![8, 7, 1, 2]);
-    }
-
-    #[test]
-    fn anchored_ngram_requires_the_configured_suffix_width() {
-        let tokens = propose_mtp_anchored_ngram_tokens(&[1, 2, 3, 9, 2, 3], 3, 4);
-
-        assert!(tokens.is_empty());
-    }
-
-    #[test]
     fn ignores_a_one_token_ngram_tail() {
         let provider = CompositeProposalProvider::from_options(options());
-        let proposal = provider.propose(&[9], &[1, 2, 3, 9, 1, 2, 3, 9, 1, 2, 3], 2);
+        let proposal = provider.propose(&[9], &context_with_upstream_span(), 2);
 
         assert_eq!(proposal.tokens(), &[9]);
         assert_eq!(proposal.native_mtp_token_count(), 1);
@@ -592,21 +548,25 @@ mod tests {
         let rejected_tail = NativeMtpHybridProposal::from_parts(vec![9, 1, 2], 1, true);
         assert!(controller.observe_tail_outcome(&rejected_tail, 1, 1));
 
-        let native_only = provider.propose_with_ngram_extension(
-            &[9],
-            &[1, 2, 3, 9, 1, 2, 3, 9, 1, 2, 3],
-            4,
-            controller.extension_limit(&[9], 3),
-        );
-        let pure_ngram = provider.propose_with_ngram_extension(
-            &[],
-            &[1, 2, 3, 9, 1, 2, 3],
-            4,
-            controller.extension_limit(&[], 4),
-        );
+        let native_only = provider
+            .propose_with_ngram_extension(
+                &[9],
+                &context_with_upstream_span(),
+                4,
+                controller.extension_limit(&[9], 3),
+            )
+            .unwrap();
+        let pure_ngram = provider
+            .propose_with_ngram_extension(
+                &[],
+                &context_with_upstream_span(),
+                4,
+                controller.extension_limit(&[], 4),
+            )
+            .unwrap();
 
         assert_eq!(native_only.tokens(), &[9]);
-        assert_eq!(pure_ngram.tokens(), &[9, 1, 2, 3]);
+        assert_eq!(pure_ngram.tokens(), &[9, 1, 7, 8]);
     }
 
     #[test]
@@ -636,13 +596,11 @@ mod tests {
 
     #[test]
     fn buffer_reuses_tail_only_when_target_advances_along_it() {
-        let mut buffer = BufferedCompositeProposal::new(
-            CompositeProposalProvider::from_options(options()).propose(
-                &[9],
-                &[1, 2, 3, 9, 1, 2, 3, 9, 1, 2, 3],
-                4,
-            ),
-        );
+        let mut buffer = BufferedCompositeProposal::new(NativeMtpHybridProposal::from_parts(
+            vec![9, 1, 2, 3],
+            1,
+            true,
+        ));
 
         buffer.accept_window(&[9, 1], Some(2));
         assert_eq!(buffer.verify_tokens(4), vec![3]);

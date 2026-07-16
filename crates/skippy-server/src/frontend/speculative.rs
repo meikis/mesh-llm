@@ -49,67 +49,16 @@ pub(super) struct OpenAiSpeculativeStats {
     pub(super) adaptive_window_enabled: bool,
 }
 
-/// Upper bound on the n-gram suffix length scanned during speculative
-/// proposal generation. Without a cap, `propose_ngram_tokens` performs a
-/// nested scan (`match_len` × `candidate_start` × per-candidate slice
-/// compare) over the full history, giving O(N³) worst case behavior. Real
-/// n-gram repeats beyond a handful of tokens are vanishingly rare, so
-/// bounding the outer match loop at this many tokens keeps the scan
-/// tractable on long contexts without losing useful proposals.
-const MAX_NGRAM_MATCH: usize = 32;
-
+/// Uses llama.cpp's ngram-simple self-speculative proposer. The accepted
+/// history includes the current token; the upstream API keeps it separate
+/// from the preceding history internally.
 pub(super) fn propose_ngram_tokens(
     history: &[i32],
     min_match_tokens: usize,
     max_proposed_tokens: usize,
-) -> Vec<i32> {
-    propose_ngram_tokens_with_min_prior_matches(history, min_match_tokens, max_proposed_tokens, 1)
-}
-
-/// Returns a continuation only when the current suffix occurred at least
-/// `min_prior_matches` times earlier in the token history. The newest prior
-/// occurrence supplies the continuation, while the extra occurrences act as a
-/// cheap recurrence-confidence signal for conservative speculative callers.
-pub(super) fn propose_ngram_tokens_with_min_prior_matches(
-    history: &[i32],
-    min_match_tokens: usize,
-    max_proposed_tokens: usize,
-    min_prior_matches: usize,
-) -> Vec<i32> {
-    if min_match_tokens == 0
-        || max_proposed_tokens == 0
-        || min_prior_matches == 0
-        || history.len() < min_match_tokens * (min_prior_matches + 1)
-    {
-        return Vec::new();
-    }
-    let upper_match = (history.len() / 2).min(MAX_NGRAM_MATCH);
-    let start_match = min_match_tokens.min(upper_match);
-    for match_len in (start_match..=upper_match).rev() {
-        let suffix_start = history.len() - match_len;
-        let suffix = &history[suffix_start..];
-        let latest_candidate_start = suffix_start.saturating_sub(match_len);
-        let mut prior_match_count = 0usize;
-        let mut newest_continuation = None;
-        for candidate_start in (0..=latest_candidate_start).rev() {
-            let candidate_end = candidate_start + match_len;
-            if &history[candidate_start..candidate_end] != suffix {
-                continue;
-            }
-            let proposal_start = candidate_end;
-            let proposal_end = history.len().min(proposal_start + max_proposed_tokens);
-            if proposal_start < proposal_end {
-                prior_match_count += 1;
-                if newest_continuation.is_none() {
-                    newest_continuation = Some(history[proposal_start..proposal_end].to_vec());
-                }
-            }
-        }
-        if prior_match_count >= min_prior_matches {
-            return newest_continuation.unwrap_or_default();
-        }
-    }
-    Vec::new()
+) -> OpenAiResult<Vec<i32>> {
+    skippy_runtime::ngram_simple_draft(history, min_match_tokens, max_proposed_tokens)
+        .map_err(openai_backend_error)
 }
 
 impl OpenAiSpeculativeStats {
@@ -384,26 +333,22 @@ mod ngram_tests {
     fn proposes_tokens_after_latest_matching_suffix() {
         let history = [1, 2, 3, 4, 9, 2, 3, 4];
 
-        assert_eq!(propose_ngram_tokens(&history, 2, 2), vec![9, 2]);
-    }
-
-    #[test]
-    fn requires_multiple_prior_suffix_matches_when_requested() {
-        let singleton = [1, 2, 3, 9, 1, 2, 3];
-        let repeated = [1, 2, 3, 9, 1, 2, 3, 9, 1, 2, 3];
-
-        assert!(propose_ngram_tokens_with_min_prior_matches(&singleton, 3, 3, 2).is_empty());
-        assert_eq!(
-            propose_ngram_tokens_with_min_prior_matches(&repeated, 3, 3, 2),
-            vec![9, 1, 2]
-        );
+        assert_eq!(propose_ngram_tokens(&history, 2, 2).unwrap(), vec![9, 2]);
     }
 
     #[test]
     fn returns_empty_without_enough_history() {
-        assert!(propose_ngram_tokens(&[1, 2, 3], 2, 4).is_empty());
-        assert!(propose_ngram_tokens(&[1, 2, 1, 2], 0, 4).is_empty());
-        assert!(propose_ngram_tokens(&[1, 2, 1, 2], 1, 0).is_empty());
+        assert!(propose_ngram_tokens(&[1, 2, 3], 2, 4).unwrap().is_empty());
+        assert!(
+            propose_ngram_tokens(&[1, 2, 1, 2], 0, 4)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            propose_ngram_tokens(&[1, 2, 1, 2], 1, 0)
+                .unwrap()
+                .is_empty()
+        );
     }
 }
 

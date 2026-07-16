@@ -96,7 +96,7 @@ impl StageOpenAiBackend {
                         native_mtp_tokens,
                         native_mtp_remaining.saturating_sub(native_mtp_tokens.len() + 1),
                     ),
-                );
+                )?;
             if proposal.tokens().is_empty() {
                 return Ok(NativeMtpVerifyWindowControl::NoProposal);
             }

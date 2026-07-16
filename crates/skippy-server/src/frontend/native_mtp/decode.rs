@@ -738,7 +738,7 @@ mod tests {
         let mut counters = NativeMtpDecodeCounters::default();
         let proposal = CompositeProposalProvider::from_options(options()).propose(
             &[],
-            &[1, 2, 3, 9, 1, 2, 3],
+            &[0, 0, 2, 3, 9, 1, 7, 8, 2, 3],
             4,
         );
         counters.observe_hybrid_proposal(&proposal, 4);

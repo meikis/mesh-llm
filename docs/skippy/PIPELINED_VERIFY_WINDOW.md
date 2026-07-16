@@ -17,7 +17,7 @@ OpenAI-compatible API retain their normal compatibility guarantees.
 |---|---|
 | Target | The full staged model, authoritative for every emitted token. |
 | Native MTP | Model-provided typed draft attached to a target reply. GLM 4.7 Flash currently supplies a narrow `N+1` candidate. |
-| N-gram sidecar | Model-free lookup over already accepted tokens. |
+| N-gram sidecar | llama.cpp's upstream `ngram-simple` lookup over already accepted tokens. |
 | Composite proposal | Native-MTP prefix plus an optional N-gram suffix. |
 | VerifyWindow | Versioned target request that verifies a candidate span at one session position. |
 | Free target token | Target's next token after a fully verified span. |
@@ -65,10 +65,11 @@ that sink is unavailable.
 
 ## Composite Proposals
 
-The sidecar extends native MTP; it never replaces it. With an MTP prefix,
-Skippy finds the most recent earlier occurrence of the configured context
-N-gram. That historical continuation must begin with every MTP prefix token.
-Only the remaining continuation is appended as the sidecar tail.
+The sidecar extends native MTP; it never replaces it. Skippy calls llama.cpp's
+upstream `ngram-simple` proposer rather than maintaining a second Rust history
+scanner. With an MTP prefix, its historical continuation must begin with every
+MTP prefix token. Only the remaining continuation is appended as the sidecar
+tail.
 
 ```mermaid
 flowchart TD

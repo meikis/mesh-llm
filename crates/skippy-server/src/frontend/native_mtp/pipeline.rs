@@ -98,8 +98,12 @@ impl CompositeProposalPipeline {
         self.accepted_tokens
     }
 
-    pub(in crate::frontend) fn set_next_draft(&mut self, draft: Option<NativeMtpDraft>) {
-        self.next_draft = draft;
+    pub(in crate::frontend) fn set_next_draft(
+        &mut self,
+        native_mtp_enabled: bool,
+        draft: Option<NativeMtpDraft>,
+    ) {
+        self.next_draft = native_mtp_enabled.then_some(draft).flatten();
     }
 
     pub(in crate::frontend) fn next_draft(&self) -> Option<&NativeMtpDraft> {
@@ -147,5 +151,20 @@ mod tests {
         assert_eq!(window.expected_free_target(), Some(3));
         assert_eq!(window.native_mtp_token_count(), 0);
         assert!(!pipeline.has_remaining_candidates());
+    }
+
+    #[test]
+    fn pure_ngram_pipeline_discards_verify_next_native_mtp_drafts() {
+        let mut pipeline = CompositeProposalPipeline::new(proposal(vec![1, 2, 3], 0), None);
+
+        pipeline.set_next_draft(
+            false,
+            Some(NativeMtpDraft {
+                tokens: vec![4],
+                proposal_compute_us: 12,
+            }),
+        );
+
+        assert!(pipeline.next_draft().is_none());
     }
 }

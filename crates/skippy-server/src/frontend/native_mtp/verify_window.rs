@@ -144,7 +144,8 @@ impl StageOpenAiBackend {
             |token| token_is_eog_with_runtime(&self.runtime, token),
         )?;
         let target_token = verify.reply.predicted_tokens[0];
-        let verify_next_mtp_draft = NativeMtpDraft::from_verify_prediction_tokens(
+        let verify_next_mtp_draft = next_native_mtp_draft(
+            request.native_mtp_enabled,
             &verify.reply.predicted_tokens,
             verify_inputs.len(),
         );
@@ -436,12 +437,38 @@ fn native_mtp_verify_window_inputs(current: i32, proposals: &[i32]) -> Vec<i32> 
     tokens
 }
 
+fn next_native_mtp_draft(
+    native_mtp_enabled: bool,
+    prediction_tokens: &[i32],
+    verified_token_count: usize,
+) -> Option<NativeMtpDraft> {
+    native_mtp_enabled
+        .then(|| {
+            NativeMtpDraft::from_verify_prediction_tokens(prediction_tokens, verified_token_count)
+        })
+        .flatten()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::native_mtp_verify_window_inputs;
+    use super::{native_mtp_verify_window_inputs, next_native_mtp_draft};
 
     #[test]
     fn verify_window_inputs_include_every_native_mtp_proposal() {
         assert_eq!(native_mtp_verify_window_inputs(10, &[11, 12]), [10, 11, 12]);
+    }
+
+    #[test]
+    fn pure_ngram_verify_does_not_capture_a_native_mtp_draft() {
+        assert_eq!(next_native_mtp_draft(false, &[10, 1, 11, 12], 1), None);
+    }
+
+    #[test]
+    fn native_mtp_verify_captures_the_next_native_draft() {
+        let draft = next_native_mtp_draft(true, &[10, 1, 11, 12], 1)
+            .expect("native MTP draft should be retained");
+
+        assert_eq!(draft.tokens, vec![11]);
+        assert_eq!(draft.proposal_compute_us, 12);
     }
 }

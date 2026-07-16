@@ -897,10 +897,10 @@ impl StageOpenAiBackend {
                     && native_mtp_reject_cooldown_remaining == 0
                     && native_mtp_remaining >= 2
                 {
-                    let pending_native_mtp_draft = composite_proposal_buffer
-                        .is_none()
-                        .then(|| native_mtp.take_pending_draft())
-                        .flatten();
+                    let pending_native_mtp_draft = (request.native_mtp_enabled
+                        && composite_proposal_buffer.is_none())
+                    .then(|| native_mtp.take_pending_draft())
+                    .flatten();
                     match self.execute_native_mtp_verify_window(
                         &request,
                         downstream,
@@ -946,7 +946,10 @@ impl StageOpenAiBackend {
                         && pipelined_windows.is_empty()
                         && native_mtp_reject_cooldown_remaining == 0
                     {
-                        let pending = native_mtp.take_pending_draft();
+                        let pending = request
+                            .native_mtp_enabled
+                            .then(|| native_mtp.take_pending_draft())
+                            .flatten();
                         let native_mtp_origin = pending.as_ref().map(|draft| draft.origin);
                         let native_mtp_tokens = pending
                             .as_ref()
@@ -1143,6 +1146,7 @@ impl StageOpenAiBackend {
                                 let pipeline = pipelined.as_mut().expect("pipeline retained");
                                 pipeline.observe_accepted(accepted_candidate_tokens);
                                 pipeline.set_next_draft(
+                                    request.native_mtp_enabled,
                                     NativeMtpDraft::from_verify_prediction_tokens(
                                         &verify.reply.predicted_tokens,
                                         window.input_tokens.len(),

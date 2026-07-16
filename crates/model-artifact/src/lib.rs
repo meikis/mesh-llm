@@ -1,4 +1,5 @@
 pub mod gguf;
+mod gguf_kv_cache;
 
 use std::path::Path;
 

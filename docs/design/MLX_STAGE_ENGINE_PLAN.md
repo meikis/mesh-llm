@@ -12,6 +12,11 @@ It combines a read of the current Skippy code (`skippy-ffi`, `skippy-runtime`,
 and a second-opinion review from an external model grounded against live
 MLX/mlx-lm/safemlx documentation.
 
+**Update — a Phase-2 solo-serving spike has now run** (`spikes/mlx-solo/`, branch
+`micn/mlx-redux`). It confirms the core workflow claim end to end and surfaced
+two concrete findings (a CPU quant-perf cliff and two safemlx-lm papercuts). See
+`spikes/mlx-solo/FINDINGS.md`; the results are folded into §5.3, Phase 2, and §9.
+
 ---
 
 ## 1. Bottom line
@@ -574,6 +579,14 @@ existing skippy backend selector in `docs/SKIPPY.md`). Validate against
 "serve any supported model instantly, no wait for quant" benefit with minimal
 new distributed work, and de-risks the engine before any split work.
 
+> **Spike done (`spikes/mlx-solo/`).** The load→generate half is proven: Qwen3-0.6B
+> from raw HF safetensors, in Rust, CPU-only, **18.1 tok/s** decode, coherent — no
+> GGUF, no pre-quant. **But JIT quant on CPU is a trap:** 4-bit/8-bit are correct
+> yet run at **~0.4 tok/s** (MLX quant matmul is Metal-optimized, no fast CPU
+> kernel). So Phase 2 must be validated on **Metal**, and JIT quant should be
+> gated behind a Metal (or CUDA) backend rather than offered as a CPU path. Two
+> safemlx-lm papercuts were also found and fixed in the fork (see §9).
+
 **Phase 3 — Stage-aware partial load + activation frames.** Add `forward_range`
 / `resume_from_hidden` and the stage-aware loader to `safemlx-lm` (upstream to
 the fork). Implement `prefill_chunk_frame` / `decode_step_frame` /
@@ -625,19 +638,30 @@ Spikes 1 and 2 are more decisive than any standalone token/s benchmark.
 
 ## 9. Risks and unknowns
 
+- **JIT quant has no fast CPU kernel — it needs Metal/CUDA (confirmed by spike).**
+  4-bit/8-bit affine quant on Apple-Silicon **CPU** ran ~45× slower than source
+  precision (0.4 vs 18.1 tok/s on Qwen3-0.6B). The "serve any model instantly,
+  JIT-quantized" workflow is therefore only attractive on an accelerator backend;
+  do not expose CPU JIT quant as a serving path. Metal-backed re-measurement is
+  a prerequisite before leaning on the §5.3 workflow claim.
 - **Partial load may require nontrivial changes to `safemlx-lm`** (loader + model
   constructors currently build `0..num_hidden_layers`). Upstreaming to the fork
-  is likely necessary. (Highest risk.)
+  is likely necessary. (Highest risk for the split work.)
 - **Eval-fence latency** could erode the benefit of adding Apple-Silicon compute
   to a chain, especially over Wi-Fi.
-- **Model coverage churn:** safemlx-lm is young; each family is bespoke Rust and
-  a separate certification.
+- **Model coverage churn — confirmed by spike:** safemlx-lm is young; each family
+  is bespoke Rust and separately certified. The spike hit two papercuts on
+  Qwen3-0.6B alone: (1) the published crate hard-enables the `metal` feature, so
+  a Metal-less/CI build needs a **workspace-level** `default-features = false`;
+  (2) tied-embedding `lm_head.weight` fails the *quantized* strict loader
+  (dense load tolerates it). Both fixed in the fork; expect more per-family.
 - **Recurrent/hybrid + MoE** splitting is materially harder than dense; scope
   them out of early phases.
 - **Two artifact pipelines** add storage + certification cost; mitigate with a
   single canonical BF16 source and reproducible derivation.
-- **safemlx maturity/maintenance** (external fork of mlx-rs) — pin carefully;
-  expect to contribute upstream.
+- **safemlx maturity/maintenance** (external fork of mlx-rs) — the `MlxStageEngine`
+  will likely carry a small fork or need upstream PRs (backend feature exposure,
+  loader fixes, and eventually `forward_range`/partial-load). Pin carefully.
 - **Compat discipline:** MLX must stay additive (feature-probe + gossip
   capability); homogeneous chains by default; mixed-engine only when certified.
 

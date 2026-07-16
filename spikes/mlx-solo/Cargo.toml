@@ -1,0 +1,30 @@
+# Standalone spike crate — deliberately its OWN workspace so it is NOT part of
+# the mesh-llm cargo workspace (keeps MLX/CMake native deps off every other
+# build). It path-depends on a sibling checkout of the safemlx fork:
+#   ../../../safemlx  == /Users/<you>/Documents/code/safemlx
+# It does not build in CI and is not meant to ship.
+[package]
+name = "mlx-solo-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "mlx-solo"
+path = "src/main.rs"
+
+[workspace]
+
+[dependencies]
+# CPU-only: accelerate backend, no metal (no Metal shader compiler on this box).
+safemlx = { path = "../../../safemlx/safemlx", default-features = false, features = [
+    "accelerate",
+    "safetensors",
+] }
+# Pure-Rust regex engine (fancy-regex) to avoid extra C/C++ tokenizer builds.
+safemlx-lm = { path = "../../../safemlx/safemlx-lm", default-features = false, features = [
+    "fancy-regex",
+] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"

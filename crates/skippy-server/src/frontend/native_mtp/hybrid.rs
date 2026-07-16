@@ -6,7 +6,6 @@ use super::NativeMtpDecodeOptions;
 use crate::frontend::speculative::propose_ngram_tokens_with_min_prior_matches;
 
 const MIN_NGRAM_EXTENSION_TOKENS: usize = 2;
-const MIN_NGRAM_PRIOR_MATCHES: usize = 2;
 
 /// Builds one speculative candidate from a native-MTP prefix and an optional
 /// N-gram continuation. The N-gram proposal must independently predict the
@@ -61,17 +60,24 @@ impl CompositeProposalProvider {
         let ngram_limit = max_proposal_tokens
             .saturating_sub(native_mtp_tokens.len())
             .min(max_ngram_extension_tokens);
-        let min_prior_matches = if native_mtp_tokens.is_empty() {
-            1
+        let ngram_tokens = if native_mtp_tokens.is_empty() {
+            propose_ngram_tokens_with_min_prior_matches(
+                context_tokens,
+                self.ngram_size,
+                ngram_limit,
+                1,
+            )
         } else {
-            MIN_NGRAM_PRIOR_MATCHES
+            // Preserve the #875 anchor rule for native MTP: the most recent
+            // earlier occurrence of the configured context N-gram supplies a
+            // complete span. Its leading tokens must agree with MTP, and only
+            // its remaining tokens become the sidecar tail below.
+            propose_mtp_anchored_ngram_tokens(
+                context_tokens,
+                self.ngram_size,
+                native_mtp_tokens.len().saturating_add(ngram_limit),
+            )
         };
-        let ngram_tokens = propose_ngram_tokens_with_min_prior_matches(
-            context_tokens,
-            self.ngram_size,
-            native_mtp_tokens.len().saturating_add(ngram_limit),
-            min_prior_matches,
-        );
         let ngram_span_available = ngram_tokens.len() > native_mtp_tokens.len();
         let ngram_mtp_prefix_agreed = !native_mtp_tokens.is_empty()
             && ngram_tokens.starts_with(native_mtp_tokens)
@@ -101,6 +107,37 @@ impl CompositeProposalProvider {
             ngram_mtp_prefix_disagreed,
         }
     }
+}
+
+/// Returns the continuation after the most recent earlier occurrence of the
+/// exact configured N-gram suffix. This is deliberately a single-prior,
+/// fixed-width lookup: it is the anchor policy that produced the #875 GLM MTP
+/// result, and differs from the conservative pure N-gram sidecar policy.
+fn propose_mtp_anchored_ngram_tokens(
+    context_tokens: &[i32],
+    ngram_size: usize,
+    max_proposal_tokens: usize,
+) -> Vec<i32> {
+    if ngram_size == 0 || max_proposal_tokens == 0 || context_tokens.len() <= ngram_size {
+        return Vec::new();
+    }
+
+    let suffix_start = context_tokens.len() - ngram_size;
+    let suffix = &context_tokens[suffix_start..];
+    for candidate_start in (0..suffix_start).rev() {
+        let candidate_end = candidate_start + ngram_size;
+        if &context_tokens[candidate_start..candidate_end] != suffix {
+            continue;
+        }
+        let proposal_start = candidate_end;
+        let proposal_end = context_tokens
+            .len()
+            .min(proposal_start.saturating_add(max_proposal_tokens));
+        if proposal_start < proposal_end {
+            return context_tokens[proposal_start..proposal_end].to_vec();
+        }
+    }
+    Vec::new()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -486,13 +523,29 @@ mod tests {
     }
 
     #[test]
-    fn requires_repeated_history_before_extending_native_mtp() {
+    fn uses_a_single_prior_fixed_ngram_anchor_for_native_mtp() {
         let provider = CompositeProposalProvider::from_options(options());
         let proposal = provider.propose(&[9], &[1, 2, 3, 9, 1, 2, 3], 4);
 
-        assert_eq!(proposal.tokens(), &[9]);
+        assert_eq!(proposal.tokens(), &[9, 1, 2, 3]);
         assert_eq!(proposal.native_mtp_token_count(), 1);
-        assert_eq!(proposal.ngram_token_count(), 0);
+        assert_eq!(proposal.ngram_token_count(), 3);
+        assert!(proposal.ngram_span_available());
+        assert!(proposal.ngram_mtp_prefix_agreed());
+    }
+
+    #[test]
+    fn anchored_ngram_uses_the_most_recent_prior_continuation() {
+        let tokens = propose_mtp_anchored_ngram_tokens(&[1, 2, 9, 4, 1, 2, 8, 7, 1, 2], 2, 4);
+
+        assert_eq!(tokens, vec![8, 7, 1, 2]);
+    }
+
+    #[test]
+    fn anchored_ngram_requires_the_configured_suffix_width() {
+        let tokens = propose_mtp_anchored_ngram_tokens(&[1, 2, 3, 9, 2, 3], 3, 4);
+
+        assert!(tokens.is_empty());
     }
 
     #[test]

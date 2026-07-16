@@ -486,9 +486,9 @@ how goose gates it. Lean by construction, for the platforms that don't use it.
 | iOS / tvOS / visionOS | ✅ Metal |
 | Linux x86_64 / aarch64 | ✅ CPU |
 | Linux + NVIDIA | ✅ CUDA (the `cuda`/`nccl` features **panic** on non-Linux) |
-| Linux + AMD (ROCm) | ❌ |
-| Vulkan (any) | ❌ |
-| Windows | ❌ |
+| Linux + AMD (ROCm) | ⏳ not today — large **active but unmerged** upstream experiment (see below) |
+| Vulkan (any) | ❌ upstream *wishlist* only, no implementation |
+| Windows | ❌ (some `if(WIN32)` scaffolding in vendored `mlx-c`, no working backend) |
 
 **Coverage is expanding, and safemlx tracks it fast.** `jbg/safemlx` is very
 active (103 commits, latest 2026-07-15) and pins a recent MLX core (`v0.32.0`).
@@ -497,22 +497,34 @@ It wires in new backends quickly: the `Add CUDA support` commit landed a full
 and there is `if(WIN32)` DLL-export scaffolding in the vendored `mlx-c`. So the
 matrix above is a **snapshot, not a ceiling**.
 
-**But the gaps are gated by MLX upstream, not by safemlx.** safemlx can only
-expose backends `ml-explore/mlx` itself provides. MLX's backend line is
-**CPU + Metal + CUDA** — which is exactly why CUDA appeared here. There is **no
-ROCm or Vulkan backend in MLX upstream**, and no in-repo signal that safemlx adds
-them independently. So: Windows is the most plausible next addition
-(scaffolding + working Linux/CUDA); ROCm/Vulkan depend on an upstream decision
-with no current signal either way.
+**The gaps are gated by MLX upstream, and there are *two* gates.** safemlx does
+not build backends of its own — every one of its non-`main` branches is model /
+runtime / quant work, not hardware work, and `forks_count`/`network_count` are 0
+with no open PRs. A new backend must therefore (1) land in `ml-explore/mlx`
+(C++), and only then (2) be wired through safemlx — exactly the sequence CUDA
+followed (`Add CUDA support` was safemlx *exposing* an upstream backend, not
+authoring one). So hardware coverage tracks upstream MLX, delayed by the safemlx
+wiring step.
 
-**Strategic consequence (unchanged).** **Today**, the ROCm / Vulkan / Windows
-gaps mean **MLX cannot be Skippy's sole engine** — which reinforces (not changes)
-the plan: MLX is an **additive, feature+cfg-gated second engine**,
-Apple-Silicon-first (with Linux/CUDA as a real second target), while llama.cpp
-stays the cross-platform default. And the most durable reason to keep llama.cpp
-is **not** platform coverage (which may well close as MLX upstream grows) but its
-GGUF/imatrix quant maturity and the existing patch-queue investment — those would
-argue against removing it even if MLX's backend matrix later caught up.
+**ROCm is real but not bankable yet.** Upstream MLX has a large, active AMD/ROCm
+effort — PR **#2300 "[Experiment] ROCm backend"** (≈449 commits, +45k lines, open
+~13 months, updated as of this writing) plus issue **#2556 "Add ROCm Support for
+AMD GPUs"**. It is **unmerged and `mergeable_state: dirty`**, so it is genuine
+momentum, not a shipped backend. Vulkan is only an upstream *wishlist* issue with
+no implementation; Windows has scaffolding but no backend. Net: the matrix is
+**expanding (CPU → Metal → CUDA, ROCm being actively attempted upstream)**, so
+treat it as a moving target — but do not plan around ROCm/Vulkan/Windows until
+they both merge upstream **and** appear in safemlx.
+
+**Strategic consequence.** **Today**, the ROCm / Vulkan / Windows gaps mean
+**MLX cannot be Skippy's sole engine** — which reinforces (not changes) the plan:
+MLX is an **additive, feature+cfg-gated second engine**, strongest on Apple
+Silicon (with Linux/CUDA a real second target, and AMD plausibly later), while
+llama.cpp stays the cross-platform default. Crucially, even in the optimistic
+world where MLX gains ROCm/Vulkan, the durable reason to keep llama.cpp is **not**
+platform coverage but its **GGUF/imatrix k-quant maturity** and the existing
+**patch-queue investment** — those are the sticky arguments; hardware coverage is
+the reversible one.
 
 ---
 
@@ -669,9 +681,23 @@ Spikes 1 and 2 are more decisive than any standalone token/s benchmark.
   them out of early phases.
 - **Two artifact pipelines** add storage + certification cost; mitigate with a
   single canonical BF16 source and reproducible derivation.
-- **safemlx maturity/maintenance** (external fork of mlx-rs) — the `MlxStageEngine`
-  will likely carry a small fork or need upstream PRs (backend feature exposure,
-  loader fixes, and eventually `forward_range`/partial-load). Pin carefully.
+- **safemlx supply chain — pin to a git rev, not a crates.io version (confirmed
+  this session).** The published crates collide version strings with the fork
+  HEAD: crates.io `safemlx-lm 0.4.1` is a *different, older* codebase than the
+  fork's `0.4.1` (851 vs 2221 lines in `qwen3.rs`), because the fork develops on
+  a fixed version without bumping. A fork-free build against published crates
+  **compiled and ran but produced gibberish for Qwen3 source precision and
+  crashed on a pre-quantized repo** (`rms_norm` size mismatch) — the working
+  dense-Qwen3/Llama + JIT-quant code exists only in unpublished fork HEAD. So
+  MLX-for-Skippy must **pin a specific git commit** of `jbg/safemlx` (and carry
+  the small loader fixes until upstreamed), or coordinate a real published
+  release. This makes "track upstream + pin + possibly patch" a **standing cost**,
+  not a one-off.
+- **Hardware coverage is a moving target with two gates.** New backends must land
+  in upstream `ml-explore/mlx` *then* be wired through safemlx (which authors no
+  backends itself). ROCm is an active-but-unmerged upstream experiment (#2300);
+  Vulkan is wishlist-only; Windows has scaffolding but no backend. Do not plan
+  around AMD/Vulkan/Windows until both gates clear.
 - **Compat discipline:** MLX must stay additive (feature-probe + gossip
   capability); homogeneous chains by default; mixed-engine only when certified.
 

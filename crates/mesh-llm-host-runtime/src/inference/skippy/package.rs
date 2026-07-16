@@ -353,10 +353,14 @@ pub fn identity_from_layer_package(package_ref: &str) -> Result<SkippyPackageIde
 
     let activation_width =
         required_layer_package_activation_width(package_ref, info.activation_width)?;
-    let source_model_bytes = info
-        .source_model_bytes
-        .unwrap_or_else(|| info.layers.iter().map(|l| l.artifact_bytes).sum::<u64>());
     let layer_weight_bytes = layer_weight_bytes_from_info(&info);
+    let source_model_bytes = info.source_model_bytes.unwrap_or_else(|| {
+        if layer_weight_bytes.is_empty() {
+            info.layers.iter().map(|l| l.artifact_bytes).sum()
+        } else {
+            layer_weight_bytes.iter().copied().sum()
+        }
+    });
 
     // For local paths inside an HF cache, convert to an exact hf:// ref so all
     // nodes resolve the same snapshot independently. HF cache dirs look like:
@@ -393,17 +397,12 @@ fn layer_weight_bytes_from_info(info: &skippy_runtime::package::LayerPackageInfo
         .into_iter()
         .map(|layer| layer.tensor_bytes.max(layer.artifact_bytes))
         .collect::<Vec<_>>();
-    let accounted = weights.iter().copied().sum::<u64>();
-    let unaccounted = info
-        .source_model_bytes
-        .unwrap_or_default()
-        .saturating_sub(accounted);
     if let Some((first, rest)) = weights.split_first_mut() {
-        *first = first.saturating_add(unaccounted.div_ceil(2));
+        *first = first.saturating_add(info.embedding_weight_bytes);
         if let Some(last) = rest.last_mut() {
-            *last = last.saturating_add(unaccounted / 2);
+            *last = last.saturating_add(info.output_weight_bytes);
         } else {
-            *first = first.saturating_add(unaccounted / 2);
+            *first = first.saturating_add(info.output_weight_bytes);
         }
     }
     weights
@@ -707,7 +706,9 @@ mod tests {
             model_id: "org/model".to_string(),
             source_model_path: "model.gguf".to_string(),
             source_model_sha256: "source".to_string(),
-            source_model_bytes: Some(120),
+            source_model_bytes: Some(1_000),
+            embedding_weight_bytes: 25,
+            output_weight_bytes: 25,
             layer_count: 2,
             activation_width: Some(1024),
             generation: None,
@@ -740,6 +741,8 @@ mod tests {
             source_model_path: "model.gguf".to_string(),
             source_model_sha256: "source".to_string(),
             source_model_bytes: Some(70),
+            embedding_weight_bytes: 0,
+            output_weight_bytes: 0,
             layer_count: 2,
             activation_width: Some(1024),
             generation: None,

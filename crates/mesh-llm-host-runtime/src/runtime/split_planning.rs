@@ -7,10 +7,11 @@ use std::collections::HashMap;
 
 use super::local::{SplitParticipant, SplitParticipantExclusion};
 
-// VRAM budget already accounts for OS/runtime reservations (e.g. Metal's
-// recommendedMaxWorkingSetSize on macOS).  No additional headroom deduction.
-const RUNTIME_NODE_HEADROOM_NUMERATOR: u64 = 0;
-const RUNTIME_NODE_HEADROOM_DENOMINATOR: u64 = 10;
+// Metal's recommendedMaxWorkingSetSize excludes OS reservations, but it is
+// still the ceiling for model, KV, and graph workspace combined. Keep room for
+// per-stage scheduler and compute buffers instead of filling it with weights.
+const RUNTIME_NODE_HEADROOM_NUMERATOR: u64 = 1;
+const RUNTIME_NODE_HEADROOM_DENOMINATOR: u64 = 20;
 const DEFAULT_TARGET_DECODE_TPOT_MS: u32 = 33;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -223,7 +224,7 @@ fn runtime_slice_plan_input(
     SplitTopologyPlanInput {
         native_context_length: resources.native_context_length,
         layer_count: package.layer_count,
-        model_weight_bytes: package.source_model_bytes,
+        model_weight_bytes: package_model_weight_bytes(package),
         layer_weight_bytes: package_layer_weight_bytes(package),
         kv_bytes_per_token: resources.kv_bytes_per_token,
         context_length_override: resources.ctx_size_override,
@@ -248,6 +249,13 @@ fn package_layer_weight_bytes(package: &skippy::SkippyPackageIdentity) -> Vec<u6
         return package.layer_weight_bytes.clone();
     }
     Vec::new()
+}
+
+fn package_model_weight_bytes(package: &skippy::SkippyPackageIdentity) -> u64 {
+    if package.layer_weight_bytes.len() == package.layer_count as usize {
+        return package.layer_weight_bytes.iter().copied().sum();
+    }
+    package.source_model_bytes
 }
 
 fn map_runtime_slice_stages(
@@ -282,9 +290,8 @@ fn split_topology_failure_reason(
     let minimum_context = minimum_valid_context(resources.native_context_length);
     let evaluated_context = resources.ctx_size_override.unwrap_or(minimum_context);
     let evaluated_lanes = resources.parallel_override.unwrap_or(1).max(1);
-    let weight_per_layer = package
-        .source_model_bytes
-        .div_ceil(u64::from(package.layer_count.max(1)));
+    let weight_per_layer =
+        package_model_weight_bytes(package).div_ceil(u64::from(package.layer_count.max(1)));
     let kv_per_layer = resources
         .kv_bytes_per_token
         .div_ceil(u64::from(package.layer_count.max(1)));
@@ -423,7 +430,7 @@ pub(super) fn validate_split_capacity(
         .sum::<u64>();
     // Use raw model weight for aggregate split check — the topology planner
     // already performed detailed per-node budgeting with KV and headroom.
-    let required_total_bytes = package.source_model_bytes;
+    let required_total_bytes = package_model_weight_bytes(package);
     anyhow::ensure!(
         total_vram_bytes >= required_total_bytes,
         "{}",
@@ -577,9 +584,9 @@ mod tests {
     }
 
     #[test]
-    fn default_runtime_headroom_is_zero() {
-        assert_eq!(default_runtime_headroom_bytes(100), 0);
-        assert_eq!(default_runtime_headroom_bytes(101), 0);
+    fn default_runtime_headroom_reserves_graph_workspace() {
+        assert_eq!(default_runtime_headroom_bytes(100), 5);
+        assert_eq!(default_runtime_headroom_bytes(101), 6);
     }
 
     #[test]
@@ -652,6 +659,7 @@ mod tests {
         let participants = vec![participant(1, 12 * GIB), participant(2, 9 * GIB)];
         let mut package = package(4, 18 * GIB);
         package.layer_weight_bytes = vec![GIB / 8, GIB / 8, 9 * GIB, 8 * GIB];
+        assert_eq!(package_model_weight_bytes(&package), 17 * GIB + GIB / 4);
 
         let plan = plan_runtime_slice_topology_with_resources(
             "topology-test",
@@ -680,12 +688,65 @@ mod tests {
     }
 
     #[test]
+    fn glm_52_lab_plan_reserves_metal_execution_workspace() {
+        const M1_ULTRA_METAL_BYTES: u64 = 115_448_725_504;
+        const M3_ULTRA_METAL_BYTES: u64 = 239_143_780_352;
+        const EMBEDDING_WEIGHT_BYTES: u64 = 1_021_099_520;
+        const OUTPUT_WEIGHT_BYTES: u64 = 1_021_124_160;
+        const GLM_DSA_KV_BYTES_PER_TOKEN: u64 = 31_284;
+
+        let mut package = package(79, 0);
+        package.activation_width = 6_144;
+        package.layer_weight_bytes = (0..79)
+            .map(|layer| match layer {
+                0..=2 => 204_373_536,
+                78 => 3_725_108_384,
+                layer if layer % 4 == 2 => 3_644_818_336,
+                _ => 3_634_859_616,
+            })
+            .collect();
+        package.layer_weight_bytes[0] =
+            package.layer_weight_bytes[0].saturating_add(EMBEDDING_WEIGHT_BYTES);
+        package.layer_weight_bytes[78] =
+            package.layer_weight_bytes[78].saturating_add(OUTPUT_WEIGHT_BYTES);
+        package.source_model_bytes = package.layer_weight_bytes.iter().sum();
+
+        let plan = plan_runtime_slice_topology_with_resources(
+            "glm-52-production",
+            "meshllm/GLM-5.2-Q2_K-MTP-Q8-layers",
+            &package,
+            &[
+                participant(1, M3_ULTRA_METAL_BYTES),
+                participant(2, M1_ULTRA_METAL_BYTES),
+            ],
+            &[],
+            SplitTopologyResourceInputs {
+                native_context_length: 1_048_576,
+                kv_bytes_per_token: GLM_DSA_KV_BYTES_PER_TOKEN,
+                ctx_size_override: Some(131_072),
+                parallel_override: Some(4),
+            },
+        )
+        .expect("GLM-5.2 should fit while retaining Metal graph workspace");
+
+        assert_eq!(plan.context_length, 131_072);
+        assert_eq!(plan.slots, 4);
+        assert_eq!(
+            plan.stages
+                .iter()
+                .map(|stage| (stage.layer_start, stage.layer_end))
+                .collect::<Vec<_>>(),
+            vec![(0, 64), (64, 79)]
+        );
+    }
+
+    #[test]
     fn resource_planner_prefers_lower_tpot_stage_count_from_participant_rtt() {
         let participants = vec![
-            participant_with_rtt(1, 23_000_000_000, 10),
-            participant_with_rtt(2, 23_000_000_000, 10),
-            participant_with_rtt(3, 23_000_000_000, 10),
-            participant_with_rtt(4, 23_000_000_000, 10),
+            participant_with_rtt(1, 24_000_000_000, 10),
+            participant_with_rtt(2, 24_000_000_000, 10),
+            participant_with_rtt(3, 24_000_000_000, 10),
+            participant_with_rtt(4, 24_000_000_000, 10),
         ];
 
         let plan = plan_runtime_slice_topology_with_resources(

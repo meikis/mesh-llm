@@ -51,6 +51,8 @@ pub struct LayerPackageInfo {
     pub source_model_path: String,
     pub source_model_sha256: String,
     pub source_model_bytes: Option<u64>,
+    pub embedding_weight_bytes: u64,
+    pub output_weight_bytes: u64,
     pub layer_count: u32,
     pub activation_width: Option<u32>,
     pub generation: Option<PackageGenerationInfo>,
@@ -505,6 +507,16 @@ pub fn inspect_layer_package(package_ref: &str) -> Result<LayerPackageInfo> {
         Some(width) => Some(width),
         None => infer_activation_width_from_layers(&package_dir, &manifest.layers)?,
     };
+    let embedding_weight_bytes = manifest
+        .shared
+        .embeddings
+        .tensor_bytes
+        .max(manifest.shared.embeddings.artifact_bytes);
+    let output_weight_bytes = manifest
+        .shared
+        .output
+        .tensor_bytes
+        .max(manifest.shared.output.artifact_bytes);
 
     Ok(LayerPackageInfo {
         package_dir,
@@ -526,6 +538,8 @@ pub fn inspect_layer_package(package_ref: &str) -> Result<LayerPackageInfo> {
                     .ok()
             })
             .flatten(),
+        embedding_weight_bytes,
+        output_weight_bytes,
         layer_count: manifest.layer_count,
         activation_width,
         generation: manifest.generation.map(package_generation_info),
@@ -1490,6 +1504,8 @@ mod tests {
         assert_eq!(info.layer_count, 1);
         assert_eq!(info.activation_width, Some(4096));
         assert_eq!(info.source_model_bytes, Some(123));
+        assert_eq!(info.embedding_weight_bytes, 10);
+        assert_eq!(info.output_weight_bytes, 6);
         assert_eq!(info.projectors.len(), 1);
         assert_eq!(info.projectors[0].kind, "mmproj");
         assert_eq!(

@@ -1,7 +1,7 @@
-From 8875e2ff2c0e697c8dc78783d803468e6de043b9 Mon Sep 17 00:00:00 2001
+From ef816c1d128d0c05f4642ae95b0c40fe2d6c45dc Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Fri, 3 Jul 2026 15:03:17 -0400
-Subject: [PATCH 14/14] Add non-frame native MTP decode ABI
+Subject: [PATCH 14/16] Add non-frame native MTP decode ABI
 
 ---
  include/skippy.h        |  9 +++++++++
@@ -92,5 +92,5 @@ index db17f7d2..5f5596ce 100644
          struct skippy_session * const * sessions,
          const llama_token * token_ids,
 -- 
-2.54.0 (Apple Git-157)
+2.50.1 (Apple Git-155)
 

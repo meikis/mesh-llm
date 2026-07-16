@@ -473,7 +473,7 @@ test-all:
     echo ""
     echo "=== 9/10 UI and website production builds ==="
     (cd "{{ ui_dir }}" && pnpm run build)
-    (cd "{{ website_dir }}" && npm run build)
+    (cd "{{ website_dir }}" && npm ci && npm run build)
     echo ""
     echo "=== 10/10 E2E smoke tests (Playwright) ==="
     if curl -sf http://127.0.0.1:3131/api/status >/dev/null 2>&1; then

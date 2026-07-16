@@ -1,7 +1,7 @@
-From c8215d3d3b513aa2b575b40cd47ac7877abdc1dd Mon Sep 17 00:00:00 2001
+From 783347d7d18796cc64478bfd0b47500d7d44760d Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Fri, 26 Jun 2026 13:47:52 +1000
-Subject: [PATCH 05/14] Add resident prefix cache and session refinements
+Subject: [PATCH 05/16] Add resident prefix cache and session refinements
 
 Squashes resident prefix cache support, exact-prefix state restoration, borrowed prefix sessions, lazy generation signals, single-token allocation avoidance, server-like thread defaults, prefix cache borrowing, lane preservation, and recurrent-state remapping.
 ---
@@ -1569,5 +1569,5 @@ index e4d08ee4..f078f0b9 100644
          struct skippy_session * session,
          uint64_t * out_token_count,
 -- 
-2.54.0 (Apple Git-157)
+2.50.1 (Apple Git-155)
 

@@ -2773,6 +2773,21 @@ fn prefill_transport_ewma_seeds_adaptive_ramp() {
 }
 
 #[test]
+fn persistent_lane_open_retries_transient_readiness_failure() {
+    let mut attempts = 0usize;
+    let opened = retry_persistent_lane_open(|| {
+        attempts += 1;
+        if attempts < PersistentStageLanePool::CONNECT_ATTEMPTS {
+            return Err(anyhow!("downstream stage is not ready"));
+        }
+        Ok(())
+    });
+
+    opened.unwrap();
+    assert_eq!(attempts, PersistentStageLanePool::CONNECT_ATTEMPTS);
+}
+
+#[test]
 fn model_matching_is_exact_for_mesh_style_ids() {
     ensure_requested_model(
         "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M",

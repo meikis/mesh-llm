@@ -297,34 +297,21 @@ pub(crate) fn open_prediction_return_stream(
     let endpoint = driver_stage_endpoint(config, topology)?;
     let return_addr = resolve_downstream_endpoint(endpoint)?;
     let source_ip = downstream_source_ip(config)?;
-    let attempts = 1;
-    let mut last_error = None;
-    for _ in 0..attempts {
-        match connect_downstream_socket(return_addr, source_ip, Duration::from_secs(2)) {
-            Ok(mut stream) => {
-                stream.set_nodelay(true).ok();
-                send_client_ready_hello_if_enabled(&mut stream)
-                    .context("send prediction return client ready hello")?;
-                recv_ready(&mut stream).context("prediction return sink did not become ready")?;
-                write_stage_message(
-                    &mut stream,
-                    &prediction_return_open_message(request_id, session_id),
-                    wire_dtype,
-                )
-                .context("open direct prediction return stream")?;
-                return Ok(stream);
-            }
-            Err(error) => {
-                last_error = Some(anyhow!(error));
-                std::thread::sleep(Duration::from_millis(500));
-            }
-        }
-    }
-    Err(last_error
-        .unwrap_or_else(|| anyhow!("timed out"))
-        .context(format!(
-            "connect direct prediction return sink at {endpoint}"
-        )))
+    retry_prediction_return_open(|| {
+        let mut stream = connect_downstream_socket(return_addr, source_ip, Duration::from_secs(2))
+            .with_context(|| format!("connect direct prediction return sink at {endpoint}"))?;
+        stream.set_nodelay(true).ok();
+        send_client_ready_hello_if_enabled(&mut stream)
+            .context("send prediction return client ready hello")?;
+        recv_ready(&mut stream).context("prediction return sink did not become ready")?;
+        write_stage_message(
+            &mut stream,
+            &prediction_return_open_message(request_id, session_id),
+            wire_dtype,
+        )
+        .context("open direct prediction return stream")?;
+        Ok(stream)
+    })
 }
 
 pub(crate) fn open_downstream_prediction_return_stream(
@@ -340,19 +327,39 @@ pub(crate) fn open_downstream_prediction_return_stream(
     let endpoint = strip_tcp_prefix(&downstream.endpoint);
     let return_addr = resolve_downstream_endpoint(endpoint)?;
     let source_ip = downstream_source_ip(config)?;
-    let mut stream = connect_downstream_socket(return_addr, source_ip, Duration::from_secs(2))
-        .with_context(|| format!("connect downstream prediction return sink at {endpoint}"))?;
-    stream.set_nodelay(true).ok();
-    send_client_ready_hello_if_enabled(&mut stream)
-        .context("send downstream prediction return client ready hello")?;
-    recv_ready(&mut stream).context("downstream prediction return sink did not become ready")?;
-    write_stage_message(
-        &mut stream,
-        &prediction_return_open_message(request_id, session_id),
-        wire_dtype,
-    )
-    .context("open downstream prediction return stream")?;
-    Ok(stream)
+    retry_prediction_return_open(|| {
+        let mut stream = connect_downstream_socket(return_addr, source_ip, Duration::from_secs(2))
+            .with_context(|| format!("connect downstream prediction return sink at {endpoint}"))?;
+        stream.set_nodelay(true).ok();
+        send_client_ready_hello_if_enabled(&mut stream)
+            .context("send downstream prediction return client ready hello")?;
+        recv_ready(&mut stream)
+            .context("downstream prediction return sink did not become ready")?;
+        write_stage_message(
+            &mut stream,
+            &prediction_return_open_message(request_id, session_id),
+            wire_dtype,
+        )
+        .context("open downstream prediction return stream")?;
+        Ok(stream)
+    })
+}
+
+const PREDICTION_RETURN_OPEN_ATTEMPTS: usize = 3;
+const PREDICTION_RETURN_OPEN_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+fn retry_prediction_return_open<T>(mut open: impl FnMut() -> Result<T>) -> Result<T> {
+    let mut last_error = None;
+    for attempt in 0..PREDICTION_RETURN_OPEN_ATTEMPTS {
+        match open() {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+        if attempt + 1 < PREDICTION_RETURN_OPEN_ATTEMPTS {
+            thread::sleep(PREDICTION_RETURN_OPEN_RETRY_DELAY);
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("prediction return open failed")))
 }
 
 pub(crate) fn send_direct_prediction_return(
@@ -492,6 +499,21 @@ mod tests {
             .unwrap()
             .expect("registered prediction return sink");
         assert_eq!(stream.peer_addr().unwrap(), client.local_addr().unwrap());
+    }
+
+    #[test]
+    fn prediction_return_open_retries_transient_failures() {
+        let mut attempts = 0usize;
+        let opened = retry_prediction_return_open(|| {
+            attempts += 1;
+            if attempts < PREDICTION_RETURN_OPEN_ATTEMPTS {
+                return Err(anyhow!("sink is not ready"));
+            }
+            Ok(())
+        });
+
+        opened.unwrap();
+        assert_eq!(attempts, PREDICTION_RETURN_OPEN_ATTEMPTS);
     }
 
     fn poll_test_reply(receiver: &PredictionReturnReceiver, expected: WireReplyKind) -> StageReply {

@@ -810,6 +810,7 @@ impl StageOpenAiBackend {
                     }
                 }
             }
+            let mut cached_ngram_proposer = CachedNgramProposer::from_env()?;
             let max_speculative_window = request.speculative_window.max(1);
             let mut adaptive_window = if request.adaptive_speculative_window {
                 max_speculative_window.min(4)
@@ -932,6 +933,7 @@ impl StageOpenAiBackend {
                                 native_mtp_tokens,
                                 native_mtp_remaining.saturating_sub(native_mtp_tokens.len()),
                             ),
+                            cached_ngram_proposer.as_mut(),
                         )?;
                     if let Some(parallel_verify_width) = proposal.parallel_verify_width(
                         adaptive_verify_window.width(proposal.tokens().len()),
@@ -972,6 +974,7 @@ impl StageOpenAiBackend {
                         &mut verify_window_scheduler,
                         pending_native_mtp_draft,
                         &mut composite_proposal_buffer,
+                        &mut cached_ngram_proposer,
                         &mut adaptive_verify_window,
                         &mut current,
                         decode_step,
@@ -1353,6 +1356,18 @@ impl StageOpenAiBackend {
                             .map_err(openai_backend_error)?;
                         if !draft_tokens.is_empty() {
                             proposal_source = "draft-model";
+                        }
+                    }
+                    if let (true, Some(cache)) =
+                        (draft_tokens.is_empty(), cached_ngram_proposer.as_mut())
+                    {
+                        draft_tokens = cache.propose(
+                            &context_tokens,
+                            &[],
+                            proposal_limit.min(request.ngram_max),
+                        )?;
+                        if !draft_tokens.is_empty() {
+                            proposal_source = "ngram-cache";
                         }
                     }
                     if draft_tokens.is_empty() && request.ngram_max > 0 {

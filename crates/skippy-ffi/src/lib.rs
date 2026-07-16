@@ -1,10 +1,11 @@
 pub const ABI_VERSION_MAJOR: u32 = 0;
 pub const ABI_VERSION_MINOR: u32 = 1;
-pub const ABI_VERSION_PATCH: u32 = 31;
+pub const ABI_VERSION_PATCH: u32 = 32;
 pub const FEATURE_BACKEND_DEVICES: u64 = 1 << 23;
 pub const FEATURE_RUNTIME_EVENTS: u64 = 1 << 24;
 pub const FEATURE_NATIVE_MTP_N1: u64 = 1 << 25;
 pub const FEATURE_NGRAM_SIMPLE_DRAFT: u64 = 1 << 26;
+pub const FEATURE_NGRAM_CACHE_DRAFT: u64 = 1 << 27;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +238,11 @@ pub struct BackendDevice {
 
 #[repr(C)]
 pub struct Model {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct NgramCache {
     _private: [u8; 0],
 }
 
@@ -793,6 +799,11 @@ mod dynamic {
         llama_model_quantize(fname_inp: *const c_char, fname_out: *const c_char, params: *const LlamaModelQuantizeParams) -> u32;
         skippy_error_free(error: *mut Error);
         skippy_ngram_simple_draft(token_ids: *const i32, token_count: usize, sampled_token: i32, ngram_size: u16, max_draft_tokens: u16, output_tokens: *mut i32, output_token_capacity: usize, out_token_count: *mut usize, out_error: *mut *mut Error) -> Status;
+        skippy_ngram_cache_create(ngram_min: u16, ngram_max: u16, out_cache: *mut *mut NgramCache, out_error: *mut *mut Error) -> Status;
+        skippy_ngram_cache_free(cache: *mut NgramCache);
+        skippy_ngram_cache_reset(cache: *mut NgramCache, token_ids: *const i32, token_count: usize, out_error: *mut *mut Error) -> Status;
+        skippy_ngram_cache_append(cache: *mut NgramCache, token_ids: *const i32, token_count: usize, out_error: *mut *mut Error) -> Status;
+        skippy_ngram_cache_draft(cache: *mut NgramCache, continuation_prefix: *const i32, continuation_prefix_count: usize, max_draft_tokens: u16, output_tokens: *mut i32, output_token_capacity: usize, out_token_count: *mut usize, out_error: *mut *mut Error) -> Status;
         skippy_backend_device_count(out_count: *mut usize, out_error: *mut *mut Error) -> Status;
         skippy_backend_device_at(index: usize, out_device: *mut BackendDevice, out_error: *mut *mut Error) -> Status;
         skippy_model_open(path: *const c_char, config: *const RuntimeConfig, out_model: *mut *mut Model, out_error: *mut *mut Error) -> Status;
@@ -1182,6 +1193,40 @@ unsafe extern "C" {
         token_count: usize,
         sampled_token: i32,
         ngram_size: u16,
+        max_draft_tokens: u16,
+        output_tokens: *mut i32,
+        output_token_capacity: usize,
+        out_token_count: *mut usize,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_ngram_cache_create(
+        ngram_min: u16,
+        ngram_max: u16,
+        out_cache: *mut *mut NgramCache,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_ngram_cache_free(cache: *mut NgramCache);
+
+    pub fn skippy_ngram_cache_reset(
+        cache: *mut NgramCache,
+        token_ids: *const i32,
+        token_count: usize,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_ngram_cache_append(
+        cache: *mut NgramCache,
+        token_ids: *const i32,
+        token_count: usize,
+        out_error: *mut *mut Error,
+    ) -> Status;
+
+    pub fn skippy_ngram_cache_draft(
+        cache: *mut NgramCache,
+        continuation_prefix: *const i32,
+        continuation_prefix_count: usize,
         max_draft_tokens: u16,
         output_tokens: *mut i32,
         output_token_capacity: usize,

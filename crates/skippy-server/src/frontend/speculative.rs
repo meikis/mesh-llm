@@ -1,5 +1,8 @@
 use super::*;
 
+const NGRAM_CACHE_DEFAULT_MIN_NGRAM: usize = 2;
+const NGRAM_CACHE_DEFAULT_MAX_NGRAM: usize = 4;
+
 #[derive(Clone, Default)]
 pub(super) struct OpenAiSpeculativeStats {
     pub(super) windows: usize,
@@ -59,6 +62,83 @@ pub(super) fn propose_ngram_tokens(
 ) -> OpenAiResult<Vec<i32>> {
     skippy_runtime::ngram_simple_draft(history, min_match_tokens, max_proposed_tokens)
         .map_err(openai_backend_error)
+}
+
+/// Request-local, cache-based N-gram proposer. It mirrors only committed
+/// history into native state; speculative candidates remain read-only inputs.
+pub(super) struct CachedNgramProposer {
+    cache: skippy_runtime::NgramCache,
+    committed_history: Vec<i32>,
+}
+
+impl CachedNgramProposer {
+    pub(super) fn from_env() -> OpenAiResult<Option<Self>> {
+        if !env_flag("SKIPPY_NGRAM_CACHE_ENABLED") {
+            return Ok(None);
+        }
+        Self::new(
+            env_usize(
+                "SKIPPY_NGRAM_CACHE_MIN_NGRAM",
+                NGRAM_CACHE_DEFAULT_MIN_NGRAM,
+            ),
+            env_usize(
+                "SKIPPY_NGRAM_CACHE_MAX_NGRAM",
+                NGRAM_CACHE_DEFAULT_MAX_NGRAM,
+            ),
+        )
+        .map(Some)
+    }
+
+    pub(super) fn new(ngram_min: usize, ngram_max: usize) -> OpenAiResult<Self> {
+        let cache =
+            skippy_runtime::NgramCache::new(ngram_min, ngram_max).map_err(openai_backend_error)?;
+        Ok(Self {
+            cache,
+            committed_history: Vec::new(),
+        })
+    }
+
+    pub(super) fn propose(
+        &mut self,
+        committed_history: &[i32],
+        continuation_prefix: &[i32],
+        max_proposed_tokens: usize,
+    ) -> OpenAiResult<Vec<i32>> {
+        self.sync(committed_history)?;
+        self.cache
+            .draft_after(continuation_prefix, max_proposed_tokens)
+            .map_err(openai_backend_error)
+    }
+
+    fn sync(&mut self, committed_history: &[i32]) -> OpenAiResult<()> {
+        if committed_history.starts_with(&self.committed_history) {
+            let appended = &committed_history[self.committed_history.len()..];
+            self.cache.append(appended).map_err(openai_backend_error)?;
+        } else {
+            self.cache
+                .reset(committed_history)
+                .map_err(openai_backend_error)?;
+        }
+        self.committed_history.clear();
+        self.committed_history.extend_from_slice(committed_history);
+        Ok(())
+    }
+}
+
+fn env_flag(key: &str) -> bool {
+    std::env::var(key).ok().as_deref().is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+fn env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(default)
 }
 
 impl OpenAiSpeculativeStats {
@@ -349,6 +429,19 @@ mod ngram_tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn cache_proposer_syncs_only_the_committed_prefix() {
+        let mut proposer = CachedNgramProposer::new(2, 2).unwrap();
+        let history = [1, 2, 3, 1, 2, 3, 1, 2];
+
+        assert_eq!(proposer.propose(&history, &[], 2).unwrap(), vec![3, 1]);
+        assert_eq!(
+            proposer.propose(&history, &[9], 2).unwrap(),
+            Vec::<i32>::new()
+        );
+        assert_eq!(proposer.propose(&history, &[], 2).unwrap(), vec![3, 1]);
     }
 }
 

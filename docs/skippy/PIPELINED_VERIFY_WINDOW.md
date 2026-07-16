@@ -17,7 +17,7 @@ OpenAI-compatible API retain their normal compatibility guarantees.
 |---|---|
 | Target | The full staged model, authoritative for every emitted token. |
 | Native MTP | Model-provided typed draft attached to a target reply. GLM 4.7 Flash currently supplies a narrow `N+1` candidate. |
-| N-gram sidecar | llama.cpp's upstream `ngram-simple` lookup over already accepted tokens. |
+| N-gram sidecar | An upstream llama.cpp `ngram-simple` lookup or request-local `ngram-cache` proposer over target-committed tokens. |
 | Composite proposal | Native-MTP prefix plus an optional N-gram suffix. |
 | VerifyWindow | Versioned target request that verifies a candidate span at one session position. |
 | Free target token | Target's next token after a fully verified span. |
@@ -65,10 +65,11 @@ that sink is unavailable.
 
 ## Composite Proposals
 
-The sidecar extends native MTP; it never replaces it. Skippy calls llama.cpp's
-upstream `ngram-simple` proposer rather than maintaining a second Rust history
-scanner. With an MTP prefix, its historical continuation must begin with every
-MTP prefix token. Only the remaining continuation is appended as the sidecar
+The sidecar extends native MTP; it never replaces it. Skippy uses upstream
+llama.cpp proposers rather than a second Rust history scanner. `ngram-simple`
+requires a historical continuation to begin with every MTP token before its
+remaining tokens can become the sidecar tail. The request-local `ngram-cache`
+instead reads directly after the provisional MTP prefix and returns only the
 tail.
 
 ```mermaid
@@ -89,6 +90,11 @@ For MTP `[a, b]`, a valid historical continuation must start `[a, b, ...]`.
 The composite proposal becomes `[a, b, c, d]`, not two independent requests.
 A one-token N-gram tail is discarded. A rejected tail does not count as an MTP
 prefix rejection; it only backs off the sidecar.
+
+The cache is never shared between requests and is updated only after target
+tokens commit. Drafting with `[a, b]` is read-only, so a rejected VerifyWindow
+cannot affect a later lookup. This permits a cache tail to follow MTP even when
+the cache would not independently predict `[a, b]`.
 
 ## Adaptive Sidecar Policy
 
@@ -193,11 +199,14 @@ SKIPPY_VERIFY_WINDOW_PIPELINE_DEPTH=1 \
 mesh-llm serve meshllm/GLM-4.7-Flash-MTP-GGUF:Q4_K_M --split --no-draft
 ```
 
-### MTP With Anchored N-gram Extension
+### MTP With Cache-backed N-gram Extension
 
 ```bash
 SKIPPY_NATIVE_MTP_ENABLED=1 \
 SKIPPY_NATIVE_MTP_NGRAM_HYBRID=1 \
+SKIPPY_NGRAM_CACHE_ENABLED=1 \
+SKIPPY_NGRAM_CACHE_MIN_NGRAM=2 \
+SKIPPY_NGRAM_CACHE_MAX_NGRAM=4 \
 SKIPPY_NATIVE_MTP_NGRAM_SIZE=4 \
 SKIPPY_NATIVE_MTP_NGRAM_MAX_PROPOSAL_TOKENS=4 \
 SKIPPY_NATIVE_MTP_NGRAM_TAIL_BACKOFF_PROPOSALS=6 \

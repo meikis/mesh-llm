@@ -4,11 +4,11 @@ use openai_frontend::{OpenAiError, OpenAiResult};
 use skippy_protocol::binary::{StageNativeMtpDraft, WireReplyKind};
 
 use super::super::{
-    AdaptiveVerifyWindow, BufferedCompositeProposal, CompositeProposalProvider,
-    EmbeddedSessionControl, EmbeddedStageZeroGeneration, NativeMtpDecodeCounters,
-    NativeMtpDecodeOptions, NativeMtpDraft, NativeMtpDraftOrigin, NativeMtpTrimAction,
-    NativeMtpVerifier, NgramSidecarController, PendingNativeMtpDraft, PhaseTimer,
-    StageOpenAiBackend, TokenControl, VerifyWindowMessageArgs, VerifyWindowScheduler,
+    AdaptiveVerifyWindow, BufferedCompositeProposal, CachedNgramProposer,
+    CompositeProposalProvider, EmbeddedSessionControl, EmbeddedStageZeroGeneration,
+    NativeMtpDecodeCounters, NativeMtpDecodeOptions, NativeMtpDraft, NativeMtpDraftOrigin,
+    NativeMtpTrimAction, NativeMtpVerifier, NgramSidecarController, PendingNativeMtpDraft,
+    PhaseTimer, StageOpenAiBackend, TokenControl, VerifyWindowMessageArgs, VerifyWindowScheduler,
     WireSamplingConfig, classify_native_mtp_verify_window, embedded_verify_window_message,
     ms_to_us, native_mtp_trim_action, token_is_eog_with_runtime,
 };
@@ -38,6 +38,7 @@ impl StageOpenAiBackend {
         verify_window_scheduler: &mut VerifyWindowScheduler,
         pending_native_mtp_draft: Option<PendingNativeMtpDraft>,
         proposal_buffer: &mut Option<BufferedCompositeProposal>,
+        cached_ngram_proposer: &mut Option<CachedNgramProposer>,
         adaptive_verify_window: &mut AdaptiveVerifyWindow,
         current: &mut i32,
         decode_step: u32,
@@ -96,6 +97,7 @@ impl StageOpenAiBackend {
                         native_mtp_tokens,
                         native_mtp_remaining.saturating_sub(native_mtp_tokens.len() + 1),
                     ),
+                    cached_ngram_proposer.as_mut(),
                 )?;
             if proposal.tokens().is_empty() {
                 return Ok(NativeMtpVerifyWindowControl::NoProposal);

@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use openai_frontend::{OpenAiError, OpenAiResult};
 
 use super::NativeMtpDecodeOptions;
-use crate::frontend::speculative::propose_ngram_tokens;
+use crate::frontend::speculative::{CachedNgramProposer, propose_ngram_tokens};
 
 const MIN_NGRAM_EXTENSION_TOKENS: usize = 2;
 
@@ -40,6 +40,7 @@ impl CompositeProposalProvider {
             context_tokens,
             max_proposal_tokens,
             max_proposal_tokens,
+            None,
         )
         .expect("llama.cpp N-gram proposal succeeds")
     }
@@ -50,6 +51,7 @@ impl CompositeProposalProvider {
         context_tokens: &[i32],
         max_proposal_tokens: usize,
         max_ngram_extension_tokens: usize,
+        cached_ngram_proposer: Option<&mut CachedNgramProposer>,
     ) -> OpenAiResult<NativeMtpHybridProposal> {
         let max_proposal_tokens = max_proposal_tokens.min(self.max_proposal_tokens);
         let native_mtp_tokens =
@@ -63,31 +65,47 @@ impl CompositeProposalProvider {
         let ngram_limit = max_proposal_tokens
             .saturating_sub(native_mtp_tokens.len())
             .min(max_ngram_extension_tokens);
-        let ngram_tokens = if native_mtp_tokens.is_empty() {
-            propose_ngram_tokens(context_tokens, self.ngram_size, ngram_limit)?
+        let (
+            ngram_tokens,
+            ngram_span_available,
+            ngram_mtp_prefix_agreed,
+            ngram_mtp_prefix_disagreed,
+        ) = if let Some(cache) = cached_ngram_proposer {
+            // The cache sees only committed target history. Native MTP is
+            // an optional read-only continuation, so this returns the
+            // sidecar tail directly rather than trying to re-predict it.
+            let tail = cache.propose(context_tokens, native_mtp_tokens, ngram_limit)?;
+            let available = !tail.is_empty();
+            (tail, available, false, false)
         } else {
-            // Preserve the #875 anchor rule for native MTP: the most recent
-            // earlier occurrence of the configured context N-gram supplies a
-            // complete span. Its leading tokens must agree with MTP, and only
-            // its remaining tokens become the sidecar tail below.
-            propose_ngram_tokens(
-                context_tokens,
-                self.ngram_size,
-                native_mtp_tokens.len().saturating_add(ngram_limit),
-            )?
-        };
-        let ngram_span_available = ngram_tokens.len() > native_mtp_tokens.len();
-        let ngram_mtp_prefix_agreed = !native_mtp_tokens.is_empty()
-            && ngram_tokens.starts_with(native_mtp_tokens)
-            && ngram_span_available;
-        let ngram_mtp_prefix_disagreed =
-            !native_mtp_tokens.is_empty() && ngram_span_available && !ngram_mtp_prefix_agreed;
-        let ngram_tokens = if native_mtp_tokens.is_empty() {
-            ngram_tokens
-        } else if ngram_mtp_prefix_agreed {
-            ngram_tokens[native_mtp_tokens.len()..].to_vec()
-        } else {
-            Vec::new()
+            let candidates = if native_mtp_tokens.is_empty() {
+                propose_ngram_tokens(context_tokens, self.ngram_size, ngram_limit)?
+            } else {
+                // Preserve the #875 anchor rule for native MTP: the most
+                // recent earlier occurrence of the configured context
+                // N-gram supplies a complete span. Its leading tokens
+                // must agree with MTP before its remaining tokens may
+                // become the sidecar tail below.
+                propose_ngram_tokens(
+                    context_tokens,
+                    self.ngram_size,
+                    native_mtp_tokens.len().saturating_add(ngram_limit),
+                )?
+            };
+            if native_mtp_tokens.is_empty() {
+                let available = !candidates.is_empty();
+                (candidates, available, false, false)
+            } else {
+                let available = candidates.len() > native_mtp_tokens.len();
+                let agreed = available && candidates.starts_with(native_mtp_tokens);
+                let disagreed = available && !agreed;
+                let tail = if agreed {
+                    candidates[native_mtp_tokens.len()..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                (tail, available, agreed, disagreed)
+            }
         };
         let ngram_tokens = if ngram_tokens.len() >= MIN_NGRAM_EXTENSION_TOKENS {
             ngram_tokens
@@ -493,6 +511,24 @@ mod tests {
     }
 
     #[test]
+    fn cache_extends_native_mtp_without_requiring_a_matching_prefix() {
+        let provider = CompositeProposalProvider::from_options(options());
+        let mut cache = CachedNgramProposer::new(2, 2).unwrap();
+        let context = [1, 9, 7, 1, 9, 7, 1];
+
+        let proposal = provider
+            .propose_with_ngram_extension(&[9], &context, 3, 2, Some(&mut cache))
+            .unwrap();
+
+        assert_eq!(proposal.tokens(), &[9, 7, 1]);
+        assert_eq!(proposal.native_mtp_token_count(), 1);
+        assert_eq!(proposal.ngram_token_count(), 2);
+        assert!(proposal.ngram_span_available());
+        assert!(!proposal.ngram_mtp_prefix_agreed());
+        assert!(!proposal.ngram_mtp_prefix_disagreed());
+    }
+
+    #[test]
     fn uses_a_single_prior_fixed_ngram_anchor_for_native_mtp() {
         let provider = CompositeProposalProvider::from_options(options());
         let proposal = provider.propose(&[9], &context_with_upstream_span(), 4);
@@ -554,6 +590,7 @@ mod tests {
                 &context_with_upstream_span(),
                 4,
                 controller.extension_limit(&[9], 3),
+                None,
             )
             .unwrap();
         let pure_ngram = provider
@@ -562,6 +599,7 @@ mod tests {
                 &context_with_upstream_span(),
                 4,
                 controller.extension_limit(&[], 4),
+                None,
             )
             .unwrap();
 

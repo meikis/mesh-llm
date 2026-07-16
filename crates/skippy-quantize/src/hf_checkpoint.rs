@@ -304,6 +304,36 @@ pub(crate) fn open_safetensor_files(source: &Path) -> Result<Vec<SafetensorFile>
         .collect()
 }
 
+pub(crate) fn checkpoint_vocab_tensor_rows(source: &Path) -> Result<Option<usize>> {
+    let mut vocab_rows = None;
+    for safetensor in open_safetensor_files(source)? {
+        for tensor in safetensor.tensors().values() {
+            if !matches!(
+                tensor.name(),
+                "model.embed_tokens.weight" | "embed_tokens.weight" | "lm_head.weight"
+            ) {
+                continue;
+            }
+            if tensor.shape().len() != 2 {
+                continue;
+            }
+            let rows = usize::try_from(tensor.shape()[0]).with_context(|| {
+                format!("vocabulary rows do not fit usize for {}", tensor.name())
+            })?;
+            if let Some(previous) = vocab_rows {
+                ensure!(
+                    previous == rows,
+                    "vocabulary tensors disagree on row count: expected {previous}, {} has {rows}",
+                    tensor.name()
+                );
+            } else {
+                vocab_rows = Some(rows);
+            }
+        }
+    }
+    Ok(vocab_rows)
+}
+
 pub(crate) fn resolve_auto_output_type(
     source: &Path,
     requested: ConvertOutputType,
@@ -633,6 +663,23 @@ mod tests {
         assert_eq!(tensor.byte_len(), 3);
         assert_eq!(copied, 3);
         assert_eq!(output, vec![9, 8, 7]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn detects_physical_vocabulary_rows_from_checkpoint_tensors() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).unwrap();
+        let tensor_bytes = vec![0_u8; 32];
+        write_safetensor(
+            &root.join("model.safetensors"),
+            &[
+                ("model.embed_tokens.weight", "BF16", &[8, 2], &tensor_bytes),
+                ("lm_head.weight", "BF16", &[8, 2], &tensor_bytes),
+            ],
+        );
+
+        assert_eq!(checkpoint_vocab_tensor_rows(&root).unwrap(), Some(8));
         fs::remove_dir_all(root).unwrap();
     }
 

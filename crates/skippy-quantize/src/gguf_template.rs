@@ -5,6 +5,7 @@ use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 
 use crate::gguf_writer::GgufKv;
+use crate::hf_checkpoint::checkpoint_vocab_tensor_rows;
 use crate::tokenizer_metadata::push_tokenizer_metadata;
 
 #[derive(Debug, Clone, Copy)]
@@ -52,7 +53,12 @@ pub(crate) fn metadata_from_hf_config_with_options(
     push_attention_metadata(&mut metadata, arch, &config)?;
     push_glm_dsa_indexer_metadata(&mut metadata, arch, &config)?;
     push_moe_metadata(&mut metadata, arch, &config);
-    push_tokenizer_metadata(&mut metadata, source, &config)?;
+    push_tokenizer_metadata(
+        &mut metadata,
+        source,
+        &config,
+        checkpoint_vocab_tensor_rows(source)?,
+    )?;
     if options.include_mtp {
         push_if_u32(
             &mut metadata,
@@ -398,9 +404,68 @@ fn model_name(source: &Path) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
+    use std::io::Write;
     use std::path::PathBuf;
 
     use super::*;
+
+    #[test]
+    fn pads_tokenizer_metadata_to_checkpoint_vocabulary_rows() {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("config.json"),
+            r#"{
+              "model_type": "qwen3",
+              "vocab_size": 8,
+              "max_position_embeddings": 128,
+              "hidden_size": 2,
+              "intermediate_size": 4,
+              "num_hidden_layers": 1,
+              "num_attention_heads": 1,
+              "num_key_value_heads": 1,
+              "head_dim": 2
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("tokenizer.json"),
+            r#"{
+              "model": {
+                "type": "BPE",
+                "vocab": {"a": 0, "b": 1, "c": 2, "d": 3, "e": 4, "f": 5},
+                "merges": []
+              },
+              "decoder": {"type": "ByteLevel"}
+            }"#,
+        )
+        .unwrap();
+        write_vocab_safetensor(&root.join("model.safetensors"), 8, 2);
+
+        let metadata = metadata_from_hf_config(&root, 2).unwrap();
+        let tokens = metadata
+            .iter()
+            .find_map(|kv| match kv {
+                GgufKv::ArrayString { key, value } if key == "tokenizer.ggml.tokens" => Some(value),
+                _ => None,
+            })
+            .unwrap();
+        let token_types = metadata
+            .iter()
+            .find_map(|kv| match kv {
+                GgufKv::ArrayI32 { key, value } if key == "tokenizer.ggml.token_type" => {
+                    Some(value)
+                }
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(tokens.len(), 8);
+        assert_eq!(&tokens[6..], ["[PAD6]", "[PAD7]"]);
+        assert_eq!(&token_types[6..], [5, 5]);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn builds_glm_moe_lite_metadata_from_config() {
@@ -705,5 +770,23 @@ mod tests {
             .as_nanos();
         let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         std::env::temp_dir().join(format!("skippy-gguf-template-{nanos}-{id}"))
+    }
+
+    fn write_vocab_safetensor(path: &Path, vocab_rows: u64, embedding_width: u64) {
+        let byte_len = vocab_rows * embedding_width * 2;
+        let header = serde_json::json!({
+            "model.embed_tokens.weight": {
+                "dtype": "BF16",
+                "shape": [vocab_rows, embedding_width],
+                "data_offsets": [0, byte_len]
+            }
+        })
+        .to_string();
+        let mut file = File::create(path).unwrap();
+        file.write_all(&(header.len() as u64).to_le_bytes())
+            .unwrap();
+        file.write_all(header.as_bytes()).unwrap();
+        file.write_all(&vec![0; usize::try_from(byte_len).unwrap()])
+            .unwrap();
     }
 }

@@ -9,11 +9,13 @@ use crate::gguf_writer::GgufKv;
 
 const TOKEN_TYPE_NORMAL: i32 = 1;
 const TOKEN_TYPE_CONTROL: i32 = 3;
+const TOKEN_TYPE_UNUSED: i32 = 5;
 
 pub(crate) fn push_tokenizer_metadata(
     metadata: &mut Vec<GgufKv>,
     source: &Path,
     config: &Value,
+    physical_vocab_size: Option<usize>,
 ) -> Result<()> {
     let tokenizer_path = source.join("tokenizer.json");
     if !tokenizer_path.exists() {
@@ -24,7 +26,7 @@ pub(crate) fn push_tokenizer_metadata(
     )
     .with_context(|| format!("parse {}", tokenizer_path.display()))?;
     let tokenizer_config = read_optional_json(&source.join("tokenizer_config.json"))?;
-    let vocab = read_byte_level_bpe(&tokenizer, config)?;
+    let vocab = read_byte_level_bpe(&tokenizer, config, physical_vocab_size)?;
 
     metadata.push(GgufKv::string("tokenizer.ggml.model", "gpt2"));
     metadata.push(GgufKv::string("tokenizer.ggml.pre", tokenizer_pre(config)?));
@@ -64,7 +66,11 @@ struct BpeVocabMetadata {
     added_tokens: BTreeMap<String, u32>,
 }
 
-fn read_byte_level_bpe(tokenizer: &Value, _config: &Value) -> Result<BpeVocabMetadata> {
+fn read_byte_level_bpe(
+    tokenizer: &Value,
+    config: &Value,
+    physical_vocab_size: Option<usize>,
+) -> Result<BpeVocabMetadata> {
     let model = tokenizer
         .get("model")
         .and_then(Value::as_object)
@@ -86,10 +92,26 @@ fn read_byte_level_bpe(tokenizer: &Value, _config: &Value) -> Result<BpeVocabMet
         .and_then(Value::as_object)
         .context("tokenizer.json model missing object field vocab")?;
     let added_tokens = collect_added_tokens(tokenizer);
-    let vocab_size = tokenizer_vocab_size(raw_vocab, &added_tokens)?;
+    let tokenizer_vocab_size = tokenizer_vocab_size(raw_vocab, &added_tokens)?;
+    let configured_vocab_size = configured_vocab_size(config)?;
+    let vocab_size = physical_vocab_size.unwrap_or(tokenizer_vocab_size);
+    ensure!(
+        vocab_size >= tokenizer_vocab_size,
+        "physical vocabulary size {vocab_size} is smaller than tokenizer size {tokenizer_vocab_size}"
+    );
+    if let Some(configured_vocab_size) = configured_vocab_size {
+        ensure!(
+            vocab_size <= configured_vocab_size,
+            "physical vocabulary size {vocab_size} exceeds configured vocab_size {configured_vocab_size}"
+        );
+    }
     let mut tokens = vec![String::new(); vocab_size];
     let mut token_types = vec![TOKEN_TYPE_NORMAL; vocab_size];
     let mut scores = vec![0.0_f32; vocab_size];
+    for index in tokenizer_vocab_size..vocab_size {
+        tokens[index] = format!("[PAD{index}]");
+        token_types[index] = TOKEN_TYPE_UNUSED;
+    }
     for (token, id) in raw_vocab {
         let id = u32_value(id).with_context(|| format!("invalid vocab id for token {token:?}"))?;
         let index = usize::try_from(id).context("vocab id does not fit usize")?;
@@ -115,7 +137,9 @@ fn read_byte_level_bpe(tokenizer: &Value, _config: &Value) -> Result<BpeVocabMet
         }
     }
 
-    let missing = tokens.iter().position(String::is_empty);
+    let missing = tokens[..tokenizer_vocab_size]
+        .iter()
+        .position(String::is_empty);
     ensure!(
         missing.is_none(),
         "tokenizer vocab has a gap at token id {}",
@@ -131,6 +155,20 @@ fn read_byte_level_bpe(tokenizer: &Value, _config: &Value) -> Result<BpeVocabMet
             .map(|token| (token.content, token.id))
             .collect(),
     })
+}
+
+fn configured_vocab_size(config: &Value) -> Result<Option<usize>> {
+    let value = config.get("vocab_size").or_else(|| {
+        config
+            .get("text_config")
+            .and_then(|text_config| text_config.get("vocab_size"))
+    });
+    value
+        .map(|value| {
+            let size = u32_value(value).context("config vocab_size is not a u32")?;
+            usize::try_from(size).context("config vocab_size does not fit usize")
+        })
+        .transpose()
 }
 
 #[derive(Debug)]
@@ -389,11 +427,28 @@ mod tests {
         )
         .unwrap();
         let config: Value =
-            serde_json::from_str(r#"{"model_type":"glm4_moe_lite","vocab_size":6}"#).unwrap();
+            serde_json::from_str(r#"{"model_type":"glm4_moe_lite","vocab_size":8}"#).unwrap();
         let mut metadata = Vec::new();
 
-        push_tokenizer_metadata(&mut metadata, &root, &config).unwrap();
+        push_tokenizer_metadata(&mut metadata, &root, &config, Some(8)).unwrap();
         let text = format!("{metadata:?}");
+
+        let tokens = metadata
+            .iter()
+            .find_map(|kv| match kv {
+                GgufKv::ArrayString { key, value } if key == "tokenizer.ggml.tokens" => Some(value),
+                _ => None,
+            })
+            .unwrap();
+        let token_types = metadata
+            .iter()
+            .find_map(|kv| match kv {
+                GgufKv::ArrayI32 { key, value } if key == "tokenizer.ggml.token_type" => {
+                    Some(value)
+                }
+                _ => None,
+            })
+            .unwrap();
 
         assert!(text.contains("tokenizer.ggml.tokens"));
         assert!(text.contains("tokenizer.ggml.pre"));
@@ -402,6 +457,9 @@ mod tests {
         assert!(text.contains("tokenizer.ggml.eot_token_id"));
         assert!(text.contains("tokenizer.ggml.eom_token_id"));
         assert!(text.contains("tokenizer.ggml.merges"));
+        assert_eq!(tokens.len(), 8);
+        assert_eq!(&tokens[6..], ["[PAD6]", "[PAD7]"]);
+        assert_eq!(&token_types[6..], [TOKEN_TYPE_UNUSED, TOKEN_TYPE_UNUSED]);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -434,7 +492,7 @@ mod tests {
             serde_json::from_str(r#"{"model_type":"qwen3","vocab_size":4}"#).unwrap();
         let mut metadata = Vec::new();
 
-        push_tokenizer_metadata(&mut metadata, &root, &config).unwrap();
+        push_tokenizer_metadata(&mut metadata, &root, &config, None).unwrap();
         let text = format!("{metadata:?}");
 
         assert!(text.contains("tokenizer.ggml.pre"));
@@ -464,7 +522,7 @@ mod tests {
         let config: Value =
             serde_json::from_str(r#"{"model_type":"qwen2","vocab_size":8}"#).unwrap();
 
-        let metadata = read_byte_level_bpe(&tokenizer, &config).unwrap();
+        let metadata = read_byte_level_bpe(&tokenizer, &config, None).unwrap();
 
         assert_eq!(metadata.tokens.len(), 3);
         assert_eq!(metadata.tokens[2], "<|endoftext|>");
@@ -498,7 +556,7 @@ mod tests {
             serde_json::from_str(r#"{"model_type":"llama","vocab_size":3}"#).unwrap();
         let mut metadata = Vec::new();
 
-        push_tokenizer_metadata(&mut metadata, &root, &config).unwrap();
+        push_tokenizer_metadata(&mut metadata, &root, &config, None).unwrap();
         let text = format!("{metadata:?}");
 
         assert!(text.contains("tokenizer.ggml.pre"));
@@ -515,7 +573,7 @@ mod tests {
         let config: Value = serde_json::from_str(r#"{"model_type":"qwen3"}"#).unwrap();
         let mut metadata = Vec::new();
 
-        push_tokenizer_metadata(&mut metadata, &root, &config).unwrap();
+        push_tokenizer_metadata(&mut metadata, &root, &config, None).unwrap();
         let error = ensure_native_tokenizer_metadata_supported(&root)
             .unwrap_err()
             .to_string();
@@ -532,7 +590,7 @@ mod tests {
         let config: Value = serde_json::from_str(r#"{"model_type":"llama"}"#).unwrap();
         let mut metadata = Vec::new();
 
-        push_tokenizer_metadata(&mut metadata, &root, &config).unwrap();
+        push_tokenizer_metadata(&mut metadata, &root, &config, None).unwrap();
         let error = ensure_native_tokenizer_metadata_supported(&root)
             .unwrap_err()
             .to_string();

@@ -1152,7 +1152,7 @@ impl PersistentStageLanePool {
             );
             send_client_ready_hello_if_enabled(&mut stream)
                 .context("send persistent downstream lane client ready hello")?;
-            recv_ready(&mut stream).context("persistent downstream lane did not become ready")?;
+            receive_persistent_lane_ready(&mut stream, Duration::from_secs(self.timeout_secs))?;
             eprintln!(
                 "openai downstream lane received ready: stage_id={} lane_id={lane_id} local={local_addr:?} peer={peer_addr:?}",
                 self.config.stage_id
@@ -1197,6 +1197,17 @@ fn retry_persistent_lane_open<T>(mut open: impl FnMut() -> Result<T>) -> Result<
         }
     }
     Err(last_error.unwrap_or_else(|| anyhow!("persistent downstream lane open failed")))
+}
+
+fn receive_persistent_lane_ready(stream: &mut TcpStream, timeout: Duration) -> Result<()> {
+    stream
+        .set_read_timeout(Some(timeout))
+        .context("set persistent downstream lane ready timeout")?;
+    let ready = recv_ready(&mut *stream).context("persistent downstream lane did not become ready");
+    stream
+        .set_read_timeout(None)
+        .context("restore persistent downstream lane read timeout")?;
+    ready
 }
 
 fn ewma(old: f64, sample: f64) -> f64 {

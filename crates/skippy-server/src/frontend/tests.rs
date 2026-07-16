@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use std::io::Cursor;
 use std::{
     env, fs,
-    net::SocketAddr,
+    net::{SocketAddr, TcpListener, TcpStream},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -2785,6 +2785,26 @@ fn persistent_lane_open_retries_transient_readiness_failure() {
 
     opened.unwrap();
     assert_eq!(attempts, PersistentStageLanePool::CONNECT_ATTEMPTS);
+}
+
+#[test]
+fn persistent_lane_ready_handshake_times_out_for_silent_downstream() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (_stream, _) = listener.accept().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+    });
+    let mut client = TcpStream::connect(address).unwrap();
+
+    let error = receive_persistent_lane_ready(&mut client, Duration::from_millis(25)).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("persistent downstream lane did not become ready")
+    );
+    server.join().unwrap();
 }
 
 #[test]

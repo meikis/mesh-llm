@@ -1,0 +1,691 @@
+# MLX as a Skippy Stage Engine — Deep Dive and Plan
+
+## Status: exploratory design proposal
+
+This document evaluates using Apple **MLX** (via the Rust `safemlx` / `safemlx-lm`
+crates) as an alternative inference engine behind Skippy's staged execution
+runtime, and proposes a phased plan.
+
+It combines a read of the current Skippy code (`skippy-ffi`, `skippy-runtime`,
+`skippy-server`, `skippy-topology`), a read of the `safemlx` fork
+(`../safemlx`), a read of goose's MLX backend (`../goose/crates/goose-local-inference`),
+and a second-opinion review from an external model grounded against live
+MLX/mlx-lm/safemlx documentation.
+
+---
+
+## 1. Bottom line
+
+MLX is a **credible second engine** for Skippy, and `safemlx-lm` is a
+surprisingly good fit because it implements each model in **pure Rust as an
+explicit `embed → layers[..] → norm → lm_head` loop with a per-layer KV cache**.
+That is exactly the seam Skippy needs for layer-range stage splitting, and it is
+Rust-facing rather than buried in C++.
+
+It is **not** a drop-in replacement for the patched llama.cpp C ABI. The engine
+boundary Skippy actually depends on is much larger than "generate tokens": it is
+a **staged execution contract** (activation frames in/out, KV page
+export/import, layer-range partial load, chunked prefill, single-token decode,
+batched verify, trim/checkpoint, tokenizer/chat helpers).
+
+**Two distinct reasons to adopt MLX — keep them separate:**
+
+1. **Workflow / artifact win (biggest near-term value):** MLX loads HF
+   **safetensors directly** and can **JIT-quantize on load**, so we can serve
+   any supported model at a chosen bit-width *immediately* — no waiting for a
+   published GGUF and no pre-run quant pipeline. This is mostly independent of
+   the hard split work and pays off first in **solo serving** (§5.3).
+2. **Apple-Silicon compute in a chain:** MLX runs straight to Metal and can add
+   Apple-Silicon nodes to a staged split — but this is the harder, later payoff,
+   gated on partial-load and boundary-fence behaviour.
+
+**Recommendation:** introduce a Rust `StageEngine` trait, keep the existing C ABI
+as the `LlamaStageEngine` adapter, and add an Apple-Silicon-gated
+`MlxStageEngine`. Do **not** extend the llama.cpp C ABI to host MLX, and do
+**not** invent a separate MLX network protocol. **Lead with solo MLX +
+JIT-quant serving** (immediate workflow win, minimal distributed work), then gate
+the split work behind two go/no-go spikes: **partial layer loading** and
+**per-token boundary fence latency**.
+
+---
+
+## 2. What the Skippy "engine" boundary actually is
+
+Skippy's engine is not a token generator; it is a staged runtime. The contract
+lives in `crates/skippy-ffi/src/lib.rs` (raw ABI) and is wrapped safely in
+`crates/skippy-runtime/src/lib.rs`. The essential surface a new engine must
+satisfy:
+
+**Stage-aware load** (`RuntimeConfig`, `skippy-runtime/src/lib.rs:840`):
+- `stage_index`, `layer_start`, `layer_end` — this stage owns a contiguous
+  layer range only.
+- `include_embeddings`, `include_output` — whether this stage owns the embedding
+  table and/or the final norm + lm_head.
+- `filter_tensors_on_load` — the intent that a stage should load **only** its
+  tensors, not the whole model.
+- backend device selection, KV cache dtype, ctx size, batch/ubatch, lanes.
+
+**Activation frame I/O** — the wire contract between stages
+(`ActivationFrame` / `ActivationDesc`, `skippy-runtime/src/lib.rs:1046` and
+`:1109`):
+
+```
+ActivationDesc {
+  version, dtype (F32|F16|BF16), layout (TokenMajor|Opaque),
+  producer_stage_index, layer_start, layer_end,
+  token_count, sequence_count, payload_bytes, flags
+}
+ActivationFrame { desc, payload: Vec<u8> }
+```
+
+- Stage 0 takes token IDs, runs its layers, emits an activation frame.
+- Middle stages import a frame, run their layers, emit a new frame.
+- Final stage runs last layers + readout, samples, returns the **predicted token
+  directly** to stage 0 (generation-3 protocol, see `skippy-server/README.md`).
+
+**Execution calls** (`skippy-runtime/src/lib.rs`):
+- `prefill_chunk_frame*` (`:2998`), `decode_step_frame_sampled*` (`:3236`),
+  `verify_tokens_frame*` (`:3557`), `copy_output_activation_frame` (`:3652`).
+- Sampled variants carry `SamplingConfig` (penalties, logit bias, grammar).
+
+**KV / state movement** (`skippy-runtime/src/lib.rs`):
+- `export_kv_page` / `import_kv_page` (`:3866`, `:3956`) with
+  `RuntimeKvPageDesc` (`:1114`) — k/v dtype, row bytes, token range, layer range.
+- `export_state` / `import_state` (`:3729`), full-state and recurrent-state
+  variants, `save_prefix` / `restore_prefix`, `trim_session`, checkpoint/restore.
+
+**Tokenizer / chat / introspection**:
+- tokenize/detokenize, EOG check, chat-template apply (incl. JSON tools path),
+  chat-response parse, model-info tensor enumeration, GGUF slice writing.
+
+**ABI is versioned and feature-probed** (`skippy-ffi/src/lib.rs:1`): ABI
+`0.1.30`, with a feature bitmask (`RUNTIME_SLICE`, `LAYER_PACKAGE`,
+`ACTIVATION_FRAME`, `BATCH_VERIFY_FRAME`, `SESSION_CHECKPOINT`,
+`NATIVE_MTP_N1`, …). This is the model for how MLX capabilities should be
+advertised: **probed, not assumed**.
+
+**Key structural gap:** there is **no Rust `trait`** abstracting this today.
+`skippy-server` binds the concrete `StageModel` / `StageSession` FFI structs
+directly (`crates/skippy-server/src/frontend.rs:46`, `runtime_state.rs:26`).
+Introducing that trait is the enabling refactor for any second engine.
+
+---
+
+## 3. What MLX / safemlx actually gives us (evidence)
+
+### 3.1 The layer-split seam already exists in `safemlx-lm`
+
+Every model in `../safemlx/safemlx-lm/src/models/*.rs` is a Rust module with the
+transformer decomposed into public fields and an explicit forward loop. From
+`qwen3.rs`:
+
+```rust
+pub struct Qwen3Model {
+    pub embed_tokens: MaybeQuantized<nn::Embedding>,
+    pub layers: Vec<TransformerBlock>,   // per-layer blocks
+    pub norm: nn::RmsNorm,
+}
+// forward:
+let mut h = self.embed_tokens.forward(inputs, stream)?;
+for (layer, c) in self.layers.iter_mut().zip(cache.iter_mut()) {
+    h = layer.forward(/* x=h, mask, cache=c */, stream)?;
+}
+self.norm.forward(&h, stream)   // then lm_head at the Model level
+```
+
+`pub embed_tokens` / `pub layers` / `pub norm` / `pub lm_head` are exposed across
+`qwen3`, `llama`, `gpt_oss`, `gemma4`, `lfm2`, `nemotron_h`, `qwen3_5_moe`, etc.
+The per-layer KV cache is a `Vec<Option<C>>` threaded through the loop
+(`safemlx-lm/src/lib.rs`, `cache.rs`), and blocks accept an explicit mutable
+cache slot. This means running **only** `layers[start..end]` and resuming from an
+imported hidden state is mechanically straightforward — no C++ surgery.
+
+### 3.2 Activation observe / intervene hooks
+
+`safemlx-lm/src/inspection.rs` defines `ActivationObserver` with
+`observe(name, &Array)` and `intervene(name, &Array) -> Option<Array>` at block
+boundaries ([inspection API](https://docs.rs/safemlx-lm/latest/safemlx_lm/inspection/)).
+This is useful plumbing/debugging, **but it is not a stage ABI** — it is
+name-based and per-tensor. For production we want a first-class
+`forward_range()` / `resume_from_hidden()` path, not a reliance on observer
+names.
+
+### 3.3 KV cache primitives
+
+`safemlx-lm/src/cache.rs` defines `KeyValueCache` (offset, max_size,
+`update_and_fetch`), with `ConcatKeyValueCache`, `SlidingKeyValueCache`,
+quantized variants, and `truncate(len)`. Cache state is MLX arrays in unified
+memory. This gives us the raw material for export/import/trim — but the state
+layout is MLX/model-specific and **not** interchangeable with llama.cpp's ggml
+page format.
+
+### 3.4 Loading, quant, and formats
+
+`safemlx-lm` loads Hugging Face-style dirs (`config.json` + `tokenizer.json` +
+safetensors) and also **GGUF** (`Array::load_gguf_with_metadata`,
+`models/mod.rs:1123`), with a **strict loader** (`weights.rs:155`) that errors on
+missing/unused tensors unless explicitly allowed. MLX quant is affine
+packed-weight-in-safetensors; there is load-time quantization from unquantized
+F32/F16/BF16.
+
+### 3.5 Distributed primitives exist but are unwrapped
+
+`../safemlx/safemlx-sys/src/mlx-c/mlx/c/distributed.h` binds
+`all_gather / all_sum / all_min / all_max / send / recv / sum_scatter` and
+distributed groups. **The safe `safemlx` layer does not wrap them yet.** This
+matters for tensor-parallel within a node, but Skippy's cross-machine model is
+its own QUIC activation-frame protocol — we do **not** want to depend on MLX
+distributed for the mesh boundary.
+
+### 3.6 goose already ships an MLX backend — what we can reuse
+
+`../goose/crates/goose-local-inference/src/mlx.rs` (1044 lines) uses `safemlx-lm`
+(`LoadedModel::load`, `generate`, Gemma4 MTP draft/speculative) as a **single
+node** backend behind goose's own `LocalInferenceBackend` trait, feature-gated
+`mlx` on macOS. It proves safemlx-lm is production-usable for generation.
+
+**"Right to Metal" is accurate.** goose's MLX path pulls
+`safemlx { features = ["accelerate", "metal", "safetensors"] }` and runs on
+`Device::new(DeviceType::Gpu, 0)` (`mlx.rs:61,94`) — i.e.
+`safemlx-sys → mlx-c → MLX → Metal`, with no llama.cpp/ggml in between. (goose
+*also* keeps a separate `llama-cpp-2` Metal path; the two are independent
+backends.)
+
+**What is actually reusable, and how:**
+
+| Asset | Reuse verdict |
+| --- | --- |
+| `safemlx` / `safemlx-lm` crates | **Reuse directly** — this is the real shared dependency. Both goose and Skippy just depend on the published crates. No goose code involved. |
+| goose's `mlx.rs` generation flow (prompt build, sampling, MTP draft/verify, streaming, stop tokens, thinking-filter) | **Reuse as a reference template, port not lift.** It is the best worked example of driving safemlx-lm for chat + speculative, but it is coupled to goose types. |
+| goose's `LocalInferenceBackend` trait (`backend.rs`, 50 lines) | **Reference only.** It is goose's shape (whole-model `load_model` + `generate`), not Skippy's staged contract. Skippy needs its own `StageEngine` (§6). |
+| HF download + shard/registry (`hf_models.rs`, `goose-download-manager`) | **Reference / optional adapter.** `goose-download-manager` is cleanly separable (deps are just `reqwest`/`tokio`), but Skippy already has `model-hf` / `model-artifact`; prefer extending those. |
+
+**Coupling is the reason it is port-not-lift.** goose's `mlx.rs` and `backend.rs`
+depend on `goose_provider_types` (`Message`, `MessageContent`, `ProviderError`,
+`ProviderUsage`/`Usage`, `DraftStats`), `rmcp::model::Tool`/`Role`, and
+`local_model_registry::ModelSettings`. Skippy speaks `ActivationFrame`, token
+IDs, `SamplingConfig`, and its OpenAI frontend types instead. So the *algorithms*
+(how to prefill, sample, run MTP draft/verify against safemlx-lm) transfer
+directly; the *types and trait* do not.
+
+**License:** goose is **Apache-2.0**, so porting code with attribution is fine.
+
+**Bottom line:** the highest-leverage reuse is simply **sharing the `safemlx-lm`
+crate** (and coordinating on/​contributing the stage-aware `forward_range` /
+partial-load additions the fork needs — see Phase 3), plus using goose's `mlx.rs`
+as the reference implementation for the single-stage generation path in Phase 2.
+It is whole-model and single-stage, so it is not a template for the staged/
+KV-page work.
+
+---
+
+## 4. Fit analysis and sharp edges
+
+The happy path fits:
+
+```
+tokens or imported hidden state
+  → optional embedding (stage 0 only)
+  → layers[start..end] with per-layer cache
+  → hidden state frame  (middle/non-final)
+  or → final norm + lm_head → sample → token  (final)
+```
+
+Sharp edges, in rough priority order:
+
+1. **Partial execution must mean partial loading.** Building a whole
+   `LoadedModel` and skipping layers can still materialize all weights. Skippy's
+   entire value proposition is fitting a big model across small machines, so a
+   stage must load only its layer range (plus embeddings/readout when it owns
+   them). This requires a **stage-aware loader** in `safemlx-lm` that
+   instantiates `layers` for `[start..end]` and only reads matching safetensors
+   shards. **This is the #1 go/no-go item.**
+
+2. **Every model family must define its exact residual-stream boundary.**
+   Embedding scale, final norm, tied vs untied output, RoPE position accounting
+   across a stage cut, attention mask construction, and any per-layer-type
+   sideband cannot be inferred generically. Each family is a separate
+   certification (mirrors `skippy-topology` family capability records,
+   `crates/skippy-topology/src/lib.rs:182`).
+
+3. **Hybrid / recurrent models need more than hidden states.** Mamba/RWKV/gated
+   DeltaNet-style layers (`nemotron_h`, `qwen3_5_moe` / `qwen3_next`, `lfm2` in
+   safemlx-lm) carry recurrent state, not page-addressable KV. Skippy already
+   has `export_recurrent_state`; MLX would need the analogous opaque sideband,
+   or those families are restricted to non-split.
+
+4. **The MLX model matrix ≠ the safemlx-lm matrix ≠ the Skippy-certified
+   matrix.** safemlx-lm implements models individually and is young. Start with
+   **dense Llama / Qwen**; do not promise arbitrary model coverage.
+
+5. **The boundary is more than execution.** Sampling, batched verify, trim,
+   checkpoint, tokenizer/chat, and state movement are all in the ABI today
+   (`crates/skippy-ffi/README.md`). The trait must cover them (some can be
+   engine-agnostic and moved above the engine).
+
+---
+
+## 5. Hard problems (with concrete approaches)
+
+### 5.1 Lazy evaluation — the network boundary is an eval boundary
+
+MLX is lazy and uses unified memory. A stage boundary forces materialization.
+The per-token non-final-stage sequence must be:
+
+1. Run local layer range (lazy).
+2. Cast to negotiated wire dtype (`ActivationDType::F16` first).
+3. Make contiguous + token-major (`ActivationLayout::TokenMajor`).
+4. **Evaluate the outgoing array AND all updated cache arrays together.**
+5. Get a host-readable slice, serialize into `ActivationFrame.payload`, send.
+
+In `safemlx`: `Array::evaluated()` materializes and `EvaluatedArray::as_slice()`
+gives host access (host access / save also forces eval)
+([safemlx lazy-eval source](https://docs.rs/safemlx/latest/src/safemlx/lib.rs.html),
+[MLX lazy-evaluation guide](https://ml-explore.github.io/mlx/build/html/usage/lazy_evaluation.html)).
+
+Critical details:
+- **Evaluate cache state even when it does not feed the outgoing hidden state**,
+  or lazy cache graphs grow unbounded across decode steps.
+- Unified memory removes the explicit GPU→CPU copy but **not** GPU completion,
+  sync, layout conversion, or the QUIC copy.
+- Final stage: evaluate the sampled token + cache; never materialize a
+  hidden-state frame.
+- Evaluate params once at warmup.
+- Consider separate **compiled** paths for fixed-shape decode vs bucketed
+  prefill (`safemlx` [`compile_with_state`](https://docs.rs/safemlx/latest/safemlx/transforms/compile/)),
+  watching recompilation from shape changes.
+
+**The benchmark that matters** is not MLX layer time; it is
+`last layer → cast/contiguous → eval fence → host view → QUIC write`, per token,
+at realistic hidden widths. **This is go/no-go item #2.**
+
+### 5.2 KV cache export/import/trim
+
+MLX cache arrays make movement possible, but mlx-lm/safemlx cache state is not
+llama.cpp page-shaped (mlx-lm caches expose array state, metadata, and tail
+trimming, and prompt caches serialize as safetensors —
+[mlx-lm cache.py](https://raw.githubusercontent.com/ml-explore/mlx-lm/main/mlx_lm/models/cache.py)).
+Do **not** reuse `RuntimeKvPageDesc` for MLX; keep that in the llama adapter.
+Define an engine-general **cache codec** with a versioned descriptor:
+
+```
+engine + model digest, architecture revision
+layer range, token range + absolute position
+cache kind (concat | sliding/rotating | quantized | recurrent)
+segments: { role, layer, dtype, shape, strides/layout, payload }
+cache-specific metadata (rotating offset, quant scales/biases)
+```
+
+- Export: slice token range, order rotating caches temporally, contiguous,
+  evaluate, serialize.
+- Import: validate engine/model/range/layout, rebuild arrays, restore offsets.
+- Trim: offset change is cheap; reclaiming/compacting memory needs slicing.
+- **Quantized KV** needs packed values + scales/biases, not just row sizes.
+- **Do not promise KV interop between llama.cpp and MLX.** Import requires same
+  engine + model digest + quant + arch revision + cache policy.
+
+### 5.3 Artifact strategy: JIT safetensors vs pre-quantized layer packages
+
+This is arguably the **strongest first reason to adopt MLX**, and it is largely
+independent of the hard split work. The benefit is really **two separate
+things**, and they behave very differently for solo vs split serving:
+
+- **(A) Source freedom** — load HF **safetensors** directly instead of waiting
+  for someone to publish a GGUF (or running our own GGUF quant pipeline first).
+- **(B) JIT quantization** — quantize at load time (`with_quantization(Q4/…)`)
+  instead of ahead of time.
+
+(A) applies equally to solo and splits (it's just "which file do we load").
+(B) is where solo and splits diverge sharply.
+
+**What safemlx-lm actually supports (confirmed):**
+- `ModelLoadOptions::with_quantization(...)` quantizes eligible dense weights
+  **one tensor at a time** on load; checkpoints already carrying matching quant
+  metadata load directly without requantizing
+  (`../safemlx/safemlx-lm/src/models/mod.rs:137`).
+- Sharded safetensors are understood via `model.safetensors.index.json`'s
+  `weight_map` (tensor name → shard file), so the loader knows which shard holds
+  `model.layers.<n>.*` (`../safemlx/safemlx-lm/src/weights.rs:463`). MLX quant is
+  affine packed-weights-in-safetensors, matching mlx-lm's converter
+  ([mlx-lm quantized loading/conversion](https://raw.githubusercontent.com/ml-explore/mlx-lm/main/mlx_lm/utils.py)).
+
+#### Solo serving → pure win, lands first
+
+Download BF16/FP16 safetensors → `with_quantization(Q4)` → serve. No wait for a
+published GGUF, no pre-run of the quant pipeline. Any dense model safemlx-lm
+supports is instantly servable at a chosen bit-width. **goose already does
+exactly this** single-node (`../goose/crates/goose-local-inference/src/mlx.rs`).
+Near-zero new distributed work; this is the cheapest, highest-value first step.
+
+#### Splits → works, but with four real conditions
+
+The premise of a split is that *no node holds the whole model*, which stresses
+JIT quant:
+
+1. **Stage-aware partial load + quant.** Today safemlx-lm builds
+   `0..num_hidden_layers` and the strict loader expects all params, so JIT quant
+   is a *whole-model* op. A split node must instantiate only `layers[start..end]`,
+   read only the shards overlapping its range, and quantize only those tensors.
+   This is exactly go/no-go **Spike 1**, now with a quant step folded in.
+2. **Selective shard download.** The `weight_map` makes fetching only the shards
+   for a layer range *possible*, but safetensors shards bundle several
+   consecutive layers, so nodes over-fetch at range boundaries — coarser than
+   GGUF layer-package parts, which Skippy slices exactly.
+3. **Deterministic cross-stage quant.** Every stage must quantize *identically*
+   (same algo / group-size / bits / tie handling) or the split model drifts
+   numerically from the solo model. Affine quant is deterministic given its
+   params, so this is achievable — but the params must be pinned and folded into
+   family/topology certification.
+4. **Cache the quantized slice.** Re-quantizing on every launch/replan across N
+   nodes is wasteful. Skippy's identity-bound materialized cache
+   (`crates/skippy-runtime/src/package/materialized_cache.rs`, keyed by
+   `model_id / topology_id / stage_id / layer_start / layer_end`) is the natural
+   home: first launch pays the JIT cost → materialize a per-stage quantized
+   artifact → reuse thereafter.
+
+#### The tension worth naming
+
+Skippy's existing chain (`skippy-quantize`, layer-package repos, BF16→GGUF) is
+built around **pre-quantized, exactly-sliced GGUF parts** *specifically so split
+nodes download their slice and never quantize at runtime*.
+JIT-quant-from-safetensors trades that for flexible source + runtime quant +
+coarser slicing. For solo there is no tension; for splits it is a genuine, but
+acceptable, tradeoff. The two paths should **coexist**:
+
+- **JIT safetensors = fast coverage path** — try any supported HF model on the
+  mesh immediately, no publish step.
+- **Pre-quantized layer packages = optimized path** — for models served
+  seriously (exact slices, no runtime quant, tailored partial download).
+
+#### One artifact identity, two physical encodings
+
+Use **one logical package identity, not one physical weight encoding**:
+
+```
+model identity + source revision + tokenizer/config/chat metadata + topology
+variants:
+  llama-gguf: GGUF parts + quant          (existing skippy-model-package path)
+  mlx-jit:    HF safetensors + quant spec  (quantize on load; cache the result)
+  mlx-packaged: pre-quantized MLX stage shards + index (optimized split path)
+```
+
+- Make **BF16/FP16 HF safetensors the canonical source**; derive all variants
+  reproducibly (this repo already has `skippy-quantize`, `model-hf`,
+  `model-package`, and BF16 GGUF conversion skills).
+- **Never** transcode an already-quantized GGUF → MLX quant (dequant/requant
+  loses quality and still rebuilds arch metadata).
+- Nodes download only their selected engine/stage variant, so catalog
+  duplication need not become per-node duplication.
+- For true partial download in the packaged path, stage-specific MLX
+  safetensors shard/index generation is needed (parallel to today's GGUF slice
+  writing).
+
+### 5.4 Cross-machine execution
+
+Treat **MLX as the local compute engine and Skippy as the distributed runtime.**
+mlx-lm's `pipeline()` / `sharded_load()` / `send`/`recv` + `all_gather` is useful
+**reference**, but it uses static ranks and MLX collectives — it is not Skippy's
+QUIC activation-frame protocol with independent stage lifecycle, capability
+negotiation, and direct final-token return. Keep Skippy's transport; use MLX only
+for compute
+([MLX distributed docs](https://ml-explore.github.io/mlx/build/html/usage/distributed.html),
+[mlx-lm utils](https://raw.githubusercontent.com/ml-explore/mlx-lm/main/mlx_lm/utils.py),
+[pipeline mixin](https://raw.githubusercontent.com/ml-explore/mlx-lm/main/mlx_lm/models/pipeline.py)).
+
+For normal Ethernet/Wi-Fi: an 8192-wide F16 activation is ~16 KiB/token/boundary
+(decode is latency-bound, not bandwidth-bound); prefill 512×8192×F16 is ~8
+MiB/boundary (bandwidth matters). Pipeline parallelism does **not** speed up
+single-sequence decode — only concurrent sessions / speculative spans keep stages
+busy. Skippy's topology wire sizing (`crates/skippy-topology/src/lib.rs:1415`)
+already models F16 = `2 × hidden_width`.
+
+### 5.5 Platform and dependency footprint
+
+"To the metal like goose" and "lean dep" are both achievable, but the second has
+a real catch: **MLX is lean at runtime and heavy at build time.**
+
+**Runtime footprint — genuinely lean.** goose's path is
+`safemlx → safemlx-sys → mlx-c → MLX → Metal`, statically linked
+(`safemlx-sys/build.rs` sets `BUILD_SHARED_LIBS=OFF`), running on
+`Device::new(DeviceType::Gpu, 0)`. The vendored `mlx-c` is a ~1 MB C shim; there
+is no runtime service or subprocess. Mesh can depend on the same crates for the
+identical to-the-metal path — the metal-ness lives in `safemlx-sys`, nothing
+goose-specific.
+
+**Build footprint — a second heavy native lane.** `safemlx-sys/build.rs` drives
+**CMake**, and the bundled `CMakeLists.txt` uses `FetchContent` to **git-clone
+the full MLX C++ core from `github.com/ml-explore/mlx.git` and compile it**.
+Building therefore needs CMake ≥3.25, a C++20 compiler, network to fetch MLX,
+and — for Metal — Apple's `metal` shader compiler (`xcrun -find metal`, producing
+`mlx.metallib`). This sits alongside the existing llama.cpp patch-queue build and
+becomes another native runtime artifact under the
+`MESH_LLM_DYNAMIC_NATIVE_RUNTIME` packaging model.
+
+**Keeping it lean = isolation, not intrinsic lightness.** Put the engine in its
+own crate (`skippy-engine-mlx`) gated by **both** a cargo `feature = "mlx"`
+**and** `cfg(target)` (Apple Silicon, optionally Linux/CUDA). Then default,
+Linux-ROCm, Vulkan, and Windows builds never pull MLX or run its CMake — exactly
+how goose gates it. Lean by construction, for the platforms that don't use it.
+
+**Support matrix — broader than macOS, but not the full llama.cpp matrix**
+(from `safemlx-sys/build.rs` + `safemlx-sys/README.md`):
+
+| Target | MLX support |
+| --- | --- |
+| macOS Apple Silicon | ✅ Metal + Accelerate |
+| iOS / tvOS / visionOS | ✅ Metal |
+| Linux x86_64 / aarch64 | ✅ CPU |
+| Linux + NVIDIA | ✅ CUDA (the `cuda`/`nccl` features **panic** on non-Linux) |
+| Linux + AMD (ROCm) | ❌ |
+| Vulkan (any) | ❌ |
+| Windows | ❌ |
+
+**Coverage is expanding, and safemlx tracks it fast.** `jbg/safemlx` is very
+active (103 commits, latest 2026-07-15) and pins a recent MLX core (`v0.32.0`).
+It wires in new backends quickly: the `Add CUDA support` commit landed a full
+`build.rs` + CMake patch + Linux CI + `cuda.rs` module + smoke test in one go,
+and there is `if(WIN32)` DLL-export scaffolding in the vendored `mlx-c`. So the
+matrix above is a **snapshot, not a ceiling**.
+
+**But the gaps are gated by MLX upstream, not by safemlx.** safemlx can only
+expose backends `ml-explore/mlx` itself provides. MLX's backend line is
+**CPU + Metal + CUDA** — which is exactly why CUDA appeared here. There is **no
+ROCm or Vulkan backend in MLX upstream**, and no in-repo signal that safemlx adds
+them independently. So: Windows is the most plausible next addition
+(scaffolding + working Linux/CUDA); ROCm/Vulkan depend on an upstream decision
+with no current signal either way.
+
+**Strategic consequence (unchanged).** **Today**, the ROCm / Vulkan / Windows
+gaps mean **MLX cannot be Skippy's sole engine** — which reinforces (not changes)
+the plan: MLX is an **additive, feature+cfg-gated second engine**,
+Apple-Silicon-first (with Linux/CUDA as a real second target), while llama.cpp
+stays the cross-platform default. And the most durable reason to keep llama.cpp
+is **not** platform coverage (which may well close as MLX upstream grows) but its
+GGUF/imatrix quant maturity and the existing patch-queue investment — those would
+argue against removing it even if MLX's backend matrix later caught up.
+
+---
+
+## 6. Recommended architecture
+
+**Option (a): a second implementation behind a Rust `StageEngine` trait.**
+
+```
+Skippy protocol / skippy-server
+    └── StageEngine (new trait, engine-agnostic descriptors + byte buffers)
+          ├── LlamaStageEngine → existing skippy-ffi C ABI  (unchanged)
+          └── MlxStageEngine   → safemlx / safemlx-lm        (Apple-Silicon-gated)
+```
+
+Trait covers: capability discovery + model inspection; stage-aware open/load;
+session lifecycle; prefill / decode / batched verify; activation import/export;
+trim / checkpoint / reset; opaque-or-segmented state export/import; final-stage
+logits/sampling; tokenizer/chat (where not yet lifted above the engine). Backend
+arrays and native handles stay private; the trait exchanges **Skippy-owned
+descriptors and `Vec<u8>` payloads**.
+
+Rejected alternatives:
+- **Extend the llama.cpp C ABI for MLX** — no. It embeds GGUF/ggml dtype and
+  llama loading concepts; MLX is already Rust-facing. This would degrade a good
+  native adapter into a lowest-common-denominator API.
+- **Separate MLX server protocol** — no, initially. It duplicates lifecycle,
+  networking, and compatibility. If Metal/MLX crash isolation later becomes
+  necessary, add an **optional subprocess** implementation behind the *same*
+  `StageEngine` trait, reusing the existing Skippy stage protocol — not a new
+  public surface.
+
+Crate shape (fits the repo's semantic-ownership rules):
+- `skippy-engine` (new): the `StageEngine` trait + shared descriptors
+  (activation frame, cache codec, capability probe). Engine-neutral.
+- `skippy-runtime` becomes / provides `LlamaStageEngine` implementing the trait.
+- `skippy-engine-mlx` (new, `cfg(all(target_os="macos", target_arch="aarch64"))`,
+  feature `mlx`): `MlxStageEngine` over `safemlx`/`safemlx-lm`.
+- `skippy-server` depends on `dyn StageEngine`, not concrete `StageModel`.
+
+Protocol compatibility: MLX support is **additive** — a new engine capability
+advertised via the existing feature-probe + gossip capability mechanism, with
+llama.cpp remaining the default. No gossip/stream/ABI break. A mixed-engine chain
+(llama stage ↔ MLX stage) must be a **separately certified** capability with
+verified residual boundary, RoPE convention, activation dtype, and model
+revision — default to **engine-homogeneous chains** first.
+
+---
+
+## 7. Phased plan
+
+**Phase 0 — Spikes (go/no-go, no product wiring).** Standalone binaries in
+`../safemlx` or a throwaway crate. See §8. Nothing merges to Skippy until Spike 1
+(partial load) and Spike 2 (boundary fence) pass.
+
+**Phase 1 — Introduce `StageEngine` trait (llama only).** Pure refactor: define
+the trait in a new `skippy-engine` crate, implement it for the existing
+`skippy-runtime` FFI, and switch `skippy-server` to `dyn StageEngine`. No
+behavior change; ship this independently of MLX. Validate with existing
+`skippy-correctness` and `mic-lab` runs.
+
+**Phase 2 — Solo MLX serving + JIT quant (the workflow win; lead here).**
+`MlxStageEngine` as a single-stage/whole-model engine: open/load, session,
+prefill, decode-sampled, tokenizer/chat, final-stage sampling — plus the
+**source-freedom + JIT-quant** path (§5.3): download HF safetensors, quantize on
+load at a chosen bit-width, serve. Port goose's `mlx.rs` generation flow (§3.6)
+rather than lifting it. Wire behind `--serving-backend mlx` (parallel to the
+existing skippy backend selector in `docs/SKIPPY.md`). Validate against
+`skippy-correctness` vs llama.cpp logits for the same model. This delivers the
+"serve any supported model instantly, no wait for quant" benefit with minimal
+new distributed work, and de-risks the engine before any split work.
+
+**Phase 3 — Stage-aware partial load + activation frames.** Add `forward_range`
+/ `resume_from_hidden` and the stage-aware loader to `safemlx-lm` (upstream to
+the fork). Implement `prefill_chunk_frame` / `decode_step_frame` /
+`copy_output_activation_frame` producing Skippy `ActivationFrame`s. Two-stage
+single-machine parity first, then two Macs over the real network.
+
+**Phase 4 — KV/state codec + verify + trim/checkpoint.** Implement the
+engine-general cache codec (§5.2), `verify_tokens_frame` for speculative decode,
+trim/checkpoint/reset. Add speculative (safemlx-lm already has Gemma4 MTP draft
+as a reference).
+
+**Phase 5 — Artifact/packaging + certification.** MLX variant in the model
+package (§5.3), stage-shard partial download, per-family/quant certification into
+`skippy-topology` capability records and `docs/skippy/` family docs. Mixed-engine
+chain certification only if warranted.
+
+**Phase 6 — Promotion.** Only after correctness + performance parity on the
+Apple-Silicon target does MLX become a default-selectable engine for
+Apple-Silicon nodes. llama.cpp remains the cross-platform default.
+
+---
+
+## 8. Spike gates (go/no-go before Phase 3)
+
+1. **Partial-loading proof (GO/NO-GO):** load only `layers[start..end]` (+
+   embeddings/readout when owned) for a dense Qwen/Llama; confirm **peak RSS
+   contains only the selected range**. If a stage can't avoid loading the whole
+   model, the split story is dead for MLX.
+2. **Boundary latency breakdown (GO/NO-GO):** measure layer compute, cast,
+   contiguous, **eval fence**, host readback, serialize, and receive-reconstruct
+   **independently**, at hidden widths 4096/8192/16384 and token counts
+   1/32/512. Decode is single-sequence latency-bound; prove the fence doesn't
+   dominate.
+3. **Two-stage dense parity:** Qwen/Llama, multiple split points, F32 + F16
+   activations, chunked prefill, 128-token decode, compare logits to llama.cpp.
+4. **Real network run:** two Macs over Wi-Fi and 1/10GbE (Thunderbolt if
+   relevant); report end-to-end tok/s + p50/p95 inter-token latency, not local
+   MLX throughput.
+5. **KV round-trip:** export/import multiple token pages, resume decode, compare
+   logits; test trim + speculative rejection; include rotating + quantized cache.
+6. **Concurrency:** multiple sessions, cancellation, repeated resets; verify
+   MLX stream/array ownership under the chosen Tokio / dedicated-thread model.
+7. **Compilation stability:** separate fixed-shape decode vs bucketed prefill;
+   watch recompilation counts, observer overhead, long-run graph/memory growth.
+
+Spikes 1 and 2 are more decisive than any standalone token/s benchmark.
+
+---
+
+## 9. Risks and unknowns
+
+- **Partial load may require nontrivial changes to `safemlx-lm`** (loader + model
+  constructors currently build `0..num_hidden_layers`). Upstreaming to the fork
+  is likely necessary. (Highest risk.)
+- **Eval-fence latency** could erode the benefit of adding Apple-Silicon compute
+  to a chain, especially over Wi-Fi.
+- **Model coverage churn:** safemlx-lm is young; each family is bespoke Rust and
+  a separate certification.
+- **Recurrent/hybrid + MoE** splitting is materially harder than dense; scope
+  them out of early phases.
+- **Two artifact pipelines** add storage + certification cost; mitigate with a
+  single canonical BF16 source and reproducible derivation.
+- **safemlx maturity/maintenance** (external fork of mlx-rs) — pin carefully;
+  expect to contribute upstream.
+- **Compat discipline:** MLX must stay additive (feature-probe + gossip
+  capability); homogeneous chains by default; mixed-engine only when certified.
+
+---
+
+## 10. Immediate next steps
+
+1. Land **Phase 1** (the `StageEngine` trait refactor, llama-only) — valuable on
+   its own and the prerequisite for everything else.
+2. Run **Spike 1 (partial load)** and **Spike 2 (boundary fence)** in
+   `../safemlx` against a dense Qwen/Llama. Treat both as go/no-go.
+3. If both pass, proceed to Phase 2 reusing goose's `safemlx-lm` generation
+   patterns as the starting point.
+
+---
+
+## Appendix — primary sources reviewed
+
+**This repo (Skippy):**
+- `crates/skippy-ffi/src/lib.rs`, `crates/skippy-ffi/README.md` — staged C ABI
+- `crates/skippy-runtime/src/lib.rs` — safe stage model/session, activation
+  frames, KV/state movement
+- `crates/skippy-server/src/frontend*` — stage driver, generation-3 protocol
+- `crates/skippy-topology/src/lib.rs` — split planning, wire sizing, family caps
+- `crates/skippy-runtime/src/package/materialized_cache.rs` — identity-bound
+  stage artifact cache
+- `docs/design/LLAMA_STAGE_INTEGRATION_PLAN.md`, `docs/SKIPPY.md` — why the ABI
+  is shaped this way; backend-selector parity
+
+**MLX Rust fork (`../safemlx`):**
+- `safemlx-lm/src/models/{qwen3,llama,gpt_oss,gemma4,...}.rs` — per-layer forward
+- `safemlx-lm/src/{cache,inspection,weights}.rs`, `models/mod.rs` — KV cache,
+  observer hooks, strict/sharded loading, JIT quant
+- `safemlx-sys/src/mlx-c/mlx/c/distributed.h` — MLX collectives (unwrapped)
+
+**goose (`../goose`, Apache-2.0):**
+- `crates/goose-local-inference/src/{mlx,backend,hf_models}.rs`,
+  `crates/goose-download-manager` — reference MLX backend + HF download
+
+**External (grounded via web search):**
+- [MLX lazy evaluation](https://ml-explore.github.io/mlx/build/html/usage/lazy_evaluation.html)
+- [MLX distributed](https://ml-explore.github.io/mlx/build/html/usage/distributed.html)
+- [safemlx docs.rs](https://docs.rs/safemlx/latest/safemlx/) ·
+  [safemlx-lm](https://docs.rs/safemlx-lm/latest/safemlx_lm/) ·
+  [inspection](https://docs.rs/safemlx-lm/latest/safemlx_lm/inspection/) ·
+  [compile](https://docs.rs/safemlx/latest/safemlx/transforms/compile/)
+- mlx-lm reference:
+  [utils.py](https://raw.githubusercontent.com/ml-explore/mlx-lm/main/mlx_lm/utils.py) ·
+  [pipeline.py](https://raw.githubusercontent.com/ml-explore/mlx-lm/main/mlx_lm/models/pipeline.py) ·
+  [cache.py](https://raw.githubusercontent.com/ml-explore/mlx-lm/main/mlx_lm/models/cache.py) ·
+  [deepseek_v3.py](https://raw.githubusercontent.com/ml-explore/mlx-lm/main/mlx_lm/models/deepseek_v3.py)

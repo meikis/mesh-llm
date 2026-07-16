@@ -3,9 +3,10 @@ use std::collections::VecDeque;
 use openai_frontend::{OpenAiError, OpenAiResult};
 
 use super::NativeMtpDecodeOptions;
-use crate::frontend::speculative::propose_ngram_tokens;
+use crate::frontend::speculative::propose_ngram_tokens_with_min_prior_matches;
 
 const MIN_NGRAM_EXTENSION_TOKENS: usize = 2;
+const MIN_NGRAM_PRIOR_MATCHES: usize = 2;
 
 /// Builds one speculative candidate from a native-MTP prefix and an optional
 /// N-gram continuation. The continuation always starts after the MTP prefix;
@@ -39,7 +40,7 @@ impl CompositeProposalProvider {
             native_mtp_tokens,
             context_tokens,
             max_proposal_tokens,
-            true,
+            max_proposal_tokens,
         )
     }
 
@@ -48,23 +49,37 @@ impl CompositeProposalProvider {
         native_mtp_tokens: &[i32],
         context_tokens: &[i32],
         max_proposal_tokens: usize,
-        allow_ngram_extension: bool,
+        max_ngram_extension_tokens: usize,
     ) -> NativeMtpHybridProposal {
         let max_proposal_tokens = max_proposal_tokens.min(self.max_proposal_tokens);
         let native_mtp_tokens =
             &native_mtp_tokens[..native_mtp_tokens.len().min(max_proposal_tokens)];
-        if !self.enabled || self.max_proposal_tokens == 0 || !allow_ngram_extension {
+        if !self.enabled || self.max_proposal_tokens == 0 || max_ngram_extension_tokens == 0 {
             return NativeMtpHybridProposal::from_native_mtp_tokens(native_mtp_tokens.to_vec());
         }
 
-        let ngram_limit = max_proposal_tokens.saturating_sub(native_mtp_tokens.len());
+        let ngram_limit = max_proposal_tokens
+            .saturating_sub(native_mtp_tokens.len())
+            .min(max_ngram_extension_tokens);
         let mut ngram_context = Vec::with_capacity(context_tokens.len() + native_mtp_tokens.len());
         ngram_context.extend_from_slice(context_tokens);
         ngram_context.extend_from_slice(native_mtp_tokens);
-        let ngram_tokens = propose_ngram_tokens(&ngram_context, self.ngram_size, ngram_limit);
-        let ngram_tokens = (ngram_tokens.len() >= MIN_NGRAM_EXTENSION_TOKENS)
-            .then_some(ngram_tokens)
-            .unwrap_or_default();
+        let min_prior_matches = if native_mtp_tokens.is_empty() {
+            1
+        } else {
+            MIN_NGRAM_PRIOR_MATCHES
+        };
+        let ngram_tokens = propose_ngram_tokens_with_min_prior_matches(
+            &ngram_context,
+            self.ngram_size,
+            ngram_limit,
+            min_prior_matches,
+        );
+        let ngram_tokens = if ngram_tokens.len() >= MIN_NGRAM_EXTENSION_TOKENS {
+            ngram_tokens
+        } else {
+            Vec::new()
+        };
         let ngram_span_available = !ngram_tokens.is_empty();
         let mut tokens = native_mtp_tokens.to_vec();
         tokens.extend(ngram_tokens);
@@ -159,40 +174,85 @@ impl NativeMtpHybridProposal {
     }
 }
 
-/// A request-local backoff for the N-gram extension. It deliberately leaves
-/// native MTP enabled: a rejected tail says nothing about an accepted MTP
-/// prefix. Pure N-gram proposals are also unaffected because they have no
-/// native baseline to preserve.
-#[derive(Debug, Default)]
-pub(in crate::frontend) struct NgramSidecarBackoff {
+/// Request-local adaptive control for the N-gram extension.
+///
+/// MTP is already a useful proposer on its own, so the N-gram sidecar starts
+/// with the smallest useful tail. It widens only after the target accepted an
+/// entire tail and resets after a mismatch. This keeps one accidental repeated
+/// context from turning a healthy MTP candidate into an expensive long span.
+/// Pure N-gram proposals retain the configured maximum because they have no
+/// native prefix to protect.
+#[derive(Debug)]
+pub(in crate::frontend) struct NgramSidecarController {
     remaining_proposals: usize,
+    initial_extension_tokens: usize,
+    current_extension_tokens: usize,
+    max_extension_tokens: usize,
 }
 
-impl NgramSidecarBackoff {
-    pub(in crate::frontend) fn allows_extension(&mut self, native_mtp_tokens: &[i32]) -> bool {
-        if native_mtp_tokens.is_empty() || self.remaining_proposals == 0 {
-            return true;
+impl NgramSidecarController {
+    pub(in crate::frontend) fn new(max_proposal_tokens: usize) -> Self {
+        let initial_extension_tokens = MIN_NGRAM_EXTENSION_TOKENS.min(max_proposal_tokens);
+        Self {
+            remaining_proposals: 0,
+            initial_extension_tokens,
+            current_extension_tokens: initial_extension_tokens,
+            max_extension_tokens: max_proposal_tokens,
         }
-        self.remaining_proposals -= 1;
-        false
     }
 
-    pub(in crate::frontend) fn observe_tail_rejection(
+    /// Returns the N-gram token budget for this proposal. A zero budget means
+    /// use the native MTP prefix alone while the sidecar cools down.
+    pub(in crate::frontend) fn extension_limit(
+        &mut self,
+        native_mtp_tokens: &[i32],
+        available_tokens: usize,
+    ) -> usize {
+        if native_mtp_tokens.is_empty() {
+            return available_tokens.min(self.max_extension_tokens);
+        }
+        if self.remaining_proposals > 0 {
+            self.remaining_proposals -= 1;
+            return 0;
+        }
+        self.current_extension_tokens.min(available_tokens)
+    }
+
+    /// Applies the result of a completed composite candidate. Returns true
+    /// only when a rejected tail entered cooldown, so existing rejection
+    /// telemetry remains a direct count of sidecar failures.
+    pub(in crate::frontend) fn observe_tail_outcome(
         &mut self,
         proposal: &NativeMtpHybridProposal,
         accepted_proposal_tokens: usize,
         cooldown_proposals: usize,
     ) -> bool {
-        if !proposal.ngram_tail_rejected(accepted_proposal_tokens) || cooldown_proposals == 0 {
+        if proposal.native_mtp_token_count() == 0 || proposal.ngram_token_count() == 0 {
             return false;
         }
+        if accepted_proposal_tokens >= proposal.tokens().len() {
+            self.current_extension_tokens = self
+                .current_extension_tokens
+                .saturating_add(1)
+                .min(self.max_extension_tokens);
+            return false;
+        }
+        if !proposal.ngram_tail_rejected(accepted_proposal_tokens) {
+            return false;
+        }
+        self.current_extension_tokens = self.initial_extension_tokens;
         self.remaining_proposals = cooldown_proposals;
-        true
+        cooldown_proposals > 0
     }
 
     #[cfg(test)]
     pub(in crate::frontend) fn remaining_proposals(&self) -> usize {
         self.remaining_proposals
+    }
+
+    #[cfg(test)]
+    pub(in crate::frontend) fn current_extension_tokens(&self) -> usize {
+        self.current_extension_tokens
     }
 }
 
@@ -343,7 +403,7 @@ mod tests {
     #[test]
     fn appends_ngram_tail_after_native_mtp_prefix() {
         let provider = CompositeProposalProvider::from_options(options());
-        let proposal = provider.propose(&[9], &[1, 2, 3, 9, 1, 2, 3], 4);
+        let proposal = provider.propose(&[9], &[1, 2, 3, 9, 1, 2, 3, 9, 1, 2, 3], 4);
 
         assert_eq!(proposal.tokens(), &[9, 1, 2, 3]);
         assert_eq!(proposal.native_mtp_token_count(), 1);
@@ -374,9 +434,19 @@ mod tests {
     }
 
     #[test]
+    fn requires_repeated_history_before_extending_native_mtp() {
+        let provider = CompositeProposalProvider::from_options(options());
+        let proposal = provider.propose(&[9], &[1, 2, 3, 9, 1, 2, 3], 4);
+
+        assert_eq!(proposal.tokens(), &[9]);
+        assert_eq!(proposal.native_mtp_token_count(), 1);
+        assert_eq!(proposal.ngram_token_count(), 0);
+    }
+
+    #[test]
     fn ignores_a_one_token_ngram_tail() {
         let provider = CompositeProposalProvider::from_options(options());
-        let proposal = provider.propose(&[9], &[1, 2, 3, 9, 1, 2, 3], 2);
+        let proposal = provider.propose(&[9], &[1, 2, 3, 9, 1, 2, 3, 9, 1, 2, 3], 2);
 
         assert_eq!(proposal.tokens(), &[9]);
         assert_eq!(proposal.native_mtp_token_count(), 1);
@@ -396,40 +466,52 @@ mod tests {
     }
 
     #[test]
-    fn tail_rejection_backs_off_only_mtp_extensions() {
+    fn tail_rejection_resets_and_backs_off_only_mtp_extensions() {
         let proposal = NativeMtpHybridProposal::from_parts(vec![9, 10, 11], 1, true);
-        let mut backoff = NgramSidecarBackoff::default();
+        let mut controller = NgramSidecarController::new(4);
 
-        assert!(backoff.observe_tail_rejection(&proposal, 1, 2));
-        assert_eq!(backoff.remaining_proposals(), 2);
-        assert!(!backoff.allows_extension(&[9]));
-        assert!(!backoff.allows_extension(&[9]));
-        assert!(backoff.allows_extension(&[9]));
-        assert!(backoff.allows_extension(&[]));
+        assert!(controller.observe_tail_outcome(&proposal, 1, 2));
+        assert_eq!(controller.remaining_proposals(), 2);
+        assert_eq!(controller.current_extension_tokens(), 2);
+        assert_eq!(controller.extension_limit(&[9], 3), 0);
+        assert_eq!(controller.extension_limit(&[9], 3), 0);
+        assert_eq!(controller.extension_limit(&[9], 3), 2);
+        assert_eq!(controller.extension_limit(&[], 4), 4);
     }
 
     #[test]
     fn backoff_preserves_the_native_mtp_prefix() {
         let provider = CompositeProposalProvider::from_options(options());
-        let mut backoff = NgramSidecarBackoff::default();
+        let mut controller = NgramSidecarController::new(4);
         let rejected_tail = NativeMtpHybridProposal::from_parts(vec![9, 1, 2], 1, true);
-        assert!(backoff.observe_tail_rejection(&rejected_tail, 1, 1));
+        assert!(controller.observe_tail_outcome(&rejected_tail, 1, 1));
 
         let native_only = provider.propose_with_ngram_extension(
             &[9],
-            &[1, 2, 3, 9, 1, 2, 3],
+            &[1, 2, 3, 9, 1, 2, 3, 9, 1, 2, 3],
             4,
-            backoff.allows_extension(&[9]),
+            controller.extension_limit(&[9], 3),
         );
         let pure_ngram = provider.propose_with_ngram_extension(
             &[],
             &[1, 2, 3, 9, 1, 2, 3],
             4,
-            backoff.allows_extension(&[]),
+            controller.extension_limit(&[], 4),
         );
 
         assert_eq!(native_only.tokens(), &[9]);
         assert_eq!(pure_ngram.tokens(), &[9, 1, 2, 3]);
+    }
+
+    #[test]
+    fn fully_accepted_tail_grows_the_next_extension_budget() {
+        let proposal = NativeMtpHybridProposal::from_parts(vec![9, 1, 2], 1, true);
+        let mut controller = NgramSidecarController::new(6);
+
+        assert_eq!(controller.extension_limit(&[9], 5), 2);
+        assert!(!controller.observe_tail_outcome(&proposal, 3, 4));
+        assert_eq!(controller.current_extension_tokens(), 3);
+        assert_eq!(controller.extension_limit(&[9], 5), 3);
     }
 
     #[test]
@@ -448,7 +530,7 @@ mod tests {
         let mut buffer = BufferedCompositeProposal::new(
             CompositeProposalProvider::from_options(options()).propose(
                 &[9],
-                &[1, 2, 3, 9, 1, 2, 3],
+                &[1, 2, 3, 9, 1, 2, 3, 9, 1, 2, 3],
                 4,
             ),
         );

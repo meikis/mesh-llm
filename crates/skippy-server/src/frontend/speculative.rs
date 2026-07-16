@@ -63,7 +63,24 @@ pub(super) fn propose_ngram_tokens(
     min_match_tokens: usize,
     max_proposed_tokens: usize,
 ) -> Vec<i32> {
-    if min_match_tokens == 0 || max_proposed_tokens == 0 || history.len() < min_match_tokens * 2 {
+    propose_ngram_tokens_with_min_prior_matches(history, min_match_tokens, max_proposed_tokens, 1)
+}
+
+/// Returns a continuation only when the current suffix occurred at least
+/// `min_prior_matches` times earlier in the token history. The newest prior
+/// occurrence supplies the continuation, while the extra occurrences act as a
+/// cheap recurrence-confidence signal for conservative speculative callers.
+pub(super) fn propose_ngram_tokens_with_min_prior_matches(
+    history: &[i32],
+    min_match_tokens: usize,
+    max_proposed_tokens: usize,
+    min_prior_matches: usize,
+) -> Vec<i32> {
+    if min_match_tokens == 0
+        || max_proposed_tokens == 0
+        || min_prior_matches == 0
+        || history.len() < min_match_tokens * (min_prior_matches + 1)
+    {
         return Vec::new();
     }
     let upper_match = (history.len() / 2).min(MAX_NGRAM_MATCH);
@@ -72,6 +89,8 @@ pub(super) fn propose_ngram_tokens(
         let suffix_start = history.len() - match_len;
         let suffix = &history[suffix_start..];
         let latest_candidate_start = suffix_start.saturating_sub(match_len);
+        let mut prior_match_count = 0usize;
+        let mut newest_continuation = None;
         for candidate_start in (0..=latest_candidate_start).rev() {
             let candidate_end = candidate_start + match_len;
             if &history[candidate_start..candidate_end] != suffix {
@@ -80,8 +99,14 @@ pub(super) fn propose_ngram_tokens(
             let proposal_start = candidate_end;
             let proposal_end = history.len().min(proposal_start + max_proposed_tokens);
             if proposal_start < proposal_end {
-                return history[proposal_start..proposal_end].to_vec();
+                prior_match_count += 1;
+                if newest_continuation.is_none() {
+                    newest_continuation = Some(history[proposal_start..proposal_end].to_vec());
+                }
             }
+        }
+        if prior_match_count >= min_prior_matches {
+            return newest_continuation.unwrap_or_default();
         }
     }
     Vec::new()
@@ -360,6 +385,18 @@ mod ngram_tests {
         let history = [1, 2, 3, 4, 9, 2, 3, 4];
 
         assert_eq!(propose_ngram_tokens(&history, 2, 2), vec![9, 2]);
+    }
+
+    #[test]
+    fn requires_multiple_prior_suffix_matches_when_requested() {
+        let singleton = [1, 2, 3, 9, 1, 2, 3];
+        let repeated = [1, 2, 3, 9, 1, 2, 3, 9, 1, 2, 3];
+
+        assert!(propose_ngram_tokens_with_min_prior_matches(&singleton, 3, 3, 2).is_empty());
+        assert_eq!(
+            propose_ngram_tokens_with_min_prior_matches(&repeated, 3, 3, 2),
+            vec![9, 1, 2]
+        );
     }
 
     #[test]

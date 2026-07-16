@@ -666,7 +666,8 @@ impl StageOpenAiBackend {
             let mut native_mtp_counters = NativeMtpDecodeCounters::default();
             let mut native_mtp_reject_cooldown_remaining = 0usize;
             let mut native_mtp_suppress_cooldown_drafts_remaining = 0usize;
-            let mut ngram_sidecar_backoff = NgramSidecarBackoff::default();
+            let mut ngram_sidecar_controller =
+                NgramSidecarController::new(native_mtp_options.ngram_max_proposal_tokens);
             if let Some(mut fused) = fused_first_decode.take() {
                 current = fused.predicted;
                 let mut fused_native_mtp_draft = fused.native_mtp_draft.take();
@@ -927,7 +928,10 @@ impl StageOpenAiBackend {
                             native_mtp_tokens,
                             &context_tokens,
                             native_mtp_remaining,
-                            ngram_sidecar_backoff.allows_extension(native_mtp_tokens),
+                            ngram_sidecar_controller.extension_limit(
+                                native_mtp_tokens,
+                                native_mtp_remaining.saturating_sub(native_mtp_tokens.len()),
+                            ),
                         );
                     if let Some(parallel_verify_width) = proposal.parallel_verify_width(
                         adaptive_verify_window.width(proposal.tokens().len()),
@@ -978,7 +982,7 @@ impl StageOpenAiBackend {
                         &mut native_mtp_counters,
                         &mut native_mtp_reject_cooldown_remaining,
                         &mut native_mtp_suppress_cooldown_drafts_remaining,
-                        &mut ngram_sidecar_backoff,
+                        &mut ngram_sidecar_controller,
                         &mut decode_stage0_compute_ms,
                         &mut decode_runtime_lock_wait_ms,
                         &mut decode_runtime_lock_wait_max_ms,
@@ -1230,7 +1234,7 @@ impl StageOpenAiBackend {
                                     stale_drain_timer.elapsed_ms(),
                                 );
                                 let pipeline = pipelined.take().expect("pipeline retained");
-                                if ngram_sidecar_backoff.observe_tail_rejection(
+                                if ngram_sidecar_controller.observe_tail_outcome(
                                     pipeline.proposal(),
                                     pipeline.accepted_tokens(),
                                     native_mtp_options.ngram_tail_backoff_proposals,
@@ -1275,6 +1279,11 @@ impl StageOpenAiBackend {
                             {
                                 let mut pipeline = pipelined.take().expect("pipeline retained");
                                 let next_draft_available = pipeline.next_draft().is_some();
+                                ngram_sidecar_controller.observe_tail_outcome(
+                                    pipeline.proposal(),
+                                    pipeline.accepted_tokens(),
+                                    native_mtp_options.ngram_tail_backoff_proposals,
+                                );
                                 native_mtp_counters.observe_hybrid_proposal(
                                     pipeline.proposal(),
                                     pipeline.accepted_tokens(),

@@ -20,7 +20,7 @@ pub(in crate::frontend) use env::{
 };
 pub(super) use hybrid::{
     BufferedCompositeProposal, CompositeProposalProvider, NativeMtpHybridProposal,
-    NgramSidecarBackoff, classify_native_mtp_verify_window,
+    NgramSidecarController, classify_native_mtp_verify_window,
 };
 pub(super) use pipeline::CompositeProposalPipeline;
 pub(super) use stats::{NativeMtpStats, NativeMtpVerification};

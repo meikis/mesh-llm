@@ -71,8 +71,20 @@ pub(super) enum RuntimeEvent {
 
 pub(super) enum LocalRuntimeBackendHandle {
     Skippy {
-        model: skippy::SkippyModelHandle,
+        // Boxed: `SkippyModelHandle` is large, and boxing keeps enum variants
+        // similarly sized (satisfies clippy::large_enum_variant once the smaller
+        // `Mlx` variant exists). Created once per model load, so the extra
+        // indirection is negligible.
+        model: Box<skippy::SkippyModelHandle>,
         http: skippy::SkippyHttpHandle,
+        _death_tx: tokio::sync::oneshot::Sender<()>,
+    },
+    #[cfg(all(feature = "mlx", target_os = "macos"))]
+    Mlx {
+        // Held to keep the loaded model (and its worker thread) alive for as long
+        // as the HTTP server is serving it; not read directly.
+        _model: crate::inference::mlx::MlxModelHandle,
+        http: crate::inference::mlx::MlxHttpHandle,
         _death_tx: tokio::sync::oneshot::Sender<()>,
     },
 }
@@ -88,9 +100,7 @@ pub(super) struct LocalRuntimeModelHandle {
 
 impl LocalRuntimeModelHandle {
     pub(super) fn pid(&self) -> u32 {
-        match &self.inner {
-            LocalRuntimeBackendHandle::Skippy { .. } => std::process::id(),
-        }
+        std::process::id()
     }
 
     pub(super) fn ctx_used_tokens(&self) -> Option<u64> {
@@ -98,12 +108,16 @@ impl LocalRuntimeModelHandle {
             LocalRuntimeBackendHandle::Skippy { model, .. } => {
                 Some(model.status().max_session_tokens)
             }
+            #[cfg(all(feature = "mlx", target_os = "macos"))]
+            LocalRuntimeBackendHandle::Mlx { .. } => None,
         }
     }
 
     pub(super) fn openai_guardrails(&self) -> Option<skippy::SkippyOpenAiGuardrailsStatus> {
         match &self.inner {
             LocalRuntimeBackendHandle::Skippy { model, .. } => model.openai_guardrails(),
+            #[cfg(all(feature = "mlx", target_os = "macos"))]
+            LocalRuntimeBackendHandle::Mlx { .. } => None,
         }
     }
 
@@ -115,6 +129,8 @@ impl LocalRuntimeModelHandle {
             LocalRuntimeBackendHandle::Skippy { model, .. } => {
                 model.set_openai_guardrail_mode(mode)
             }
+            #[cfg(all(feature = "mlx", target_os = "macos"))]
+            LocalRuntimeBackendHandle::Mlx { .. } => None,
         }
     }
 
@@ -157,6 +173,8 @@ impl LocalRuntimeModelHandle {
                         .collect(),
                 })
             }
+            #[cfg(all(feature = "mlx", target_os = "macos"))]
+            LocalRuntimeBackendHandle::Mlx { .. } => None,
         }
     }
 
@@ -165,6 +183,10 @@ impl LocalRuntimeModelHandle {
             LocalRuntimeBackendHandle::Skippy { model, http, .. } => {
                 let _ = http.shutdown().await;
                 model.shutdown();
+            }
+            #[cfg(all(feature = "mlx", target_os = "macos"))]
+            LocalRuntimeBackendHandle::Mlx { http, .. } => {
+                let _ = http.shutdown().await;
             }
         }
     }
@@ -566,6 +588,16 @@ pub(super) async fn start_runtime_local_model(
     tokio::sync::oneshot::Receiver<()>,
 )> {
     let model_name = runtime_model_name.to_string();
+
+    // Safetensors models are served by the MLX (Metal) engine on Apple Silicon.
+    // This branch runs before any GGUF planning, which assumes a llama.cpp/GGUF
+    // artifact. On non-macOS or without the `mlx` feature, a safetensors path
+    // falls through to the GGUF path and fails there with a clear error.
+    #[cfg(all(feature = "mlx", target_os = "macos"))]
+    if is_safetensors_model_path(spec.model_path) {
+        return start_runtime_mlx_model(spec, model_name).await;
+    }
+
     let package_ref = spec.model_path.to_string_lossy().to_string();
     let layer_package = if skippy::is_layer_package_ref(&package_ref) {
         let package_ref_for_identity = package_ref.clone();
@@ -1384,7 +1416,7 @@ async fn load_split_runtime_generation_inner(
             slots: spec.slots,
             capabilities,
             inner: LocalRuntimeBackendHandle::Skippy {
-                model: handle,
+                model: Box::new(handle),
                 http,
                 _death_tx: death_tx,
             },
@@ -3610,6 +3642,95 @@ fn now_unix_nanos() -> i64 {
         .unwrap_or(0)
 }
 
+/// True if the resolved model path points at a safetensors artifact (single
+/// `model.safetensors`, a sharded first file, or any `*.safetensors`), which the
+/// MLX engine serves. Directories are treated as safetensors when they contain a
+/// primary weight file.
+#[cfg(all(feature = "mlx", target_os = "macos"))]
+fn is_safetensors_model_path(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if name.ends_with(".safetensors") {
+        return true;
+    }
+    if path.is_dir() {
+        return path.join("model.safetensors").exists()
+            || path.join("model.safetensors.index.json").exists();
+    }
+    false
+}
+
+/// The directory that holds a safetensors model's `config.json` / `tokenizer.json`
+/// / weights — either `path` itself (a dir) or its parent (a weight file).
+#[cfg(all(feature = "mlx", target_os = "macos"))]
+fn mlx_model_dir(path: &Path) -> PathBuf {
+    if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.to_path_buf())
+    }
+}
+
+#[cfg(all(feature = "mlx", target_os = "macos"))]
+async fn start_runtime_mlx_model(
+    spec: LocalRuntimeModelStartSpec<'_>,
+    model_name: String,
+) -> Result<(
+    String,
+    LocalRuntimeModelHandle,
+    tokio::sync::oneshot::Receiver<()>,
+)> {
+    let port = alloc_local_port().await?;
+    let model_dir = mlx_model_dir(spec.model_path);
+    let context_length = spec.ctx_size_override.unwrap_or(4096);
+    let capabilities = models::runtime_verified_model_capabilities(
+        &model_name,
+        spec.model_path,
+        models::RuntimeMediaCapabilityEvidence {
+            vision_projector_loaded: false,
+        },
+    );
+
+    let _ = emit_event(OutputEvent::ModelLoading {
+        model: model_name.clone(),
+        source: None,
+    });
+    let load_model_name = model_name.clone();
+    let mlx_model = tokio::task::spawn_blocking(move || {
+        crate::inference::mlx::MlxModelHandle::load(model_dir, load_model_name, context_length)
+    })
+    .await
+    .context("join load MLX model task")??;
+    let _ = emit_event(OutputEvent::ModelLoaded {
+        model: model_name.clone(),
+        bytes: None,
+    });
+
+    let http = mlx_model.start_http(port);
+    let (death_tx, death_rx) = tokio::sync::oneshot::channel();
+
+    Ok((
+        model_name,
+        LocalRuntimeModelHandle {
+            port: http.port(),
+            backend: "mlx".into(),
+            context_length,
+            slots: 1,
+            capabilities,
+            inner: LocalRuntimeBackendHandle::Mlx {
+                _model: mlx_model,
+                http,
+                _death_tx: death_tx,
+            },
+        },
+        death_rx,
+    ))
+}
+
 async fn start_runtime_skippy_model(
     spec: LocalRuntimeModelStartSpec<'_>,
     model_name: String,
@@ -3687,7 +3808,7 @@ async fn start_runtime_skippy_model(
             slots: plan.slots,
             capabilities,
             inner: LocalRuntimeBackendHandle::Skippy {
-                model: skippy_model,
+                model: Box::new(skippy_model),
                 http,
                 _death_tx: death_tx,
             },
@@ -3803,7 +3924,7 @@ async fn start_runtime_layer_package_model(
             slots: plan.slots,
             capabilities,
             inner: LocalRuntimeBackendHandle::Skippy {
-                model: handle,
+                model: Box::new(handle),
                 http,
                 _death_tx: death_tx,
             },

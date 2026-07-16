@@ -52,6 +52,7 @@ WORKSPACE_MEMBERS=(
   "skippy-topology"
   "skippy-cache"
   "skippy-metrics"
+  "skippy-engine-mlx"
   "openai-frontend"
   "skippy-ffi"
   "skippy-runtime"

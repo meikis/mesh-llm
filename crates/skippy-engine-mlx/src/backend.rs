@@ -167,9 +167,9 @@ impl OpenAiBackend for MlxBackend {
         &self,
         request: ChatCompletionRequest,
     ) -> OpenAiResult<ChatCompletionResponse> {
-        let gen = self.build_request(&request)?;
+        let job = self.build_request(&request)?;
         let model = self.engine.model_id().to_string();
-        let mut rx = self.engine.submit(gen);
+        let mut rx = self.engine.submit(job);
 
         let mut text = String::new();
         let mut finish = FinishReason::Stop;
@@ -217,9 +217,9 @@ impl OpenAiBackend for MlxBackend {
         request: ChatCompletionRequest,
         _context: OpenAiRequestContext,
     ) -> OpenAiResult<ChatCompletionStream> {
-        let gen = self.build_request(&request)?;
+        let job = self.build_request(&request)?;
         let model = self.engine.model_id().to_string();
-        let mut rx = self.engine.submit(gen);
+        let mut rx = self.engine.submit(job);
         let id = completion_id("chatcmpl");
         let created = now_secs();
 

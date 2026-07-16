@@ -41,6 +41,7 @@ members = [
     "crates/skippy-topology",
     "crates/skippy-cache",
     "crates/skippy-metrics",
+    "crates/skippy-engine-mlx",
     "crates/openai-frontend",
     "crates/skippy-ffi",
     "crates/skippy-runtime",

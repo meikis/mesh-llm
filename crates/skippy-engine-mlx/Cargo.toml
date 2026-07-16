@@ -16,11 +16,9 @@
 # Promotion to a real workspace member is documented in WIRING.md.
 [package]
 name = "skippy-engine-mlx"
-version = "0.0.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 publish = false
-
-[workspace]
 
 [lib]
 name = "skippy_engine_mlx"

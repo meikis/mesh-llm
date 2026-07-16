@@ -85,7 +85,28 @@ pub(crate) struct PreflightGeneration {
 #[derive(Debug, Serialize)]
 pub(crate) struct PreflightSpeculativeDecoding {
     pub default: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub proposers: Vec<PreflightSpeculativeProposer>,
     pub strategies: Vec<PreflightSpeculativeStrategy>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PreflightSpeculativeProposer {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub proposer_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prediction_depth: Option<u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub layer_indices: Vec<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ngram_min: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ngram_max: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_proposal_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history_scope: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -99,6 +120,21 @@ pub(crate) struct PreflightSpeculativeStrategy {
     pub layer_indices: Vec<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_policy: Option<PreflightWindowPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extender: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension_policy: Option<PreflightExtensionPolicy>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct PreflightExtensionPolicy {
+    pub initial_tokens: u32,
+    pub max_tokens: u32,
+    pub tail_backoff_proposals: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -150,7 +186,27 @@ struct PackageGeneration {
 struct PackageSpeculativeDecoding {
     default: String,
     #[serde(default)]
+    proposers: BTreeMap<String, PackageSpeculativeProposer>,
+    #[serde(default)]
     strategies: BTreeMap<String, PackageSpeculativeStrategy>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PackageSpeculativeProposer {
+    #[serde(rename = "type")]
+    proposer_type: String,
+    #[serde(default)]
+    prediction_depth: Option<u32>,
+    #[serde(default)]
+    layer_indices: Vec<u32>,
+    #[serde(default)]
+    ngram_min: Option<u32>,
+    #[serde(default)]
+    ngram_max: Option<u32>,
+    #[serde(default)]
+    max_proposal_tokens: Option<u32>,
+    #[serde(default)]
+    history_scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,6 +219,21 @@ struct PackageSpeculativeStrategy {
     layer_indices: Vec<u32>,
     #[serde(default)]
     window_policy: Option<PackageWindowPolicy>,
+    #[serde(default)]
+    proposer: Option<String>,
+    #[serde(default)]
+    primary: Option<String>,
+    #[serde(default)]
+    extender: Option<String>,
+    #[serde(default)]
+    extension_policy: Option<PackageExtensionPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PackageExtensionPolicy {
+    initial_tokens: u32,
+    max_tokens: u32,
+    tail_backoff_proposals: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -428,14 +499,53 @@ fn validate_generation(
             "add the default strategy entry or point default at an existing strategy",
         );
     }
+    for (name, proposer) in &speculative.proposers {
+        validate_speculative_proposer(name, proposer, layer_count, report);
+    }
     for (name, strategy) in &speculative.strategies {
-        validate_speculative_strategy(name, strategy, layer_count, report);
+        validate_speculative_strategy(name, strategy, &speculative.proposers, layer_count, report);
+    }
+}
+
+fn validate_speculative_proposer(
+    name: &str,
+    proposer: &PackageSpeculativeProposer,
+    layer_count: u32,
+    report: &mut PackagePreflightReport,
+) {
+    if name.trim().is_empty() {
+        report.error(
+            "empty_speculative_proposer_name",
+            "generation.speculative_decoding proposer names must not be empty",
+            Some("model-package.json".to_string()),
+            "use a stable non-empty proposer id such as mtp or ngram-cache",
+        );
+    }
+    match proposer.proposer_type.as_str() {
+        "native-mtp" => validate_native_mtp_parts(
+            name,
+            proposer.prediction_depth,
+            &proposer.layer_indices,
+            layer_count,
+            report,
+        ),
+        "ngram-simple" | "ngram-cache" => validate_ngram_proposer(name, proposer, report),
+        _ => report.error(
+            "unsupported_speculative_proposer_type",
+            format!(
+                "speculative proposer {name} has unsupported type {}",
+                proposer.proposer_type
+            ),
+            Some("model-package.json".to_string()),
+            "use native-mtp, ngram-simple, or ngram-cache",
+        ),
     }
 }
 
 fn validate_speculative_strategy(
     name: &str,
     strategy: &PackageSpeculativeStrategy,
+    proposers: &BTreeMap<String, PackageSpeculativeProposer>,
     layer_count: u32,
     report: &mut PackagePreflightReport,
 ) {
@@ -458,8 +568,86 @@ fn validate_speculative_strategy(
     if strategy.strategy_type == "native-mtp" {
         validate_native_mtp_strategy(name, strategy, layer_count, report);
     }
+    if let Some(proposer) = &strategy.proposer {
+        validate_proposer_reference(name, "proposer", proposer, proposers, report);
+    }
+    if strategy.strategy_type == "composite" {
+        validate_composite_strategy(name, strategy, proposers, report);
+    }
+    if let Some(policy) = &strategy.extension_policy {
+        validate_extension_policy(name, policy, report);
+    }
     if let Some(window) = &strategy.window_policy {
         validate_window_policy(name, window, report);
+    }
+}
+
+fn validate_proposer_reference(
+    strategy_name: &str,
+    field: &str,
+    proposer_name: &str,
+    proposers: &BTreeMap<String, PackageSpeculativeProposer>,
+    report: &mut PackagePreflightReport,
+) {
+    if !proposers.contains_key(proposer_name) {
+        report.error(
+            "missing_speculative_proposer",
+            format!("speculative strategy {strategy_name} references missing {field} proposer {proposer_name}"),
+            Some("model-package.json".to_string()),
+            "declare the referenced proposer under generation.speculative_decoding.proposers",
+        );
+    }
+}
+
+fn validate_composite_strategy(
+    name: &str,
+    strategy: &PackageSpeculativeStrategy,
+    proposers: &BTreeMap<String, PackageSpeculativeProposer>,
+    report: &mut PackagePreflightReport,
+) {
+    let Some(primary) = strategy.primary.as_deref() else {
+        report.error(
+            "missing_composite_primary",
+            format!("composite speculative strategy {name} must declare primary"),
+            Some("model-package.json".to_string()),
+            "set primary to a declared native-mtp proposer",
+        );
+        return;
+    };
+    let Some(extender) = strategy.extender.as_deref() else {
+        report.error(
+            "missing_composite_extender",
+            format!("composite speculative strategy {name} must declare extender"),
+            Some("model-package.json".to_string()),
+            "set extender to a declared ngram-simple or ngram-cache proposer",
+        );
+        return;
+    };
+    validate_proposer_reference(name, "primary", primary, proposers, report);
+    validate_proposer_reference(name, "extender", extender, proposers, report);
+    if proposers
+        .get(primary)
+        .is_some_and(|proposer| proposer.proposer_type != "native-mtp")
+    {
+        report.error(
+            "invalid_composite_primary_type",
+            format!("composite speculative strategy {name} primary {primary} must be native-mtp"),
+            Some("model-package.json".to_string()),
+            "set primary to a native-mtp proposer",
+        );
+    }
+    if proposers.get(extender).is_some_and(|proposer| {
+        !matches!(
+            proposer.proposer_type.as_str(),
+            "ngram-simple" | "ngram-cache"
+        )
+    }) {
+        report.error(
+            "invalid_composite_extender_type",
+            format!("composite speculative strategy {name} extender {extender} must be an N-gram proposer"),
+            Some("model-package.json".to_string()),
+            "set extender to an ngram-simple or ngram-cache proposer",
+        );
     }
 }
 
@@ -469,7 +657,23 @@ fn validate_native_mtp_strategy(
     layer_count: u32,
     report: &mut PackagePreflightReport,
 ) {
-    if strategy.prediction_depth != Some(1) {
+    validate_native_mtp_parts(
+        name,
+        strategy.prediction_depth,
+        &strategy.layer_indices,
+        layer_count,
+        report,
+    );
+}
+
+fn validate_native_mtp_parts(
+    name: &str,
+    prediction_depth: Option<u32>,
+    layer_indices: &[u32],
+    layer_count: u32,
+    report: &mut PackagePreflightReport,
+) {
+    if prediction_depth != Some(1) {
         report.error(
             "unsupported_native_mtp_prediction_depth",
             format!("native MTP strategy {name} must use prediction_depth 1"),
@@ -477,7 +681,7 @@ fn validate_native_mtp_strategy(
             "rebuild the package with the mtp policy supported by this runtime",
         );
     }
-    if strategy.layer_indices.is_empty() {
+    if layer_indices.is_empty() {
         report.error(
             "missing_native_mtp_layers",
             format!("native MTP strategy {name} must declare MTP layer_indices"),
@@ -485,7 +689,7 @@ fn validate_native_mtp_strategy(
             "rebuild the package from a GGUF with native MTP tensors",
         );
     }
-    for layer_index in &strategy.layer_indices {
+    for layer_index in layer_indices {
         if *layer_index >= layer_count {
             report.error(
                 "native_mtp_layer_out_of_range",
@@ -496,6 +700,59 @@ fn validate_native_mtp_strategy(
                 "rebuild the package manifest so MTP layer indices are within the package layer range",
             );
         }
+    }
+}
+
+fn validate_ngram_proposer(
+    name: &str,
+    proposer: &PackageSpeculativeProposer,
+    report: &mut PackagePreflightReport,
+) {
+    let min = proposer.ngram_min.unwrap_or_default();
+    let max = proposer.ngram_max.unwrap_or_default();
+    if min == 0 || max == 0 || min > max {
+        report.error(
+            "invalid_ngram_proposer_window",
+            format!("N-gram proposer {name} must set ngram_min and ngram_max with 1 <= min <= max"),
+            Some("model-package.json".to_string()),
+            "set positive ngram_min and ngram_max values with min less than or equal to max",
+        );
+    }
+    if proposer.max_proposal_tokens.unwrap_or_default() == 0 {
+        report.error(
+            "invalid_ngram_proposer_max_tokens",
+            format!("N-gram proposer {name} must set max_proposal_tokens greater than zero"),
+            Some("model-package.json".to_string()),
+            "set max_proposal_tokens to a positive value",
+        );
+    }
+    if proposer.proposer_type == "ngram-cache"
+        && proposer.history_scope.as_deref() != Some("request")
+    {
+        report.error(
+            "invalid_ngram_cache_history_scope",
+            format!("N-gram cache proposer {name} must set history_scope to request"),
+            Some("model-package.json".to_string()),
+            "set history_scope to request; shared cache history is not supported",
+        );
+    }
+}
+
+fn validate_extension_policy(
+    name: &str,
+    policy: &PackageExtensionPolicy,
+    report: &mut PackagePreflightReport,
+) {
+    if policy.initial_tokens == 0
+        || policy.max_tokens == 0
+        || policy.initial_tokens > policy.max_tokens
+    {
+        report.error(
+            "invalid_extension_policy_tokens",
+            format!("speculative strategy {name} extension_policy must satisfy 1 <= initial_tokens <= max_tokens"),
+            Some("model-package.json".to_string()),
+            "set positive initial_tokens and max_tokens with initial_tokens no larger than max_tokens",
+        );
     }
 }
 
@@ -558,6 +815,20 @@ fn preflight_speculative_decoding(
 ) -> PreflightSpeculativeDecoding {
     PreflightSpeculativeDecoding {
         default: speculative.default.clone(),
+        proposers: speculative
+            .proposers
+            .iter()
+            .map(|(name, proposer)| PreflightSpeculativeProposer {
+                name: name.clone(),
+                proposer_type: proposer.proposer_type.clone(),
+                prediction_depth: proposer.prediction_depth,
+                layer_indices: proposer.layer_indices.clone(),
+                ngram_min: proposer.ngram_min,
+                ngram_max: proposer.ngram_max,
+                max_proposal_tokens: proposer.max_proposal_tokens,
+                history_scope: proposer.history_scope.clone(),
+            })
+            .collect(),
         strategies: speculative
             .strategies
             .iter()
@@ -567,6 +838,16 @@ fn preflight_speculative_decoding(
                 prediction_depth: strategy.prediction_depth,
                 layer_indices: strategy.layer_indices.clone(),
                 window_policy: strategy.window_policy.as_ref().map(preflight_window_policy),
+                proposer: strategy.proposer.clone(),
+                primary: strategy.primary.clone(),
+                extender: strategy.extender.clone(),
+                extension_policy: strategy.extension_policy.as_ref().map(|policy| {
+                    PreflightExtensionPolicy {
+                        initial_tokens: policy.initial_tokens,
+                        max_tokens: policy.max_tokens,
+                        tail_backoff_proposals: policy.tail_backoff_proposals,
+                    }
+                }),
             })
             .collect(),
     }
@@ -1259,6 +1540,90 @@ mod tests {
         assert_eq!(window_policy.initial_window, 1);
         assert_eq!(window_policy.min_window, 1);
         assert_eq!(window_policy.max_window, 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preflight_accepts_request_local_ngram_cache_composite_strategy() {
+        let dir = unique_test_dir("ngram-cache-composite");
+        let package = write_package_fixture(&dir, true);
+        write_generation_to_manifest(
+            &package,
+            serde_json::json!({
+                "speculative_decoding": {
+                    "default": "mtp-cache",
+                    "proposers": {
+                        "mtp": {
+                            "type": "native-mtp",
+                            "prediction_depth": 1,
+                            "layer_indices": [1]
+                        },
+                        "cache": {
+                            "type": "ngram-cache",
+                            "ngram_min": 2,
+                            "ngram_max": 4,
+                            "max_proposal_tokens": 4,
+                            "history_scope": "request"
+                        }
+                    },
+                    "strategies": {
+                        "mtp-cache": {
+                            "type": "composite",
+                            "primary": "mtp",
+                            "extender": "cache",
+                            "extension_policy": {
+                                "initial_tokens": 2,
+                                "max_tokens": 4,
+                                "tail_backoff_proposals": 6
+                            }
+                        }
+                    }
+                }
+            }),
+        );
+
+        let report = preflight_package(&package, &PackagePreflightOptions::default());
+
+        assert!(report.valid, "{:?}", report.issues);
+        let speculative = report
+            .generation
+            .and_then(|generation| generation.speculative_decoding)
+            .expect("generation strategy should be reported");
+        assert_eq!(speculative.proposers.len(), 2);
+        assert_eq!(speculative.strategies[0].primary.as_deref(), Some("mtp"));
+        assert_eq!(speculative.strategies[0].extender.as_deref(), Some("cache"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preflight_rejects_shared_ngram_cache_history() {
+        let dir = unique_test_dir("ngram-cache-shared-history");
+        let package = write_package_fixture(&dir, true);
+        write_generation_to_manifest(
+            &package,
+            serde_json::json!({
+                "speculative_decoding": {
+                    "default": "cache",
+                    "proposers": {
+                        "cache": {
+                            "type": "ngram-cache",
+                            "ngram_min": 2,
+                            "ngram_max": 4,
+                            "max_proposal_tokens": 4,
+                            "history_scope": "shared"
+                        }
+                    },
+                    "strategies": {
+                        "cache": { "type": "ngram-cache", "proposer": "cache" }
+                    }
+                }
+            }),
+        );
+
+        let report = preflight_package(&package, &PackagePreflightOptions::default());
+
+        assert!(!report.valid);
+        assert_issue(&report, "invalid_ngram_cache_history_scope");
         fs::remove_dir_all(dir).unwrap();
     }
 

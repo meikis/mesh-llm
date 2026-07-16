@@ -231,7 +231,27 @@ struct PackageGeneration {
 #[derive(Debug, Deserialize, Serialize)]
 struct PackageSpeculativeDecoding {
     default: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    proposers: BTreeMap<String, PackageSpeculativeProposer>,
     strategies: BTreeMap<String, PackageSpeculativeStrategy>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PackageSpeculativeProposer {
+    #[serde(rename = "type")]
+    proposer_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prediction_depth: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    layer_indices: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ngram_min: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ngram_max: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_proposal_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    history_scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -244,6 +264,21 @@ struct PackageSpeculativeStrategy {
     layer_indices: Vec<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     window_policy: Option<PackageWindowPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proposer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    primary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    extender: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    extension_policy: Option<PackageExtensionPolicy>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PackageExtensionPolicy {
+    initial_tokens: u32,
+    max_tokens: u32,
+    tail_backoff_proposals: u32,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1771,6 +1806,19 @@ fn package_generation(tensors: &[TensorInfo]) -> Option<PackageGeneration> {
 
     let strategy_id = "mtp".to_string();
     let mut strategies = BTreeMap::new();
+    let mut proposers = BTreeMap::new();
+    proposers.insert(
+        strategy_id.clone(),
+        PackageSpeculativeProposer {
+            proposer_type: "native-mtp".to_string(),
+            prediction_depth: Some(1),
+            layer_indices: mtp_layers.clone(),
+            ngram_min: None,
+            ngram_max: None,
+            max_proposal_tokens: None,
+            history_scope: None,
+        },
+    );
     strategies.insert(
         strategy_id.clone(),
         PackageSpeculativeStrategy {
@@ -1783,12 +1831,17 @@ fn package_generation(tensors: &[TensorInfo]) -> Option<PackageGeneration> {
                 min_window: 1,
                 max_window: 1,
             }),
+            proposer: Some(strategy_id.clone()),
+            primary: None,
+            extender: None,
+            extension_policy: None,
         },
     );
 
     Some(PackageGeneration {
         speculative_decoding: Some(PackageSpeculativeDecoding {
             default: strategy_id,
+            proposers,
             strategies,
         }),
     })
@@ -2112,11 +2165,19 @@ mod tests {
             .speculative_decoding
             .expect("MTP generation should configure speculative decoding");
         assert_eq!(speculative.default, "mtp");
+        let proposer = speculative
+            .proposers
+            .get("mtp")
+            .expect("native MTP proposer should be present");
+        assert_eq!(proposer.proposer_type, "native-mtp");
+        assert_eq!(proposer.prediction_depth, Some(1));
+        assert_eq!(proposer.layer_indices, vec![47]);
         let strategy = speculative
             .strategies
             .get("mtp")
             .expect("default strategy should be present");
         assert_eq!(strategy.strategy_type, "native-mtp");
+        assert_eq!(strategy.proposer.as_deref(), Some("mtp"));
         assert_eq!(strategy.prediction_depth, Some(1));
         assert_eq!(strategy.layer_indices, vec![47]);
         let window = strategy

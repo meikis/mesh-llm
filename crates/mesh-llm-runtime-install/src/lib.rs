@@ -290,13 +290,16 @@ async fn download_release_manifest(url: &str) -> Result<NativeRuntimeReleaseMani
         .header("User-Agent", "mesh-llm")
         .send()
         .await
+        .map_err(reqwest::Error::without_url)
         .with_context(|| format!("download native runtime release manifest {diagnostic_url}"))?
         .error_for_status()
+        .map_err(reqwest::Error::without_url)
         .with_context(|| {
             format!("native runtime release manifest request failed for {diagnostic_url}")
         })?
         .bytes()
         .await
+        .map_err(reqwest::Error::without_url)
         .with_context(|| format!("read native runtime release manifest {diagnostic_url}"))?;
     let checksum_url = release_manifest_checksum_url(url);
     let diagnostic_checksum_url = url_without_query(&checksum_url);
@@ -305,15 +308,18 @@ async fn download_release_manifest(url: &str) -> Result<NativeRuntimeReleaseMani
         .header("User-Agent", "mesh-llm")
         .send()
         .await
+        .map_err(reqwest::Error::without_url)
         .with_context(|| {
             format!("download native runtime manifest checksum {diagnostic_checksum_url}")
         })?
         .error_for_status()
+        .map_err(reqwest::Error::without_url)
         .with_context(|| {
             format!("native runtime manifest checksum request failed for {diagnostic_checksum_url}")
         })?
         .text()
         .await
+        .map_err(reqwest::Error::without_url)
         .with_context(|| {
             format!("read native runtime manifest checksum {diagnostic_checksum_url}")
         })?;

@@ -1171,10 +1171,11 @@ impl StageOpenAiBackend {
                                 let pipeline = pipelined.as_mut().expect("pipeline retained");
                                 pipeline.set_next_draft(
                                     request.native_mtp_enabled,
-                                    NativeMtpDraft::from_verify_prediction_tokens(
-                                        &verify.reply.predicted_tokens,
-                                        window.input_tokens.len(),
-                                    ),
+                                    verify
+                                        .reply
+                                        .native_mtp_draft
+                                        .clone()
+                                        .map(NativeMtpDraft::from_stage_draft),
                                 );
                             } else {
                                 speculative_stats.rejected_tokens += 1;
@@ -1762,7 +1763,10 @@ impl StageOpenAiBackend {
                 let native_mtp_draft = if suppress_cooldown_draft {
                     None
                 } else {
-                    NativeMtpDraft::from_prediction_tokens(&reply.predicted_tokens)
+                    reply
+                        .native_mtp_draft
+                        .clone()
+                        .map(NativeMtpDraft::from_stage_draft)
                 };
                 if suppress_cooldown_draft {
                     native_mtp.clear_pending_draft();

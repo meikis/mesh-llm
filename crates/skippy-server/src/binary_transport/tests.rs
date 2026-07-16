@@ -1,8 +1,8 @@
 use super::{
     binary_full_prefill_record_identities, decode_record_tokens_sideband,
     is_decode_frame_batch_candidate, native_mtp_enabled_from, prepare_binary_stage_connection,
-    reply_window_for_message, restore_prefill_decode_as_decode_message, token_sideband_or_fill,
-    warm_downstream_preconnect_enabled_from,
+    reply_window_for_message, restore_prefill_decode_as_decode_message, split_native_mtp_reply,
+    token_sideband_or_fill, warm_downstream_preconnect_enabled_from,
 };
 use std::{
     io,
@@ -147,11 +147,39 @@ fn verify_window_reply_reports_accepted_prefix_and_correction() {
     message.state.seq_id = 42;
     message.tokens = vec![10, 11, 12];
 
-    let reply = reply_window_for_message(&message, &[10, 99, 100]);
+    let reply = reply_window_for_message(&message, &[11, 99, 100]);
 
     assert_eq!(reply.window_id, 42);
     assert_eq!(reply.accepted_len, 1);
     assert_eq!(reply.correction_token, 99);
+}
+
+#[test]
+fn native_mtp_sideband_is_removed_from_verify_predictions() {
+    let mut message = test_message(WireMessageKind::VerifyWindow, 3);
+    message.tokens = vec![10, 11, 12];
+    let mut predictions = vec![11, 12, 13, 2, 14, 15, 123];
+
+    let draft = split_native_mtp_reply(&message, &mut predictions).unwrap();
+
+    assert_eq!(predictions, vec![11, 12, 13]);
+    assert_eq!(
+        draft,
+        Some(skippy_protocol::binary::StageNativeMtpDraft {
+            token_ids: vec![14, 15],
+            proposal_compute_us: 123,
+        })
+    );
+}
+
+#[test]
+fn malformed_native_mtp_sideband_is_rejected() {
+    let message = test_message(WireMessageKind::DecodeEmbd, 1);
+    let mut predictions = vec![11, 2, 12];
+
+    let error = split_native_mtp_reply(&message, &mut predictions).unwrap_err();
+
+    assert!(error.to_string().contains("malformed native MTP sideband"));
 }
 
 #[test]

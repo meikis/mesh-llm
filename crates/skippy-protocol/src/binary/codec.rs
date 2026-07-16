@@ -4,8 +4,9 @@ use super::{
     MAX_STAGE_ACTIVATION_BYTES, MAX_STAGE_CHAT_SAMPLING_METADATA_BYTES,
     MAX_STAGE_DECODED_ACTIVATION_BYTES, MAX_STAGE_LOGIT_BIAS, MAX_STAGE_PREDICTED_TOKENS,
     MAX_STAGE_SIDEBAND_VALUES, MAX_STAGE_STATE_IMPORT_BYTES, READY_MAGIC, STAGE_STATE_VERSION,
-    StageLogitBias, StageReply, StageReplyStats, StageReplyWindow, StageSamplingConfig,
-    StageStateHeader, StageWireMessage, WireActivationDType, WireMessageKind, WireReplyKind,
+    StageLogitBias, StageNativeMtpDraft, StageReply, StageReplyStats, StageReplyWindow,
+    StageSamplingConfig, StageStateHeader, StageWireMessage, WireActivationDType, WireMessageKind,
+    WireReplyKind,
     activation::{
         activation_decoded_f32_bytes_with_state_flags, activation_wire_bytes_with_state_flags,
     },
@@ -35,6 +36,7 @@ pub fn send_reply_ack_with_stats(mut writer: impl Write, stats: StageReplyStats)
             kind: WireReplyKind::Ack,
             predicted: 0,
             predicted_tokens: Vec::new(),
+            native_mtp_draft: None,
             window: StageReplyWindow::default(),
             stats,
         },
@@ -91,6 +93,7 @@ pub fn send_reply_predicted_with_tokens_window_and_stats(
         predicted_tokens,
         window,
     )?;
+    write_native_mtp_draft(&mut writer, None)?;
     write_reply_stats(&mut writer, stats)
 }
 
@@ -124,6 +127,7 @@ pub fn send_reply_predicted_tokens_with_window_and_stats(
         predicted_tokens,
         window,
     )?;
+    write_native_mtp_draft(&mut writer, None)?;
     write_reply_stats(&mut writer, stats)
 }
 
@@ -138,6 +142,7 @@ pub fn send_reply_message(mut writer: impl Write, reply: &StageReply) -> io::Res
         &reply.predicted_tokens,
         reply.window,
     )?;
+    write_native_mtp_draft(&mut writer, reply.native_mtp_draft.as_ref())?;
     write_reply_stats(&mut writer, reply.stats)
 }
 
@@ -155,11 +160,13 @@ pub fn recv_reply(mut reader: impl Read) -> io::Result<StageReply> {
         predicted_tokens.push(read_i32(&mut reader)?);
     }
     let window = read_reply_window(&mut reader)?;
+    let native_mtp_draft = read_native_mtp_draft(&mut reader)?;
     let stats = read_reply_stats(&mut reader)?;
     Ok(StageReply {
         kind,
         predicted,
         predicted_tokens,
+        native_mtp_draft,
         window,
         stats,
     })
@@ -183,6 +190,51 @@ fn write_reply_header(
         write_i32(&mut writer, *token)?;
     }
     write_reply_window(&mut writer, window)
+}
+
+fn write_native_mtp_draft(
+    mut writer: impl Write,
+    draft: Option<&StageNativeMtpDraft>,
+) -> io::Result<()> {
+    let Some(draft) = draft else {
+        return write_i32(&mut writer, 0);
+    };
+    if draft.token_ids.len() > MAX_STAGE_PREDICTED_TOKENS {
+        return Err(invalid_input("too many native MTP draft tokens"));
+    }
+    write_i32(&mut writer, 1)?;
+    write_i32(
+        &mut writer,
+        i32::try_from(draft.token_ids.len())
+            .map_err(|_| invalid_input("too many native MTP draft tokens"))?,
+    )?;
+    for token in &draft.token_ids {
+        write_i32(&mut writer, *token)?;
+    }
+    write_i64(&mut writer, draft.proposal_compute_us)
+}
+
+fn read_native_mtp_draft(mut reader: impl Read) -> io::Result<Option<StageNativeMtpDraft>> {
+    match read_i32(&mut reader)? {
+        0 => Ok(None),
+        1 => {
+            let token_count = checked_i32_len(
+                read_i32(&mut reader)?,
+                MAX_STAGE_PREDICTED_TOKENS,
+                "negative native MTP draft token count",
+                "native MTP draft token count exceeds maximum",
+            )?;
+            let mut token_ids = Vec::with_capacity(token_count);
+            for _ in 0..token_count {
+                token_ids.push(read_i32(&mut reader)?);
+            }
+            Ok(Some(StageNativeMtpDraft {
+                token_ids,
+                proposal_compute_us: read_i64(&mut reader)?,
+            }))
+        }
+        _ => Err(invalid_data("unknown native MTP draft reply marker")),
+    }
 }
 
 pub fn write_stage_message(
@@ -644,6 +696,16 @@ fn read_i32(mut reader: impl Read) -> io::Result<i32> {
 }
 
 fn write_i32(mut writer: impl Write, value: i32) -> io::Result<()> {
+    writer.write_all(&value.to_le_bytes())
+}
+
+fn read_i64(mut reader: impl Read) -> io::Result<i64> {
+    let mut bytes = [0_u8; 8];
+    reader.read_exact(&mut bytes)?;
+    Ok(i64::from_le_bytes(bytes))
+}
+
+fn write_i64(mut writer: impl Write, value: i64) -> io::Result<()> {
     writer.write_all(&value.to_le_bytes())
 }
 

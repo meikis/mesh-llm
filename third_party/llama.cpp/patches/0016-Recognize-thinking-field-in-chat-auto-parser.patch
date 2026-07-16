@@ -1,7 +1,7 @@
-From 5cadd27893dc12af80a115884275e48c7396e8f8 Mon Sep 17 00:00:00 2001
+From c890e2c3d6af578f435a9ff014c8230bb5a790d1 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Tue, 14 Jul 2026 19:32:50 +1000
-Subject: [PATCH] Recognize thinking field in chat auto-parser
+Subject: [PATCH 16/16] Recognize thinking field in chat auto-parser
 
 ---
  common/chat-diff-analyzer.cpp   | 10 +++++++---
@@ -89,5 +89,5 @@ index 8e662c3e..b51df496 100644
  
  static void test_cohere_reasoning_detection(testing & t) {
 -- 
-2.50.1 (Apple Git-155)
+2.54.0 (Apple Git-157)
 

@@ -1,7 +1,7 @@
 use std::net::TcpStream;
 
 use openai_frontend::{OpenAiError, OpenAiResult};
-use skippy_protocol::binary::WireReplyKind;
+use skippy_protocol::binary::{StageNativeMtpDraft, WireReplyKind};
 
 use super::super::{
     AdaptiveVerifyWindow, BufferedCompositeProposal, CompositeProposalProvider,
@@ -149,8 +149,7 @@ impl StageOpenAiBackend {
         let target_token = verify.reply.predicted_tokens[0];
         let verify_next_mtp_draft = next_native_mtp_draft(
             request.native_mtp_enabled,
-            &verify.reply.predicted_tokens,
-            verify_inputs.len(),
+            verify.reply.native_mtp_draft.clone(),
         );
         let native_mtp_decision = (!native_mtp_draft_tokens.is_empty()).then(|| {
             let span = native_mtp.observe_taken_draft_span(
@@ -469,19 +468,17 @@ fn native_mtp_verify_window_inputs(current: i32, proposals: &[i32]) -> Vec<i32> 
 
 fn next_native_mtp_draft(
     native_mtp_enabled: bool,
-    prediction_tokens: &[i32],
-    verified_token_count: usize,
+    stage_draft: Option<StageNativeMtpDraft>,
 ) -> Option<NativeMtpDraft> {
     native_mtp_enabled
-        .then(|| {
-            NativeMtpDraft::from_verify_prediction_tokens(prediction_tokens, verified_token_count)
-        })
+        .then(|| stage_draft.map(NativeMtpDraft::from_stage_draft))
         .flatten()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{native_mtp_verify_window_inputs, next_native_mtp_draft};
+    use skippy_protocol::binary::StageNativeMtpDraft;
 
     #[test]
     fn verify_window_inputs_include_every_native_mtp_proposal() {
@@ -490,13 +487,28 @@ mod tests {
 
     #[test]
     fn pure_ngram_verify_does_not_capture_a_native_mtp_draft() {
-        assert_eq!(next_native_mtp_draft(false, &[10, 1, 11, 12], 1), None);
+        assert_eq!(
+            next_native_mtp_draft(
+                false,
+                Some(StageNativeMtpDraft {
+                    token_ids: vec![11],
+                    proposal_compute_us: 12,
+                }),
+            ),
+            None
+        );
     }
 
     #[test]
     fn native_mtp_verify_captures_the_next_native_draft() {
-        let draft = next_native_mtp_draft(true, &[10, 1, 11, 12], 1)
-            .expect("native MTP draft should be retained");
+        let draft = next_native_mtp_draft(
+            true,
+            Some(StageNativeMtpDraft {
+                token_ids: vec![11],
+                proposal_compute_us: 12,
+            }),
+        )
+        .expect("native MTP draft should be retained");
 
         assert_eq!(draft.tokens, vec![11]);
         assert_eq!(draft.proposal_compute_us, 12);

@@ -1032,9 +1032,10 @@ impl StageOpenAiBackend {
         Ok(Some(EmbeddedFusedFirstDecode {
             predicted: downstream_reply.predicted,
             predicted_tokens: vec![downstream_reply.predicted],
-            native_mtp_draft: NativeMtpDraft::from_prediction_tokens(
-                &downstream_reply.predicted_tokens,
-            ),
+            native_mtp_draft: downstream_reply
+                .native_mtp_draft
+                .clone()
+                .map(NativeMtpDraft::from_stage_draft),
             reply_stats,
             execution: EmbeddedExecutionStats {
                 stage0_compute_ms,

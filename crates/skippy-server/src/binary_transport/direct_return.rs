@@ -449,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_prediction_return_preserves_predicted_token_sideband() {
+    fn direct_prediction_return_preserves_typed_native_mtp_draft() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let mut client = TcpStream::connect(addr).unwrap();
@@ -458,7 +458,11 @@ mod tests {
         let reply = StageReply {
             kind: WireReplyKind::PredictedToken,
             predicted: 42,
-            predicted_tokens: vec![42, 43, 123],
+            predicted_tokens: vec![42],
+            native_mtp_draft: Some(skippy_protocol::binary::StageNativeMtpDraft {
+                token_ids: vec![43],
+                proposal_compute_us: 123,
+            }),
             window: skippy_protocol::binary::StageReplyWindow {
                 window_id: 7,
                 accepted_len: 2,
@@ -471,7 +475,14 @@ mod tests {
         let received = recv_reply(&mut client).unwrap();
         assert_eq!(received.kind, WireReplyKind::PredictedToken);
         assert_eq!(received.predicted, 42);
-        assert_eq!(received.predicted_tokens, vec![42, 43, 123]);
+        assert_eq!(received.predicted_tokens, vec![42]);
+        assert_eq!(
+            received.native_mtp_draft,
+            Some(skippy_protocol::binary::StageNativeMtpDraft {
+                token_ids: vec![43],
+                proposal_compute_us: 123,
+            })
+        );
         assert_eq!(received.window.window_id, 7);
         assert_eq!(received.window.accepted_len, 2);
         assert_eq!(received.window.correction_token, 123);

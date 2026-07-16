@@ -3521,20 +3521,9 @@ async fn prepare_runtime_startup(
         .iter()
         .map(|model| model.resolved_path.clone())
         .collect();
-    let update_check_paths = resolved_models.clone();
-    match tokio::task::spawn_blocking(move || {
-        models::warn_about_updates_for_paths(&update_check_paths);
-    })
-    .await
-    {
-        Ok(()) => {}
-        Err(err) => {
-            let _ = emit_event(OutputEvent::Warning {
-                message: format!("Could not join Hugging Face update check task: {err}"),
-                context: None,
-            });
-        }
-    }
+    spawn_advisory_startup_task(move || {
+        models::warn_about_updates_for_paths(&resolved_models);
+    });
 
     let requested_model_names = startup_models
         .iter()
@@ -3545,6 +3534,11 @@ async fn prepare_runtime_startup(
         requested_model_names,
         bin_dir,
     }))
+}
+
+// Snapshot update checks are advisory. Serving must not wait on Hub reachability.
+fn spawn_advisory_startup_task(task: impl FnOnce() + Send + 'static) {
+    let _ = tokio::task::spawn_blocking(task);
 }
 
 pub(crate) async fn run() -> Result<()> {
@@ -9235,6 +9229,28 @@ mod tests {
             // TODO: Audit that the environment access only happens in single-threaded code.
             unsafe { std::env::remove_var(key) };
         }
+    }
+
+    #[tokio::test]
+    async fn advisory_startup_task_does_not_block_runtime_startup() {
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let completed = std::sync::Arc::new(AtomicBool::new(false));
+        let task_started = std::sync::Arc::clone(&started);
+        let task_completed = std::sync::Arc::clone(&completed);
+
+        spawn_advisory_startup_task(move || {
+            task_started.notify_one();
+            std::thread::sleep(Duration::from_millis(100));
+            task_completed.store(true, Ordering::Release);
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), started.notified())
+            .await
+            .expect("advisory task should be scheduled");
+        assert!(
+            !completed.load(Ordering::Acquire),
+            "startup must not wait for the advisory task"
+        );
     }
 
     #[test]

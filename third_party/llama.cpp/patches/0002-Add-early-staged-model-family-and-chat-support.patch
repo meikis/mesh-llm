@@ -1,7 +1,7 @@
-From 774c69d06b369118b7e73b31f799247523234a18 Mon Sep 17 00:00:00 2001
+From 62a7c68a1a479b76547bec25912ee1bbfc8d98a7 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Fri, 26 Jun 2026 13:47:52 +1000
-Subject: [PATCH 02/14] Add early staged model-family and chat support
+Subject: [PATCH 02/16] Add early staged model-family and chat support
 
 Squashes the first Qwen MoE staged-runtime support, native KV page basics, session reset, token EOG exposure, batched token verification, chat-template ABI, and the first wider model-family support pass.
 ---
@@ -319,7 +319,7 @@ index 7ab93d35..23a46e0f 100644
          const char * path,
          struct skippy_model_info ** out_info,
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 36faacbd..d3a03342 100644
+index 660dee46..cca99a8f 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -22,6 +22,7 @@
@@ -414,7 +414,7 @@ index 36faacbd..d3a03342 100644
      const int64_t n_rs = mctx->get_recr()->get_n_rs();
  
 diff --git a/src/llama-graph.h b/src/llama-graph.h
-index c03fb1ce..32406ff2 100644
+index cbcb2be0..17ea96e5 100644
 --- a/src/llama-graph.h
 +++ b/src/llama-graph.h
 @@ -38,9 +38,17 @@ struct skippy_graph_filter {
@@ -435,7 +435,7 @@ index c03fb1ce..32406ff2 100644
  
  // certain models (typically multi-modal) can produce different types of graphs
  enum llm_graph_type {
-@@ -160,6 +168,18 @@ public:
+@@ -161,6 +169,18 @@ public:
      const int64_t n_embd = 0;
  };
  
@@ -929,10 +929,10 @@ index f4310743..4e43bfbc 100644
          if (info.op == GGML_OP_NONE || (flags & TENSOR_SKIP)) {
              const size_t nbytes = ggml_nbytes(t_meta);
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 7dea38c8..4ea21038 100644
+index d8748138..714157f8 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
-@@ -1381,13 +1381,13 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+@@ -1380,13 +1380,13 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
              }
  
              // MoE expert weight scales (per-expert, shape {n_expert})

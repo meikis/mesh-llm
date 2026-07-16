@@ -20,10 +20,11 @@ pub use types::{
     MAX_STAGE_DECODED_ACTIVATION_BYTES, MAX_STAGE_LOGIT_BIAS, MAX_STAGE_PREDICTED_TOKENS,
     MAX_STAGE_SIDEBAND_VALUES, MAX_STAGE_STATE_IMPORT_BYTES, READY_MAGIC,
     STAGE_LOGIT_BIAS_WIRE_BYTES, STAGE_SAMPLING_CONFIG_BASE_BYTES, STAGE_STATE_HEADER_BYTES,
-    STAGE_STATE_VERSION, STAGE_WIRE_FIXED_HEADER_BYTES, StageLogitBias, StageReply,
-    StageReplyStats, StageReplyWindow, StageRequestEpoch, StageSamplingConfig, StageStateHeader,
-    StageWireMessage, WireActivationDType, WireMessageKind, WireReplyKind, WireStagePhase,
-    activation_frame_flags_from_state_flags, activation_state_flags_from_frame_flags, state_flags,
+    STAGE_STATE_VERSION, STAGE_WIRE_FIXED_HEADER_BYTES, StageLogitBias, StageNativeMtpDraft,
+    StageReply, StageReplyStats, StageReplyWindow, StageRequestEpoch, StageSamplingConfig,
+    StageStateHeader, StageWireMessage, WireActivationDType, WireMessageKind, WireReplyKind,
+    WireStagePhase, activation_frame_flags_from_state_flags,
+    activation_state_flags_from_frame_flags, state_flags,
 };
 
 pub(crate) fn invalid_data(message: &'static str) -> std::io::Error {
@@ -104,6 +105,26 @@ mod tests {
         assert_eq!(reply.kind, WireReplyKind::PredictedToken);
         assert_eq!(reply.predicted, 42);
         assert_eq!(reply.predicted_tokens, vec![42]);
+        assert_eq!(reply.native_mtp_draft, None);
+    }
+
+    #[test]
+    fn reply_round_trips_typed_native_mtp_draft() {
+        let reply = StageReply {
+            kind: WireReplyKind::PredictedToken,
+            predicted: 42,
+            predicted_tokens: vec![42],
+            native_mtp_draft: Some(StageNativeMtpDraft {
+                token_ids: vec![43, 44],
+                proposal_compute_us: 12_345,
+            }),
+            window: StageReplyWindow::default(),
+            stats: StageReplyStats::default(),
+        };
+        let mut bytes = Vec::new();
+        send_reply_message(&mut bytes, &reply).unwrap();
+
+        assert_eq!(recv_reply(Cursor::new(bytes)).unwrap(), reply);
     }
 
     #[test]

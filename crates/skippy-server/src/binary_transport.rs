@@ -27,10 +27,11 @@ use skippy_metrics::{attr, metric};
 use skippy_protocol::{
     MessageBase, SCHEMA_VERSION, StageConfig, StageTopology,
     binary::{
-        LLAMA_TOKEN_NULL, READY_MAGIC, StageReply, StageReplyStats, StageSamplingConfig,
-        StageStateHeader, StageWireMessage, WireActivationDType, WireMessageKind, WireReplyKind,
-        activation_frame_flags_from_state_flags, read_stage_message, recv_reply, send_ready,
-        send_reply_ack, send_reply_ack_with_stats, send_reply_message, state_flags,
+        LLAMA_TOKEN_NULL, READY_MAGIC, StageNativeMtpDraft, StageReply, StageReplyStats,
+        StageSamplingConfig, StageStateHeader, StageWireMessage, WireActivationDType,
+        WireMessageKind, WireReplyKind, activation_frame_flags_from_state_flags,
+        read_stage_message, recv_reply, send_ready, send_reply_ack, send_reply_ack_with_stats,
+        send_reply_message, state_flags,
     },
 };
 use skippy_runtime::{
@@ -1042,7 +1043,7 @@ fn handle_binary_connection(
         let mut decode_batch_wait_ms = 0.0;
         let input_activation_bytes = message.activation.len();
         let mut proactive_eviction = None;
-        let (predicted_token, predicted_tokens, output, compute_ms) = if restored_prefill {
+        let (predicted_token, mut predicted_tokens, output, compute_ms) = if restored_prefill {
             let now = now_unix_nanos() as u64;
             compute_start_unix_nanos = now;
             compute_end_unix_nanos = now;
@@ -1522,6 +1523,7 @@ fn handle_binary_connection(
             } else {
                 WireReplyKind::PredictedToken
             };
+            let native_mtp_draft = split_native_mtp_reply(&message, &mut predicted_tokens)?;
             let predicted_token_count = if message.kind == WireMessageKind::VerifyWindow {
                 predicted_tokens.len()
             } else {
@@ -1535,6 +1537,7 @@ fn handle_binary_connection(
                 kind: reply_kind,
                 predicted: predicted_token,
                 predicted_tokens,
+                native_mtp_draft,
                 window: reply_window,
                 stats: message_reply_stats,
             };
@@ -1828,6 +1831,51 @@ fn native_mtp_prediction_tokens(predicted: i32, draft: Option<NativeMtpDraft>) -
     tokens.extend(draft.token_ids);
     tokens.push(draft.proposal_compute_us.clamp(0, i64::from(i32::MAX)) as i32);
     tokens
+}
+
+/// Converts the temporary llama-stage sideband into the typed stage reply field.
+///
+/// The C ABI still returns the proposal as a trailer. The network boundary is
+/// authoritative: consumers receive only target predictions plus a separate
+/// native-MTP draft. A malformed trailer is rejected instead of being exposed
+/// as target-model output.
+fn split_native_mtp_reply(
+    message: &StageWireMessage,
+    prediction_tokens: &mut Vec<i32>,
+) -> Result<Option<StageNativeMtpDraft>> {
+    let sideband_offset = match message.kind {
+        WireMessageKind::DecodeEmbd
+        | WireMessageKind::DecodeReadout
+        | WireMessageKind::DecodeLightCtx
+        | WireMessageKind::DecodeReplayEmbd
+        | WireMessageKind::DecodeReplayFinalEmbd => 1,
+        WireMessageKind::VerifyWindow => message.tokens.len(),
+        _ => return Ok(None),
+    };
+    if prediction_tokens.len() <= sideband_offset {
+        return Ok(None);
+    }
+    let draft_token_count = usize::try_from(prediction_tokens[sideband_offset])
+        .map_err(|_| anyhow!("negative native MTP draft token count"))?;
+    let draft_start = sideband_offset + 1;
+    let draft_end = draft_start
+        .checked_add(draft_token_count)
+        .ok_or_else(|| anyhow!("native MTP draft token count overflow"))?;
+    let compute_index = draft_end;
+    if prediction_tokens.len() != compute_index + 1 {
+        bail!(
+            "malformed native MTP sideband: expected {} values, got {}",
+            compute_index + 1,
+            prediction_tokens.len()
+        );
+    }
+    let proposal_compute_us = i64::from(prediction_tokens[compute_index].max(0));
+    let token_ids = prediction_tokens[draft_start..draft_end].to_vec();
+    prediction_tokens.truncate(sideband_offset);
+    Ok((!token_ids.is_empty()).then_some(StageNativeMtpDraft {
+        token_ids,
+        proposal_compute_us,
+    }))
 }
 
 fn binary_auto_align_session_enabled() -> bool {
@@ -2479,6 +2527,7 @@ fn handle_binary_restore_prefill_decode_control(
                 kind: WireReplyKind::Ack,
                 predicted: 0,
                 predicted_tokens: Vec::new(),
+                native_mtp_draft: None,
                 window: Default::default(),
                 stats: control_stats,
             },
@@ -2642,6 +2691,7 @@ fn handle_binary_restore_prefill_decode_control(
             kind: WireReplyKind::PredictedToken,
             predicted: predicted_token,
             predicted_tokens: vec![predicted_token],
+            native_mtp_draft: None,
             window: Default::default(),
             stats: control_stats,
         },
@@ -2681,6 +2731,7 @@ fn reply_window_for_message(
         let accepted_len = message
             .tokens
             .iter()
+            .skip(1)
             .zip(predicted_tokens)
             .take_while(|(input, predicted)| input == predicted)
             .count();

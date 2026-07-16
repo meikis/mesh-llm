@@ -5,7 +5,8 @@ use super::{
     invalid_data,
 };
 
-pub const STAGE_STATE_VERSION: i32 = 7;
+// v8 adds the typed native-MTP reply section. Stage peers must be upgraded together.
+pub const STAGE_STATE_VERSION: i32 = 8;
 pub const MAX_STAGE_LOGIT_BIAS: usize = 256;
 pub const MAX_STAGE_PREDICTED_TOKENS: usize = 262_144;
 pub const MAX_STAGE_SIDEBAND_VALUES: usize = 1_048_576;
@@ -549,9 +550,22 @@ impl StageWireMessage {
 pub struct StageReply {
     pub kind: WireReplyKind,
     pub predicted: i32,
+    /// Target-model predictions only. Native MTP proposals are carried separately.
     pub predicted_tokens: Vec<i32>,
+    pub native_mtp_draft: Option<StageNativeMtpDraft>,
     pub window: StageReplyWindow,
     pub stats: StageReplyStats,
+}
+
+/// A native MTP proposal associated with a stage reply.
+///
+/// This deliberately has its own reply field rather than sharing the target
+/// prediction vector. Consumers must never mistake proposal metadata for a
+/// target prediction while verifying a composite speculative window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageNativeMtpDraft {
+    pub token_ids: Vec<i32>,
+    pub proposal_compute_us: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

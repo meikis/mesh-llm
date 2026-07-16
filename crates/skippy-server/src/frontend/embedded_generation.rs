@@ -1223,7 +1223,9 @@ impl StageOpenAiBackend {
                                 );
                                 native_mtp.clear_pending_draft();
                                 if native_mtp_verify_decision.rejected
-                                    && pipeline.origin().is_some()
+                                    && pipeline.proposal().native_mtp_prefix_rejected(
+                                        native_mtp_verify_decision.accepted_proposal_tokens,
+                                    )
                                     && native_mtp_options.reject_cooldown_tokens > 0
                                 {
                                     native_mtp_reject_cooldown_remaining =

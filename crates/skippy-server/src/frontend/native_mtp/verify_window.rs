@@ -192,6 +192,11 @@ impl StageOpenAiBackend {
             && native_mtp_verify_decision.accepted_proposal_tokens == proposal_tokens.len()
             && committed_positions == consumed_positions
             && !reached_stop;
+        let native_mtp_prefix_rejected = proposal_buffer.as_ref().is_some_and(|buffer| {
+            buffer
+                .proposal()
+                .native_mtp_prefix_rejected(native_mtp_verify_decision.accepted_proposal_tokens)
+        });
         let buffer_exhausted = {
             let buffer = proposal_buffer.as_mut().expect("proposal buffer retained");
             if fully_accepted_window {
@@ -214,7 +219,7 @@ impl StageOpenAiBackend {
             adaptive_verify_window.current_tokens(),
         );
         if native_mtp_verify_decision.rejected
-            && !native_mtp_draft_tokens.is_empty()
+            && native_mtp_prefix_rejected
             && native_mtp_options.reject_cooldown_tokens > 0
         {
             *native_mtp_reject_cooldown_remaining = native_mtp_options.reject_cooldown_tokens;

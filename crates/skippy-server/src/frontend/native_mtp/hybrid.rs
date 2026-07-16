@@ -103,6 +103,15 @@ impl NativeMtpHybridProposal {
         self.ngram_span_available
     }
 
+    /// A tail mismatch is not evidence that the native MTP prefix was bad.
+    /// Keep the native reject cooldown scoped to mismatches inside that prefix.
+    pub(in crate::frontend) fn native_mtp_prefix_rejected(
+        &self,
+        accepted_proposal_tokens: usize,
+    ) -> bool {
+        accepted_proposal_tokens < self.native_mtp_token_count
+    }
+
     /// A pipelined verify needs each in-flight window's candidates plus one
     /// optimistic target token to seed the following window.
     pub(in crate::frontend) fn parallel_verify_width(
@@ -287,6 +296,14 @@ mod tests {
         assert_eq!(proposal.native_mtp_token_count(), 2);
         assert_eq!(proposal.ngram_token_count(), 0);
         assert!(!proposal.ngram_span_available());
+    }
+
+    #[test]
+    fn tail_rejection_does_not_count_as_native_mtp_rejection() {
+        let proposal = NativeMtpHybridProposal::from_parts(vec![9, 10, 11], 1, true);
+
+        assert!(!proposal.native_mtp_prefix_rejected(1));
+        assert!(proposal.native_mtp_prefix_rejected(0));
     }
 
     #[test]

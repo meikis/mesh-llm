@@ -125,6 +125,8 @@ pub(in crate::frontend) struct NativeMtpDecodeCounters {
     verify_next_draft_adopted_count: usize,
     hybrid_native_prefix_available_count: usize,
     hybrid_ngram_continuation_available_count: usize,
+    hybrid_ngram_mtp_prefix_agreement_count: usize,
+    hybrid_ngram_mtp_prefix_disagreement_count: usize,
     hybrid_proposal_token_count: usize,
     hybrid_accepted_token_count: usize,
     hybrid_accepted_tail_token_count: usize,
@@ -201,6 +203,10 @@ impl NativeMtpDecodeCounters {
             usize::from(proposal.native_mtp_token_count() > 0);
         self.hybrid_ngram_continuation_available_count +=
             usize::from(proposal.ngram_span_available());
+        self.hybrid_ngram_mtp_prefix_agreement_count +=
+            usize::from(proposal.ngram_mtp_prefix_agreed());
+        self.hybrid_ngram_mtp_prefix_disagreement_count +=
+            usize::from(proposal.ngram_mtp_prefix_disagreed());
         self.hybrid_proposal_token_count += proposal.tokens().len();
         self.hybrid_accepted_token_count += accepted_token_count;
         self.hybrid_accepted_tail_token_count +=
@@ -332,6 +338,14 @@ impl NativeMtpDecodeCounters {
             json!(self.hybrid_ngram_continuation_available_count),
         );
         attrs.insert(
+            "llama_stage.native_mtp.hybrid_ngram_mtp_prefix_agreement_count".to_string(),
+            json!(self.hybrid_ngram_mtp_prefix_agreement_count),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.hybrid_ngram_mtp_prefix_disagreement_count".to_string(),
+            json!(self.hybrid_ngram_mtp_prefix_disagreement_count),
+        );
+        attrs.insert(
             "llama_stage.native_mtp.hybrid_proposal_token_count".to_string(),
             json!(self.hybrid_proposal_token_count),
         );
@@ -405,6 +419,14 @@ impl NativeMtpDecodeCounters {
         timings.insert(
             "native_mtp_hybrid_ngram_continuation_available".to_string(),
             json!(self.hybrid_ngram_continuation_available_count),
+        );
+        timings.insert(
+            "native_mtp_hybrid_ngram_mtp_prefix_agreements".to_string(),
+            json!(self.hybrid_ngram_mtp_prefix_agreement_count),
+        );
+        timings.insert(
+            "native_mtp_hybrid_ngram_mtp_prefix_disagreements".to_string(),
+            json!(self.hybrid_ngram_mtp_prefix_disagreement_count),
         );
         timings.insert(
             "native_mtp_hybrid_proposed_tokens".to_string(),
@@ -544,7 +566,11 @@ mod tests {
     }
 
     fn composite_proposal() -> NativeMtpHybridProposal {
-        CompositeProposalProvider::from_options(options()).propose(&[9], &[1, 2, 3, 9, 1, 2, 3], 4)
+        CompositeProposalProvider::from_options(options()).propose(
+            &[9],
+            &[1, 2, 3, 9, 1, 2, 3, 9, 1, 2, 3],
+            4,
+        )
     }
 
     #[test]
@@ -619,6 +645,14 @@ mod tests {
             Some(&json!(1))
         );
         assert_eq!(
+            attrs.get("llama_stage.native_mtp.hybrid_ngram_mtp_prefix_agreement_count"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.hybrid_ngram_mtp_prefix_disagreement_count"),
+            Some(&json!(0))
+        );
+        assert_eq!(
             attrs.get("llama_stage.native_mtp.hybrid_ngram_tail_rejection_count"),
             Some(&json!(1))
         );
@@ -672,6 +706,10 @@ mod tests {
         );
         assert_eq!(
             timings.get("native_mtp_hybrid_accepted_native_tokens"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            timings.get("native_mtp_hybrid_ngram_mtp_prefix_agreements"),
             Some(&json!(1))
         );
         assert_eq!(

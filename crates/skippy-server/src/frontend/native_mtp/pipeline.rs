@@ -32,6 +32,7 @@ pub(in crate::frontend) struct CompositeProposalPipeline {
     proposal: NativeMtpHybridProposal,
     origin: Option<NativeMtpDraftOrigin>,
     candidates: VecDeque<i32>,
+    parallel_verify_width: usize,
     dispatched_native_mtp_token_count: usize,
     accepted_tokens: usize,
     next_draft: Option<NativeMtpDraft>,
@@ -41,11 +42,13 @@ impl CompositeProposalPipeline {
     pub(in crate::frontend) fn new(
         proposal: NativeMtpHybridProposal,
         origin: Option<NativeMtpDraftOrigin>,
+        parallel_verify_width: usize,
     ) -> Self {
         Self {
             candidates: proposal.tokens().iter().copied().collect(),
             proposal,
             origin,
+            parallel_verify_width: parallel_verify_width.max(1),
             dispatched_native_mtp_token_count: 0,
             accepted_tokens: 0,
             next_draft: None,
@@ -56,7 +59,9 @@ impl CompositeProposalPipeline {
         &mut self,
         verify_width: usize,
     ) -> Option<PipelinedCandidateWindow> {
-        let verify_width = verify_width.min(self.candidates.len());
+        let verify_width = verify_width
+            .min(self.parallel_verify_width)
+            .min(self.candidates.len());
         if verify_width == 0 {
             return None;
         }
@@ -129,6 +134,7 @@ mod tests {
         let mut pipeline = CompositeProposalPipeline::new(
             proposal(vec![9, 1, 2, 3, 4], 1),
             Some(NativeMtpDraftOrigin::InitialSerial),
+            2,
         );
 
         let first = pipeline.next_window(2).unwrap();
@@ -144,7 +150,7 @@ mod tests {
 
     #[test]
     fn supports_a_pure_ngram_candidate() {
-        let mut pipeline = CompositeProposalPipeline::new(proposal(vec![1, 2, 3], 0), None);
+        let mut pipeline = CompositeProposalPipeline::new(proposal(vec![1, 2, 3], 0), None, 2);
 
         let window = pipeline.next_window(2).unwrap();
         assert_eq!(window.proposal_tokens(), &[1, 2]);
@@ -155,7 +161,7 @@ mod tests {
 
     #[test]
     fn pure_ngram_pipeline_discards_verify_next_native_mtp_drafts() {
-        let mut pipeline = CompositeProposalPipeline::new(proposal(vec![1, 2, 3], 0), None);
+        let mut pipeline = CompositeProposalPipeline::new(proposal(vec![1, 2, 3], 0), None, 2);
 
         pipeline.set_next_draft(
             false,
@@ -166,5 +172,15 @@ mod tests {
         );
 
         assert!(pipeline.next_draft().is_none());
+    }
+
+    #[test]
+    fn caps_each_dispatched_window_to_the_parallel_width() {
+        let mut pipeline = CompositeProposalPipeline::new(proposal(vec![1, 2, 3], 0), None, 1);
+
+        let window = pipeline.next_window(4).unwrap();
+
+        assert_eq!(window.proposal_tokens(), &[1]);
+        assert_eq!(window.expected_free_target(), Some(2));
     }
 }

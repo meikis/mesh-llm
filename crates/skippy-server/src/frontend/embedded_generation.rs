@@ -862,7 +862,7 @@ impl StageOpenAiBackend {
             let native_mtp_verify_windows_enabled =
                 (request.native_mtp_enabled || composite_sidecar_enabled) && draft_guard.is_none();
             let pipelined_decode_enabled =
-                native_mtp_verify_windows_enabled && verify_window_scheduler.depth() > 1;
+                composite_sidecar_enabled && verify_window_scheduler.depth() > 1;
             if native_mtp_verify_windows_enabled && !direct_prediction_return_opened {
                 return Err(OpenAiError::backend(
                     "native MTP verify windows require direct prediction return",
@@ -892,8 +892,57 @@ impl StageOpenAiBackend {
                 let token_timer = PhaseTimer::start();
                 let native_mtp_remaining =
                     (request.max_tokens as usize).saturating_sub(decoded_tokens);
+                let mut pipeline_seed = None;
+                if pipelined_decode_enabled
+                    && pipelined.is_none()
+                    && pipelined_windows.is_empty()
+                    && native_mtp_reject_cooldown_remaining == 0
+                {
+                    let pending = request
+                        .native_mtp_enabled
+                        .then(|| native_mtp.take_pending_draft())
+                        .flatten();
+                    let native_mtp_origin = pending.as_ref().map(|draft| draft.origin);
+                    let native_mtp_tokens = pending
+                        .as_ref()
+                        .map(|draft| {
+                            draft
+                                .tokens
+                                .iter()
+                                .copied()
+                                .take(native_mtp_options.max_draft_tokens)
+                                .take(native_mtp_remaining.saturating_sub(1))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let native_mtp_tokens =
+                        if native_mtp_tokens.len() >= native_mtp_options.min_draft_tokens {
+                            native_mtp_tokens.as_slice()
+                        } else {
+                            &[]
+                        };
+                    let proposal = CompositeProposalProvider::from_options(native_mtp_options)
+                        .propose(native_mtp_tokens, &context_tokens, native_mtp_remaining);
+                    if let Some(parallel_verify_width) = proposal.parallel_verify_width(
+                        adaptive_verify_window.width(proposal.tokens().len()),
+                        verify_window_scheduler.depth(),
+                    ) {
+                        pipeline_seed = Some((
+                            proposal,
+                            if native_mtp_tokens.is_empty() {
+                                None
+                            } else {
+                                native_mtp_origin
+                            },
+                            parallel_verify_width,
+                        ));
+                    } else if let Some(pending) = pending {
+                        native_mtp.restore_pending_draft(pending);
+                    }
+                }
                 if native_mtp_verify_windows_enabled
-                    && !pipelined_decode_enabled
+                    && (!pipelined_decode_enabled
+                        || (pipelined.is_none() && pipeline_seed.is_none()))
                     && native_mtp_reject_cooldown_remaining == 0
                     && native_mtp_remaining >= 2
                 {
@@ -942,46 +991,13 @@ impl StageOpenAiBackend {
                     }
                 }
                 if pipelined_decode_enabled {
-                    if pipelined.is_none()
-                        && pipelined_windows.is_empty()
-                        && native_mtp_reject_cooldown_remaining == 0
-                    {
-                        let pending = request
-                            .native_mtp_enabled
-                            .then(|| native_mtp.take_pending_draft())
-                            .flatten();
-                        let native_mtp_origin = pending.as_ref().map(|draft| draft.origin);
-                        let native_mtp_tokens = pending
-                            .as_ref()
-                            .map(|draft| {
-                                draft
-                                    .tokens
-                                    .iter()
-                                    .copied()
-                                    .take(native_mtp_options.max_draft_tokens)
-                                    .take(native_mtp_remaining.saturating_sub(1))
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default();
-                        let native_mtp_tokens =
-                            if native_mtp_tokens.len() >= native_mtp_options.min_draft_tokens {
-                                native_mtp_tokens.as_slice()
-                            } else {
-                                &[]
-                            };
-                        let proposal = CompositeProposalProvider::from_options(native_mtp_options)
-                            .propose(native_mtp_tokens, &context_tokens, native_mtp_remaining);
-                        if !proposal.tokens().is_empty() {
-                            pipelined_current = current;
-                            pipelined = Some(CompositeProposalPipeline::new(
-                                proposal,
-                                if native_mtp_tokens.is_empty() {
-                                    None
-                                } else {
-                                    native_mtp_origin
-                                },
-                            ));
-                        }
+                    if let Some((proposal, origin, parallel_verify_width)) = pipeline_seed {
+                        pipelined_current = current;
+                        pipelined = Some(CompositeProposalPipeline::new(
+                            proposal,
+                            origin,
+                            parallel_verify_width,
+                        ));
                     }
                     if let Some(pipeline) = pipelined.as_mut() {
                         while verify_window_scheduler.has_capacity()

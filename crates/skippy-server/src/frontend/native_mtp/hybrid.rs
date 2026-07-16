@@ -102,6 +102,21 @@ impl NativeMtpHybridProposal {
     pub(in crate::frontend) fn ngram_span_available(&self) -> bool {
         self.ngram_span_available
     }
+
+    /// A pipelined verify needs each in-flight window's candidates plus one
+    /// optimistic target token to seed the following window.
+    pub(in crate::frontend) fn parallel_verify_width(
+        &self,
+        adaptive_verify_width: usize,
+        pipeline_depth: usize,
+    ) -> Option<usize> {
+        let max_parallel_width = self
+            .tokens
+            .len()
+            .saturating_sub(1)
+            .checked_div(pipeline_depth)?;
+        (max_parallel_width > 0).then(|| adaptive_verify_width.min(max_parallel_width))
+    }
 }
 
 /// Holds the unverified portion of a composite proposal. A fully accepted
@@ -272,6 +287,17 @@ mod tests {
         assert_eq!(proposal.native_mtp_token_count(), 2);
         assert_eq!(proposal.ngram_token_count(), 0);
         assert!(!proposal.ngram_span_available());
+    }
+
+    #[test]
+    fn caps_parallel_verify_width_to_the_available_candidate_depth() {
+        let too_shallow = NativeMtpHybridProposal::from_parts(vec![1, 2], 1, true);
+        let deep_enough = NativeMtpHybridProposal::from_parts(vec![1, 2, 3], 1, true);
+        let wider = NativeMtpHybridProposal::from_parts(vec![1, 2, 3, 4, 5], 1, true);
+
+        assert_eq!(too_shallow.parallel_verify_width(4, 2), None);
+        assert_eq!(deep_enough.parallel_verify_width(4, 2), Some(1));
+        assert_eq!(wider.parallel_verify_width(4, 2), Some(2));
     }
 
     #[test]

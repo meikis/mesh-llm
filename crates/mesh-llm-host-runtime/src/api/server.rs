@@ -221,20 +221,21 @@ pub(crate) async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> an
         return Ok(());
     }
 
-    if requires_trusted_local_access(method, path_only)
-        && !is_trusted_local_request(
-            source_addr,
-            request_origin(&request.raw),
-            request_host(&request.raw),
-        )
-    {
-        respond_error(
-            &mut stream,
-            403,
-            "This management route requires a trusted local caller",
-        )
-        .await?;
-        return Ok(());
+    if requires_trusted_local_access(method, path_only) {
+        let trusted_local_request = match (request_origin(&request.raw), request_host(&request.raw))
+        {
+            (Ok(origin), Ok(host)) => is_trusted_local_request(source_addr, origin, host),
+            _ => false,
+        };
+        if !trusted_local_request {
+            respond_error(
+                &mut stream,
+                403,
+                "This management route requires a trusted local caller",
+            )
+            .await?;
+            return Ok(());
+        }
     }
 
     match (method, path_only) {

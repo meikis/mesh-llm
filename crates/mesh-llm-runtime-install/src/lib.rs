@@ -280,6 +280,7 @@ fn installed_outcome(
 }
 
 async fn download_release_manifest(url: &str) -> Result<NativeRuntimeReleaseManifest> {
+    let diagnostic_url = url_without_query(url);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()
@@ -289,32 +290,39 @@ async fn download_release_manifest(url: &str) -> Result<NativeRuntimeReleaseMani
         .header("User-Agent", "mesh-llm")
         .send()
         .await
-        .with_context(|| format!("download native runtime release manifest {url}"))?
+        .with_context(|| format!("download native runtime release manifest {diagnostic_url}"))?
         .error_for_status()
-        .with_context(|| format!("native runtime release manifest request failed for {url}"))?
+        .with_context(|| {
+            format!("native runtime release manifest request failed for {diagnostic_url}")
+        })?
         .bytes()
         .await
-        .with_context(|| format!("read native runtime release manifest {url}"))?;
+        .with_context(|| format!("read native runtime release manifest {diagnostic_url}"))?;
     let checksum_url = release_manifest_checksum_url(url);
+    let diagnostic_checksum_url = url_without_query(&checksum_url);
     let checksum = client
         .get(&checksum_url)
         .header("User-Agent", "mesh-llm")
         .send()
         .await
-        .with_context(|| format!("download native runtime manifest checksum {checksum_url}"))?
+        .with_context(|| {
+            format!("download native runtime manifest checksum {diagnostic_checksum_url}")
+        })?
         .error_for_status()
         .with_context(|| {
-            format!("native runtime manifest checksum request failed for {checksum_url}")
+            format!("native runtime manifest checksum request failed for {diagnostic_checksum_url}")
         })?
         .text()
         .await
-        .with_context(|| format!("read native runtime manifest checksum {checksum_url}"))?;
+        .with_context(|| {
+            format!("read native runtime manifest checksum {diagnostic_checksum_url}")
+        })?;
     verify_release_manifest_checksum(&bytes, &checksum)
-        .with_context(|| format!("verify native runtime release manifest {url}"))?;
+        .with_context(|| format!("verify native runtime release manifest {diagnostic_url}"))?;
     let text = std::str::from_utf8(&bytes)
-        .with_context(|| format!("decode native runtime release manifest {url}"))?;
+        .with_context(|| format!("decode native runtime release manifest {diagnostic_url}"))?;
     NativeRuntimeReleaseManifest::from_json_str(text)
-        .with_context(|| format!("parse native runtime release manifest {url}"))
+        .with_context(|| format!("parse native runtime release manifest {diagnostic_url}"))
 }
 
 fn verify_release_manifest_checksum(manifest_bytes: &[u8], checksum_text: &str) -> Result<()> {
@@ -331,6 +339,10 @@ fn release_manifest_checksum_url(url: &str) -> String {
         Some((base, query)) => format!("{base}.sha256?{query}"),
         None => format!("{url}.sha256"),
     }
+}
+
+fn url_without_query(url: &str) -> &str {
+    url.split_once('?').map_or(url, |(base, _)| base)
 }
 
 async fn download_and_install_runtime(
@@ -607,6 +619,18 @@ mod tests {
                 "https://example.invalid/native-runtimes.json?token=secret"
             ),
             "https://example.invalid/native-runtimes.json.sha256?token=secret"
+        );
+    }
+
+    #[test]
+    fn manifest_diagnostic_urls_redact_query_parameters() {
+        assert_eq!(
+            url_without_query("https://example.invalid/native-runtimes.json?token=secret"),
+            "https://example.invalid/native-runtimes.json"
+        );
+        assert_eq!(
+            url_without_query("https://example.invalid/native-runtimes.json"),
+            "https://example.invalid/native-runtimes.json"
         );
     }
 

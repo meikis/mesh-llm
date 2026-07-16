@@ -44,25 +44,27 @@ pub(crate) fn is_trusted_local_request(
     host.is_none_or(is_trusted_local_authority) && origin.is_none_or(is_trusted_local_origin)
 }
 
-pub(crate) fn request_origin(raw_request: &[u8]) -> Option<&str> {
+pub(crate) fn request_origin(raw_request: &[u8]) -> Result<Option<&str>, ()> {
     request_header(raw_request, "origin")
 }
 
-pub(crate) fn request_host(raw_request: &[u8]) -> Option<&str> {
+pub(crate) fn request_host(raw_request: &[u8]) -> Result<Option<&str>, ()> {
     request_header(raw_request, "host")
 }
 
-fn request_header<'a>(raw_request: &'a [u8], name: &str) -> Option<&'a str> {
+fn request_header<'a>(raw_request: &'a [u8], name: &str) -> Result<Option<&'a str>, ()> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut request = httparse::Request::new(&mut headers);
-    request.parse(raw_request).ok()?;
-    request.headers.iter().find_map(|header| {
-        header
-            .name
-            .eq_ignore_ascii_case(name)
-            .then(|| std::str::from_utf8(header.value).ok())
-            .flatten()
-    })
+    match request.parse(raw_request).map_err(|_| ())? {
+        httparse::Status::Complete(_) => {}
+        httparse::Status::Partial => return Err(()),
+    }
+    request
+        .headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case(name))
+        .map(|header| std::str::from_utf8(header.value).map_err(|_| ()))
+        .transpose()
 }
 
 fn is_loopback_ip(ip: IpAddr) -> bool {
@@ -177,7 +179,16 @@ mod tests {
     #[test]
     fn origin_header_is_extracted_case_insensitively() {
         let request = b"POST /mcp HTTP/1.1\r\nHost: localhost\r\noRiGiN: https://attacker.example\r\nContent-Length: 0\r\n\r\n";
-        assert_eq!(request_origin(request), Some("https://attacker.example"));
+        assert_eq!(
+            request_origin(request),
+            Ok(Some("https://attacker.example"))
+        );
+    }
+
+    #[test]
+    fn malformed_security_header_is_rejected() {
+        let request = b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nOrigin: https://local\xff\r\n\r\n";
+        assert_eq!(request_origin(request), Err(()));
     }
 
     #[test]

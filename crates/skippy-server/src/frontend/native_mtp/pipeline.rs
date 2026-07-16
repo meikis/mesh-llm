@@ -183,4 +183,23 @@ mod tests {
         assert_eq!(window.proposal_tokens(), &[1]);
         assert_eq!(window.expected_free_target(), Some(2));
     }
+
+    #[test]
+    fn records_the_matching_prefix_of_a_rejected_window() {
+        let mut pipeline = CompositeProposalPipeline::new(
+            proposal(vec![9, 1, 2, 3], 1),
+            Some(NativeMtpDraftOrigin::InitialSerial),
+            2,
+        );
+
+        let _ = pipeline.next_window(2).unwrap();
+        pipeline.observe_accepted(1);
+
+        assert_eq!(pipeline.accepted_tokens(), 1);
+        assert!(
+            pipeline
+                .proposal()
+                .ngram_tail_rejected(pipeline.accepted_tokens())
+        );
+    }
 }

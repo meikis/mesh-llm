@@ -666,6 +666,7 @@ impl StageOpenAiBackend {
             let mut native_mtp_counters = NativeMtpDecodeCounters::default();
             let mut native_mtp_reject_cooldown_remaining = 0usize;
             let mut native_mtp_suppress_cooldown_drafts_remaining = 0usize;
+            let mut ngram_sidecar_backoff = NgramSidecarBackoff::default();
             if let Some(mut fused) = fused_first_decode.take() {
                 current = fused.predicted;
                 let mut fused_native_mtp_draft = fused.native_mtp_draft.take();
@@ -922,7 +923,12 @@ impl StageOpenAiBackend {
                             &[]
                         };
                     let proposal = CompositeProposalProvider::from_options(native_mtp_options)
-                        .propose(native_mtp_tokens, &context_tokens, native_mtp_remaining);
+                        .propose_with_ngram_extension(
+                            native_mtp_tokens,
+                            &context_tokens,
+                            native_mtp_remaining,
+                            ngram_sidecar_backoff.allows_extension(native_mtp_tokens),
+                        );
                     if let Some(parallel_verify_width) = proposal.parallel_verify_width(
                         adaptive_verify_window.width(proposal.tokens().len()),
                         verify_window_scheduler.depth(),
@@ -972,6 +978,7 @@ impl StageOpenAiBackend {
                         &mut native_mtp_counters,
                         &mut native_mtp_reject_cooldown_remaining,
                         &mut native_mtp_suppress_cooldown_drafts_remaining,
+                        &mut ngram_sidecar_backoff,
                         &mut decode_stage0_compute_ms,
                         &mut decode_runtime_lock_wait_ms,
                         &mut decode_runtime_lock_wait_max_ms,
@@ -1096,6 +1103,13 @@ impl StageOpenAiBackend {
                                         == Some(&expected)
                                 });
                             let pipeline_continues = fully_accepted_window && free_target_matches;
+                            let accepted_candidate_tokens = native_mtp_verify_decision
+                                .accepted_proposal_tokens
+                                + usize::from(
+                                    fully_accepted_window
+                                        && window.expected_free_target.is_some()
+                                        && free_target_matches,
+                                );
                             if window.native_mtp_token_count > 0 {
                                 let pipeline = pipelined.as_ref().expect("pipeline retained");
                                 let span = native_mtp.observe_taken_draft_span(
@@ -1152,15 +1166,9 @@ impl StageOpenAiBackend {
                             decode_forward_write_ms += verify.stats.forward_write_ms;
                             decode_downstream_wait_ms += verify.stats.downstream_wait_ms;
                             if fully_accepted_window {
-                                let accepted_candidate_tokens = window.proposal_tokens.len()
-                                    + usize::from(
-                                        window.expected_free_target.is_some()
-                                            && free_target_matches,
-                                    );
                                 speculative_stats.accepted_tokens += accepted_candidate_tokens;
                                 speculative_stats.full_accept_windows += 1;
                                 let pipeline = pipelined.as_mut().expect("pipeline retained");
-                                pipeline.observe_accepted(accepted_candidate_tokens);
                                 pipeline.set_next_draft(
                                     request.native_mtp_enabled,
                                     NativeMtpDraft::from_verify_prediction_tokens(
@@ -1174,6 +1182,10 @@ impl StageOpenAiBackend {
                                 speculative_stats.early_reject_windows += 1;
                                 speculative_stats.first_reject_position_sum += 1;
                             }
+                            pipelined
+                                .as_mut()
+                                .expect("pipeline retained")
+                                .observe_accepted(accepted_candidate_tokens);
                             let mut reached_stop = false;
                             for token in verify
                                 .reply
@@ -1217,6 +1229,13 @@ impl StageOpenAiBackend {
                                     stale_drain_timer.elapsed_ms(),
                                 );
                                 let pipeline = pipelined.take().expect("pipeline retained");
+                                if ngram_sidecar_backoff.observe_tail_rejection(
+                                    pipeline.proposal(),
+                                    pipeline.accepted_tokens(),
+                                    native_mtp_options.ngram_tail_backoff_proposals,
+                                ) {
+                                    native_mtp_counters.observe_ngram_tail_rejection();
+                                }
                                 native_mtp_counters.observe_hybrid_proposal(
                                     pipeline.proposal(),
                                     pipeline.accepted_tokens(),

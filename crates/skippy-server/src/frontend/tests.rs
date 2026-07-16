@@ -1179,6 +1179,7 @@ fn generated_text_timings_prefer_composite_proposal_totals() {
         ngram_hybrid: true,
         ngram_size: 2,
         ngram_max_proposal_tokens: 4,
+        ngram_tail_backoff_proposals: 2,
         verify_window_min_tokens: 1,
         verify_window_max_tokens: 4,
     })
@@ -1203,6 +1204,7 @@ fn generated_text_timings_prefer_composite_proposal_totals() {
                 ngram_hybrid: true,
                 ngram_size: 2,
                 ngram_max_proposal_tokens: 4,
+                ngram_tail_backoff_proposals: 2,
                 verify_window_min_tokens: 1,
                 verify_window_max_tokens: 4,
             },

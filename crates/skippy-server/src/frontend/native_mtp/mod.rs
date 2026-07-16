@@ -14,13 +14,13 @@ pub(super) use decode::{
 pub(super) use draft::{NativeMtpDraft, NativeMtpDraftOrigin, PendingNativeMtpDraft};
 pub(in crate::frontend) use env::{
     native_mtp_ngram_hybrid_enabled, native_mtp_ngram_max_proposal_tokens, native_mtp_ngram_size,
-    native_mtp_reject_cooldown_tokens, native_mtp_suppress_cooldown_draft_limit,
-    native_mtp_suppress_cooldown_drafts_enabled, native_mtp_verify_window_max_tokens,
-    native_mtp_verify_window_min_tokens,
+    native_mtp_ngram_tail_backoff_proposals, native_mtp_reject_cooldown_tokens,
+    native_mtp_suppress_cooldown_draft_limit, native_mtp_suppress_cooldown_drafts_enabled,
+    native_mtp_verify_window_max_tokens, native_mtp_verify_window_min_tokens,
 };
 pub(super) use hybrid::{
     BufferedCompositeProposal, CompositeProposalProvider, NativeMtpHybridProposal,
-    classify_native_mtp_verify_window,
+    NgramSidecarBackoff, classify_native_mtp_verify_window,
 };
 pub(super) use pipeline::CompositeProposalPipeline;
 pub(super) use stats::{NativeMtpStats, NativeMtpVerification};

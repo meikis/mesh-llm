@@ -4,7 +4,8 @@ use serde_json::{Value, json};
 
 use super::{
     NativeMtpDraftOrigin, NativeMtpHybridProposal, native_mtp_ngram_hybrid_enabled,
-    native_mtp_ngram_max_proposal_tokens, native_mtp_ngram_size, native_mtp_reject_cooldown_tokens,
+    native_mtp_ngram_max_proposal_tokens, native_mtp_ngram_size,
+    native_mtp_ngram_tail_backoff_proposals, native_mtp_reject_cooldown_tokens,
     native_mtp_suppress_cooldown_draft_limit, native_mtp_suppress_cooldown_drafts_enabled,
     native_mtp_verify_window_max_tokens, native_mtp_verify_window_min_tokens,
 };
@@ -19,6 +20,7 @@ pub(in crate::frontend) struct NativeMtpDecodeOptions {
     pub(in crate::frontend) ngram_hybrid: bool,
     pub(in crate::frontend) ngram_size: usize,
     pub(in crate::frontend) ngram_max_proposal_tokens: usize,
+    pub(in crate::frontend) ngram_tail_backoff_proposals: usize,
     pub(in crate::frontend) verify_window_min_tokens: usize,
     pub(in crate::frontend) verify_window_max_tokens: usize,
 }
@@ -51,6 +53,7 @@ impl NativeMtpDecodeOptions {
             ngram_hybrid: native_mtp_ngram_hybrid_enabled(),
             ngram_size: native_mtp_ngram_size(),
             ngram_max_proposal_tokens: native_mtp_ngram_max_proposal_tokens(),
+            ngram_tail_backoff_proposals: native_mtp_ngram_tail_backoff_proposals(),
             verify_window_min_tokens: native_mtp_verify_window_min_tokens(),
             verify_window_max_tokens: native_mtp_verify_window_max_tokens(),
         }
@@ -128,6 +131,9 @@ pub(in crate::frontend) struct NativeMtpDecodeCounters {
     hybrid_native_mtp_token_count: usize,
     hybrid_ngram_token_count: usize,
     hybrid_pure_ngram_proposal_count: usize,
+    hybrid_accepted_native_mtp_token_count: usize,
+    hybrid_ngram_tail_rejection_count: usize,
+    hybrid_ngram_sidecar_backoff_count: usize,
     adaptive_verify_window_count: usize,
     adaptive_verify_window_width_sum: usize,
     adaptive_verify_window_width_min: usize,
@@ -199,9 +205,16 @@ impl NativeMtpDecodeCounters {
         self.hybrid_accepted_token_count += accepted_token_count;
         self.hybrid_accepted_tail_token_count +=
             accepted_token_count.saturating_sub(proposal.native_mtp_token_count());
+        self.hybrid_accepted_native_mtp_token_count +=
+            accepted_token_count.min(proposal.native_mtp_token_count());
         self.hybrid_native_mtp_token_count += proposal.native_mtp_token_count();
         self.hybrid_ngram_token_count += proposal.ngram_token_count();
         self.hybrid_pure_ngram_proposal_count += usize::from(proposal.is_pure_ngram());
+    }
+
+    pub(in crate::frontend) fn observe_ngram_tail_rejection(&mut self) {
+        self.hybrid_ngram_tail_rejection_count += 1;
+        self.hybrid_ngram_sidecar_backoff_count += 1;
     }
 
     pub(in crate::frontend) fn observe_adaptive_verify_window(
@@ -257,6 +270,10 @@ impl NativeMtpDecodeCounters {
         attrs.insert(
             "llama_stage.native_mtp.ngram_max_proposal_tokens".to_string(),
             json!(options.ngram_max_proposal_tokens),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.ngram_tail_backoff_proposals".to_string(),
+            json!(options.ngram_tail_backoff_proposals),
         );
         attrs.insert(
             "llama_stage.native_mtp.verify_window_min_tokens".to_string(),
@@ -335,6 +352,18 @@ impl NativeMtpDecodeCounters {
             json!(self.hybrid_ngram_token_count),
         );
         attrs.insert(
+            "llama_stage.native_mtp.hybrid_accepted_native_mtp_token_count".to_string(),
+            json!(self.hybrid_accepted_native_mtp_token_count),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.hybrid_ngram_tail_rejection_count".to_string(),
+            json!(self.hybrid_ngram_tail_rejection_count),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.hybrid_ngram_sidecar_backoff_count".to_string(),
+            json!(self.hybrid_ngram_sidecar_backoff_count),
+        );
+        attrs.insert(
             "llama_stage.native_mtp.hybrid_pure_ngram_proposal_count".to_string(),
             json!(self.hybrid_pure_ngram_proposal_count),
         );
@@ -396,6 +425,18 @@ impl NativeMtpDecodeCounters {
         timings.insert(
             "native_mtp_hybrid_ngram_tokens".to_string(),
             json!(self.hybrid_ngram_token_count),
+        );
+        timings.insert(
+            "native_mtp_hybrid_accepted_native_tokens".to_string(),
+            json!(self.hybrid_accepted_native_mtp_token_count),
+        );
+        timings.insert(
+            "native_mtp_hybrid_ngram_tail_rejections".to_string(),
+            json!(self.hybrid_ngram_tail_rejection_count),
+        );
+        timings.insert(
+            "native_mtp_hybrid_ngram_sidecar_backoffs".to_string(),
+            json!(self.hybrid_ngram_sidecar_backoff_count),
         );
         timings.insert(
             "native_mtp_hybrid_pure_ngram_proposals".to_string(),
@@ -466,6 +507,10 @@ impl NativeMtpDecodeTelemetry {
             json!(self.options.ngram_max_proposal_tokens),
         );
         timings.insert(
+            "native_mtp_ngram_tail_backoff_proposals".to_string(),
+            json!(self.options.ngram_tail_backoff_proposals),
+        );
+        timings.insert(
             "native_mtp_verify_window_min_tokens".to_string(),
             json!(self.options.verify_window_min_tokens),
         );
@@ -492,6 +537,7 @@ mod tests {
             ngram_hybrid: true,
             ngram_size: 2,
             ngram_max_proposal_tokens: 4,
+            ngram_tail_backoff_proposals: 2,
             verify_window_min_tokens: 1,
             verify_window_max_tokens: 4,
         }
@@ -511,6 +557,7 @@ mod tests {
         counters.observe_verify_next_draft(true, true);
         counters.observe_suppressed_cooldown_draft();
         counters.observe_hybrid_proposal(&composite_proposal(), 3);
+        counters.observe_ngram_tail_rejection();
         counters.observe_adaptive_verify_window(2, 3);
 
         let mut attrs = BTreeMap::new();
@@ -525,6 +572,7 @@ mod tests {
                 ngram_hybrid: true,
                 ngram_size: 8,
                 ngram_max_proposal_tokens: 4,
+                ngram_tail_backoff_proposals: 6,
                 verify_window_min_tokens: 1,
                 verify_window_max_tokens: 4,
             },
@@ -567,6 +615,18 @@ mod tests {
             Some(&json!(2))
         );
         assert_eq!(
+            attrs.get("llama_stage.native_mtp.hybrid_accepted_native_mtp_token_count"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.hybrid_ngram_tail_rejection_count"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.hybrid_ngram_sidecar_backoff_count"),
+            Some(&json!(1))
+        );
+        assert_eq!(
             attrs.get("llama_stage.native_mtp.adaptive_verify_window_grow_count"),
             Some(&json!(1))
         );
@@ -588,6 +648,7 @@ mod tests {
                 ngram_hybrid: true,
                 ngram_size: 8,
                 ngram_max_proposal_tokens: 4,
+                ngram_tail_backoff_proposals: 6,
                 verify_window_min_tokens: 1,
                 verify_window_max_tokens: 4,
             },
@@ -608,6 +669,10 @@ mod tests {
         assert_eq!(
             timings.get("native_mtp_hybrid_accepted_tail_tokens"),
             Some(&json!(2))
+        );
+        assert_eq!(
+            timings.get("native_mtp_hybrid_accepted_native_tokens"),
+            Some(&json!(1))
         );
         assert_eq!(
             timings.get("native_mtp_adaptive_verify_window_grows"),

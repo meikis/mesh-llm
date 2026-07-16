@@ -7,8 +7,8 @@ use super::super::{
     AdaptiveVerifyWindow, BufferedCompositeProposal, CompositeProposalProvider,
     EmbeddedSessionControl, EmbeddedStageZeroGeneration, NativeMtpDecodeCounters,
     NativeMtpDecodeOptions, NativeMtpDraft, NativeMtpDraftOrigin, NativeMtpTrimAction,
-    NativeMtpVerifier, PendingNativeMtpDraft, PhaseTimer, StageOpenAiBackend, TokenControl,
-    VerifyWindowMessageArgs, VerifyWindowScheduler, WireSamplingConfig,
+    NativeMtpVerifier, NgramSidecarBackoff, PendingNativeMtpDraft, PhaseTimer, StageOpenAiBackend,
+    TokenControl, VerifyWindowMessageArgs, VerifyWindowScheduler, WireSamplingConfig,
     classify_native_mtp_verify_window, embedded_verify_window_message, ms_to_us,
     native_mtp_trim_action, token_is_eog_with_runtime,
 };
@@ -49,6 +49,7 @@ impl StageOpenAiBackend {
         native_mtp_counters: &mut NativeMtpDecodeCounters,
         native_mtp_reject_cooldown_remaining: &mut usize,
         native_mtp_suppress_cooldown_drafts_remaining: &mut usize,
+        ngram_sidecar_backoff: &mut NgramSidecarBackoff,
         // Mutable decode accumulators
         decode_stage0_compute_ms: &mut f64,
         decode_runtime_lock_wait_ms: &mut f64,
@@ -86,11 +87,13 @@ impl StageOpenAiBackend {
                 } else {
                     &[]
                 };
-            let proposal = CompositeProposalProvider::from_options(*native_mtp_options).propose(
-                native_mtp_tokens,
-                context_tokens,
-                native_mtp_remaining.saturating_sub(1),
-            );
+            let proposal = CompositeProposalProvider::from_options(*native_mtp_options)
+                .propose_with_ngram_extension(
+                    native_mtp_tokens,
+                    context_tokens,
+                    native_mtp_remaining.saturating_sub(1),
+                    ngram_sidecar_backoff.allows_extension(native_mtp_tokens),
+                );
             if proposal.tokens().is_empty() {
                 return Ok(NativeMtpVerifyWindowControl::NoProposal);
             }
@@ -197,7 +200,7 @@ impl StageOpenAiBackend {
                 .proposal()
                 .native_mtp_prefix_rejected(native_mtp_verify_decision.accepted_proposal_tokens)
         });
-        let buffer_exhausted = {
+        let (buffer_exhausted, accepted_proposal_tokens, ngram_tail_rejected) = {
             let buffer = proposal_buffer.as_mut().expect("proposal buffer retained");
             if fully_accepted_window {
                 buffer.accept_window(
@@ -209,9 +212,19 @@ impl StageOpenAiBackend {
                         .copied(),
                 );
             } else {
-                buffer.reject_window();
+                buffer.reject_window(native_mtp_verify_decision.accepted_proposal_tokens);
             }
-            buffer.is_empty()
+            let accepted_proposal_tokens = buffer.accepted_tokens();
+            let buffer_exhausted = buffer.is_empty();
+            let ngram_tail_rejected = buffer_exhausted
+                && buffer
+                    .proposal()
+                    .ngram_tail_rejected(accepted_proposal_tokens);
+            (
+                buffer_exhausted,
+                accepted_proposal_tokens,
+                ngram_tail_rejected,
+            )
         };
         let window_adjusted = adaptive_verify_window.observe(fully_accepted_window);
         native_mtp_counters.observe_adaptive_verify_window(
@@ -226,6 +239,18 @@ impl StageOpenAiBackend {
             *native_mtp_suppress_cooldown_drafts_remaining =
                 native_mtp_options.suppress_cooldown_draft_limit;
             native_mtp.clear_pending_draft();
+        }
+        if ngram_tail_rejected
+            && ngram_sidecar_backoff.observe_tail_rejection(
+                proposal_buffer
+                    .as_ref()
+                    .expect("composite proposal retained until final accounting")
+                    .proposal(),
+                accepted_proposal_tokens,
+                native_mtp_options.ngram_tail_backoff_proposals,
+            )
+        {
+            native_mtp_counters.observe_ngram_tail_rejection();
         }
         let verify_next_mtp_draft_available = verify_next_mtp_draft.is_some();
         let verify_next_mtp_draft_adopted = buffer_exhausted

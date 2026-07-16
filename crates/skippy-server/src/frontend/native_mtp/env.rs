@@ -4,6 +4,7 @@ const SUPPRESS_COOLDOWN_DRAFT_LIMIT_ENV: &str = "SKIPPY_NATIVE_MTP_SUPPRESS_COOL
 const NGRAM_HYBRID_ENV: &str = "SKIPPY_NATIVE_MTP_NGRAM_HYBRID";
 const NGRAM_SIZE_ENV: &str = "SKIPPY_NATIVE_MTP_NGRAM_SIZE";
 const NGRAM_MAX_PROPOSAL_TOKENS_ENV: &str = "SKIPPY_NATIVE_MTP_NGRAM_MAX_PROPOSAL_TOKENS";
+const NGRAM_TAIL_BACKOFF_PROPOSALS_ENV: &str = "SKIPPY_NATIVE_MTP_NGRAM_TAIL_BACKOFF_PROPOSALS";
 const VERIFY_WINDOW_MIN_TOKENS_ENV: &str = "SKIPPY_NATIVE_MTP_VERIFY_WINDOW_MIN_TOKENS";
 const VERIFY_WINDOW_MAX_TOKENS_ENV: &str = "SKIPPY_NATIVE_MTP_VERIFY_WINDOW_MAX_TOKENS";
 
@@ -29,6 +30,10 @@ pub(in crate::frontend) fn native_mtp_ngram_size() -> usize {
 
 pub(in crate::frontend) fn native_mtp_ngram_max_proposal_tokens() -> usize {
     parse_usize_env(NGRAM_MAX_PROPOSAL_TOKENS_ENV, 10)
+}
+
+pub(in crate::frontend) fn native_mtp_ngram_tail_backoff_proposals() -> usize {
+    parse_usize_env(NGRAM_TAIL_BACKOFF_PROPOSALS_ENV, 6)
 }
 
 pub(in crate::frontend) fn native_mtp_verify_window_min_tokens() -> usize {

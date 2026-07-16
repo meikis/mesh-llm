@@ -52,10 +52,10 @@ struct Cli {
 fn main() -> Result<()> {
     let args = Cli::parse();
 
-    // CPU device: no Metal compiler on this box, so the GPU backend is absent.
-    let device = Device::new(DeviceType::Cpu, 0);
-    let stream = Stream::new_with_device(&device);
-    let weights_stream = Stream::new_with_device(&device);
+    // Mirror goose (crates/goose-local-inference/src/mlx.rs): Metal GPU stream for
+    // compute, CPU stream for weight staging.
+    let stream = Stream::new_with_device(&Device::new(DeviceType::Gpu, 0));
+    let weights_stream = Stream::new_with_device(&Device::new(DeviceType::Cpu, 0));
 
     let load_options = match args.quantize {
         Some(bits) => {

@@ -12,10 +12,15 @@ It combines a read of the current Skippy code (`skippy-ffi`, `skippy-runtime`,
 and a second-opinion review from an external model grounded against live
 MLX/mlx-lm/safemlx documentation.
 
-**Update — a Phase-2 solo-serving spike has now run** (`spikes/mlx-solo/`, branch
-`micn/mlx-redux`). It confirms the core workflow claim end to end and surfaced
-two concrete findings (a CPU quant-perf cliff and two safemlx-lm papercuts). See
-`spikes/mlx-solo/FINDINGS.md`; the results are folded into §5.3, Phase 2, and §9.
+**Update — a Phase-2 solo-serving spike has now run on Metal** (`spikes/mlx-solo/`,
+branch `micn/mlx-redux`). It confirms the core workflow claim end to end: Qwen3-0.6B
+on Apple-Silicon Metal at **321 tok/s** (bf16) and **~604 tok/s** (4-bit), where
+**JIT-quantize-on-load matches a pre-quantized artifact** (604 ≈ 603 tok/s) — so
+quantizing on load is free at inference time. The goose baseline (source precision)
+needs **zero fork patches**; two small `safemlx-lm` fixes are only needed to go
+beyond it (JIT quant + loading arbitrary mlx-community repos) and are upstream-PR
+candidates. See `spikes/mlx-solo/FINDINGS.md`; results are folded into §5.3,
+Phase 2, and §9.
 
 ---
 
@@ -579,13 +584,17 @@ existing skippy backend selector in `docs/SKIPPY.md`). Validate against
 "serve any supported model instantly, no wait for quant" benefit with minimal
 new distributed work, and de-risks the engine before any split work.
 
-> **Spike done (`spikes/mlx-solo/`).** The load→generate half is proven: Qwen3-0.6B
-> from raw HF safetensors, in Rust, CPU-only, **18.1 tok/s** decode, coherent — no
-> GGUF, no pre-quant. **But JIT quant on CPU is a trap:** 4-bit/8-bit are correct
-> yet run at **~0.4 tok/s** (MLX quant matmul is Metal-optimized, no fast CPU
-> kernel). So Phase 2 must be validated on **Metal**, and JIT quant should be
-> gated behind a Metal (or CUDA) backend rather than offered as a CPU path. Two
-> safemlx-lm papercuts were also found and fixed in the fork (see §9).
+> **Spike done on Metal (`spikes/mlx-solo/`).** The load→generate half is proven:
+> Qwen3-0.6B from raw HF safetensors, in Rust, on Apple-Silicon Metal, matching
+> goose's setup exactly (`["accelerate","metal","safetensors"]`, `Device::Gpu`).
+> Measured decode: **321 tok/s** source precision (bf16), **~604 tok/s** at 4-bit —
+> and crucially **JIT-quantize-on-load (604) ≈ a pre-quantized mlx-community repo
+> (603)**, so quantizing on load is free at inference time. The source-precision
+> path (goose's baseline) needs **zero fork patches**; two small `safemlx-lm` fixes
+> are only needed to go beyond it (JIT quant of a tied-embedding checkpoint, and
+> loading published quant repos that omit the `mode` field) — both upstream-PR
+> candidates, not mesh-llm drift (see §9). CPU is not a serving path and was not
+> benchmarked as one.
 
 **Phase 3 — Stage-aware partial load + activation frames.** Add `forward_range`
 / `resume_from_hidden` and the stage-aware loader to `safemlx-lm` (upstream to
@@ -638,12 +647,13 @@ Spikes 1 and 2 are more decisive than any standalone token/s benchmark.
 
 ## 9. Risks and unknowns
 
-- **JIT quant has no fast CPU kernel — it needs Metal/CUDA (confirmed by spike).**
-  4-bit/8-bit affine quant on Apple-Silicon **CPU** ran ~45× slower than source
-  precision (0.4 vs 18.1 tok/s on Qwen3-0.6B). The "serve any model instantly,
-  JIT-quantized" workflow is therefore only attractive on an accelerator backend;
-  do not expose CPU JIT quant as a serving path. Metal-backed re-measurement is
-  a prerequisite before leaning on the §5.3 workflow claim.
+- **JIT quant is free at inference time on Metal (confirmed by spike), but CPU is
+  not a serving path.** On Apple-Silicon Metal, JIT 4-bit (604 tok/s) matched a
+  pre-quantized mlx-community repo (603 tok/s), and source precision ran at 321
+  tok/s — so the §5.3 "serve any model instantly, JIT-quantized" claim holds with
+  no runtime penalty. MLX quant matmul is Metal-optimized with no fast CPU kernel,
+  so JIT quant must be gated behind a Metal (or CUDA) backend; do not expose a CPU
+  quant serving path. (This supersedes an earlier CPU-only measurement.)
 - **Partial load may require nontrivial changes to `safemlx-lm`** (loader + model
   constructors currently build `0..num_hidden_layers`). Upstreaming to the fork
   is likely necessary. (Highest risk for the split work.)

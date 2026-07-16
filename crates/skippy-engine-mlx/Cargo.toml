@@ -1,0 +1,62 @@
+# MLX (Metal) serving engine for mesh-llm.
+#
+# Serves HF safetensors tensor models over mesh-llm's REAL OpenAI-compatible
+# frontend (`openai-frontend::OpenAiBackend`), goose-style, on Apple Silicon.
+#
+# This crate is intentionally its OWN cargo workspace (note the empty
+# `[workspace]` table below) so it does NOT join the main mesh-llm workspace.
+# Reason: it path-depends on a sibling checkout of the safemlx fork at
+# ../../../safemlx, which is external to this repo. Making it a normal workspace
+# member would force every `cargo build`/CI run to resolve that external path,
+# breaking builds for anyone without the checkout. Promotion to a real member
+# (with safemlx pinned to a git rev) is documented in WIRING.md.
+[package]
+name = "skippy-engine-mlx"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+name = "skippy_engine_mlx"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mlx-serve"
+path = "src/bin/mlx-serve.rs"
+
+[features]
+default = []
+# Enable the real MLX engine. macOS-only in practice (code is cfg-gated to
+# target_os = "macos"); the deps still resolve elsewhere but compile to nothing.
+mlx = ["dep:safemlx", "dep:safemlx-lm", "dep:tokenizers"]
+
+[dependencies]
+# The real mesh-llm OpenAI frontend — this is what proves we serve over the
+# same surface the shipped binary uses, not a toy.
+openai-frontend = { path = "../openai-frontend" }
+async-trait = "0.1"
+async-stream = "0.3"
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+futures-core = "0.3"
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# MLX stack (pinned to the safemlx fork checkout; see WIRING.md for git-pin plan).
+# Same feature set goose uses: accelerate + metal + safetensors.
+safemlx = { path = "../../../safemlx/safemlx", default-features = false, features = [
+    "accelerate",
+    "metal",
+    "safetensors",
+], optional = true }
+safemlx-lm = { path = "../../../safemlx/safemlx-lm", optional = true }
+# Standalone tokenizer for incremental (streaming) detokenization without
+# borrowing the model. `onig` matches safemlx-lm so the build dedupes.
+tokenizers = { version = "0.23", default-features = false, features = [
+    "onig",
+], optional = true }

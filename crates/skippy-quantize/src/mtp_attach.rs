@@ -43,6 +43,10 @@ struct MtpAttachReport {
 
 pub(crate) fn run_validate_mtp_attach(args: ValidateMtpAttachArgs) -> Result<()> {
     validate_paths(&args)?;
+    ensure!(
+        skippy_ffi::native_runtime_loaded(),
+        "validate-mtp-attach requires a statically linked standalone build or a loaded native runtime"
+    );
     let native_mtp_multimodal_feature =
         skippy_ffi::abi_features() & skippy_ffi::FEATURE_INKLING_MTP_MM != 0;
     ensure!(

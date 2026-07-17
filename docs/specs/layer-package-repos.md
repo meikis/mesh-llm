@@ -359,8 +359,11 @@ the direct native-MTP control, and `disabled` disables speculation. A named
 package strategy such as `mtp-cache` is accepted only when the selected package
 declares it. Precedence is CLI invocation, selected model entry, then global
 defaults. These layers may bound N-gram proposal size, extension depth,
-cooldown, and VerifyWindow depth; they cannot make an undeclared proposer
-available. `skippy-server` receives the resulting typed plan and does not
+cooldown, and VerifyWindow depth. A named package strategy cannot be invented
+outside its package. For direct GGUF operation, operators may explicitly select
+the built-in `ngram-simple` or request-local `ngram-cache` proposer by supplying
+valid N-gram bounds; mesh-llm constructs and validates that generic plan before
+starting Skippy. `skippy-server` receives the resulting typed plan and does not
 repeat this policy resolution.
 
 Operators may also pass the legacy `native-mtp-n1` value; the runtime normalizes it to `mtp` for backward compatibility. New configs should use `mtp`.

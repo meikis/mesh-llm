@@ -277,6 +277,23 @@ fn resolve_decode_config(input: DecodeResolutionInput<'_>) -> Result<Speculative
         }
     }
 
+    if config.native_mtp.enabled
+        && let Some(ngram) = config.ngram.as_ref()
+    {
+        config.effective_strategy = match ngram.kind {
+            NgramProposerKind::Simple => "native-mtp+ngram-simple",
+            NgramProposerKind::Cache => "native-mtp+ngram-cache",
+        }
+        .to_string();
+        if config.extension.is_none() {
+            config.extension = Some(NgramExtensionConfig {
+                initial_tokens: ngram.max_proposal_tokens.clamp(1, 2),
+                max_tokens: ngram.max_proposal_tokens,
+                tail_backoff_proposals: 0,
+            });
+        }
+    }
+
     let extension_initial = pick_optional_u32(
         input
             .model_config
@@ -303,7 +320,9 @@ fn resolve_decode_config(input: DecodeResolutionInput<'_>) -> Result<Speculative
     );
     if extension_initial.is_some() || extension_max.is_some() || extension_backoff.is_some() {
         let Some(extension) = config.extension.as_mut() else {
-            bail!("skippy speculative extension controls require a package composite strategy");
+            bail!(
+                "skippy speculative extension controls require native MTP and an N-gram proposer"
+            );
         };
         if let Some(value) = extension_initial {
             extension.initial_tokens = value as usize;
@@ -380,6 +399,7 @@ fn resolve_decode_config(input: DecodeResolutionInput<'_>) -> Result<Speculative
     if config.verify_window.min_tokens > config.verify_window.max_tokens {
         bail!("skippy speculative verify window requires min_tokens <= max_tokens");
     }
+    config.validate()?;
     Ok(config)
 }
 

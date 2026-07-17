@@ -309,7 +309,14 @@ impl ResolvedSkippyConfig {
     fn speculative_window_for_embedded(&self, mode: &str) -> usize {
         match mode {
             "draft" => self.speculative.draft_max_tokens as usize,
-            "ngram" => self.speculative.ngram_max as usize,
+            "ngram" => self
+                .speculative
+                .decode
+                .ngram
+                .as_ref()
+                .map_or(self.speculative.ngram_max as usize, |ngram| {
+                    ngram.max_proposal_tokens
+                }),
             _ => 0,
         }
     }

@@ -566,9 +566,17 @@ pub struct Cli {
     #[arg(long, hide = true)]
     pub speculative_strategy: Option<String>,
 
-    /// Override the N-gram proposer kind for a package strategy that includes one.
+    /// Override the N-gram proposer kind for this invocation.
     #[arg(long, value_enum, hide = true)]
     pub speculative_ngram_proposer: Option<SpeculativeNgramProposerCli>,
+
+    /// Minimum matching N-gram length for a direct N-gram proposer.
+    #[arg(long, hide = true)]
+    pub speculative_ngram_min: Option<u32>,
+
+    /// Maximum matching N-gram length for a direct N-gram proposer.
+    #[arg(long, hide = true)]
+    pub speculative_ngram_max: Option<u32>,
 
     /// Cap N-gram tokens proposed in one verify window.
     #[arg(long, hide = true)]
@@ -1578,6 +1586,10 @@ mod tests {
             "mtp-cache",
             "--speculative-ngram-proposer",
             "cache",
+            "--speculative-ngram-min",
+            "2",
+            "--speculative-ngram-max",
+            "6",
             "--speculative-extension-max-tokens",
             "8",
             "--speculative-native-mtp-allow-cooldown-drafts",
@@ -1591,6 +1603,8 @@ mod tests {
             cli.speculative_ngram_proposer,
             Some(SpeculativeNgramProposerCli::Cache)
         );
+        assert_eq!(cli.speculative_ngram_min, Some(2));
+        assert_eq!(cli.speculative_ngram_max, Some(6));
         assert_eq!(cli.speculative_extension_max_tokens, Some(8));
         assert!(cli.speculative_native_mtp_allow_cooldown_drafts);
         assert_eq!(cli.speculative_verify_window_pipeline_depth, Some(3));

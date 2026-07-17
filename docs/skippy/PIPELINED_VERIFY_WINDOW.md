@@ -233,7 +233,9 @@ package can expose native MTP plus a request-local cache sidecar as follows:
 Choose a package strategy with `speculative.strategy`. `auto` uses the package
 default; `disabled` turns speculation off; `mtp` preserves the direct native
 MTP path. A named strategy such as `mtp-cache` is valid only when the selected
-package declares it. Operator settings only bound or tune the selected plan:
+package declares it. Packages provide the recommended bounds and topology for
+a model, while an explicit direct-GGUF configuration may select the built-in
+simple or request-local cache N-gram proposer with its required bounds.
 
 ```toml
 [defaults.speculative]
@@ -277,25 +279,43 @@ mesh-llm serve meshllm/GLM-4.7-Flash-MTP-GGUF:Q4_K_M --split --no-draft
 ```
 
 Use `[models.speculative] strategy = "mtp-cache"` with the bounded settings
-above. The package must declare the request-local cache proposer; this command
-does not silently turn one on.
+above when the package declares that recommendation. For a direct GGUF, use
+the built-in request-local cache proposer explicitly:
+
+```toml
+[models.speculative]
+strategy = "mtp"
+ngram_proposer = "cache"
+ngram_min = 2
+ngram_max = 6
+ngram_max_proposal_tokens = 6
+extension_max_tokens = 6
+```
+
+With native MTP and an N-gram proposer present, mesh-llm creates the bounded
+composite plan. The package remains the preferred way to publish tested values.
 
 ### Invocation Overrides
 
 `mesh-llm serve` may temporarily override a package-selected strategy without
 editing `config.toml`. CLI settings have highest precedence, then the selected
 model entry, then `[defaults.speculative]`; unspecified CLI fields retain the
-lower-layer value. The CLI cannot make an undeclared package proposer available.
+lower-layer value. Named package strategies remain package-declared. The CLI
+may explicitly select the built-in simple or request-local cache proposer for
+a direct GGUF only when it supplies valid N-gram bounds.
 
 ```bash
 mesh-llm serve meshllm/GLM-4.7-Flash-MTP-GGUF:Q4_K_M --split --no-draft \
-  --speculative-strategy mtp-cache \
+  --speculative-strategy mtp \
   --speculative-ngram-proposer cache \
+  --speculative-ngram-min 2 \
+  --speculative-ngram-max 6 \
   --speculative-extension-max-tokens 8 \
   --speculative-verify-window-pipeline-depth 2
 ```
 
-The supported tuning flags are `--speculative-ngram-max-proposal-tokens`,
+The supported tuning flags are `--speculative-ngram-{min,max}`,
+`--speculative-ngram-max-proposal-tokens`,
 `--speculative-extension-{initial,max}-tokens`,
 `--speculative-extension-tail-backoff-proposals`,
 `--speculative-native-mtp-{reject-cooldown-tokens,suppress-cooldown-drafts,suppress-cooldown-draft-limit}`,

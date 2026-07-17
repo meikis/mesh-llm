@@ -96,6 +96,48 @@ fn native_mtp_cache_generation() -> PackageGenerationInfo {
     }
 }
 
+fn ngram_cache_generation() -> PackageGenerationInfo {
+    let mut proposers = BTreeMap::new();
+    proposers.insert(
+        "cache".to_string(),
+        PackageSpeculativeProposerInfo {
+            proposer_type: "ngram-cache".to_string(),
+            prediction_depth: None,
+            layer_indices: Vec::new(),
+            ngram_min: Some(2),
+            ngram_max: Some(6),
+            max_proposal_tokens: Some(6),
+            history_scope: Some("request".to_string()),
+        },
+    );
+    let mut strategies = BTreeMap::new();
+    strategies.insert(
+        "ngram-cache".to_string(),
+        PackageSpeculativeStrategyInfo {
+            strategy_type: "ngram-cache".to_string(),
+            prediction_depth: None,
+            layer_indices: Vec::new(),
+            window_policy: Some(PackageWindowPolicyInfo {
+                default: "fixed".to_string(),
+                initial_window: 6,
+                min_window: 1,
+                max_window: 6,
+            }),
+            proposer: Some("cache".to_string()),
+            primary: None,
+            extender: None,
+            extension_policy: None,
+        },
+    );
+    PackageGenerationInfo {
+        speculative_decoding: Some(PackageSpeculativeDecodingInfo {
+            default: "ngram-cache".to_string(),
+            proposers,
+            strategies,
+        }),
+    }
+}
+
 #[test]
 fn speculative_strategy_auto_without_package_generation_disables_native_mtp() {
     let mesh_config = parse_config("");
@@ -324,6 +366,91 @@ verify_window_pipeline_depth = 2
     assert_eq!(resolved.speculative.decode.verify_window.min_tokens, 1);
     assert_eq!(resolved.speculative.decode.verify_window.max_tokens, 6);
     assert_eq!(resolved.speculative.decode.verify_window.pipeline_depth, 2);
+}
+
+#[test]
+fn package_cache_strategy_uses_the_declared_verify_window() {
+    let mesh_config = parse_config(
+        r#"
+[defaults.speculative]
+strategy = "ngram-cache"
+"#,
+    );
+    let model_file = temp_model_file();
+    let generation = ngram_cache_generation();
+
+    let resolved = resolve_skippy_config(SkippyConfigResolveRequest {
+        mesh_config: &mesh_config,
+        model_id: "meshllm/GLM-4.7-Flash-MTP-GGUF",
+        model_path: model_file.path(),
+        model_bytes: 4 * 1024 * 1024 * 1024,
+        allocatable_memory_bytes: None,
+        request_defaults: None,
+        package_generation: Some(&generation),
+    })
+    .expect("package cache strategy should resolve");
+
+    assert!(!resolved.speculative.native_mtp_enabled);
+    let openai = resolved
+        .to_embedded_openai_args(4096, true)
+        .expect("package cache strategy should build OpenAI args");
+    assert_eq!(openai.speculative_window, 6);
+    assert_eq!(openai.ngram_min, 2);
+    assert_eq!(openai.ngram_max, 6);
+    assert_eq!(
+        openai.speculative.ngram.as_ref().map(|ngram| ngram.kind),
+        Some(skippy_server::NgramProposerKind::Cache)
+    );
+}
+
+#[test]
+fn direct_native_mtp_can_use_a_request_local_cache_extension() {
+    let mesh_config = parse_config(
+        r#"
+[defaults.speculative]
+strategy = "mtp"
+ngram_proposer = "cache"
+ngram_min = 2
+ngram_max = 6
+ngram_max_proposal_tokens = 6
+"#,
+    );
+    let model_file = temp_model_file_with_tensor_names(&["blk.23.nextn.eh_proj.weight"], None);
+
+    let resolved = resolve_skippy_config(SkippyConfigResolveRequest {
+        mesh_config: &mesh_config,
+        model_id: "meshllm/GLM-4.7-Flash-MTP-GGUF",
+        model_path: model_file.path(),
+        model_bytes: 4 * 1024 * 1024 * 1024,
+        allocatable_memory_bytes: None,
+        request_defaults: None,
+        package_generation: None,
+    })
+    .expect("direct native MTP with cache extension should resolve");
+
+    assert!(resolved.speculative.native_mtp_enabled);
+    assert_eq!(
+        resolved.speculative.decode.effective_strategy,
+        "native-mtp+ngram-cache"
+    );
+    let extension = resolved
+        .speculative
+        .decode
+        .extension
+        .as_ref()
+        .expect("direct cache strategy should synthesize an extension plan");
+    assert_eq!(extension.initial_tokens, 2);
+    assert_eq!(extension.max_tokens, 6);
+    let openai = resolved
+        .to_embedded_openai_args(4096, true)
+        .expect("direct cache strategy should build OpenAI args");
+    assert!(openai.native_mtp_enabled);
+    assert_eq!(openai.ngram_min, 2);
+    assert_eq!(openai.ngram_max, 6);
+    assert_eq!(
+        openai.speculative.ngram.as_ref().map(|ngram| ngram.kind),
+        Some(skippy_server::NgramProposerKind::Cache)
+    );
 }
 
 #[test]

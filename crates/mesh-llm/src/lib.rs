@@ -212,6 +212,8 @@ fn speculative_overrides_from_cli(
         .speculative_ngram_proposer
         .map(mesh_llm_cli::SpeculativeNgramProposerCli::as_str)
         .map(str::to_string);
+    overrides.ngram_min = cli.speculative_ngram_min;
+    overrides.ngram_max = cli.speculative_ngram_max;
     overrides.ngram_max_proposal_tokens = cli.speculative_ngram_max_proposal_tokens;
     overrides.extension_initial_tokens = cli.speculative_extension_initial_tokens;
     overrides.extension_max_tokens = cli.speculative_extension_max_tokens;
@@ -310,6 +312,7 @@ fn map_trust_policy(
 
 #[cfg(test)]
 mod cli_entrypoint_tests {
+    use clap::Parser;
     use std::ffi::OsString;
 
     #[test]
@@ -362,5 +365,33 @@ mod cli_entrypoint_tests {
             OsString::from("help"),
             OsString::from("--help"),
         ]));
+    }
+
+    #[test]
+    fn cli_ngram_override_reaches_runtime_config() {
+        let normalized = mesh_llm_cli::normalize_runtime_surface_args([
+            "mesh-llm",
+            "serve",
+            "--speculative-strategy",
+            "mtp",
+            "--speculative-ngram-proposer",
+            "cache",
+            "--speculative-ngram-min",
+            "2",
+            "--speculative-ngram-max",
+            "6",
+            "--speculative-ngram-max-proposal-tokens",
+            "5",
+        ]);
+        let cli = mesh_llm_cli::Cli::try_parse_from(normalized.normalized).expect("CLI parses");
+
+        let config = super::speculative_overrides_from_cli(&cli)
+            .expect("speculative flags produce an override");
+
+        assert_eq!(config.strategy.as_deref(), Some("mtp"));
+        assert_eq!(config.ngram_proposer.as_deref(), Some("cache"));
+        assert_eq!(config.ngram_min, Some(2));
+        assert_eq!(config.ngram_max, Some(6));
+        assert_eq!(config.ngram_max_proposal_tokens, Some(5));
     }
 }

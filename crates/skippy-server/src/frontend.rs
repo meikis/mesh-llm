@@ -317,14 +317,21 @@ impl SpeculativeDecodeConfig {
         if let Some(ngram) = &self.ngram
             && (ngram.min_ngram == 0
                 || ngram.min_ngram > ngram.max_ngram
-                || ngram.max_proposal_tokens == 0)
+                || ngram.max_proposal_tokens < ngram.min_ngram)
         {
             bail!(
-                "N-gram proposer requires 0 < min_ngram <= max_ngram and max_proposal_tokens > 0"
+                "N-gram proposer requires 0 < min_ngram <= max_ngram and max_proposal_tokens >= min_ngram"
             );
         }
         if self.extension.is_some() && (!self.native_mtp.enabled || self.ngram.is_none()) {
             bail!("N-gram extension requires both native MTP and an N-gram proposer");
+        }
+        if let Some(extension) = &self.extension
+            && (extension.initial_tokens == 0
+                || extension.initial_tokens > extension.max_tokens
+                || extension.max_tokens == 0)
+        {
+            bail!("N-gram extension requires 0 < initial_tokens <= max_tokens");
         }
         if self.verify_window.min_tokens == 0
             || self.verify_window.min_tokens > self.verify_window.max_tokens

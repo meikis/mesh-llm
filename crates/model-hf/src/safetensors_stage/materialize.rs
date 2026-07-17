@@ -1,0 +1,694 @@
+use std::{
+    collections::BTreeMap,
+    env,
+    fs::{self, File},
+    io::{BufReader, BufWriter, Read, Write},
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+use anyhow::{Context, Result, anyhow, ensure};
+use model_artifact::safetensors::{TensorHeader, parse_header};
+use sha2::{Digest, Sha256};
+
+use super::{
+    http::RemoteSource,
+    layout,
+    types::{
+        MANIFEST_SCHEMA_VERSION, PreparedStage, SafetensorsSourceShard, SafetensorsStageArtifact,
+        SafetensorsStageManifest, SafetensorsStagePlan, SafetensorsStageRequest, SelectedTensor,
+    },
+};
+
+const MODEL_FILE: &str = "model.safetensors";
+const CONFIG_FILE: &str = "config.json";
+const PLAN_FILE: &str = "stage-plan.json";
+const MANIFEST_FILE: &str = "stage-manifest.json";
+const MAX_LOCAL_HEADER_BYTES: u64 = 256 * 1024 * 1024;
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+pub struct SafetensorsStageMaterializer {
+    remote: RemoteSource,
+    cache_root: PathBuf,
+}
+
+impl SafetensorsStageMaterializer {
+    pub fn from_environment() -> Result<Self> {
+        let endpoint = env::var("HF_ENDPOINT").ok();
+        Self::new(
+            crate::store::mesh_llm_cache_dir().join("mlx-safetensors-stages"),
+            endpoint.as_deref(),
+            hf_token(),
+        )
+    }
+
+    pub fn new(cache_root: PathBuf, endpoint: Option<&str>, token: Option<String>) -> Result<Self> {
+        Ok(Self {
+            remote: RemoteSource::new(endpoint, token)?,
+            cache_root,
+        })
+    }
+
+    pub fn plan(&self, request: SafetensorsStageRequest) -> Result<SafetensorsStagePlan> {
+        let request = request.normalized()?;
+        Ok(layout::prepare(&self.remote, &request)?.plan)
+    }
+
+    pub fn materialize(
+        &self,
+        request: SafetensorsStageRequest,
+    ) -> Result<SafetensorsStageArtifact> {
+        let request = request.normalized()?;
+        let cache_key = cache_key(self.remote.endpoint(), &request)?;
+        let destination = self.cache_root.join(&cache_key);
+        if let Ok(Some(artifact)) = self.load_cached(&destination, &cache_key, &request) {
+            return Ok(artifact);
+        }
+
+        let prepared = layout::prepare(&self.remote, &request)?;
+        fs::create_dir_all(&self.cache_root).with_context(|| {
+            format!(
+                "create SafeTensors stage cache {}",
+                self.cache_root.display()
+            )
+        })?;
+        let temporary = self.temporary_path(&cache_key);
+        fs::create_dir(&temporary)
+            .with_context(|| format!("create temporary stage cache {}", temporary.display()))?;
+        if let Err(error) = self.write_stage(&temporary, &cache_key, &request, &prepared) {
+            let _ = fs::remove_dir_all(&temporary);
+            return Err(error);
+        }
+        let cache_hit = self.publish_cache(&temporary, &destination, &cache_key, &request)?;
+        let mut artifact = self
+            .load_cached(&destination, &cache_key, &request)?
+            .ok_or_else(|| anyhow!("published SafeTensors stage cache is missing"))?;
+        artifact.cache_hit = cache_hit;
+        Ok(artifact)
+    }
+
+    fn write_stage(
+        &self,
+        directory: &Path,
+        cache_key: &str,
+        request: &SafetensorsStageRequest,
+        prepared: &PreparedStage,
+    ) -> Result<()> {
+        let output_path = directory.join(MODEL_FILE);
+        let (output_file_bytes, output_sha256) = self
+            .write_model(&output_path, prepared)
+            .context("materialize SafeTensors stage")?;
+        write_synced(directory.join(CONFIG_FILE), &prepared.config)?;
+        write_json(directory.join(PLAN_FILE), &prepared.plan)?;
+        let manifest = SafetensorsStageManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            cache_key: cache_key.to_string(),
+            source_endpoint: self.remote.endpoint().to_string(),
+            request: request.clone(),
+            selected_tensor_count: prepared.plan.selected_tensor_count,
+            selected_tensor_bytes: prepared.plan.selected_tensor_bytes,
+            output_file_bytes,
+            output_sha256,
+            config_sha256: prepared.config_sha256.clone(),
+            config_etag: prepared.config_etag.clone(),
+            index_sha256: prepared.index_sha256.clone(),
+            index_etag: prepared.index_etag.clone(),
+            source_shards: prepared.source_shards.clone(),
+        };
+        write_json(directory.join(MANIFEST_FILE), &manifest)?;
+        sync_directory(directory)?;
+        Ok(())
+    }
+
+    fn write_model(&self, path: &Path, prepared: &PreparedStage) -> Result<(u64, String)> {
+        let mut tensors = prepared.tensors.iter().collect::<Vec<_>>();
+        tensors.sort_by(|left, right| {
+            (&left.source_file, left.source_range.start)
+                .cmp(&(&right.source_file, right.source_range.start))
+        });
+        let (header, payload_bytes) = output_header(&tensors)?;
+        let mut header_bytes = serde_json::to_vec(&header)?;
+        while header_bytes.len() % 8 != 0 {
+            header_bytes.push(b' ');
+        }
+        let header_len = u64::try_from(header_bytes.len()).context("output header is too large")?;
+
+        let file = File::create(path).with_context(|| format!("create {}", path.display()))?;
+        let mut writer = HashingWriter::new(BufWriter::new(file));
+        writer.write_all(&header_len.to_le_bytes())?;
+        writer.write_all(&header_bytes)?;
+        let source_shards = prepared
+            .source_shards
+            .iter()
+            .map(|shard| (shard.file.as_str(), shard))
+            .collect::<BTreeMap<_, _>>();
+        let mut downloaded = 0_u64;
+        for span in materialization_spans(&tensors) {
+            let identity = source_shards
+                .get(span.source_file.as_str())
+                .with_context(|| format!("missing source identity for {}", span.source_file))?;
+            let url = self.remote.url(
+                &prepared.plan.repo,
+                &prepared.plan.revision,
+                &span.source_file,
+            )?;
+            let response = self
+                .remote
+                .exact_range(url, span.start..span.end_exclusive)?;
+            ensure!(
+                response.total_file_bytes == identity.file_bytes,
+                "SafeTensors shard {} changed size during materialization",
+                span.source_file
+            );
+            ensure_source_identity(identity, response.etag())?;
+            downloaded = downloaded
+                .checked_add(response.copy_to(&mut writer)?)
+                .context("materialized tensor byte count overflow")?;
+        }
+        ensure!(
+            downloaded == payload_bytes && downloaded == prepared.plan.selected_tensor_bytes,
+            "materialized {downloaded} tensor bytes but planned {}",
+            prepared.plan.selected_tensor_bytes
+        );
+        writer.flush()?;
+        writer.inner.get_ref().sync_all()?;
+        let output_file_bytes = writer.bytes_written;
+        let output_sha256 = writer.finish_hash();
+        Ok((output_file_bytes, output_sha256))
+    }
+
+    fn load_cached(
+        &self,
+        directory: &Path,
+        cache_key: &str,
+        request: &SafetensorsStageRequest,
+    ) -> Result<Option<SafetensorsStageArtifact>> {
+        if !directory.exists() {
+            return Ok(None);
+        }
+        ensure!(
+            directory.is_dir(),
+            "SafeTensors stage cache entry is not a directory"
+        );
+        let manifest: SafetensorsStageManifest = read_json(&directory.join(MANIFEST_FILE))?;
+        let plan: SafetensorsStagePlan = read_json(&directory.join(PLAN_FILE))?;
+        ensure!(
+            manifest.schema_version == MANIFEST_SCHEMA_VERSION,
+            "SafeTensors stage cache schema is stale"
+        );
+        ensure!(
+            manifest.cache_key == cache_key,
+            "SafeTensors cache key mismatch"
+        );
+        ensure!(
+            manifest.request == *request,
+            "SafeTensors cache request mismatch"
+        );
+        ensure!(
+            manifest.source_endpoint == self.remote.endpoint(),
+            "SafeTensors cache source endpoint mismatch"
+        );
+        ensure!(
+            plan.selected_tensor_count == manifest.selected_tensor_count
+                && plan.selected_tensor_bytes == manifest.selected_tensor_bytes,
+            "SafeTensors cached plan and manifest disagree"
+        );
+        let model_path = directory.join(MODEL_FILE);
+        let config_path = directory.join(CONFIG_FILE);
+        ensure_regular_file(&model_path)?;
+        ensure_regular_file(&config_path)?;
+        ensure!(
+            fs::metadata(&model_path)?.len() == manifest.output_file_bytes,
+            "cached SafeTensors output length mismatch"
+        );
+        ensure!(
+            sha256_file(&model_path)? == manifest.output_sha256,
+            "cached SafeTensors output hash mismatch"
+        );
+        ensure!(
+            sha256_file(&config_path)? == manifest.config_sha256,
+            "cached SafeTensors config hash mismatch"
+        );
+        validate_local_safetensors(&model_path)?;
+        Ok(Some(SafetensorsStageArtifact {
+            path: directory.to_path_buf(),
+            manifest,
+            plan,
+            cache_hit: true,
+        }))
+    }
+
+    fn publish_cache(
+        &self,
+        temporary: &Path,
+        destination: &Path,
+        cache_key: &str,
+        request: &SafetensorsStageRequest,
+    ) -> Result<bool> {
+        if destination.exists() {
+            if matches!(
+                self.load_cached(destination, cache_key, request),
+                Ok(Some(_))
+            ) {
+                fs::remove_dir_all(temporary)?;
+                return Ok(true);
+            }
+            let quarantine = self.temporary_path(&format!("{cache_key}.corrupt"));
+            fs::rename(destination, &quarantine).with_context(|| {
+                format!("quarantine corrupt stage cache {}", destination.display())
+            })?;
+            if let Err(error) = fs::rename(temporary, destination) {
+                let _ = fs::rename(&quarantine, destination);
+                return Err(error).context("publish repaired SafeTensors stage cache");
+            }
+            let _ = fs::remove_dir_all(quarantine);
+        } else {
+            fs::rename(temporary, destination).context("publish SafeTensors stage cache")?;
+        }
+        sync_directory(&self.cache_root)?;
+        Ok(false)
+    }
+
+    fn temporary_path(&self, cache_key: &str) -> PathBuf {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        self.cache_root.join(format!(
+            ".{cache_key}.{}.{}.partial",
+            std::process::id(),
+            sequence
+        ))
+    }
+}
+
+struct MaterializationSpan {
+    source_file: String,
+    start: u64,
+    end_exclusive: u64,
+}
+
+fn output_header(tensors: &[&SelectedTensor]) -> Result<(BTreeMap<String, TensorHeader>, u64)> {
+    let mut output_offset = 0_u64;
+    let mut output_header = BTreeMap::new();
+    for tensor in tensors {
+        let end = output_offset
+            .checked_add(tensor.source_range.len())
+            .context("partial SafeTensors output offset overflow")?;
+        let mut header = tensor.header.clone();
+        header.data_offsets = [output_offset, end];
+        output_header.insert(tensor.name.clone(), header);
+        output_offset = end;
+    }
+    Ok((output_header, output_offset))
+}
+
+fn materialization_spans(tensors: &[&SelectedTensor]) -> Vec<MaterializationSpan> {
+    let mut spans: Vec<MaterializationSpan> = Vec::new();
+    for tensor in tensors {
+        if let Some(previous) = spans.last_mut()
+            && previous.source_file == tensor.source_file
+            && previous.end_exclusive == tensor.source_range.start
+        {
+            previous.end_exclusive = tensor.source_range.end_exclusive;
+        } else {
+            spans.push(MaterializationSpan {
+                source_file: tensor.source_file.clone(),
+                start: tensor.source_range.start,
+                end_exclusive: tensor.source_range.end_exclusive,
+            });
+        }
+    }
+    spans
+}
+
+fn ensure_source_identity(
+    identity: &SafetensorsSourceShard,
+    actual_etag: Option<&str>,
+) -> Result<()> {
+    if let (Some(expected), Some(actual)) = (identity.etag.as_deref(), actual_etag) {
+        ensure!(
+            expected == actual,
+            "SafeTensors shard {} changed identity during materialization",
+            identity.file
+        );
+    }
+    Ok(())
+}
+
+fn cache_key(endpoint: &str, request: &SafetensorsStageRequest) -> Result<String> {
+    let identity = serde_json::to_vec(&(MANIFEST_SCHEMA_VERSION, endpoint, request))?;
+    Ok(format!("{:x}", Sha256::digest(identity)))
+}
+
+fn hf_token() -> Option<String> {
+    ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"]
+        .iter()
+        .find_map(|name| env::var(name).ok())
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+}
+
+fn write_json(path: PathBuf, value: &impl serde::Serialize) -> Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    write_synced(path, &bytes)
+}
+
+fn write_synced(path: PathBuf, bytes: &[u8]) -> Result<()> {
+    let mut file = File::create(&path).with_context(|| format!("create {}", path.display()))?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    ensure_regular_file(path)?;
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    serde_json::from_reader(BufReader::new(file))
+        .with_context(|| format!("parse {}", path.display()))
+}
+
+fn ensure_regular_file(path: &Path) -> Result<()> {
+    ensure!(
+        fs::symlink_metadata(path)?.file_type().is_file(),
+        "cache path is not a regular file: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut reader = BufReader::new(File::open(path)?);
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut reader, &mut HashWriter(&mut hasher))?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn validate_local_safetensors(path: &Path) -> Result<()> {
+    let mut reader = BufReader::new(File::open(path)?);
+    let file_bytes = reader.get_ref().metadata()?.len();
+    let mut length = [0_u8; 8];
+    reader.read_exact(&mut length)?;
+    let header_len = u64::from_le_bytes(length);
+    ensure!(
+        header_len <= MAX_LOCAL_HEADER_BYTES,
+        "cached SafeTensors header is too large"
+    );
+    let data_start = 8_u64
+        .checked_add(header_len)
+        .context("cached SafeTensors header offset overflow")?;
+    ensure!(
+        data_start <= file_bytes,
+        "cached SafeTensors header is truncated"
+    );
+    let mut header = vec![0_u8; usize::try_from(header_len)?];
+    reader.read_exact(&mut header)?;
+    parse_header(&header, file_bytes - data_start)?;
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+struct HashingWriter<W> {
+    inner: W,
+    hasher: Sha256,
+    bytes_written: u64,
+}
+
+impl<W> HashingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+            bytes_written: 0,
+        }
+    }
+
+    fn finish_hash(&self) -> String {
+        format!("{:x}", self.hasher.clone().finalize())
+    }
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(bytes)?;
+        self.hasher.update(&bytes[..written]);
+        self.bytes_written = self.bytes_written.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+struct HashWriter<'a>(&'a mut Sha256);
+
+impl Write for HashWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{Read, Seek, SeekFrom},
+        net::{TcpListener, TcpStream},
+        sync::{Arc, Mutex},
+        thread,
+    };
+
+    use model_artifact::safetensors::TensorHeader;
+
+    use super::*;
+    use crate::safetensors_stage::types::ByteRange;
+
+    fn selected(name: &str, file: &str, start: u64, end: u64) -> SelectedTensor {
+        SelectedTensor {
+            name: name.to_string(),
+            source_file: file.to_string(),
+            source_range: ByteRange {
+                start,
+                end_exclusive: end,
+            },
+            header: TensorHeader {
+                dtype: "U8".to_string(),
+                shape: vec![end - start],
+                data_offsets: [start, end],
+            },
+        }
+    }
+
+    #[test]
+    fn materialization_spans_join_only_same_shard_contiguous_tensors() {
+        let tensors = [
+            selected("a", "one", 10, 20),
+            selected("b", "one", 20, 30),
+            selected("c", "one", 40, 50),
+            selected("d", "two", 50, 60),
+        ];
+        let refs = tensors.iter().collect::<Vec<_>>();
+
+        let spans = materialization_spans(&refs);
+
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].start, 10);
+        assert_eq!(spans[0].end_exclusive, 30);
+        assert_eq!(spans[2].source_file, "two");
+    }
+
+    #[test]
+    fn cache_identity_changes_with_layer_range() {
+        let request = SafetensorsStageRequest {
+            repo: "org/model".to_string(),
+            revision: "a".repeat(40),
+            layer_start: 0,
+            layer_end: 10,
+            include_prefixes: Vec::new(),
+        };
+        let mut other = request.clone();
+        other.layer_start = 10;
+        other.layer_end = 20;
+
+        assert_ne!(
+            cache_key("https://huggingface.co/", &request).unwrap(),
+            cache_key("https://huggingface.co/", &other).unwrap()
+        );
+    }
+
+    #[test]
+    fn materializes_exact_ranges_reuses_cache_and_repairs_corruption() {
+        let checkpoint = Arc::new(test_checkpoint());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = start_checkpoint_server(Arc::clone(&checkpoint), Arc::clone(&requests));
+        let cache = tempfile::tempdir().unwrap();
+        let materializer =
+            SafetensorsStageMaterializer::new(cache.path().join("cache"), Some(&endpoint), None)
+                .unwrap();
+        let request = test_request();
+
+        let first = materializer.materialize(request.clone()).unwrap();
+
+        assert!(!first.cache_hit);
+        assert_eq!(first.plan.selected_tensor_count, 2);
+        assert_eq!(first.plan.selected_tensor_bytes, 4);
+        assert!(first.manifest.output_file_bytes < checkpoint.len() as u64);
+        let request_count = requests.lock().unwrap().len();
+        assert!(requests.lock().unwrap().iter().any(|request| {
+            request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("range: bytes=0-7"))
+        }));
+
+        let cached = materializer.materialize(request.clone()).unwrap();
+
+        assert!(cached.cache_hit);
+        assert_eq!(requests.lock().unwrap().len(), request_count);
+
+        let model_path = cached.path.join(MODEL_FILE);
+        let mut model = fs::OpenOptions::new().write(true).open(model_path).unwrap();
+        model.seek(SeekFrom::Start(16)).unwrap();
+        model.write_all(b"broken").unwrap();
+        model.sync_all().unwrap();
+
+        let repaired = materializer.materialize(request).unwrap();
+
+        assert!(!repaired.cache_hit);
+        assert!(requests.lock().unwrap().len() > request_count);
+        validate_local_safetensors(&repaired.path.join(MODEL_FILE)).unwrap();
+    }
+
+    fn test_request() -> SafetensorsStageRequest {
+        SafetensorsStageRequest {
+            repo: "org/model".to_string(),
+            revision: "0123456789012345678901234567890123456789".to_string(),
+            layer_start: 0,
+            layer_end: 1,
+            include_prefixes: Vec::new(),
+        }
+    }
+
+    fn test_checkpoint() -> Vec<u8> {
+        let mut offset = 0_u64;
+        let mut header = BTreeMap::new();
+        for name in [
+            "model.embed_tokens.weight",
+            "model.layers.0.weight",
+            "model.layers.1.weight",
+            "model.norm.weight",
+        ] {
+            header.insert(
+                name,
+                TensorHeader {
+                    dtype: "U8".to_string(),
+                    shape: vec![2],
+                    data_offsets: [offset, offset + 2],
+                },
+            );
+            offset += 2;
+        }
+        let mut header = serde_json::to_vec(&header).unwrap();
+        while header.len() % 8 != 0 {
+            header.push(b' ');
+        }
+        let mut checkpoint = u64::try_from(header.len()).unwrap().to_le_bytes().to_vec();
+        checkpoint.extend(header);
+        checkpoint.extend(0_u8..8);
+        checkpoint
+    }
+
+    fn start_checkpoint_server(
+        checkpoint: Arc<Vec<u8>>,
+        requests: Arc<Mutex<Vec<String>>>,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else {
+                    return;
+                };
+                let checkpoint = Arc::clone(&checkpoint);
+                let requests = Arc::clone(&requests);
+                thread::spawn(move || {
+                    handle_checkpoint_request(&mut stream, &checkpoint, &requests)
+                });
+            }
+        });
+        format!("http://{address}")
+    }
+
+    fn handle_checkpoint_request(
+        stream: &mut TcpStream,
+        checkpoint: &[u8],
+        requests: &Mutex<Vec<String>>,
+    ) {
+        let mut bytes = vec![0_u8; 8192];
+        let Ok(read) = stream.read(&mut bytes) else {
+            return;
+        };
+        let request = String::from_utf8_lossy(&bytes[..read]).into_owned();
+        requests.lock().unwrap().push(request.clone());
+        let path = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("/");
+        let response = if path.ends_with("/config.json") {
+            http_response(
+                "200 OK",
+                &[("ETag", "\"config-id\"")],
+                br#"{"model_type":"llama","hidden_size":2,"num_hidden_layers":2,"tie_word_embeddings":true}"#,
+            )
+        } else if path.ends_with("/model.safetensors.index.json") {
+            http_response("404 Not Found", &[], b"")
+        } else if path.ends_with("/model.safetensors") {
+            checkpoint_range_response(&request, checkpoint)
+        } else {
+            http_response("404 Not Found", &[], b"")
+        };
+        let _ = stream.write_all(&response);
+    }
+
+    fn checkpoint_range_response(request: &str, checkpoint: &[u8]) -> Vec<u8> {
+        let range = request
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("range").then_some(value.trim())
+            })
+            .unwrap();
+        let bounds = range.strip_prefix("bytes=").unwrap();
+        let (start, end) = bounds.split_once('-').unwrap();
+        let start = start.parse::<usize>().unwrap();
+        let end = end.parse::<usize>().unwrap();
+        let content_range = format!("bytes {start}-{end}/{}", checkpoint.len());
+        http_response(
+            "206 Partial Content",
+            &[("ETag", "\"model-id\""), ("Content-Range", &content_range)],
+            &checkpoint[start..=end],
+        )
+    }
+
+    fn http_response(status: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
+        let headers = headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect::<String>();
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{headers}Connection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(body.iter().copied())
+        .collect()
+    }
+}

@@ -4512,6 +4512,7 @@ dependencies = [
  "async-trait",
  "model-ref",
  "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -4526,6 +4527,7 @@ dependencies = [
  "hf-hub",
  "model-artifact",
  "model-ref",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serial_test",

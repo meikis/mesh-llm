@@ -1,5 +1,6 @@
 mod http;
 mod layout;
+mod locking;
 mod materialize;
 mod types;
 

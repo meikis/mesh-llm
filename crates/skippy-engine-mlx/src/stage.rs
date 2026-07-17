@@ -17,7 +17,7 @@ use safemlx_lm::{
         common::linear::project_logits_maybe_quantized,
         llama::{self, AttentionInput, TransformerBlock},
     },
-    weights::load_safetensors_lenient,
+    weights::{StrictLoadConfig, StrictLoadReport, load_safetensors_strict},
 };
 use skippy_engine::{
     StageActivation, StageEngine, StageEngineInfo, StageExecutionKind, StageExecutionOutput,
@@ -165,7 +165,16 @@ fn load_stage(config: MlxStageEngineConfig) -> Result<LoadedStage> {
     info.validate()?;
 
     let mut model = llama::Model::new(model_args, &stream)?;
-    load_safetensors_lenient(&mut model, weight_file(&config.model_dir), &weights_stream)?;
+    let load_config = partial_stage_load_config(&info);
+    let mut load_report = StrictLoadReport::default();
+    load_safetensors_strict(
+        &mut model,
+        weight_file(&config.model_dir),
+        &weights_stream,
+        &load_config,
+        &mut load_report,
+    )?;
+    load_report.finish(&model, &load_config)?;
     retain_local_layers(&mut model, info.layer_start, info.layer_end)?;
     copy_stage_weights_to_compute_stream(&mut model, &info, &stream)?;
     stream.synchronize()?;
@@ -184,6 +193,24 @@ fn load_stage(config: MlxStageEngineConfig) -> Result<LoadedStage> {
         info,
         sessions: BTreeMap::new(),
     })
+}
+
+fn partial_stage_load_config(info: &StageEngineInfo) -> StrictLoadConfig {
+    let mut config = StrictLoadConfig::default();
+    for layer in 0..info.total_layers {
+        if layer < info.layer_start || layer >= info.layer_end {
+            config = config.allow_missing_contains(format!("model.layers.{layer}."));
+        }
+    }
+    if !info.is_first() && !info.is_final() {
+        config = config.allow_missing_contains("model.embed_tokens.");
+    }
+    if !info.is_final() {
+        config = config
+            .allow_missing_contains("model.norm.")
+            .allow_missing_contains("lm_head.");
+    }
+    config
 }
 
 fn weight_file(model_dir: &Path) -> PathBuf {

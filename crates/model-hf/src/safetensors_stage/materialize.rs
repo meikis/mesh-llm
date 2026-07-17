@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use super::{
     http::RemoteSource,
     layout,
+    locking::CacheKeyLock,
     types::{
         MANIFEST_SCHEMA_VERSION, PreparedStage, SafetensorsSourceShard, SafetensorsStageArtifact,
         SafetensorsStageManifest, SafetensorsStagePlan, SafetensorsStageRequest, SelectedTensor,
@@ -65,13 +66,12 @@ impl SafetensorsStageMaterializer {
             return Ok(artifact);
         }
 
+        let _cache_lock = CacheKeyLock::acquire(&self.cache_root, &cache_key)?;
+        if let Ok(Some(artifact)) = self.load_cached(&destination, &cache_key, &request) {
+            return Ok(artifact);
+        }
+        remove_stale_partials(&self.cache_root, &cache_key)?;
         let prepared = layout::prepare(&self.remote, &request)?;
-        fs::create_dir_all(&self.cache_root).with_context(|| {
-            format!(
-                "create SafeTensors stage cache {}",
-                self.cache_root.display()
-            )
-        })?;
         let temporary = self.temporary_path(&cache_key);
         fs::create_dir(&temporary)
             .with_context(|| format!("create temporary stage cache {}", temporary.display()))?;
@@ -103,6 +103,7 @@ impl SafetensorsStageMaterializer {
         let manifest = SafetensorsStageManifest {
             schema_version: MANIFEST_SCHEMA_VERSION,
             cache_key: cache_key.to_string(),
+            checkpoint_sha256: prepared.checkpoint_sha256.clone(),
             source_endpoint: self.remote.endpoint().to_string(),
             request: request.clone(),
             selected_tensor_count: prepared.plan.selected_tensor_count,
@@ -152,9 +153,15 @@ impl SafetensorsStageMaterializer {
                 &prepared.plan.revision,
                 &span.source_file,
             )?;
-            let response = self
-                .remote
-                .exact_range(url, span.start..span.end_exclusive)?;
+            let expected_etag = identity
+                .etag
+                .as_deref()
+                .context("planned SafeTensors shard has no ETag")?;
+            let response = self.remote.exact_range_if_range(
+                url,
+                span.start..span.end_exclusive,
+                expected_etag,
+            )?;
             ensure!(
                 response.total_file_bytes == identity.file_bytes,
                 "SafeTensors shard {} changed size during materialization",
@@ -173,6 +180,14 @@ impl SafetensorsStageMaterializer {
         writer.flush()?;
         writer.inner.get_ref().sync_all()?;
         let output_file_bytes = writer.bytes_written;
+        let expected_output_file_bytes = 8_u64
+            .checked_add(header_len)
+            .and_then(|bytes| bytes.checked_add(payload_bytes))
+            .context("materialized SafeTensors output length overflow")?;
+        ensure!(
+            output_file_bytes == expected_output_file_bytes,
+            "materialized SafeTensors output length mismatch"
+        );
         let output_sha256 = writer.finish_hash();
         Ok((output_file_bytes, output_sha256))
     }
@@ -212,6 +227,10 @@ impl SafetensorsStageMaterializer {
             plan.selected_tensor_count == manifest.selected_tensor_count
                 && plan.selected_tensor_bytes == manifest.selected_tensor_bytes,
             "SafeTensors cached plan and manifest disagree"
+        );
+        ensure!(
+            plan.checkpoint_sha256 == manifest.checkpoint_sha256,
+            "SafeTensors checkpoint identity mismatch"
         );
         let model_path = directory.join(MODEL_FILE);
         let config_path = directory.join(CONFIG_FILE);
@@ -323,13 +342,37 @@ fn ensure_source_identity(
     identity: &SafetensorsSourceShard,
     actual_etag: Option<&str>,
 ) -> Result<()> {
-    if let (Some(expected), Some(actual)) = (identity.etag.as_deref(), actual_etag) {
-        ensure!(
-            expected == actual,
-            "SafeTensors shard {} changed identity during materialization",
-            identity.file
-        );
+    let expected = identity
+        .etag
+        .as_deref()
+        .context("planned SafeTensors shard has no ETag")?;
+    let actual = actual_etag.context("SafeTensors payload response omitted ETag")?;
+    ensure!(
+        expected == actual,
+        "SafeTensors shard {} changed identity during materialization",
+        identity.file
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+fn remove_stale_partials(cache_root: &Path, cache_key: &str) -> Result<()> {
+    let prefix = format!(".{cache_key}.");
+    for entry in fs::read_dir(cache_root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with(&prefix) && name.ends_with(".partial") && entry.file_type()?.is_dir() {
+            fs::remove_dir_all(entry.path())?;
+        }
     }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn remove_stale_partials(_cache_root: &Path, _cache_key: &str) -> Result<()> {
     Ok(())
 }
 
@@ -461,7 +504,10 @@ mod tests {
     use std::{
         io::{Read, Seek, SeekFrom},
         net::{TcpListener, TcpStream},
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Barrier, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
         thread,
     };
 
@@ -546,6 +592,11 @@ mod tests {
                 .lines()
                 .any(|line| line.eq_ignore_ascii_case("range: bytes=0-7"))
         }));
+        assert!(requests.lock().unwrap().iter().any(|request| {
+            request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("if-range: \"model-id\""))
+        }));
 
         let cached = materializer.materialize(request.clone()).unwrap();
 
@@ -563,6 +614,107 @@ mod tests {
         assert!(!repaired.cache_hit);
         assert!(requests.lock().unwrap().len() > request_count);
         validate_local_safetensors(&repaired.path.join(MODEL_FILE)).unwrap();
+    }
+
+    #[test]
+    fn serializes_concurrent_materialization_of_the_same_cache_key() {
+        let checkpoint = Arc::new(test_checkpoint());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = start_checkpoint_server(Arc::clone(&checkpoint), Arc::clone(&requests));
+        let cache = tempfile::tempdir().unwrap();
+        let cache_root = cache.path().join("cache");
+        let barrier = Arc::new(Barrier::new(2));
+        let handles = (0..2)
+            .map(|_| {
+                let endpoint = endpoint.clone();
+                let cache_root = cache_root.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    let materializer =
+                        SafetensorsStageMaterializer::new(cache_root, Some(&endpoint), None)
+                            .unwrap();
+                    barrier.wait();
+                    materializer.materialize(test_request()).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut artifacts = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        artifacts.sort_by_key(|artifact| artifact.cache_hit);
+
+        assert!(!artifacts[0].cache_hit);
+        assert!(artifacts[1].cache_hit);
+        assert_eq!(artifacts[0].path, artifacts[1].path);
+        assert!(fs::read_dir(cache_root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".partial")
+        }));
+    }
+
+    #[test]
+    fn rejects_checkpoint_shard_without_an_etag() {
+        let checkpoint = Arc::new(test_checkpoint());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let endpoint =
+            start_checkpoint_server_with_etag(checkpoint, requests, ModelEtagMode::Static(None));
+        let cache = tempfile::tempdir().unwrap();
+        let materializer =
+            SafetensorsStageMaterializer::new(cache.path().join("cache"), Some(&endpoint), None)
+                .unwrap();
+
+        let error = materializer.materialize(test_request()).unwrap_err();
+
+        assert!(format!("{error:#}").contains("omitted ETag"));
+    }
+
+    #[test]
+    fn rejects_checkpoint_that_changes_etag_before_payload() {
+        let checkpoint = Arc::new(test_checkpoint());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = start_checkpoint_server_with_etag(
+            checkpoint,
+            requests,
+            ModelEtagMode::ChangeAfterHeader,
+        );
+        let cache = tempfile::tempdir().unwrap();
+        let materializer =
+            SafetensorsStageMaterializer::new(cache.path().join("cache"), Some(&endpoint), None)
+                .unwrap();
+
+        let error = materializer.materialize(test_request()).unwrap_err();
+
+        assert!(format!("{error:#}").contains("changed identity"));
+    }
+
+    #[test]
+    fn shares_checkpoint_identity_across_distinct_layer_ranges() {
+        let checkpoint = Arc::new(test_checkpoint());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = start_checkpoint_server(checkpoint, requests);
+        let cache = tempfile::tempdir().unwrap();
+        let materializer =
+            SafetensorsStageMaterializer::new(cache.path().join("cache"), Some(&endpoint), None)
+                .unwrap();
+        let first_request = test_request();
+        let mut final_request = first_request.clone();
+        final_request.layer_start = 1;
+        final_request.layer_end = 2;
+
+        let first = materializer.materialize(first_request).unwrap();
+        let final_stage = materializer.materialize(final_request).unwrap();
+
+        assert_eq!(
+            first.manifest.checkpoint_sha256,
+            final_stage.manifest.checkpoint_sha256
+        );
+        assert_ne!(first.path, final_stage.path);
+        assert_eq!(final_stage.plan.selected_tensor_count, 3);
     }
 
     fn test_request() -> SafetensorsStageRequest {
@@ -608,8 +760,27 @@ mod tests {
         checkpoint: Arc<Vec<u8>>,
         requests: Arc<Mutex<Vec<String>>>,
     ) -> String {
+        start_checkpoint_server_with_etag(
+            checkpoint,
+            requests,
+            ModelEtagMode::Static(Some("\"model-id\"")),
+        )
+    }
+
+    #[derive(Clone, Copy)]
+    enum ModelEtagMode {
+        Static(Option<&'static str>),
+        ChangeAfterHeader,
+    }
+
+    fn start_checkpoint_server_with_etag(
+        checkpoint: Arc<Vec<u8>>,
+        requests: Arc<Mutex<Vec<String>>>,
+        etag_mode: ModelEtagMode,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
+        let model_requests = Arc::new(AtomicUsize::new(0));
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else {
@@ -617,8 +788,15 @@ mod tests {
                 };
                 let checkpoint = Arc::clone(&checkpoint);
                 let requests = Arc::clone(&requests);
+                let model_requests = Arc::clone(&model_requests);
                 thread::spawn(move || {
-                    handle_checkpoint_request(&mut stream, &checkpoint, &requests)
+                    handle_checkpoint_request(
+                        &mut stream,
+                        &checkpoint,
+                        &requests,
+                        etag_mode,
+                        &model_requests,
+                    )
                 });
             }
         });
@@ -629,6 +807,8 @@ mod tests {
         stream: &mut TcpStream,
         checkpoint: &[u8],
         requests: &Mutex<Vec<String>>,
+        etag_mode: ModelEtagMode,
+        model_requests: &AtomicUsize,
     ) {
         let mut bytes = vec![0_u8; 8192];
         let Ok(read) = stream.read(&mut bytes) else {
@@ -650,14 +830,20 @@ mod tests {
         } else if path.ends_with("/model.safetensors.index.json") {
             http_response("404 Not Found", &[], b"")
         } else if path.ends_with("/model.safetensors") {
-            checkpoint_range_response(&request, checkpoint)
+            let request_index = model_requests.fetch_add(1, Ordering::SeqCst);
+            let etag = match etag_mode {
+                ModelEtagMode::Static(etag) => etag,
+                ModelEtagMode::ChangeAfterHeader if request_index < 2 => Some("\"model-id\""),
+                ModelEtagMode::ChangeAfterHeader => Some("\"changed-id\""),
+            };
+            checkpoint_range_response(&request, checkpoint, etag)
         } else {
             http_response("404 Not Found", &[], b"")
         };
         let _ = stream.write_all(&response);
     }
 
-    fn checkpoint_range_response(request: &str, checkpoint: &[u8]) -> Vec<u8> {
+    fn checkpoint_range_response(request: &str, checkpoint: &[u8], etag: Option<&str>) -> Vec<u8> {
         let range = request
             .lines()
             .find_map(|line| {
@@ -670,11 +856,11 @@ mod tests {
         let start = start.parse::<usize>().unwrap();
         let end = end.parse::<usize>().unwrap();
         let content_range = format!("bytes {start}-{end}/{}", checkpoint.len());
-        http_response(
-            "206 Partial Content",
-            &[("ETag", "\"model-id\""), ("Content-Range", &content_range)],
-            &checkpoint[start..=end],
-        )
+        let mut headers = vec![("Content-Range", content_range.as_str())];
+        if let Some(etag) = etag {
+            headers.push(("ETag", etag));
+        }
+        http_response("206 Partial Content", &headers, &checkpoint[start..=end])
     }
 
     fn http_response(status: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {

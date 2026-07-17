@@ -4525,6 +4525,7 @@ dependencies = [
  "chrono",
  "dirs",
  "hf-hub",
+ "libc",
  "model-artifact",
  "model-ref",
  "reqwest 0.12.28",

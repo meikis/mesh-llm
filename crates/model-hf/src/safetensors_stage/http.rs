@@ -9,7 +9,9 @@ use anyhow::{Context, Result, anyhow, ensure};
 use reqwest::{
     StatusCode, Url,
     blocking::{Client, RequestBuilder, Response},
-    header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, ETAG, RANGE},
+    header::{
+        ACCEPT_ENCODING, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, ETAG, IF_RANGE, RANGE,
+    },
     redirect::Policy,
 };
 
@@ -92,16 +94,38 @@ impl RemoteSource {
     }
 
     pub fn exact_range(&self, url: Url, range: Range<u64>) -> Result<ExactRangeResponse> {
+        self.exact_range_with_identity(url, range, None)
+    }
+
+    pub fn exact_range_if_range(
+        &self,
+        url: Url,
+        range: Range<u64>,
+        etag: &str,
+    ) -> Result<ExactRangeResponse> {
+        validate_strong_etag(etag)?;
+        self.exact_range_with_identity(url, range, Some(etag))
+    }
+
+    fn exact_range_with_identity(
+        &self,
+        url: Url,
+        range: Range<u64>,
+        etag: Option<&str>,
+    ) -> Result<ExactRangeResponse> {
         ensure!(range.start < range.end, "HTTP byte range must not be empty");
         let expected_bytes = range.end - range.start;
         let range_header = format!("bytes={}-{}", range.start, range.end - 1);
+        let mut request = self
+            .client
+            .get(url)
+            .header(RANGE, range_header.clone())
+            .header(ACCEPT_ENCODING, "identity");
+        if let Some(etag) = etag {
+            request = request.header(IF_RANGE, etag);
+        }
         let response = self
-            .authorized(
-                self.client
-                    .get(url)
-                    .header(RANGE, range_header.clone())
-                    .header(ACCEPT_ENCODING, "identity"),
-            )
+            .authorized(request)
             .send()
             .with_context(|| format!("request HTTP range {range_header}"))?;
         ensure!(
@@ -132,6 +156,9 @@ impl RemoteSource {
             );
         }
         let etag = header_string(&response, ETAG)?;
+        if let Some(etag) = &etag {
+            validate_strong_etag(etag)?;
+        }
         Ok(ExactRangeResponse {
             response,
             total_file_bytes: parsed.total_file_bytes,
@@ -177,6 +204,14 @@ impl RemoteSource {
             None => builder,
         }
     }
+}
+
+fn validate_strong_etag(etag: &str) -> Result<()> {
+    ensure!(
+        !etag.starts_with("W/") && etag.starts_with('"') && etag.ends_with('"'),
+        "SafeTensors range response requires a strong quoted ETag"
+    );
+    Ok(())
 }
 
 impl ExactRangeResponse {
@@ -355,6 +390,23 @@ mod tests {
             .unwrap_err();
 
         assert!(format!("{error:#}").contains("HTTP range"));
+    }
+
+    #[test]
+    fn rejects_weak_etag_for_tensor_ranges() {
+        let endpoint = serve_once(http_response(
+            "206 Partial Content",
+            &[("Content-Range", "bytes 0-3/10"), ("ETag", "W/\"weak\"")],
+            b"four",
+        ));
+        let remote = RemoteSource::new(Some(&endpoint), None).unwrap();
+        let url = remote
+            .url("org/model", &"a".repeat(40), "model.safetensors")
+            .unwrap();
+
+        let error = remote.exact_range(url, 0..4).err().unwrap();
+
+        assert!(error.to_string().contains("strong quoted ETag"));
     }
 
     fn serve_once(response: Vec<u8>) -> String {

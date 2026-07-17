@@ -21,13 +21,15 @@ const MAX_HEADER_BYTES: u64 = 256 * 1024 * 1024;
 #[derive(Clone, Debug)]
 struct RemoteHeader {
     header_len: u64,
+    header_sha256: String,
     file_bytes: u64,
-    etag: Option<String>,
+    etag: String,
     tensors: BTreeMap<String, TensorHeader>,
 }
 
 struct CheckpointLayout {
     index: SafetensorsIndex,
+    layout_sha256: String,
     index_bytes: u64,
     index_sha256: Option<String>,
     index_etag: Option<String>,
@@ -49,6 +51,7 @@ pub(crate) fn prepare(
     add_required_prefixes(&mut selection_request, &model_config);
 
     let mut layout = load_checkpoint_layout(remote, request)?;
+    let checkpoint_sha256 = checkpoint_sha256(request, &config_sha256, &layout.layout_sha256)?;
     validate_layer_coverage(&layout.index, request)?;
     let selected = select_tensors(&layout.index.weight_map, &selection_request);
     ensure!(
@@ -94,18 +97,20 @@ pub(crate) fn prepare(
             SafetensorsSourceShard {
                 file: shard.file.clone(),
                 file_bytes: header.file_bytes,
-                etag: header.etag.clone(),
+                etag: Some(header.etag.clone()),
             }
         })
         .collect();
     let plan = summarize_plan(
         &selection_request,
+        &checkpoint_sha256,
         &layout.index,
         config.bytes.len() as u64,
         layout.index_bytes,
         shards,
     )?;
     Ok(PreparedStage {
+        checkpoint_sha256,
         plan,
         tensors,
         config: config.bytes,
@@ -193,10 +198,12 @@ fn load_checkpoint_layout(
     )?;
     if let Some(index_file) = remote.optional_small_file(index_url, MAX_INDEX_BYTES)? {
         let index = parse_index(&index_file.bytes)?;
+        let index_sha256 = sha256_hex(&index_file.bytes);
         return Ok(CheckpointLayout {
             index,
+            layout_sha256: index_sha256.clone(),
             index_bytes: index_file.bytes.len() as u64,
-            index_sha256: Some(sha256_hex(&index_file.bytes)),
+            index_sha256: Some(index_sha256),
             index_etag: index_file.etag,
             headers: BTreeMap::new(),
         });
@@ -220,6 +227,7 @@ fn load_checkpoint_layout(
             metadata: IndexMetadata { total_size },
             weight_map,
         },
+        layout_sha256: header.header_sha256.clone(),
         index_bytes: 0,
         index_sha256: None,
         index_etag: None,
@@ -235,7 +243,10 @@ fn fetch_safetensor_header(
     let url = remote.url(&request.repo, &request.revision, file)?;
     let len_response = remote.exact_range(url.clone(), 0..8)?;
     let file_bytes = len_response.total_file_bytes;
-    let len_etag = len_response.etag().map(str::to_string);
+    let len_etag = len_response
+        .etag()
+        .context("SafeTensors header-length response omitted ETag")?
+        .to_string();
     let len_bytes = len_response.into_bytes()?;
     let header_len = u64::from_le_bytes(
         len_bytes
@@ -254,31 +265,34 @@ fn fetch_safetensor_header(
         header_end <= file_bytes,
         "SafeTensors header exceeds source file length"
     );
-    let header_response = remote.exact_range(url, 8..header_end)?;
+    let header_response = remote.exact_range_if_range(url, 8..header_end, &len_etag)?;
     ensure!(
         header_response.total_file_bytes == file_bytes,
         "source file size changed while reading SafeTensors header"
     );
-    ensure_matching_etag(len_etag.as_deref(), header_response.etag(), file)?;
-    let etag = header_response.etag().map(str::to_string).or(len_etag);
+    let header_etag = header_response
+        .etag()
+        .context("SafeTensors header response omitted ETag")?;
+    ensure_matching_etag(&len_etag, header_etag, file)?;
+    let etag = header_etag.to_string();
     let header_bytes = header_response.into_bytes()?;
+    let header_sha256 = sha256_hex(&header_bytes);
     let data_bytes = file_bytes - header_end;
     let tensors = parse_header(&header_bytes, data_bytes)?;
     Ok(RemoteHeader {
         header_len,
+        header_sha256,
         file_bytes,
         etag,
         tensors,
     })
 }
 
-fn ensure_matching_etag(left: Option<&str>, right: Option<&str>, file: &str) -> Result<()> {
-    if let (Some(left), Some(right)) = (left, right) {
-        ensure!(
-            left == right,
-            "source identity changed while reading SafeTensors shard {file}"
-        );
-    }
+fn ensure_matching_etag(left: &str, right: &str, file: &str) -> Result<()> {
+    ensure!(
+        left == right,
+        "source identity changed while reading SafeTensors shard {file}"
+    );
     Ok(())
 }
 
@@ -401,6 +415,7 @@ fn coalesce_contiguous_ranges(mut ranges: Vec<ByteRange>) -> Vec<ByteRange> {
 
 fn summarize_plan(
     request: &SafetensorsStageRequest,
+    checkpoint_sha256: &str,
     index: &SafetensorsIndex,
     config_bytes: u64,
     index_bytes: u64,
@@ -429,6 +444,7 @@ fn summarize_plan(
         .and_then(|bytes| bytes.checked_add(range_payload_bytes))
         .context("planned download byte count overflow")?;
     Ok(SafetensorsStagePlan {
+        checkpoint_sha256: checkpoint_sha256.to_string(),
         repo: request.repo.clone(),
         revision: request.revision.clone(),
         layer_start: request.layer_start,
@@ -454,6 +470,21 @@ fn summarize_plan(
             .map(|total| total.saturating_sub(selected_tensor_bytes)),
         shards,
     })
+}
+
+fn checkpoint_sha256(
+    request: &SafetensorsStageRequest,
+    config_sha256: &str,
+    layout_sha256: &str,
+) -> Result<String> {
+    let identity = serde_json::to_vec(&(
+        "mesh-mlx-safetensors-checkpoint-v1",
+        &request.repo,
+        &request.revision,
+        config_sha256,
+        layout_sha256,
+    ))?;
+    Ok(sha256_hex(&identity))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

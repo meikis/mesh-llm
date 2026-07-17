@@ -4,12 +4,12 @@ use anyhow::{Result, ensure};
 use model_artifact::safetensors::TensorHeader;
 use serde::{Deserialize, Serialize};
 
-pub(crate) const MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub(crate) const MANIFEST_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SafetensorsStageRequest {
     pub repo: String,
-    /// Immutable Hugging Face commit SHA, not a branch or tag.
+    /// Hugging Face commit SHA. The endpoint must honor commit-addressed immutability.
     pub revision: String,
     pub layer_start: u32,
     pub layer_end: u32,
@@ -49,6 +49,8 @@ impl SafetensorsStageRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SafetensorsStagePlan {
+    /// Topology-wide identity shared by every layer range of this checkpoint.
+    pub checkpoint_sha256: String,
     pub repo: String,
     pub revision: String,
     pub layer_start: u32,
@@ -90,7 +92,7 @@ pub struct ByteRange {
 
 impl ByteRange {
     pub fn len(&self) -> u64 {
-        self.end_exclusive - self.start
+        self.end_exclusive.saturating_sub(self.start)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -102,6 +104,7 @@ impl ByteRange {
 pub struct SafetensorsStageManifest {
     pub schema_version: u32,
     pub cache_key: String,
+    pub checkpoint_sha256: String,
     pub source_endpoint: String,
     pub request: SafetensorsStageRequest,
     pub selected_tensor_count: usize,
@@ -140,6 +143,7 @@ pub(crate) struct SelectedTensor {
 
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedStage {
+    pub checkpoint_sha256: String,
     pub plan: SafetensorsStagePlan,
     pub tensors: Vec<SelectedTensor>,
     pub config: Vec<u8>,

@@ -3640,8 +3640,9 @@ async fn run_runtime_cli(
         autoupdate::check_for_update(crate::BUILD_VERSION).await;
     }
 
-    let config = plugin::load_config(options.config.as_deref())?;
+    let mut config = plugin::load_config(options.config.as_deref())?;
     apply_runtime_config_options(&mut options, &config);
+    apply_runtime_cli_speculative_overrides(&mut config, options.speculative_overrides.as_ref());
     let startup_mesh_creation_state = resolve_startup_mesh_creation_state(&options, &config)?;
     let cli_has_explicit_models = cli_has_explicit_models(&options);
     let has_config_models = !config.models.is_empty();
@@ -3699,6 +3700,35 @@ async fn run_runtime_cli(
 fn apply_runtime_config_options(options: &mut RuntimeOptions, config: &plugin::MeshConfig) {
     options.debug |= config.runtime.debug;
     options.listen_all |= config.runtime.listen_all;
+}
+
+fn apply_runtime_cli_speculative_overrides(
+    config: &mut plugin::MeshConfig,
+    overrides: Option<&plugin::SpeculativeConfig>,
+) {
+    let Some(overrides) = overrides else {
+        return;
+    };
+    let defaults = config
+        .defaults
+        .as_ref()
+        .and_then(|defaults| defaults.speculative.as_ref())
+        .cloned();
+
+    let resolved_defaults =
+        plugin::SpeculativeConfig::with_precedence(Some(overrides), None, defaults.as_ref());
+    config
+        .defaults
+        .get_or_insert_with(plugin::ModelConfigDefaults::default)
+        .speculative = Some(resolved_defaults);
+
+    for model in &mut config.models {
+        model.speculative = Some(plugin::SpeculativeConfig::with_precedence(
+            Some(overrides),
+            model.speculative.as_ref(),
+            defaults.as_ref(),
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -9261,6 +9291,37 @@ mod tests {
 
         assert_eq!(message, "failed closing path (err=LastOpenPath)");
         assert_eq!(context.as_deref(), Some("transport"));
+    }
+
+    #[test]
+    fn cli_speculative_overrides_take_precedence_without_dropping_model_tuning() {
+        let mut config: plugin::MeshConfig = toml::from_str(
+            r#"
+[defaults.speculative]
+strategy = "mtp-cache"
+verify_window_pipeline_depth = 2
+
+[[models]]
+model = "test/model"
+
+[models.speculative]
+ngram_max_proposal_tokens = 6
+"#,
+        )
+        .expect("config parses");
+        let mut overrides = plugin::SpeculativeConfig::default();
+        overrides.strategy = Some("mtp".to_string());
+        overrides.verify_window_pipeline_depth = Some(3);
+
+        apply_runtime_cli_speculative_overrides(&mut config, Some(&overrides));
+
+        let model = config.models[0]
+            .speculative
+            .as_ref()
+            .expect("model speculative config is resolved");
+        assert_eq!(model.strategy.as_deref(), Some("mtp"));
+        assert_eq!(model.ngram_max_proposal_tokens, Some(6));
+        assert_eq!(model.verify_window_pipeline_depth, Some(3));
     }
 
     #[test]

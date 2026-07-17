@@ -280,6 +280,38 @@ Use `[models.speculative] strategy = "mtp-cache"` with the bounded settings
 above. The package must declare the request-local cache proposer; this command
 does not silently turn one on.
 
+### Invocation Overrides
+
+`mesh-llm serve` may temporarily override a package-selected strategy without
+editing `config.toml`. CLI settings have highest precedence, then the selected
+model entry, then `[defaults.speculative]`; unspecified CLI fields retain the
+lower-layer value. The CLI cannot make an undeclared package proposer available.
+
+```bash
+mesh-llm serve meshllm/GLM-4.7-Flash-MTP-GGUF:Q4_K_M --split --no-draft \
+  --speculative-strategy mtp-cache \
+  --speculative-ngram-proposer cache \
+  --speculative-extension-max-tokens 8 \
+  --speculative-verify-window-pipeline-depth 2
+```
+
+The supported tuning flags are `--speculative-ngram-max-proposal-tokens`,
+`--speculative-extension-{initial,max}-tokens`,
+`--speculative-extension-tail-backoff-proposals`,
+`--speculative-native-mtp-{reject-cooldown-tokens,suppress-cooldown-drafts,suppress-cooldown-draft-limit}`,
+and `--speculative-verify-window-{min,max}-tokens` / `--speculative-verify-window-pipeline-depth`.
+Use `--speculative-native-mtp-allow-cooldown-drafts` to explicitly override a
+configured suppression policy to `false`.
+
+### Standalone Skippy Server
+
+`skippy-server` does not resolve layer-package recommendations. For isolated
+stage-server operation it accepts a complete, already resolved JSON
+`SpeculativeDecodeConfig` via `serve-binary --openai-speculative-config` or
+`serve-openai --speculative-config`. The file is validated as one typed plan
+before serving starts. This is intentionally not a second policy-merging path;
+normal mesh serving always resolves the package and policy in `mesh-llm`.
+
 ```mermaid
 flowchart LR
   C["SPEED-Bench client\non micstudio"] --> S0["micstudio :9337\nOpenAI frontend / stage 0"]

@@ -574,6 +574,65 @@ pub struct SpeculativeConfig {
     pub(crate) legacy_draft_model_path_used: bool,
 }
 
+impl SpeculativeConfig {
+    /// Resolves the three supported policy layers without discarding fields
+    /// that are not overridden by a more specific layer.
+    pub fn with_precedence(
+        overrides: Option<&Self>,
+        model: Option<&Self>,
+        defaults: Option<&Self>,
+    ) -> Self {
+        macro_rules! pick {
+            ($field:ident) => {
+                overrides
+                    .and_then(|config| config.$field.clone())
+                    .or_else(|| model.and_then(|config| config.$field.clone()))
+                    .or_else(|| defaults.and_then(|config| config.$field.clone()))
+            };
+        }
+
+        Self {
+            strategy: pick!(strategy),
+            mode: pick!(mode),
+            draft_model: pick!(draft_model),
+            draft_hf_repo: pick!(draft_hf_repo),
+            draft_hf_file: pick!(draft_hf_file),
+            draft_selection_policy: pick!(draft_selection_policy),
+            pairing_fault: pick!(pairing_fault),
+            draft_max_tokens: pick!(draft_max_tokens),
+            draft_min_tokens: pick!(draft_min_tokens),
+            draft_acceptance_threshold: pick!(draft_acceptance_threshold),
+            draft_split_probability: pick!(draft_split_probability),
+            draft_gpu_layers: pick!(draft_gpu_layers),
+            draft_device: pick!(draft_device),
+            draft_threads: pick!(draft_threads),
+            draft_cache_type_k: pick!(draft_cache_type_k),
+            draft_cache_type_v: pick!(draft_cache_type_v),
+            ngram_min: pick!(ngram_min),
+            ngram_max: pick!(ngram_max),
+            ngram_proposer: pick!(ngram_proposer),
+            ngram_max_proposal_tokens: pick!(ngram_max_proposal_tokens),
+            extension_initial_tokens: pick!(extension_initial_tokens),
+            extension_max_tokens: pick!(extension_max_tokens),
+            extension_tail_backoff_proposals: pick!(extension_tail_backoff_proposals),
+            native_mtp_reject_cooldown_tokens: pick!(native_mtp_reject_cooldown_tokens),
+            native_mtp_suppress_cooldown_drafts: pick!(native_mtp_suppress_cooldown_drafts),
+            native_mtp_suppress_cooldown_draft_limit: pick!(
+                native_mtp_suppress_cooldown_draft_limit
+            ),
+            verify_window_min_tokens: pick!(verify_window_min_tokens),
+            verify_window_max_tokens: pick!(verify_window_max_tokens),
+            verify_window_pipeline_depth: pick!(verify_window_pipeline_depth),
+            spec_default: pick!(spec_default),
+            legacy_draft_model_path_used: overrides
+                .filter(|config| config.draft_model.is_some())
+                .or_else(|| model.filter(|config| config.draft_model.is_some()))
+                .or_else(|| defaults.filter(|config| config.draft_model.is_some()))
+                .is_some_and(|config| config.legacy_draft_model_path_used),
+        }
+    }
+}
+
 /// Raw deserialization helper that accepts both `draft_model` and the legacy
 /// `draft_model_path` key. The public `SpeculativeConfig` is constructed from
 /// this after detecting which key was used.

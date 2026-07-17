@@ -3,7 +3,12 @@ use std::{net::SocketAddr, path::PathBuf};
 use anyhow::{Context, Result, bail};
 use skippy_protocol::{StageConfig, StageTopology, binary::WireActivationDType};
 
-use crate::{cli::ServeBinaryArgs, config::load_json, telemetry::TelemetryLevel};
+use crate::{
+    cli::ServeBinaryArgs,
+    config::load_json,
+    frontend::{NgramProposalConfig, NgramProposerKind, SpeculativeDecodeConfig},
+    telemetry::TelemetryLevel,
+};
 
 use super::WireCondition;
 
@@ -42,10 +47,9 @@ pub struct EmbeddedOpenAiStageOptions {
     pub speculative_window: usize,
     pub adaptive_speculative_window: bool,
     pub draft_n_gpu_layers: Option<i32>,
-    pub ngram_min: usize,
-    pub ngram_max: usize,
     pub native_mtp_max_tokens: usize,
     pub native_mtp_min_tokens: usize,
+    pub speculative: SpeculativeDecodeConfig,
 }
 
 impl BinaryStageOptions {
@@ -72,6 +76,14 @@ impl BinaryStageOptions {
             None => None,
         };
         let bind_addr = args.bind_addr.unwrap_or(config.bind_addr.parse()?);
+        let openai_speculative = args
+            .openai_speculative_config
+            .as_ref()
+            .map(load_json)
+            .transpose()
+            .context("load --openai-speculative-config")?
+            .unwrap_or_else(|| legacy_speculative_config(&args));
+        openai_speculative.validate()?;
         let openai = args
             .openai_bind_addr
             .map(|bind_addr| EmbeddedOpenAiStageOptions {
@@ -89,10 +101,9 @@ impl BinaryStageOptions {
                 speculative_window: args.openai_speculative_window,
                 adaptive_speculative_window: args.openai_adaptive_speculative_window,
                 draft_n_gpu_layers: args.openai_draft_n_gpu_layers,
-                ngram_min: args.openai_ngram_min,
-                ngram_max: args.openai_ngram_max,
                 native_mtp_max_tokens: 3,
                 native_mtp_min_tokens: 0,
+                speculative: openai_speculative,
             });
         let native_mtp_enabled = config.native_mtp_enabled;
         Ok(Self {
@@ -113,6 +124,20 @@ impl BinaryStageOptions {
             openai,
         })
     }
+}
+
+fn legacy_speculative_config(args: &ServeBinaryArgs) -> SpeculativeDecodeConfig {
+    let mut config = SpeculativeDecodeConfig::default();
+    if args.openai_ngram_min > 0 && args.openai_ngram_max > 0 {
+        config.effective_strategy = "ngram-simple".to_string();
+        config.ngram = Some(NgramProposalConfig {
+            kind: NgramProposerKind::Simple,
+            min_ngram: args.openai_ngram_min,
+            max_ngram: args.openai_ngram_max,
+            max_proposal_tokens: args.openai_ngram_max,
+        });
+    }
+    config
 }
 
 pub fn parse_wire_dtype(value: &str) -> Result<WireActivationDType> {

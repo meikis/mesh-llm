@@ -353,12 +353,15 @@ Consumers that do not recognize a strategy type MUST ignore it unless it is the
 declared default for a request they are trying to serve.
 
 Operators may override the package recommendation in `config.toml` with
-`speculative.strategy`. `auto` uses the package/runtime default, `mtp` forces
+`speculative.strategy`, or for one `mesh-llm serve` invocation with
+`--speculative-strategy`. `auto` uses the package/runtime default, `mtp` forces
 the direct native-MTP control, and `disabled` disables speculation. A named
 package strategy such as `mtp-cache` is accepted only when the selected package
-declares it. Model-level speculative settings override global defaults and may
-bound N-gram proposal size, extension depth, cooldown, and VerifyWindow depth;
-they cannot make an undeclared proposer available.
+declares it. Precedence is CLI invocation, selected model entry, then global
+defaults. These layers may bound N-gram proposal size, extension depth,
+cooldown, and VerifyWindow depth; they cannot make an undeclared proposer
+available. `skippy-server` receives the resulting typed plan and does not
+repeat this policy resolution.
 
 Operators may also pass the legacy `native-mtp-n1` value; the runtime normalizes it to `mtp` for backward compatibility. New configs should use `mtp`.
 

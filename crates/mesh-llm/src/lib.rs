@@ -131,6 +131,7 @@ fn runtime_help_text() -> Option<String> {
 }
 
 fn runtime_options_from_cli(cli: mesh_llm_cli::Cli) -> mesh_llm_host_runtime::RuntimeOptions {
+    let speculative_overrides = speculative_overrides_from_cli(&cli);
     mesh_llm_host_runtime::RuntimeOptions {
         log_format: cli.log_format,
         debug: cli.debug,
@@ -166,6 +167,7 @@ fn runtime_options_from_cli(cli: mesh_llm_cli::Cli) -> mesh_llm_host_runtime::Ru
         draft: cli.draft,
         draft_max: cli.draft_max,
         no_draft: cli.no_draft,
+        speculative_overrides,
         split: cli.split,
         ctx_size: cli.ctx_size,
         max_vram: cli.max_vram,
@@ -193,6 +195,35 @@ fn runtime_options_from_cli(cli: mesh_llm_cli::Cli) -> mesh_llm_host_runtime::Ru
         trust_owner: cli.trust_owner,
         nostr_discovery: cli.nostr_discovery,
     }
+}
+
+fn speculative_overrides_from_cli(
+    cli: &mesh_llm_cli::Cli,
+) -> Option<mesh_llm_host_runtime::plugin::SpeculativeConfig> {
+    let suppress_cooldown_drafts = if cli.speculative_native_mtp_allow_cooldown_drafts {
+        Some(false)
+    } else {
+        cli.speculative_native_mtp_suppress_cooldown_drafts
+            .then_some(true)
+    };
+    let mut overrides = mesh_llm_host_runtime::plugin::SpeculativeConfig::default();
+    overrides.strategy = cli.speculative_strategy.clone();
+    overrides.ngram_proposer = cli
+        .speculative_ngram_proposer
+        .map(mesh_llm_cli::SpeculativeNgramProposerCli::as_str)
+        .map(str::to_string);
+    overrides.ngram_max_proposal_tokens = cli.speculative_ngram_max_proposal_tokens;
+    overrides.extension_initial_tokens = cli.speculative_extension_initial_tokens;
+    overrides.extension_max_tokens = cli.speculative_extension_max_tokens;
+    overrides.extension_tail_backoff_proposals = cli.speculative_extension_tail_backoff_proposals;
+    overrides.native_mtp_reject_cooldown_tokens = cli.speculative_native_mtp_reject_cooldown_tokens;
+    overrides.native_mtp_suppress_cooldown_drafts = suppress_cooldown_drafts;
+    overrides.native_mtp_suppress_cooldown_draft_limit =
+        cli.speculative_native_mtp_suppress_cooldown_draft_limit;
+    overrides.verify_window_min_tokens = cli.speculative_verify_window_min_tokens;
+    overrides.verify_window_max_tokens = cli.speculative_verify_window_max_tokens;
+    overrides.verify_window_pipeline_depth = cli.speculative_verify_window_pipeline_depth;
+    (overrides != Default::default()).then_some(overrides)
 }
 
 fn command_uses_machine_output(command: Option<&mesh_llm_cli::Command>) -> bool {

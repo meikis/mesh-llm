@@ -102,7 +102,8 @@ impl StageOpenAiBackend {
                     sampling: &sampling,
                     chat_sampling_metadata,
                     speculative: &self.speculative,
-                    native_mtp_enabled: self.speculative.native_mtp.enabled,
+                    native_mtp_enabled: self.config.native_mtp_enabled
+                        && self.speculative.native_mtp.enabled,
                     hook_request: hook_request.clone(),
                     hook_runtime: hook_runtime.clone(),
                     cancellation,
@@ -139,7 +140,8 @@ impl StageOpenAiBackend {
                     speculative: &self.speculative,
                     ngram_min: self.ngram_min,
                     ngram_max: self.ngram_max,
-                    native_mtp_enabled: self.speculative.native_mtp.enabled,
+                    native_mtp_enabled: config.native_mtp_enabled
+                        && self.speculative.native_mtp.enabled,
                     native_mtp_max_tokens: self.speculative.native_mtp.max_draft_tokens,
                     prompt_token_ids: &prompt_token_ids,
                     max_tokens,

@@ -395,6 +395,21 @@ pub enum MeshGuardrailCliMode {
     Enforce,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum SpeculativeNgramProposerCli {
+    Simple,
+    Cache,
+}
+
+impl SpeculativeNgramProposerCli {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Simple => "simple",
+            Self::Cache => "cache",
+        }
+    }
+}
+
 impl MeshGuardrailCliMode {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -546,6 +561,62 @@ pub struct Cli {
     /// Disable automatic draft model detection.
     #[arg(long, hide = true)]
     pub no_draft: bool,
+
+    /// Override the package speculative decoding strategy for this invocation.
+    #[arg(long, hide = true)]
+    pub speculative_strategy: Option<String>,
+
+    /// Override the N-gram proposer kind for a package strategy that includes one.
+    #[arg(long, value_enum, hide = true)]
+    pub speculative_ngram_proposer: Option<SpeculativeNgramProposerCli>,
+
+    /// Cap N-gram tokens proposed in one verify window.
+    #[arg(long, hide = true)]
+    pub speculative_ngram_max_proposal_tokens: Option<u32>,
+
+    /// Initial N-gram extension length for a composite MTP strategy.
+    #[arg(long, hide = true)]
+    pub speculative_extension_initial_tokens: Option<u32>,
+
+    /// Maximum N-gram extension length for a composite MTP strategy.
+    #[arg(long, hide = true)]
+    pub speculative_extension_max_tokens: Option<u32>,
+
+    /// Consecutive weak extensions before the composite strategy backs off.
+    #[arg(long, hide = true)]
+    pub speculative_extension_tail_backoff_proposals: Option<u32>,
+
+    /// Native MTP rejection cooldown in generated tokens.
+    #[arg(long, hide = true)]
+    pub speculative_native_mtp_reject_cooldown_tokens: Option<u32>,
+
+    /// Suppress native MTP drafts while its rejection cooldown is active.
+    #[arg(long, hide = true)]
+    pub speculative_native_mtp_suppress_cooldown_drafts: bool,
+
+    /// Keep native MTP drafts during its rejection cooldown.
+    #[arg(
+        long,
+        hide = true,
+        conflicts_with = "speculative_native_mtp_suppress_cooldown_drafts"
+    )]
+    pub speculative_native_mtp_allow_cooldown_drafts: bool,
+
+    /// Maximum native MTP drafts suppressed by a cooldown.
+    #[arg(long, hide = true)]
+    pub speculative_native_mtp_suppress_cooldown_draft_limit: Option<u32>,
+
+    /// Minimum tokens to include in a pipelined verify window.
+    #[arg(long, hide = true)]
+    pub speculative_verify_window_min_tokens: Option<u32>,
+
+    /// Maximum tokens to include in a pipelined verify window.
+    #[arg(long, hide = true)]
+    pub speculative_verify_window_max_tokens: Option<u32>,
+
+    /// Number of in-flight pipelined verify windows.
+    #[arg(long, hide = true)]
+    pub speculative_verify_window_pipeline_depth: Option<u32>,
 
     /// Force tensor split even if the model fits on one node.
     #[arg(long, hide = true)]
@@ -1496,6 +1567,33 @@ mod tests {
                 .map(OsString::from)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn serve_parses_speculative_decode_overrides() {
+        let normalized = normalize_runtime_surface_args([
+            "mesh-llm",
+            "serve",
+            "--speculative-strategy",
+            "mtp-cache",
+            "--speculative-ngram-proposer",
+            "cache",
+            "--speculative-extension-max-tokens",
+            "8",
+            "--speculative-native-mtp-allow-cooldown-drafts",
+            "--speculative-verify-window-pipeline-depth",
+            "3",
+        ]);
+        let cli = Cli::try_parse_from(normalized.normalized).expect("clap parse");
+
+        assert_eq!(cli.speculative_strategy.as_deref(), Some("mtp-cache"));
+        assert_eq!(
+            cli.speculative_ngram_proposer,
+            Some(SpeculativeNgramProposerCli::Cache)
+        );
+        assert_eq!(cli.speculative_extension_max_tokens, Some(8));
+        assert!(cli.speculative_native_mtp_allow_cooldown_drafts);
+        assert_eq!(cli.speculative_verify_window_pipeline_depth, Some(3));
     }
 
     #[test]

@@ -32,7 +32,7 @@ use openai_frontend::{
     RetryExhaustionMode, StreamingGuardrailMode, Usage, apply_chat_hook_outcome,
     chat_mesh_hooks_enabled,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use skippy_metrics::attr as attr_key;
@@ -148,6 +148,7 @@ pub async fn serve_openai(args: ServeOpenAiArgs) -> Result<()> {
     if args.generation_concurrency == 0 {
         bail!("--generation-concurrency must be greater than zero");
     }
+    let speculative = load_standalone_speculative_config(args.speculative_config.as_ref())?;
 
     let runtime = load_runtime(&config)?.ok_or_else(|| {
         anyhow!("serve-openai requires a stage config with model_path for tokenization and decode")
@@ -201,9 +202,9 @@ pub async fn serve_openai(args: ServeOpenAiArgs) -> Result<()> {
         draft: None,
         speculative_window: 0,
         adaptive_speculative_window: false,
-        ngram_min: 0,
-        ngram_max: 0,
-        speculative: SpeculativeDecodeConfig::default(),
+        ngram_min: standalone_simple_ngram_min(&speculative),
+        ngram_max: standalone_simple_ngram_max(&speculative),
+        speculative,
         generation_limit: Arc::new(Semaphore::new(args.generation_concurrency)),
         generation_queue_depth: Arc::new(AtomicUsize::new(0)),
         generation_queue_limit: args.generation_concurrency,
@@ -227,7 +228,8 @@ pub async fn serve_openai(args: ServeOpenAiArgs) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SpeculativeDecodeConfig {
     pub requested_strategy: String,
     pub effective_strategy: String,
@@ -237,7 +239,8 @@ pub struct SpeculativeDecodeConfig {
     pub verify_window: VerifyWindowConfig,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeMtpProposalConfig {
     pub enabled: bool,
     pub max_draft_tokens: usize,
@@ -247,13 +250,15 @@ pub struct NativeMtpProposalConfig {
     pub suppress_cooldown_draft_limit: usize,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum NgramProposerKind {
     Simple,
     Cache,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct NgramProposalConfig {
     pub kind: NgramProposerKind,
     pub min_ngram: usize,
@@ -261,14 +266,16 @@ pub struct NgramProposalConfig {
     pub max_proposal_tokens: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct NgramExtensionConfig {
     pub initial_tokens: usize,
     pub max_tokens: usize,
     pub tail_backoff_proposals: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct VerifyWindowConfig {
     pub min_tokens: usize,
     pub max_tokens: usize,
@@ -300,6 +307,34 @@ impl Default for SpeculativeDecodeConfig {
 }
 
 impl SpeculativeDecodeConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.requested_strategy.trim().is_empty() || self.effective_strategy.trim().is_empty() {
+            bail!("speculative decode strategies must not be empty");
+        }
+        if self.native_mtp.min_draft_tokens > self.native_mtp.max_draft_tokens {
+            bail!("native MTP min_draft_tokens must not exceed max_draft_tokens");
+        }
+        if let Some(ngram) = &self.ngram
+            && (ngram.min_ngram == 0
+                || ngram.min_ngram > ngram.max_ngram
+                || ngram.max_proposal_tokens == 0)
+        {
+            bail!(
+                "N-gram proposer requires 0 < min_ngram <= max_ngram and max_proposal_tokens > 0"
+            );
+        }
+        if self.extension.is_some() && (!self.native_mtp.enabled || self.ngram.is_none()) {
+            bail!("N-gram extension requires both native MTP and an N-gram proposer");
+        }
+        if self.verify_window.min_tokens == 0
+            || self.verify_window.min_tokens > self.verify_window.max_tokens
+            || self.verify_window.pipeline_depth == 0
+        {
+            bail!("verify window requires 0 < min_tokens <= max_tokens and pipeline_depth > 0");
+        }
+        Ok(())
+    }
+
     fn insert_telemetry_attrs(&self, attrs: &mut BTreeMap<String, Value>) {
         attrs.insert(
             "llama_stage.spec.requested_strategy".to_string(),
@@ -309,6 +344,88 @@ impl SpeculativeDecodeConfig {
             "llama_stage.spec.effective_strategy".to_string(),
             json!(self.effective_strategy),
         );
+    }
+}
+
+fn load_standalone_speculative_config(path: Option<&PathBuf>) -> Result<SpeculativeDecodeConfig> {
+    let config = match path {
+        Some(path) => load_json(path)
+            .with_context(|| format!("load speculative decode config {}", path.display()))?,
+        None => SpeculativeDecodeConfig::default(),
+    };
+    config.validate()?;
+    Ok(config)
+}
+
+fn standalone_simple_ngram_min(config: &SpeculativeDecodeConfig) -> usize {
+    config
+        .ngram
+        .as_ref()
+        .filter(|ngram| ngram.kind == NgramProposerKind::Simple)
+        .map_or(0, |ngram| ngram.min_ngram)
+}
+
+fn standalone_simple_ngram_max(config: &SpeculativeDecodeConfig) -> usize {
+    config
+        .ngram
+        .as_ref()
+        .filter(|ngram| ngram.kind == NgramProposerKind::Simple)
+        .map_or(0, |ngram| ngram.max_proposal_tokens.min(ngram.max_ngram))
+}
+
+#[cfg(test)]
+mod standalone_speculative_config_tests {
+    use super::*;
+
+    #[test]
+    fn standalone_speculative_config_rejects_invalid_composite_plan() {
+        let config = SpeculativeDecodeConfig {
+            extension: Some(NgramExtensionConfig {
+                initial_tokens: 2,
+                max_tokens: 4,
+                tail_backoff_proposals: 1,
+            }),
+            ..SpeculativeDecodeConfig::default()
+        };
+
+        let error = config.validate().expect_err("extension requires proposers");
+
+        assert!(
+            error
+                .to_string()
+                .contains("requires both native MTP and an N-gram proposer")
+        );
+    }
+
+    #[test]
+    fn standalone_speculative_config_round_trips_cache_composite() {
+        let config = SpeculativeDecodeConfig {
+            requested_strategy: "mtp-cache".to_string(),
+            effective_strategy: "native-mtp-cache".to_string(),
+            native_mtp: NativeMtpProposalConfig {
+                enabled: true,
+                max_draft_tokens: 2,
+                ..SpeculativeDecodeConfig::default().native_mtp
+            },
+            ngram: Some(NgramProposalConfig {
+                kind: NgramProposerKind::Cache,
+                min_ngram: 2,
+                max_ngram: 4,
+                max_proposal_tokens: 6,
+            }),
+            extension: Some(NgramExtensionConfig {
+                initial_tokens: 2,
+                max_tokens: 6,
+                tail_backoff_proposals: 2,
+            }),
+            ..SpeculativeDecodeConfig::default()
+        };
+
+        let json = serde_json::to_string(&config).expect("serialize plan");
+        let decoded: SpeculativeDecodeConfig = serde_json::from_str(&json).expect("parse plan");
+
+        assert_eq!(decoded, config);
+        decoded.validate().expect("valid composite plan");
     }
 }
 

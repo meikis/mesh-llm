@@ -67,6 +67,7 @@ dry-run by default and must be confirmed explicitly before submitting jobs:
 mesh-llm models package unsloth/Qwen3-8B-GGUF:Q4_K_M --dry-run
 mesh-llm models package unsloth/Qwen3-8B-GGUF:Q4_K_M --confirm --follow
 mesh-llm models package unsloth/inkling-GGUF:UD-Q2_K_XL --dry-run
+mesh-llm models package unsloth/inkling-GGUF:UD-Q2_K_XL --experimental --confirm --follow
 ```
 
 The hidden compatibility alias is `mesh-llm model-package`; prefer
@@ -81,6 +82,10 @@ Important options:
 - `--dry-run`: print the resolved package plan and maximum cost without side effects.
 - `--confirm`: submit the job.
 - `--follow`: wait and stream job progress.
+- `--experimental`: publish the package publicly with an experimental warning
+  and tag, and open an unmerged Hugging Face `meshllm/catalog` PR instead of
+  committing it to the catalog's `main` revision. Mesh discovery does not see
+  the package until that HF PR is reviewed and merged.
 - `--status <job-id>`, `--logs <job-id>`, `--cancel <job-id>`, `--list`: inspect
   or manage submitted jobs.
 - `--update-script`: refresh the bucket script when needed.

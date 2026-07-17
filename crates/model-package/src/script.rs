@@ -130,7 +130,10 @@ mod tests {
     #[test]
     fn embedded_script_writes_rich_model_card() {
         assert!(EMBEDDED_SCRIPT.contains("SOURCE_PIPELINE_TAG"));
+        assert!(EMBEDDED_SCRIPT.contains("PACKAGE_EXPERIMENTAL"));
         assert!(EMBEDDED_SCRIPT.contains("pipeline_tag: {yaml_quote(source_pipeline_tag)}"));
+        assert!(EMBEDDED_SCRIPT.contains("- experimental"));
+        assert!(EMBEDDED_SCRIPT.contains("Experimental package:"));
         assert!(EMBEDDED_SCRIPT.contains("- openai-compatible"));
         assert!(EMBEDDED_SCRIPT.contains("## Model Overview"));
         assert!(EMBEDDED_SCRIPT.contains("## Highlights"));

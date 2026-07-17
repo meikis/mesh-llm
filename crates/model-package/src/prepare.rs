@@ -23,6 +23,7 @@ pub struct PrepareParams {
     pub flavor: String,
     pub timeout_seconds: u64,
     pub mesh_llm_ref: String,
+    pub experimental: bool,
     pub hf_token: Option<String>,
 }
 
@@ -36,6 +37,7 @@ pub struct PrepareJob {
     pub model_id: String,
     pub namespace: String,
     pub catalog_create_pr: bool,
+    pub experimental: bool,
     pub job_plan: CpuJobPlan,
     pub spec: JobSpec,
 }
@@ -295,14 +297,14 @@ pub async fn resolve(
         );
     }
     environment.insert("MESH_LLM_REF".into(), params.mesh_llm_ref.clone());
+    let catalog_create_pr = params.experimental || permissions.catalog_create_pr;
     environment.insert(
         "CATALOG_CREATE_PR".into(),
-        if permissions.catalog_create_pr {
-            "true"
-        } else {
-            "false"
-        }
-        .into(),
+        if catalog_create_pr { "true" } else { "false" }.into(),
+    );
+    environment.insert(
+        "PACKAGE_EXPERIMENTAL".into(),
+        if params.experimental { "true" } else { "false" }.into(),
     );
 
     // The HF Jobs API passes secrets as env vars inside the container.
@@ -348,7 +350,8 @@ pub async fn resolve(
         target_repo,
         model_id,
         namespace: permissions.namespace.clone(),
-        catalog_create_pr: permissions.catalog_create_pr,
+        catalog_create_pr,
+        experimental: params.experimental,
         job_plan,
         spec,
     })

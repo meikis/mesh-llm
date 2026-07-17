@@ -10,6 +10,7 @@ set -euo pipefail
 #   SOURCE_PIPELINE_TAG — source model pipeline tag for the published model card
 #   MESH_LLM_REF — git ref to build from (default: main)
 #   CATALOG_CREATE_PR — "true" to open a PR for catalog updates (non-org members)
+#   PACKAGE_EXPERIMENTAL — "true" to label the public package as not runtime-certified
 #   HF_TOKEN — injected as a secret by HF Jobs
 #
 # Volumes:
@@ -556,6 +557,17 @@ mesh_llm_ref = os.environ.get("MESH_LLM_REF", "main")
 source_pipeline_tag = os.environ.get("SOURCE_PIPELINE_TAG", "text-generation").strip()
 if not source_pipeline_tag:
     source_pipeline_tag = "text-generation"
+experimental = os.environ.get("PACKAGE_EXPERIMENTAL", "false").lower() == "true"
+experimental_tag = "- experimental\n" if experimental else ""
+experimental_warning = (
+    "> [!WARNING]\n"
+    "> **Experimental package:** artifact integrity may be validated, but runtime, "
+    "split-correctness, and multimodal certification are still pending. This package "
+    "is not discoverable through `meshllm/catalog@main` until its Hugging Face catalog "
+    "PR is reviewed and merged.\n\n"
+    if experimental
+    else ""
+)
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -695,7 +707,7 @@ tags:
 - distributed-inference
 - local-inference
 - openai-compatible
----
+{experimental_tag}---
 
 <div align="center">
   <a href="https://www.meshllm.cloud">
@@ -715,7 +727,7 @@ tags:
   </p>
 </div>
 
-GGUF layer package for running **{display_name}** across a local Mesh LLM cluster.
+{experimental_warning}GGUF layer package for running **{display_name}** across a local Mesh LLM cluster.
 
 This package is derived from [{source_repo}](https://huggingface.co/{source_repo}) and keeps the original GGUF distribution split into per-layer artifacts for distributed inference.
 

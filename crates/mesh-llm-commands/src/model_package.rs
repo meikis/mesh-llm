@@ -16,6 +16,7 @@ pub struct ModelPrepareArgs<'a> {
     pub flavor: &'a str,
     pub timeout: &'a str,
     pub mesh_llm_ref: &'a str,
+    pub experimental: bool,
     pub dry_run: bool,
     pub confirm: bool,
     pub follow: bool,
@@ -37,6 +38,7 @@ pub async fn dispatch_model_package(args: ModelPrepareArgs<'_>) -> Result<()> {
         flavor,
         timeout,
         mesh_llm_ref,
+        experimental,
         dry_run,
         confirm,
         follow,
@@ -129,6 +131,7 @@ pub async fn dispatch_model_package(args: ModelPrepareArgs<'_>) -> Result<()> {
         flavor: flavor.to_string(),
         timeout_seconds,
         mesh_llm_ref: mesh_llm_ref.to_string(),
+        experimental,
         hf_token: jobs_client
             .as_ref()
             .map(|client| client.token().to_string()),
@@ -152,6 +155,7 @@ pub async fn dispatch_model_package(args: ModelPrepareArgs<'_>) -> Result<()> {
                     "projectors": job.projectors,
                     "targetRepo": job.target_repo,
                     "modelId": job.model_id,
+                    "experimental": job.experimental,
                     "jobPlan": job.job_plan,
                     "spec": redacted,
                 }))?
@@ -236,6 +240,14 @@ fn print_prepare_job(job: &PrepareJob, perms: &permissions::PermissionCheck) {
         }
     );
     eprintln!("   Target:  {}", job.target_repo);
+    eprintln!(
+        "   Release: {}",
+        if job.experimental {
+            "experimental (public, not cataloged until HF PR merge)"
+        } else {
+            "stable"
+        }
+    );
     eprintln!(
         "   Catalog: meshllm/catalog ({})",
         if job.catalog_create_pr {

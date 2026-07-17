@@ -2338,4 +2338,29 @@ mod tests {
             other => panic!("unexpected command: {other:?}"),
         }
     }
+
+    #[test]
+    fn models_package_parses_experimental_publication() {
+        let cli = Cli::parse_from([
+            "mesh-llm",
+            "models",
+            "package",
+            "unsloth/inkling-GGUF:UD-Q2_K_XL",
+            "--experimental",
+            "--dry-run",
+        ]);
+
+        match cli.command.expect("models command expected") {
+            Command::Models {
+                command:
+                    ModelsCommand::Package {
+                        source_repo: Some(source_repo),
+                        experimental: true,
+                        dry_run: true,
+                        ..
+                    },
+            } => assert_eq!(source_repo, "unsloth/inkling-GGUF:UD-Q2_K_XL"),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
 }

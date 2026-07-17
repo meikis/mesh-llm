@@ -338,6 +338,25 @@ between users or sessions. A `composite` strategy MUST use a `native-mtp`
 primary and an N-gram extender. Its `extension_policy` bounds the adaptive
 tail; every combined candidate is still verified by one target VerifyWindow.
 
+The package schema separates a proposer match length from its output budget:
+
+| Field | Applies to | Requirement |
+|---|---|---|
+| `prediction_depth` | `native-mtp` | Must be `1` for the current native MTP runtime. |
+| `layer_indices` | `native-mtp` | Must identify the package layers that contain the model's NextN/MTP tensors. |
+| `ngram_min` / `ngram_max` | N-gram proposers | Define the historical token match range. Both are required and `ngram_min <= ngram_max`. |
+| `max_proposal_tokens` | N-gram proposers | Caps how many continuation tokens the proposer may return. It is independent of `ngram_max`. |
+| `history_scope` | `ngram-cache` | Must be `"request"`; a cache proposer never observes another request's tokens. |
+| `initial_tokens` / `max_tokens` | composite extension policy | Bound the adaptive N-gram tail after an MTP prefix. |
+| `tail_backoff_proposals` | composite extension policy | Sets how many proposals to back off after an unhelpful tail. |
+
+`ngram-simple` looks up continuations in the accepted prompt/history. It can
+be published for any compatible tokenizer. `ngram-cache` is a request-local
+incremental lookup that can also start after a provisional MTP prefix; its
+match window is intentionally capped at four tokens by the current llama.cpp
+ABI. Neither N-gram proposer is authoritative: the target verifies the MTP
+prefix and N-gram suffix together, then commits the accepted prefix only.
+
 Packages that expose the full product menu SHOULD use stable strategy ids:
 `mtp`, `ngram-simple`, `ngram-cache`, `mtp-simple`, and `mtp-cache`. `mtp`
 may reference a reusable `native-mtp` proposer instead of repeating its
@@ -376,6 +395,12 @@ starting Skippy. `skippy-server` receives the resulting typed plan and does not
 repeat this policy resolution.
 
 Operators may also pass the legacy `native-mtp-n1` value; the runtime normalizes it to `mtp` for backward compatibility. New configs should use `mtp`.
+
+See [Speculative Decode Configuration](../skippy/PIPELINED_VERIFY_WINDOW.md#operator-configuration)
+for the operator-side `config.toml` controls and CLI equivalents. Package
+authors should publish conservative, tested values in the manifest; operators
+can use configuration to choose a strategy or tighten its bounds without
+changing the package's declared topology.
 
 ## Layer Selection
 

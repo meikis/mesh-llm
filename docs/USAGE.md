@@ -320,8 +320,8 @@ lifecycle_health_interval_ms    = 5000      # health-check interval (ms)
 
 # --- Speculative decoding ------------------------------------------------
 [defaults.speculative]
-strategy                   = "auto"          # auto disabled mtp
-mode                       = "auto"          # auto off draft ngram lookahead
+strategy                   = "auto"          # auto disabled mtp or a package strategy id
+mode                       = "auto"          # legacy draft-model mode: auto disabled draft ngram
 draft_selection_policy     = "auto"          # auto manual heuristic
 pairing_fault              = "warn_disable"  # warn_disable fail_open fail_closed
 draft_acceptance_threshold = 0.0             # 0.0 = use runtime default
@@ -345,9 +345,23 @@ spec_default               = "auto"          # bool or "auto"
 # draft_cache_type_k = "q8_0"
 # draft_cache_type_v = "q8_0"
 
-# N-gram speculative (when mode = "ngram")
-# ngram_min = 1
-# ngram_max = 5
+# N-gram proposer and MTP extension. `simple` scans accepted history;
+# `cache` is request-local and currently requires ngram_max <= 4.
+# ngram_proposer            = "cache"  # simple cache
+# ngram_min                 = 2
+# ngram_max                 = 4
+# ngram_max_proposal_tokens = 6        # output budget, separate from ngram_max
+# extension_initial_tokens  = 2        # requires native MTP plus an N-gram proposer
+# extension_max_tokens      = 6
+# extension_tail_backoff_proposals = 2
+
+# Target VerifyWindow and native-MTP recovery controls
+# verify_window_min_tokens                    = 1
+# verify_window_max_tokens                    = 6
+# verify_window_pipeline_depth                = 2
+# native_mtp_reject_cooldown_tokens           = 4
+# native_mtp_suppress_cooldown_drafts         = true
+# native_mtp_suppress_cooldown_draft_limit    = 1
 
 # --- Request defaults (merged at OpenAI frontend only) -------------------
 [defaults.request_defaults]
@@ -701,6 +715,51 @@ Config precedence:
   as inactive instead of rejecting the config, and `lazy_start = true` defers
   process launch until direct plugin use. This is useful for very slow legacy
   hosts or emulator-assisted startup paths.
+
+## Speculative decode configuration
+
+Configure speculative decoding under `[defaults.speculative]` for all staged
+models, or under `[models.speculative]` to override one configured model. CLI
+flags have the highest precedence, followed by the selected model, then
+`[defaults.speculative]`; package strategies supply the remaining declared
+defaults. The resolved plan is validated once before Skippy starts.
+
+Set `strategy = "auto"` to use a package recommendation, `"disabled"` for
+the no-speculation baseline, or `"mtp"` for native MTP. A package may also
+publish stable names such as `mtp-cache`; that name is valid only for the
+package that declares it. Direct GGUF serving can use `ngram-simple` or
+`ngram-cache` when it supplies valid N-gram bounds.
+
+```toml
+[[models]]
+model = "meshllm/GLM-4.7-Flash-MTP-GGUF:Q4_K_M"
+
+[models.speculative]
+strategy = "mtp"
+ngram_proposer = "cache"
+ngram_min = 2
+ngram_max = 4
+ngram_max_proposal_tokens = 6
+extension_initial_tokens = 2
+extension_max_tokens = 6
+extension_tail_backoff_proposals = 2
+verify_window_min_tokens = 1
+verify_window_max_tokens = 6
+verify_window_pipeline_depth = 2
+```
+
+`ngram_min` and `ngram_max` determine the history match length.
+`ngram_max_proposal_tokens` is separately the maximum continuation length.
+The request-local `cache` proposer is limited to `ngram_max <= 4`; `simple`
+searches accepted history instead. Extension settings require both native MTP
+and an N-gram proposer. All combinations are verified together by the target,
+so tuning these values changes speculative work, not output correctness.
+
+For package-authoring rules, see
+[Layer Package Repositories](specs/layer-package-repos.md#generation-defaults).
+For strategy diagrams, CLI overrides, and the VerifyWindow telemetry used to
+evaluate a configuration, see
+[Pipelined VerifyWindow Decode](skippy/PIPELINED_VERIFY_WINDOW.md).
 
 ## Lemonade integration
 

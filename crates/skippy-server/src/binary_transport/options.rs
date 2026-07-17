@@ -148,3 +148,140 @@ pub fn parse_wire_dtype(value: &str) -> Result<WireActivationDType> {
         _ => bail!("unsupported activation wire dtype {value}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use clap::Parser;
+    use skippy_protocol::{FlashAttentionType, LoadMode, StageConfig};
+
+    use super::*;
+    use crate::{
+        cli::{Cli, Command},
+        frontend::{NativeMtpProposalConfig, NgramExtensionConfig, VerifyWindowConfig},
+    };
+
+    fn stage_config() -> StageConfig {
+        StageConfig {
+            run_id: "run".to_string(),
+            topology_id: "topology".to_string(),
+            model_id: "model".to_string(),
+            package_ref: None,
+            manifest_sha256: None,
+            source_model_path: None,
+            source_model_sha256: None,
+            source_model_bytes: None,
+            materialized_path: None,
+            materialized_pinned: false,
+            model_path: Some("/tmp/model.gguf".to_string()),
+            projector_path: None,
+            stage_id: "stage-0".to_string(),
+            stage_index: 0,
+            layer_start: 0,
+            layer_end: 4,
+            ctx_size: 512,
+            lane_count: 1,
+            n_batch: None,
+            n_ubatch: None,
+            n_gpu_layers: -1,
+            mmap: None,
+            mlock: false,
+            cache_type_k: "f16".to_string(),
+            cache_type_v: "f16".to_string(),
+            flash_attn_type: FlashAttentionType::Auto,
+            filter_tensors_on_load: true,
+            selected_device: None,
+            kv_cache: None,
+            native_mtp_enabled: true,
+            load_mode: LoadMode::RuntimeSlice,
+            bind_addr: "127.0.0.1:0".to_string(),
+            upstream: None,
+            downstream: None,
+        }
+    }
+
+    fn cache_composite_plan() -> SpeculativeDecodeConfig {
+        SpeculativeDecodeConfig {
+            requested_strategy: "mtp-cache".to_string(),
+            effective_strategy: "native-mtp+ngram-cache".to_string(),
+            native_mtp: NativeMtpProposalConfig {
+                enabled: true,
+                max_draft_tokens: 1,
+                min_draft_tokens: 0,
+                reject_cooldown_tokens: 0,
+                suppress_cooldown_drafts: false,
+                suppress_cooldown_draft_limit: 0,
+            },
+            ngram: Some(NgramProposalConfig {
+                kind: NgramProposerKind::Cache,
+                min_ngram: 2,
+                max_ngram: 6,
+                max_proposal_tokens: 6,
+            }),
+            extension: Some(NgramExtensionConfig {
+                initial_tokens: 2,
+                max_tokens: 6,
+                tail_backoff_proposals: 2,
+            }),
+            verify_window: VerifyWindowConfig {
+                min_tokens: 1,
+                max_tokens: 6,
+                pipeline_depth: 2,
+            },
+        }
+    }
+
+    #[test]
+    fn typed_speculative_plan_reaches_embedded_stage_without_policy_merging() {
+        let dir = tempfile::tempdir().expect("create temp directory");
+        let stage_path = dir.path().join("stage.json");
+        let plan_path = dir.path().join("speculative.json");
+        fs::write(
+            &stage_path,
+            serde_json::to_vec(&stage_config()).expect("serialize stage config"),
+        )
+        .expect("write stage config");
+        let expected = cache_composite_plan();
+        fs::write(
+            &plan_path,
+            serde_json::to_vec(&expected).expect("serialize speculative config"),
+        )
+        .expect("write speculative config");
+
+        let cli = Cli::try_parse_from([
+            "skippy-server",
+            "serve-binary",
+            "--config",
+            stage_path.to_str().expect("UTF-8 stage path"),
+            "--activation-width",
+            "2048",
+            "--openai-bind-addr",
+            "127.0.0.1:9337",
+            "--openai-speculative-config",
+            plan_path.to_str().expect("UTF-8 plan path"),
+        ])
+        .expect("parse binary stage CLI");
+        let Command::ServeBinary(args) = cli.command else {
+            panic!("expected serve-binary command");
+        };
+
+        let options = BinaryStageOptions::from_cli_args(args).expect("resolve binary stage");
+        let openai = options.openai.expect("embedded OpenAI configuration");
+
+        assert!(options.native_mtp_enabled);
+        assert_eq!(openai.speculative, expected);
+    }
+
+    #[test]
+    fn cache_composite_plan_is_json_stable_for_stage_handoff() {
+        let plan = cache_composite_plan();
+        let json = serde_json::to_value(&plan).expect("serialize speculative plan");
+
+        assert_eq!(
+            json["ngram"]["kind"],
+            serde_json::Value::String("cache".to_string())
+        );
+        assert_eq!(json["verify_window"]["pipeline_depth"], 2);
+    }
+}

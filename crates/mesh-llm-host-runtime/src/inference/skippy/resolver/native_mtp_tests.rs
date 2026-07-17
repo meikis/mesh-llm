@@ -9,20 +9,33 @@ use skippy_runtime::package::{
 use std::collections::BTreeMap;
 
 fn native_mtp_generation() -> PackageGenerationInfo {
+    let mut proposers = BTreeMap::new();
+    proposers.insert(
+        "mtp".to_string(),
+        PackageSpeculativeProposerInfo {
+            proposer_type: "native-mtp".to_string(),
+            prediction_depth: Some(1),
+            layer_indices: vec![46],
+            ngram_min: None,
+            ngram_max: None,
+            max_proposal_tokens: None,
+            history_scope: None,
+        },
+    );
     let mut strategies = BTreeMap::new();
     strategies.insert(
         "mtp".to_string(),
         PackageSpeculativeStrategyInfo {
             strategy_type: "native-mtp".to_string(),
-            prediction_depth: Some(1),
-            layer_indices: vec![46],
+            prediction_depth: None,
+            layer_indices: Vec::new(),
             window_policy: Some(PackageWindowPolicyInfo {
                 default: "fixed".to_string(),
                 initial_window: 1,
                 min_window: 1,
                 max_window: 1,
             }),
-            proposer: None,
+            proposer: Some("mtp".to_string()),
             primary: None,
             extender: None,
             extension_policy: None,
@@ -32,7 +45,7 @@ fn native_mtp_generation() -> PackageGenerationInfo {
     PackageGenerationInfo {
         speculative_decoding: Some(PackageSpeculativeDecodingInfo {
             default: "mtp".to_string(),
-            proposers: BTreeMap::new(),
+            proposers,
             strategies,
         }),
     }
@@ -450,6 +463,48 @@ ngram_max_proposal_tokens = 6
     assert_eq!(
         openai.speculative.ngram.as_ref().map(|ngram| ngram.kind),
         Some(skippy_server::NgramProposerKind::Cache)
+    );
+}
+
+#[test]
+fn direct_native_mtp_can_use_a_simple_ngram_extension() {
+    let mesh_config = parse_config(
+        r#"
+[defaults.speculative]
+strategy = "mtp"
+ngram_proposer = "simple"
+ngram_min = 2
+ngram_max = 6
+ngram_max_proposal_tokens = 6
+"#,
+    );
+    let model_file = temp_model_file_with_tensor_names(&["blk.23.nextn.eh_proj.weight"], None);
+
+    let resolved = resolve_skippy_config(SkippyConfigResolveRequest {
+        mesh_config: &mesh_config,
+        model_id: "meshllm/GLM-4.7-Flash-MTP-GGUF",
+        model_path: model_file.path(),
+        model_bytes: 4 * 1024 * 1024 * 1024,
+        allocatable_memory_bytes: None,
+        request_defaults: None,
+        package_generation: None,
+    })
+    .expect("direct native MTP with simple N-gram extension should resolve");
+
+    assert!(resolved.speculative.native_mtp_enabled);
+    assert_eq!(
+        resolved.speculative.decode.effective_strategy,
+        "native-mtp+ngram-simple"
+    );
+    assert!(resolved.speculative.decode.extension.is_some());
+    let openai = resolved
+        .to_embedded_openai_args(4096, true)
+        .expect("direct simple strategy should build OpenAI args");
+    assert_eq!(openai.ngram_min, 2);
+    assert_eq!(openai.ngram_max, 6);
+    assert_eq!(
+        openai.speculative.ngram.as_ref().map(|ngram| ngram.kind),
+        Some(skippy_server::NgramProposerKind::Simple)
     );
 }
 

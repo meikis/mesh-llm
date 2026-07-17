@@ -228,6 +228,20 @@ package can expose native MTP plus a request-local cache sidecar as follows:
 }
 ```
 
+Use the following stable strategy names when a package exposes the complete
+native-MTP/N-gram menu:
+
+| Strategy | Composition | Benchmark condition |
+|---|---|---|
+| `mtp` | Native MTP proposer | MTP |
+| `ngram-simple` | Pure prompt/history N-gram proposer | N-gram simple |
+| `ngram-cache` | Pure request-local cache N-gram proposer | N-gram cache |
+| `mtp-simple` | Native MTP primary plus simple N-gram tail | MTP + N-gram simple |
+| `mtp-cache` | Native MTP primary plus request-local cache N-gram tail | MTP + N-gram cache |
+
+`disabled` is an operator control rather than a package strategy; it supplies
+the no-MTP baseline. Every listed strategy is still target-verified.
+
 ### Operator Configuration
 
 Choose a package strategy with `speculative.strategy`. `auto` uses the package

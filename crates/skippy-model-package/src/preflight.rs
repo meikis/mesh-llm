@@ -565,11 +565,23 @@ fn validate_speculative_strategy(
             "set a supported strategy type such as native-mtp",
         );
     }
-    if strategy.strategy_type == "native-mtp" {
-        validate_native_mtp_strategy(name, strategy, layer_count, report);
-    }
     if let Some(proposer) = &strategy.proposer {
         validate_proposer_reference(name, "proposer", proposer, proposers, report);
+    }
+    if strategy.strategy_type == "native-mtp" {
+        validate_native_mtp_strategy_proposer_or_inline(
+            name,
+            strategy,
+            proposers,
+            layer_count,
+            report,
+        );
+    }
+    if matches!(
+        strategy.strategy_type.as_str(),
+        "ngram-simple" | "ngram-cache"
+    ) {
+        validate_ngram_strategy_proposer_type(name, strategy, proposers, report);
     }
     if strategy.strategy_type == "composite" {
         validate_composite_strategy(name, strategy, proposers, report);
@@ -579,6 +591,64 @@ fn validate_speculative_strategy(
     }
     if let Some(window) = &strategy.window_policy {
         validate_window_policy(name, window, report);
+    }
+}
+
+fn validate_native_mtp_strategy_proposer_or_inline(
+    strategy_name: &str,
+    strategy: &PackageSpeculativeStrategy,
+    proposers: &BTreeMap<String, PackageSpeculativeProposer>,
+    layer_count: u32,
+    report: &mut PackagePreflightReport,
+) {
+    let Some(proposer_name) = strategy.proposer.as_deref() else {
+        validate_native_mtp_strategy(strategy_name, strategy, layer_count, report);
+        return;
+    };
+    let Some(proposer) = proposers.get(proposer_name) else {
+        return;
+    };
+    if proposer.proposer_type != "native-mtp" {
+        report.error(
+            "native_mtp_strategy_proposer_type_mismatch",
+            format!(
+                "native MTP speculative strategy {strategy_name} references proposer {proposer_name} with type {}",
+                proposer.proposer_type
+            ),
+            Some("model-package.json".to_string()),
+            "set proposer to a declared native-mtp proposer",
+        );
+    }
+}
+
+fn validate_ngram_strategy_proposer_type(
+    strategy_name: &str,
+    strategy: &PackageSpeculativeStrategy,
+    proposers: &BTreeMap<String, PackageSpeculativeProposer>,
+    report: &mut PackagePreflightReport,
+) {
+    let Some(proposer_name) = strategy.proposer.as_deref() else {
+        report.error(
+            "missing_ngram_strategy_proposer",
+            format!("N-gram speculative strategy {strategy_name} must declare a proposer"),
+            Some("model-package.json".to_string()),
+            "set proposer to a declared ngram-simple or ngram-cache proposer",
+        );
+        return;
+    };
+    let Some(proposer) = proposers.get(proposer_name) else {
+        return;
+    };
+    if proposer.proposer_type != strategy.strategy_type {
+        report.error(
+            "ngram_strategy_proposer_type_mismatch",
+            format!(
+                "N-gram speculative strategy {strategy_name} type {} does not match proposer {proposer_name} type {}",
+                strategy.strategy_type, proposer.proposer_type
+            ),
+            Some("model-package.json".to_string()),
+            "make the strategy type match its referenced N-gram proposer",
+        );
     }
 }
 
@@ -1592,6 +1662,158 @@ mod tests {
         assert_eq!(speculative.proposers.len(), 2);
         assert_eq!(speculative.strategies[0].primary.as_deref(), Some("mtp"));
         assert_eq!(speculative.strategies[0].extender.as_deref(), Some("cache"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preflight_accepts_complete_native_and_ngram_strategy_matrix() {
+        let dir = unique_test_dir("complete-speculative-matrix");
+        let package = write_package_fixture(&dir, true);
+        write_generation_to_manifest(
+            &package,
+            serde_json::json!({
+                "speculative_decoding": {
+                    "default": "mtp",
+                    "proposers": {
+                        "mtp": {
+                            "type": "native-mtp",
+                            "prediction_depth": 1,
+                            "layer_indices": [1]
+                        },
+                        "simple": {
+                            "type": "ngram-simple",
+                            "ngram_min": 2,
+                            "ngram_max": 6,
+                            "max_proposal_tokens": 6
+                        },
+                        "cache": {
+                            "type": "ngram-cache",
+                            "ngram_min": 2,
+                            "ngram_max": 6,
+                            "max_proposal_tokens": 6,
+                            "history_scope": "request"
+                        }
+                    },
+                    "strategies": {
+                        "mtp": {
+                            "type": "native-mtp",
+                            "proposer": "mtp"
+                        },
+                        "ngram-simple": {
+                            "type": "ngram-simple",
+                            "proposer": "simple"
+                        },
+                        "ngram-cache": {
+                            "type": "ngram-cache",
+                            "proposer": "cache"
+                        },
+                        "mtp-simple": {
+                            "type": "composite",
+                            "primary": "mtp",
+                            "extender": "simple",
+                            "extension_policy": {
+                                "initial_tokens": 2,
+                                "max_tokens": 6,
+                                "tail_backoff_proposals": 2
+                            }
+                        },
+                        "mtp-cache": {
+                            "type": "composite",
+                            "primary": "mtp",
+                            "extender": "cache",
+                            "extension_policy": {
+                                "initial_tokens": 2,
+                                "max_tokens": 6,
+                                "tail_backoff_proposals": 2
+                            }
+                        }
+                    }
+                }
+            }),
+        );
+
+        let report = preflight_package(&package, &PackagePreflightOptions::default());
+
+        assert!(report.valid, "{:?}", report.issues);
+        let strategies = report
+            .generation
+            .and_then(|generation| generation.speculative_decoding)
+            .expect("generation strategies should be reported")
+            .strategies;
+        assert_eq!(strategies.len(), 5);
+        assert!(
+            strategies
+                .iter()
+                .any(|strategy| strategy.name == "mtp-simple")
+        );
+        assert!(
+            strategies
+                .iter()
+                .any(|strategy| strategy.name == "mtp-cache")
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preflight_rejects_ngram_strategy_with_mismatched_proposer_type() {
+        let dir = unique_test_dir("ngram-strategy-type-mismatch");
+        let package = write_package_fixture(&dir, true);
+        write_generation_to_manifest(
+            &package,
+            serde_json::json!({
+                "speculative_decoding": {
+                    "default": "simple",
+                    "proposers": {
+                        "cache": {
+                            "type": "ngram-cache",
+                            "ngram_min": 2,
+                            "ngram_max": 4,
+                            "max_proposal_tokens": 4,
+                            "history_scope": "request"
+                        }
+                    },
+                    "strategies": {
+                        "simple": { "type": "ngram-simple", "proposer": "cache" }
+                    }
+                }
+            }),
+        );
+
+        let report = preflight_package(&package, &PackagePreflightOptions::default());
+
+        assert!(!report.valid);
+        assert_issue(&report, "ngram_strategy_proposer_type_mismatch");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preflight_rejects_native_mtp_strategy_with_ngram_proposer() {
+        let dir = unique_test_dir("native-mtp-strategy-type-mismatch");
+        let package = write_package_fixture(&dir, true);
+        write_generation_to_manifest(
+            &package,
+            serde_json::json!({
+                "speculative_decoding": {
+                    "default": "mtp",
+                    "proposers": {
+                        "simple": {
+                            "type": "ngram-simple",
+                            "ngram_min": 2,
+                            "ngram_max": 4,
+                            "max_proposal_tokens": 4
+                        }
+                    },
+                    "strategies": {
+                        "mtp": { "type": "native-mtp", "proposer": "simple" }
+                    }
+                }
+            }),
+        );
+
+        let report = preflight_package(&package, &PackagePreflightOptions::default());
+
+        assert!(!report.valid);
+        assert_issue(&report, "native_mtp_strategy_proposer_type_mismatch");
         fs::remove_dir_all(dir).unwrap();
     }
 

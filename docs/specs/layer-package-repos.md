@@ -337,6 +337,14 @@ between users or sessions. A `composite` strategy MUST use a `native-mtp`
 primary and an N-gram extender. Its `extension_policy` bounds the adaptive
 tail; every combined candidate is still verified by one target VerifyWindow.
 
+Packages that expose the full product menu SHOULD use stable strategy ids:
+`mtp`, `ngram-simple`, `ngram-cache`, `mtp-simple`, and `mtp-cache`. `mtp`
+may reference a reusable `native-mtp` proposer instead of repeating its
+prediction-depth and layer metadata. The N-gram-only names use `proposer`; the
+two composite names use that MTP proposer as `primary` and the corresponding
+N-gram proposer as `extender`. `disabled` is a runtime/operator baseline, not
+a package strategy.
+
 Native MTP strategy rules:
 
 - `type` MUST be `native-mtp`.

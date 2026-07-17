@@ -15,14 +15,14 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Instant;
 
-use anyhow::{anyhow, Result};
-use serde_json::{json, Value};
+use anyhow::{Result, anyhow};
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use safemlx::transforms::async_eval;
 use safemlx::{Device, DeviceType, Stream};
-use safemlx_lm::models::input::{InputPart, ModelInput};
 use safemlx_lm::models::LoadedModel;
+use safemlx_lm::models::input::{InputPart, ModelInput};
 use safemlx_lm::sampler::DefaultSampler;
 
 /// How the worker should load and run a model.

@@ -33,9 +33,19 @@ GiB of shard files; exact ranges avoid 833.15 GiB. A SmolLM2-135M proof then
 materialized two partial files (layers 0..15 and 15..30), loaded each directly
 into MLX, and matched unsplit logits exactly for prefill plus eight decode steps
 through Skippy's real F16 and F32 binary activation codec. The remaining
-artifact gate is bounded-memory quantization for frontier-sized source tensors;
-the remaining product gate is engine-neutral `skippy-server` integration.
+artifact gate is bounded-memory quantization for frontier-sized source tensors.
 See `spikes/mlx-safetensors-stages/FINDINGS.md`.
+
+**Update — the first engine-neutral, multi-process stage chain is now proven.**
+The new `skippy-engine` crate defines a runtime-neutral `StageEngine` contract;
+`skippy-server::engine_transport` carries that contract over the existing
+binary stage protocol; and `MlxStageEngine` runs a partial layer range with its
+own KV cache. Two real processes, each given only one 155.28 MiB partial
+SmolLM2 artifact, reproduced the eight-token whole-model reference exactly over
+F16 residuals. Their post-proof RSS was about 189 MiB each. This closes the
+dense execution and process-boundary proof. Host topology selection, advanced
+cache/session operations, additional families, and bounded-memory quantization
+remain. See `crates/skippy-engine-mlx/STAGED_EXECUTION.md`.
 
 ---
 
@@ -608,6 +618,12 @@ the trait in a new `skippy-engine` crate, implement it for the existing
 behavior change; ship this independently of MLX. Validate with existing
 `skippy-correctness` and `mic-lab` runs.
 
+> **Partially implemented on this branch.** The engine-neutral crate and an
+> additive reduced binary server lane now exist, and MLX uses them for the
+> two-process proof. The mature llama runtime has not yet been migrated from
+> concrete `RuntimeState`; that compatibility refactor remains before the
+> engine-neutral lane can replace the default server internals.
+
 **Phase 2 — Solo MLX serving + JIT quant (the workflow win; lead here).**
 `MlxStageEngine` as a single-stage/whole-model engine: open/load, session,
 prefill, decode-sampled, tokenizer/chat, final-stage sampling — plus the
@@ -742,8 +758,9 @@ Spikes 1 and 2 are more decisive than any standalone token/s benchmark.
 
 1. Add tensor-at-a-time MLX quantization to the materializer and measure peak
    RSS against the one-source-tensor memory contract.
-2. Introduce `StageEngine` with the llama adapter first, then run the proven MLX
-   split through two real `skippy-server` processes.
+2. Add the llama `StageEngine` adapter and route normal `skippy-server` launch
+   through the engine-neutral contract; the MLX two-process binary-wire proof
+   is complete.
 3. Run **Spike 2 (boundary fence)** at frontier residual widths and keep it as a
    go/no-go gate.
 4. Use Nemotron-H as the first frontier-family follow-up already represented in

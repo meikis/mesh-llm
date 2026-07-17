@@ -8,6 +8,7 @@ pub mod cli;
 pub mod config;
 mod decode_batch_policy;
 pub mod embedded;
+pub mod engine_transport;
 pub mod frontend;
 pub mod http;
 pub mod kv_integration;

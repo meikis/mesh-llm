@@ -7739,6 +7739,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippy-engine"
+version = "0.72.1"
+dependencies = [
+ "anyhow",
+ "skippy-protocol",
+]
+
+[[package]]
 name = "skippy-engine-mlx"
 version = "0.72.1"
 dependencies = [
@@ -7752,6 +7760,9 @@ dependencies = [
  "safemlx",
  "safemlx-lm",
  "serde_json",
+ "skippy-engine",
+ "skippy-protocol",
+ "skippy-server",
  "tokenizers",
  "tokio",
  "tracing",
@@ -7859,6 +7870,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "skippy-cache",
+ "skippy-engine",
  "skippy-metrics",
  "skippy-protocol",
  "skippy-runtime",

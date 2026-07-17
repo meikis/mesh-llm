@@ -12,10 +12,10 @@ use openai_frontend::backend::{
     ChatCompletionStream, OpenAiBackend, OpenAiRequestContext, OpenAiResult,
 };
 use openai_frontend::chat::{
-    message_content_to_text, AssistantMessage, ChatCompletionChoice, ChatCompletionChunk,
-    ChatCompletionChunkChoice, ChatCompletionDelta, ChatCompletionRequest, ChatCompletionResponse,
+    AssistantMessage, ChatCompletionChoice, ChatCompletionChunk, ChatCompletionChunkChoice,
+    ChatCompletionDelta, ChatCompletionRequest, ChatCompletionResponse, message_content_to_text,
 };
-use openai_frontend::common::{completion_id, FinishReason, Usage};
+use openai_frontend::common::{FinishReason, Usage, completion_id};
 use openai_frontend::errors::OpenAiError;
 use openai_frontend::models::ModelObject;
 

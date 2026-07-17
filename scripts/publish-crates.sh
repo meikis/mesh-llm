@@ -374,6 +374,10 @@ unpublished_registry_deps() {
             printf '%s\n' \
                 skippy-protocol
             ;;
+        skippy-engine)
+            printf '%s\n' \
+                skippy-protocol
+            ;;
         skippy-runtime)
             printf '%s\n' \
                 skippy-ffi
@@ -382,6 +386,7 @@ unpublished_registry_deps() {
             printf '%s\n' \
                 openai-frontend \
                 skippy-cache \
+                skippy-engine \
                 skippy-metrics \
                 skippy-protocol \
                 skippy-runtime
@@ -469,6 +474,7 @@ publish_crates=(
     mesh-llm-gpu-bench
     skippy-ffi
     skippy-protocol
+    skippy-engine
     skippy-coordinator
     skippy-topology
     skippy-metrics

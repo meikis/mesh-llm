@@ -11,11 +11,15 @@
 mod backend;
 #[cfg(all(feature = "mlx", target_os = "macos"))]
 mod engine;
+#[cfg(all(feature = "mlx", target_os = "macos"))]
+mod stage;
 
 #[cfg(all(feature = "mlx", target_os = "macos"))]
 pub use backend::MlxBackend;
 #[cfg(all(feature = "mlx", target_os = "macos"))]
 pub use engine::{ChatTurn, GenerateRequest, MlxEngine, MlxEngineConfig};
+#[cfg(all(feature = "mlx", target_os = "macos"))]
+pub use stage::{MlxComputeDtype, MlxStageEngine, MlxStageEngineConfig};
 
 /// True when this build actually contains the MLX engine.
 pub const fn mlx_available() -> bool {

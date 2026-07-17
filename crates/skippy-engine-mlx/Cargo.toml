@@ -28,6 +28,10 @@ path = "src/lib.rs"
 name = "mlx-serve"
 path = "src/bin/mlx-serve.rs"
 
+[[bin]]
+name = "mlx-stage"
+path = "src/bin/mlx-stage.rs"
+
 [features]
 default = []
 # Enable the real MLX engine. macOS-only in practice (code is cfg-gated to
@@ -38,6 +42,9 @@ mlx = ["dep:safemlx", "dep:safemlx-lm", "dep:tokenizers"]
 # The real mesh-llm OpenAI frontend — this is what proves we serve over the
 # same surface the shipped binary uses, not a toy.
 openai-frontend = { path = "../openai-frontend" }
+skippy-engine = { path = "../skippy-engine" }
+skippy-protocol = { path = "../skippy-protocol" }
+skippy-server = { path = "../skippy-server" }
 async-trait = "0.1"
 async-stream = "0.3"
 anyhow = "1"

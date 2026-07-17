@@ -48,6 +48,7 @@ WORKSPACE_MEMBERS=(
   "model-hf"
   "model-resolver"
   "skippy-protocol"
+  "skippy-engine"
   "skippy-coordinator"
   "skippy-topology"
   "skippy-cache"

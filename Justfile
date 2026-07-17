@@ -239,6 +239,18 @@ skippy-quantize-standalone-build backend="cpu":
 skippy-quantize-standalone-release-build backend="cpu":
     LLAMA_STAGE_BACKEND="{{ backend }}" LLAMA_STAGE_LINK_MODE=static just with-lld cargo build --release --locked -p skippy-quantize
 
+# Build and test the standalone SafeTensors stage-range research spike.
+mlx-safetensors-stage-plan-test:
+    just with-lld cargo test --manifest-path spikes/mlx-safetensors-stages/Cargo.toml
+
+# Inspect a remote checkpoint without downloading tensor payloads.
+mlx-safetensors-stage-plan *ARGS:
+    just with-lld cargo run --manifest-path spikes/mlx-safetensors-stages/Cargo.toml -- {{ ARGS }}
+
+# Compare whole-model MLX against two partial SafeTensors stages on Metal.
+mlx-safetensors-split-proof *ARGS:
+    DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer just with-lld cargo run --release --manifest-path spikes/mlx-solo/Cargo.toml --bin mlx-split-proof -- {{ ARGS }}
+
 # Generate a reproducible benchmark corpus for skippy bench tooling.
 bench-corpus tier="smoke" *ARGS="":
     scripts/generate-bench-corpus.py "{{ tier }}" {{ ARGS }}

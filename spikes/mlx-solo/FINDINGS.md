@@ -144,6 +144,9 @@ De-risked:
 
 Still open:
 - Larger models + throughput vs the llama.cpp backend on the same hardware.
-- Everything staged/split — this spike is single-stage, whole-model. The
-  partial-load and boundary-fence go/no-go spikes (plan §8) are unchanged.
+- Product staged/split integration. A follow-on SmolLM2 proof now range-
+  materializes two partial SafeTensors files and matches whole-model MLX through
+  Skippy's F16/F32 binary activation codec; see
+  `../mlx-safetensors-stages/FINDINGS.md`. Two `skippy-server` processes, the
+  boundary-fence benchmark, and bounded-memory load-time quantization remain.
 - Upstreaming the two fixes to `jbg/safemlx` (or carrying a thin fork).

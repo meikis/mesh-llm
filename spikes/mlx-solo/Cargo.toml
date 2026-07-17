@@ -15,6 +15,10 @@ publish = false
 name = "mlx-solo"
 path = "src/main.rs"
 
+[[bin]]
+name = "mlx-split-proof"
+path = "src/bin/mlx-split-proof.rs"
+
 [workspace]
 
 [dependencies]
@@ -29,3 +33,4 @@ safemlx-lm = { path = "../../../safemlx/safemlx-lm" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
+skippy-protocol = { path = "../../crates/skippy-protocol" }

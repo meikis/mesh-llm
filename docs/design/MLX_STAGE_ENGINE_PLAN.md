@@ -22,6 +22,21 @@ beyond it (JIT quant + loading arbitrary mlx-community repos) and are upstream-P
 candidates. See `spikes/mlx-solo/FINDINGS.md`; results are folded into §5.3,
 Phase 2, and §9.
 
+**Update — exact stage-local SafeTensors materialization and dense split
+execution are now proven**
+(`spikes/mlx-safetensors-stages/`). The SafeTensors index plus per-file headers
+are sufficient to map a stage to exact HTTP byte ranges, and Hugging Face honors
+those range requests. This materially changes the split artifact conclusion:
+nodes do not need published stage packages or even complete source shards. On
+Inkling BF16, four layers contain 109.84 GiB of tensors scattered across 942.99
+GiB of shard files; exact ranges avoid 833.15 GiB. A SmolLM2-135M proof then
+materialized two partial files (layers 0..15 and 15..30), loaded each directly
+into MLX, and matched unsplit logits exactly for prefill plus eight decode steps
+through Skippy's real F16 and F32 binary activation codec. The remaining
+artifact gate is bounded-memory quantization for frontier-sized source tensors;
+the remaining product gate is engine-neutral `skippy-server` integration.
+See `spikes/mlx-safetensors-stages/FINDINGS.md`.
+
 ---
 
 ## 1. Bottom line
@@ -52,10 +67,16 @@ batched verify, trim/checkpoint, tokenizer/chat helpers).
 **Recommendation:** introduce a Rust `StageEngine` trait, keep the existing C ABI
 as the `LlamaStageEngine` adapter, and add an Apple-Silicon-gated
 `MlxStageEngine`. Do **not** extend the llama.cpp C ABI to host MLX, and do
-**not** invent a separate MLX network protocol. **Lead with solo MLX +
-JIT-quant serving** (immediate workflow win, minimal distributed work), then gate
-the split work behind two go/no-go spikes: **partial layer loading** and
-**per-token boundary fence latency**.
+**not** invent a separate MLX network protocol. For split serving, treat the
+immutable upstream SafeTensors checkpoint plus a small quantization profile as
+the source of truth; range-fetch, optionally quantize, and cache only the local
+stage. Published engine-specific layer packages become an optional prewarmed
+optimization rather than a prerequisite. Gate execution behind the remaining
+go/no-go work: **bounded-memory stage materialization / partial model loading**
+and **per-token boundary fence latency**. The small-model proof also establishes
+that a receiver must restore the model compute dtype after decoding the wire
+dtype; numeric F32 residual values left as an F32 MLX array change downstream
+Metal arithmetic for a BF16 model.
 
 ---
 
@@ -377,10 +398,11 @@ JIT quant:
    is a *whole-model* op. A split node must instantiate only `layers[start..end]`,
    read only the shards overlapping its range, and quantize only those tensors.
    This is exactly go/no-go **Spike 1**, now with a quant step folded in.
-2. **Selective shard download.** The `weight_map` makes fetching only the shards
-   for a layer range *possible*, but safetensors shards bundle several
-   consecutive layers, so nodes over-fetch at range boundaries — coarser than
-   GGUF layer-package parts, which Skippy slices exactly.
+2. **Exact tensor-range download (proven).** The `weight_map` selects source
+   files, and each SafeTensors header supplies exact tensor byte offsets. HTTP
+   range requests therefore avoid whole-shard overfetch. This is a modest win
+   for layer-ordered Qwen/Nemotron/GLM checkpoints and a requirement for
+   Inkling, whose tensors for four layers are spread across 57 BF16 files.
 3. **Deterministic cross-stage quant.** Every stage must quantize *identically*
    (same algo / group-size / bits / tie handling) or the split model drifts
    numerically from the solo model. Affine quant is deterministic given its
@@ -396,14 +418,15 @@ JIT quant:
 #### The tension worth naming
 
 Skippy's existing chain (`skippy-quantize`, layer-package repos, BF16→GGUF) is
-built around **pre-quantized, exactly-sliced GGUF parts** *specifically so split
-nodes download their slice and never quantize at runtime*.
-JIT-quant-from-safetensors trades that for flexible source + runtime quant +
-coarser slicing. For solo there is no tension; for splits it is a genuine, but
-acceptable, tradeoff. The two paths should **coexist**:
+built around **pre-quantized, exactly-sliced GGUF parts** so split nodes never
+quantize at runtime. Exact SafeTensors byte ranges remove the earlier coarser-
+slicing disadvantage. The remaining trade is cold-start quantization time and
+temporary source precision versus a prewarmed, published quant. The two paths
+should **coexist**:
 
-- **JIT safetensors = fast coverage path** — try any supported HF model on the
-  mesh immediately, no publish step.
+- **JIT safetensors = flexible coverage path** — range-fetch only the stage,
+  adapt its precision to available hardware, cache the deterministic result,
+  and require no weight-republishing step.
 - **Pre-quantized layer packages = optimized path** — for models served
   seriously (exact slices, no runtime quant, tailored partial download).
 
@@ -415,7 +438,7 @@ Use **one logical package identity, not one physical weight encoding**:
 model identity + source revision + tokenizer/config/chat metadata + topology
 variants:
   llama-gguf: GGUF parts + quant          (existing skippy-model-package path)
-  mlx-jit:    HF safetensors + quant spec  (quantize on load; cache the result)
+  mlx-jit:    HF tensor ranges + per-stage quant profile (quantize on load; cache)
   mlx-packaged: pre-quantized MLX stage shards + index (optimized split path)
 ```
 
@@ -608,11 +631,20 @@ new distributed work, and de-risks the engine before any split work.
 > candidates, not mesh-llm drift (see §9). CPU is not a serving path and was not
 > benchmarked as one.
 
-**Phase 3 — Stage-aware partial load + activation frames.** Add `forward_range`
-/ `resume_from_hidden` and the stage-aware loader to `safemlx-lm` (upstream to
-the fork). Implement `prefill_chunk_frame` / `decode_step_frame` /
+**Phase 3 — Streaming stage materialization + partial load + activation
+frames.** Convert the proven tensor-range plan into a bounded-memory pipeline:
+range-fetch one tensor, optionally quantize it, append it to a derived stage
+cache, and release the source buffer. Add `forward_range` /
+`resume_from_hidden` and a stage-aware model constructor to `safemlx-lm`.
+Implement `prefill_chunk_frame` / `decode_step_frame` /
 `copy_output_activation_frame` producing Skippy `ActivationFrame`s. Two-stage
 single-machine parity first, then two Macs over the real network.
+
+> **Dense single-machine spike passed.** SmolLM2-135M was split 15+15 using two
+> exact-range partial SafeTensors artifacts. F16 and F32 `StageWireMessage`
+> boundaries both matched unsplit MLX with zero measured logit delta across
+> prompt prefill and eight decode steps. This proves the basic artifact and
+> activation seams, but not bounded-memory quantization or server integration.
 
 **Phase 4 — KV/state codec + verify + trim/checkpoint.** Implement the
 engine-general cache codec (§5.2), `verify_tokens_frame` for speculative decode,
@@ -632,17 +664,20 @@ Apple-Silicon nodes. llama.cpp remains the cross-platform default.
 
 ## 8. Spike gates (go/no-go before Phase 3)
 
-1. **Partial-loading proof (GO/NO-GO):** load only `layers[start..end]` (+
-   embeddings/readout when owned) for a dense Qwen/Llama; confirm **peak RSS
-   contains only the selected range**. If a stage can't avoid loading the whole
-   model, the split story is dead for MLX.
+1. **Partial-loading proof (DENSE GO, QUANT PARTIAL):** remote exact-range
+   selection is proven, including on 1.9 TB Inkling BF16. SmolLM2 partial files
+   were materialized and loaded without a complete checkpoint. Still required:
+   confirm peak RSS is bounded by quantized stage + one source tensor and
+   scratch during tensor-at-a-time load-time quantization.
 2. **Boundary latency breakdown (GO/NO-GO):** measure layer compute, cast,
    contiguous, **eval fence**, host readback, serialize, and receive-reconstruct
    **independently**, at hidden widths 4096/8192/16384 and token counts
    1/32/512. Decode is single-sequence latency-bound; prove the fence doesn't
    dominate.
-3. **Two-stage dense parity:** Qwen/Llama, multiple split points, F32 + F16
-   activations, chunked prefill, 128-token decode, compare logits to llama.cpp.
+3. **Two-stage dense parity (INITIAL GO):** SmolLM2/Llama at split 15 passed F32
+   and F16 through the real binary codec with zero measured logit delta for one
+   prefill plus eight decode steps. Still required: multiple split points,
+   chunked prefill, 128-token decode, two processes, and cross-engine comparison.
 4. **Real network run:** two Macs over Wi-Fi and 1/10GbE (Thunderbolt if
    relevant); report end-to-end tok/s + p50/p95 inter-token latency, not local
    MLX throughput.
@@ -705,12 +740,14 @@ Spikes 1 and 2 are more decisive than any standalone token/s benchmark.
 
 ## 10. Immediate next steps
 
-1. Land **Phase 1** (the `StageEngine` trait refactor, llama-only) — valuable on
-   its own and the prerequisite for everything else.
-2. Run **Spike 1 (partial load)** and **Spike 2 (boundary fence)** in
-   `../safemlx` against a dense Qwen/Llama. Treat both as go/no-go.
-3. If both pass, proceed to Phase 2 reusing goose's `safemlx-lm` generation
-   patterns as the starting point.
+1. Add tensor-at-a-time MLX quantization to the materializer and measure peak
+   RSS against the one-source-tensor memory contract.
+2. Introduce `StageEngine` with the llama adapter first, then run the proven MLX
+   split through two real `skippy-server` processes.
+3. Run **Spike 2 (boundary fence)** at frontier residual widths and keep it as a
+   go/no-go gate.
+4. Use Nemotron-H as the first frontier-family follow-up already represented in
+   `safemlx-lm`; then port Inkling text from the upstream Transformers reference.
 
 ---
 

@@ -1,8 +1,5 @@
 use super::*;
 
-const NGRAM_CACHE_DEFAULT_MIN_NGRAM: usize = 2;
-const NGRAM_CACHE_DEFAULT_MAX_NGRAM: usize = 4;
-
 #[derive(Clone, Default)]
 pub(super) struct OpenAiSpeculativeStats {
     pub(super) windows: usize,
@@ -72,21 +69,14 @@ pub(super) struct CachedNgramProposer {
 }
 
 impl CachedNgramProposer {
-    pub(super) fn from_env() -> OpenAiResult<Option<Self>> {
-        if !env_flag("SKIPPY_NGRAM_CACHE_ENABLED") {
+    pub(super) fn from_config(config: &SpeculativeDecodeConfig) -> OpenAiResult<Option<Self>> {
+        let Some(ngram) = config.ngram.as_ref() else {
+            return Ok(None);
+        };
+        if ngram.kind != NgramProposerKind::Cache {
             return Ok(None);
         }
-        Self::new(
-            env_usize(
-                "SKIPPY_NGRAM_CACHE_MIN_NGRAM",
-                NGRAM_CACHE_DEFAULT_MIN_NGRAM,
-            ),
-            env_usize(
-                "SKIPPY_NGRAM_CACHE_MAX_NGRAM",
-                NGRAM_CACHE_DEFAULT_MAX_NGRAM,
-            ),
-        )
-        .map(Some)
+        Self::new(ngram.min_ngram, ngram.max_ngram).map(Some)
     }
 
     pub(super) fn new(ngram_min: usize, ngram_max: usize) -> OpenAiResult<Self> {
@@ -123,22 +113,6 @@ impl CachedNgramProposer {
         self.committed_history.extend_from_slice(committed_history);
         Ok(())
     }
-}
-
-fn env_flag(key: &str) -> bool {
-    std::env::var(key).ok().as_deref().is_some_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
-}
-
-fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(default)
 }
 
 impl OpenAiSpeculativeStats {

@@ -278,6 +278,7 @@ fn run_binary_stage(options: BinaryStageOptions, shutdown: Arc<AtomicBool>) -> R
                 speculative_window: openai_options.speculative_window,
                 adaptive_speculative_window: openai_options.adaptive_speculative_window,
                 draft_n_gpu_layers: openai_options.draft_n_gpu_layers,
+                speculative: frontend::SpeculativeDecodeConfig::default(),
                 ngram_min: openai_options.ngram_min,
                 ngram_max: openai_options.ngram_max,
                 native_mtp_enabled,
@@ -1905,14 +1906,6 @@ fn message_allows_session_auto_align(message: &StageWireMessage) -> bool {
 
 fn message_pos_start_as_token_count(message: &StageWireMessage) -> Option<u64> {
     u64::try_from(message.pos_start).ok()
-}
-
-#[cfg(test)]
-fn native_mtp_enabled_from(value: Option<&str>) -> bool {
-    !matches!(
-        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
-        Some("0" | "false" | "off" | "disable" | "disabled" | "no")
-    )
 }
 
 pub(crate) fn stage_output_activation_capacity(

@@ -878,11 +878,9 @@ fn validate_skippy(config: &SkippyConfig, base_path: &str) -> DiagnosticResult {
 }
 
 fn validate_speculative(config: &SpeculativeConfig, base_path: &str) -> DiagnosticResult {
-    validate_optional_enum(
-        config.strategy.as_deref(),
-        &["auto", "disabled", "mtp"],
-        &format!("{base_path}.strategy"),
-    )?;
+    if let Some(strategy) = config.strategy.as_deref() {
+        validate_non_empty(strategy, &format!("{base_path}.strategy"))?;
+    }
     validate_optional_enum(
         config.mode.as_deref(),
         &["auto", "disabled", "draft", "ngram"],
@@ -982,6 +980,7 @@ fn validate_speculative(config: &SpeculativeConfig, base_path: &str) -> Diagnost
             format!("{base_path}.ngram_max must be greater than or equal to {base_path}.ngram_min"),
         ));
     }
+    validate_speculative_proposer_controls(config, base_path)?;
     validate_bool_or_auto(
         config.spec_default.as_ref(),
         &format!("{base_path}.spec_default"),
@@ -999,6 +998,109 @@ fn validate_speculative(config: &SpeculativeConfig, base_path: &str) -> Diagnost
         ));
     }
     Ok(())
+}
+
+fn validate_speculative_proposer_controls(
+    config: &SpeculativeConfig,
+    base_path: &str,
+) -> DiagnosticResult {
+    validate_optional_enum(
+        config.ngram_proposer.as_deref(),
+        &["simple", "cache"],
+        &format!("{base_path}.ngram_proposer"),
+    )?;
+    validate_optional_u32_range(
+        config.ngram_max_proposal_tokens,
+        &format!("{base_path}.ngram_max_proposal_tokens"),
+        1,
+        10_000_000,
+    )?;
+    validate_extension_controls(config, base_path)?;
+    validate_native_mtp_controls(config, base_path)?;
+    validate_verify_window_controls(config, base_path)
+}
+
+fn validate_extension_controls(config: &SpeculativeConfig, base_path: &str) -> DiagnosticResult {
+    validate_optional_u32_range(
+        config.extension_initial_tokens,
+        &format!("{base_path}.extension_initial_tokens"),
+        1,
+        10_000_000,
+    )?;
+    validate_optional_u32_range(
+        config.extension_max_tokens,
+        &format!("{base_path}.extension_max_tokens"),
+        1,
+        10_000_000,
+    )?;
+    if let (Some(initial), Some(max)) =
+        (config.extension_initial_tokens, config.extension_max_tokens)
+        && initial > max
+    {
+        return Err(validation_diagnostic(
+            &format!("{base_path}.extension_initial_tokens"),
+            format!(
+                "{base_path}.extension_initial_tokens must be less than or equal to {base_path}.extension_max_tokens"
+            ),
+        ));
+    }
+    validate_optional_u32_range(
+        config.extension_tail_backoff_proposals,
+        &format!("{base_path}.extension_tail_backoff_proposals"),
+        0,
+        10_000_000,
+    )
+}
+
+fn validate_native_mtp_controls(config: &SpeculativeConfig, base_path: &str) -> DiagnosticResult {
+    validate_optional_u32_range(
+        config.native_mtp_reject_cooldown_tokens,
+        &format!("{base_path}.native_mtp_reject_cooldown_tokens"),
+        0,
+        10_000_000,
+    )?;
+    validate_optional_u32_range(
+        config.native_mtp_suppress_cooldown_draft_limit,
+        &format!("{base_path}.native_mtp_suppress_cooldown_draft_limit"),
+        0,
+        10_000_000,
+    )
+}
+
+fn validate_verify_window_controls(
+    config: &SpeculativeConfig,
+    base_path: &str,
+) -> DiagnosticResult {
+    validate_optional_u32_range(
+        config.verify_window_min_tokens,
+        &format!("{base_path}.verify_window_min_tokens"),
+        1,
+        10_000_000,
+    )?;
+    validate_optional_u32_range(
+        config.verify_window_max_tokens,
+        &format!("{base_path}.verify_window_max_tokens"),
+        1,
+        10_000_000,
+    )?;
+    if let (Some(min), Some(max)) = (
+        config.verify_window_min_tokens,
+        config.verify_window_max_tokens,
+    ) && min > max
+    {
+        return Err(validation_diagnostic(
+            &format!("{base_path}.verify_window_min_tokens"),
+            format!(
+                "{base_path}.verify_window_min_tokens must be less than or equal to {base_path}.verify_window_max_tokens"
+            ),
+        ));
+    }
+    validate_optional_u32_range(
+        config.verify_window_pipeline_depth,
+        &format!("{base_path}.verify_window_pipeline_depth"),
+        1,
+        1_024,
+    )
 }
 
 fn validate_request_defaults(config: &RequestDefaultsConfig, base_path: &str) -> DiagnosticResult {
@@ -1885,7 +1987,7 @@ gpu_id = "metal:0"
     }
 
     #[test]
-    fn speculative_strategy_rejects_unknown_values() {
+    fn speculative_strategy_allows_package_declared_names() {
         let config: MeshConfig = toml::from_str(
             r#"
 [defaults.speculative]
@@ -1894,17 +1996,9 @@ strategy = "mystery-oracle"
         )
         .expect("config should parse before validation");
 
-        let diagnostics = validate_config_diagnostics(&config);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(
-            diagnostics[0].path.as_ref().map(ConfigPath::render),
-            Some("defaults.speculative.strategy".to_string())
-        );
-        assert!(
-            diagnostics[0]
-                .message
-                .contains("defaults.speculative.strategy must be one of")
-        );
+        validate_config(&config)
+            .expect("package strategy names are validated after package resolution");
+        assert!(validate_config_diagnostics(&config).is_empty());
     }
 
     #[test]
@@ -1928,7 +2022,7 @@ strategy = "native-mtp-n1"
     }
 
     #[test]
-    fn speculative_strategy_native_mtp_n1_raw_value_is_invalid() {
+    fn speculative_strategy_raw_name_is_deferred_to_package_resolution() {
         let config = MeshConfig {
             defaults: Some(ModelConfigDefaults {
                 speculative: Some(SpeculativeConfig {
@@ -1940,17 +2034,9 @@ strategy = "native-mtp-n1"
             ..MeshConfig::default()
         };
 
-        let diagnostics = validate_config_diagnostics(&config);
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(
-            diagnostics[0].path.as_ref().map(ConfigPath::render),
-            Some("defaults.speculative.strategy".to_string())
-        );
-        assert!(
-            diagnostics[0]
-                .message
-                .contains("defaults.speculative.strategy must be one of")
-        );
+        validate_config(&config)
+            .expect("package strategy names are validated after package resolution");
+        assert!(validate_config_diagnostics(&config).is_empty());
     }
 
     #[test]

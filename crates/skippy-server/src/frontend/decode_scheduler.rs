@@ -2,21 +2,15 @@ use std::collections::{BTreeMap, VecDeque};
 
 use super::{OpenAiError, OpenAiResult};
 
-const PIPELINE_DEPTH_ENV: &str = "SKIPPY_VERIFY_WINDOW_PIPELINE_DEPTH";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct VerifyWindowPipelineConfig {
     depth: usize,
 }
 
 impl VerifyWindowPipelineConfig {
-    pub(super) fn from_env() -> Self {
+    pub(super) fn new(depth: usize) -> Self {
         Self {
-            depth: std::env::var(PIPELINE_DEPTH_ENV)
-                .ok()
-                .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(1)
-                .max(1),
+            depth: depth.max(1),
         }
     }
 

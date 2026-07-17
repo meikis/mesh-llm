@@ -275,6 +275,7 @@ configured.
 When present, it may declare `speculative_decoding` defaults:
 
 - `default`: the strategy id the package recommends for this distribution.
+- `proposers`: a map of reusable proposal-source ids to configuration.
 - `strategies`: a map of strategy id to strategy configuration.
 
 The current native MTP strategy shape is:
@@ -293,6 +294,49 @@ The current native MTP strategy shape is:
 }
 ```
 
+New packages SHOULD name the native MTP source under `proposers` and reference
+it from the strategy. This also permits a package to add an N-gram sidecar
+without changing the MTP source:
+
+```json
+{
+  "default": "mtp-cache",
+  "proposers": {
+    "mtp": {
+      "type": "native-mtp",
+      "prediction_depth": 1,
+      "layer_indices": [47]
+    },
+    "cache": {
+      "type": "ngram-cache",
+      "ngram_min": 2,
+      "ngram_max": 6,
+      "max_proposal_tokens": 10,
+      "history_scope": "request"
+    }
+  },
+  "strategies": {
+    "mtp-cache": {
+      "type": "composite",
+      "primary": "mtp",
+      "extender": "cache",
+      "extension_policy": {
+        "initial_tokens": 2,
+        "max_tokens": 8,
+        "tail_backoff_proposals": 5
+      }
+    }
+  }
+}
+```
+
+Supported proposer types are `native-mtp`, `ngram-simple`, and
+`ngram-cache`. An `ngram-cache` proposer MUST use `history_scope: "request"`:
+it contains only target-committed history for one request and is never shared
+between users or sessions. A `composite` strategy MUST use a `native-mtp`
+primary and an N-gram extender. Its `extension_policy` bounds the adaptive
+tail; every combined candidate is still verified by one target VerifyWindow.
+
 Native MTP strategy rules:
 
 - `type` MUST be `native-mtp`.
@@ -309,9 +353,12 @@ Consumers that do not recognize a strategy type MUST ignore it unless it is the
 declared default for a request they are trying to serve.
 
 Operators may override the package recommendation in `config.toml` with
-`speculative.strategy`. Supported values are `auto` (use package/runtime
-defaults), `mtp` (force the current native MTP strategy), and
-`disabled` (disable native MTP for the configured model/default scope).
+`speculative.strategy`. `auto` uses the package/runtime default, `mtp` forces
+the direct native-MTP control, and `disabled` disables speculation. A named
+package strategy such as `mtp-cache` is accepted only when the selected package
+declares it. Model-level speculative settings override global defaults and may
+bound N-gram proposal size, extension depth, cooldown, and VerifyWindow depth;
+they cannot make an undeclared proposer available.
 
 Operators may also pass the legacy `native-mtp-n1` value; the runtime normalizes it to `mtp` for backward compatibility. New configs should use `mtp`.
 

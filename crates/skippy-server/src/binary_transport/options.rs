@@ -94,7 +94,7 @@ impl BinaryStageOptions {
                 native_mtp_max_tokens: 3,
                 native_mtp_min_tokens: 0,
             });
-        let native_mtp_enabled = native_mtp_enabled_from_env();
+        let native_mtp_enabled = config.native_mtp_enabled;
         Ok(Self {
             config,
             topology,
@@ -113,19 +113,6 @@ impl BinaryStageOptions {
             openai,
         })
     }
-}
-
-fn native_mtp_enabled_from_env() -> bool {
-    !matches!(
-        std::env::var("SKIPPY_NATIVE_MTP_ENABLED")
-            .ok()
-            .map(|value| value.trim().to_ascii_lowercase()),
-        Some(value)
-            if matches!(
-                value.as_str(),
-                "0" | "false" | "off" | "disable" | "disabled" | "no"
-            )
-    )
 }
 
 pub fn parse_wire_dtype(value: &str) -> Result<WireActivationDType> {

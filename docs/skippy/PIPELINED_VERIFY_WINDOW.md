@@ -135,11 +135,10 @@ This is the native-MTP parity path. It is not decode parallelism by itself.
 
 ## Pipelined Composite Mode
 
-Concurrency is enabled only when the N-gram hybrid is on and
-`SKIPPY_VERIFY_WINDOW_PIPELINE_DEPTH > 1`. A deeper composite proposal is
-partitioned into FIFO windows. The target's free-advance candidate is reserved
-as the next window's optimistic current token, preventing duplicate KV
-positions.
+Concurrency is enabled only when a package-selected composite strategy sets
+`verify_window_pipeline_depth > 1`. A deeper composite proposal is partitioned
+into FIFO windows. The target's free-advance candidate is reserved as the next
+window's optimistic current token, preventing duplicate KV positions.
 
 ```mermaid
 sequenceDiagram
@@ -181,40 +180,105 @@ flowchart LR
 Use the package-qualified model reference. The normal mesh runtime owns split
 planning; do not replace it with a direct `gguf://` reference for this flow.
 
+The package owns a tested declarative default. `mesh-llm` resolves that package
+plan once at launch, applies model-level settings before global defaults, and
+passes the resulting typed configuration to `skippy-server`. The server does
+not read `SKIPPY_NATIVE_MTP_*`, `SKIPPY_NGRAM_CACHE_*`, or
+`SKIPPY_VERIFY_WINDOW_*` from its request hot path. Those variables are retired
+from supported operation.
+
+### Package Strategy Shape
+
+`model-package.json` names reusable proposers and strategies. A GLM 4.7 Flash
+package can expose native MTP plus a request-local cache sidecar as follows:
+
+```json
+{
+  "generation": {
+    "speculative_decoding": {
+      "default": "mtp-cache",
+      "proposers": {
+        "mtp": {
+          "type": "native-mtp",
+          "prediction_depth": 1,
+          "layer_indices": [47]
+        },
+        "cache": {
+          "type": "ngram-cache",
+          "ngram_min": 2,
+          "ngram_max": 6,
+          "max_proposal_tokens": 10,
+          "history_scope": "request"
+        }
+      },
+      "strategies": {
+        "mtp-cache": {
+          "type": "composite",
+          "primary": "mtp",
+          "extender": "cache",
+          "extension_policy": {
+            "initial_tokens": 2,
+            "max_tokens": 8,
+            "tail_backoff_proposals": 5
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### Operator Configuration
+
+Choose a package strategy with `speculative.strategy`. `auto` uses the package
+default; `disabled` turns speculation off; `mtp` preserves the direct native
+MTP path. A named strategy such as `mtp-cache` is valid only when the selected
+package declares it. Operator settings only bound or tune the selected plan:
+
+```toml
+[defaults.speculative]
+strategy = "auto"
+
+[[models]]
+model = "meshllm/GLM-4.7-Flash-MTP-GGUF:Q4_K_M"
+
+[models.speculative]
+strategy = "mtp-cache"
+ngram_max_proposal_tokens = 10
+extension_initial_tokens = 2
+extension_max_tokens = 8
+extension_tail_backoff_proposals = 5
+verify_window_min_tokens = 1
+verify_window_max_tokens = 6
+verify_window_pipeline_depth = 2
+```
+
 ### No MTP Baseline
 
 ```bash
-SKIPPY_NATIVE_MTP_ENABLED=0 \
-SKIPPY_NATIVE_MTP_NGRAM_HYBRID=0 \
-SKIPPY_VERIFY_WINDOW_PIPELINE_DEPTH=1 \
 mesh-llm serve meshllm/GLM-4.7-Flash-MTP-GGUF:Q4_K_M --split --no-draft
 ```
+
+Use `[models.speculative] strategy = "disabled"` to make this an explicit
+baseline instead of relying on environment variables.
 
 ### Native MTP Only
 
 ```bash
-SKIPPY_NATIVE_MTP_ENABLED=1 \
-SKIPPY_NATIVE_MTP_NGRAM_HYBRID=0 \
-SKIPPY_VERIFY_WINDOW_PIPELINE_DEPTH=1 \
 mesh-llm serve meshllm/GLM-4.7-Flash-MTP-GGUF:Q4_K_M --split --no-draft
 ```
+
+Use `[models.speculative] strategy = "mtp"` to force this control.
 
 ### MTP With Cache-backed N-gram Extension
 
 ```bash
-SKIPPY_NATIVE_MTP_ENABLED=1 \
-SKIPPY_NATIVE_MTP_NGRAM_HYBRID=1 \
-SKIPPY_NGRAM_CACHE_ENABLED=1 \
-SKIPPY_NGRAM_CACHE_MIN_NGRAM=2 \
-SKIPPY_NGRAM_CACHE_MAX_NGRAM=4 \
-SKIPPY_NATIVE_MTP_NGRAM_SIZE=4 \
-SKIPPY_NATIVE_MTP_NGRAM_MAX_PROPOSAL_TOKENS=4 \
-SKIPPY_NATIVE_MTP_NGRAM_TAIL_BACKOFF_PROPOSALS=6 \
-SKIPPY_NATIVE_MTP_VERIFY_WINDOW_MIN_TOKENS=1 \
-SKIPPY_NATIVE_MTP_VERIFY_WINDOW_MAX_TOKENS=4 \
-SKIPPY_VERIFY_WINDOW_PIPELINE_DEPTH=2 \
 mesh-llm serve meshllm/GLM-4.7-Flash-MTP-GGUF:Q4_K_M --split --no-draft
 ```
+
+Use `[models.speculative] strategy = "mtp-cache"` with the bounded settings
+above. The package must declare the request-local cache proposer; this command
+does not silently turn one on.
 
 ```mermaid
 flowchart LR
@@ -238,6 +302,7 @@ telemetry supplies per-window and per-stage detail.
 | Question | Counters |
 |---|---|
 | Is decode faster? | `predicted_per_second`, `predicted_n`, `predicted_ms` |
+| Which plan actually ran? | `llama_stage.spec.requested_strategy`, `llama_stage.spec.effective_strategy` |
 | Are proposals accepted? | `draft_n`, `draft_n_accepted` |
 | Did the sidecar widen MTP? | `native_mtp_hybrid_native_tokens`, `native_mtp_hybrid_ngram_tokens`, `native_mtp_hybrid_proposed_tokens` |
 | Did anchors agree? | `native_mtp_hybrid_ngram_mtp_prefix_agreements`, `native_mtp_hybrid_ngram_mtp_prefix_disagreements` |

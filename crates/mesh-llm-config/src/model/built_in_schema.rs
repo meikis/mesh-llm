@@ -599,6 +599,7 @@ fn skippy_settings(prefix: &str) -> Vec<ConfigSettingSchema> {
 
 fn speculative_settings(prefix: &str) -> Vec<ConfigSettingSchema> {
     vec![
+        basic_setting(&format!("{prefix}.strategy"), ConfigValueSchema::String),
         basic_setting(
             &format!("{prefix}.mode"),
             string_enum(["auto", "disabled", "draft", "ngram"]),
@@ -661,6 +662,50 @@ fn speculative_settings(prefix: &str) -> Vec<ConfigSettingSchema> {
         ),
         basic_setting(&format!("{prefix}.ngram_min"), ConfigValueSchema::Integer),
         basic_setting(&format!("{prefix}.ngram_max"), ConfigValueSchema::Integer),
+        basic_setting(
+            &format!("{prefix}.ngram_proposer"),
+            string_enum(["simple", "cache"]),
+        ),
+        basic_setting(
+            &format!("{prefix}.ngram_max_proposal_tokens"),
+            ConfigValueSchema::Integer,
+        ),
+        basic_setting(
+            &format!("{prefix}.extension_initial_tokens"),
+            ConfigValueSchema::Integer,
+        ),
+        basic_setting(
+            &format!("{prefix}.extension_max_tokens"),
+            ConfigValueSchema::Integer,
+        ),
+        basic_setting(
+            &format!("{prefix}.extension_tail_backoff_proposals"),
+            ConfigValueSchema::Integer,
+        ),
+        basic_setting(
+            &format!("{prefix}.native_mtp_reject_cooldown_tokens"),
+            ConfigValueSchema::Integer,
+        ),
+        basic_setting(
+            &format!("{prefix}.native_mtp_suppress_cooldown_drafts"),
+            ConfigValueSchema::Boolean,
+        ),
+        basic_setting(
+            &format!("{prefix}.native_mtp_suppress_cooldown_draft_limit"),
+            ConfigValueSchema::Integer,
+        ),
+        basic_setting(
+            &format!("{prefix}.verify_window_min_tokens"),
+            ConfigValueSchema::Integer,
+        ),
+        basic_setting(
+            &format!("{prefix}.verify_window_max_tokens"),
+            ConfigValueSchema::Integer,
+        ),
+        basic_setting(
+            &format!("{prefix}.verify_window_pipeline_depth"),
+            ConfigValueSchema::Integer,
+        ),
         basic_setting(&format!("{prefix}.spec_default"), bool_or_auto_schema()),
     ]
 }

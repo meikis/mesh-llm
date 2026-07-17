@@ -4,7 +4,14 @@ use crate::models::find_model_path;
 use anyhow::{Result, bail};
 use mesh_llm_system::util::validate_draft_min_max;
 use model_artifact::gguf::{scan_gguf_compact_meta, scan_gguf_tensor_names_any};
-use skippy_runtime::package::{PackageGenerationInfo, PackageSpeculativeDecodingInfo};
+use skippy_runtime::package::{
+    PackageExtensionPolicyInfo, PackageGenerationInfo, PackageSpeculativeDecodingInfo,
+    PackageSpeculativeProposerInfo, PackageSpeculativeStrategyInfo, PackageWindowPolicyInfo,
+};
+use skippy_server::{
+    NativeMtpProposalConfig, NgramExtensionConfig, NgramProposalConfig, NgramProposerKind,
+    SpeculativeDecodeConfig, VerifyWindowConfig,
+};
 use skippy_topology::infer_family_capability;
 
 use super::support::{pick_owned, pick_string, pick_string_owned};
@@ -55,7 +62,6 @@ pub(super) fn resolve_speculative_config(
         supports_native_mtp,
         package_generation,
         model_path,
-        native_mtp_env_override(),
     )?;
     let mode = pick_string_owned(
         model_config.and_then(|config| config.mode.as_deref()),
@@ -125,7 +131,7 @@ pub(super) fn resolve_speculative_config(
         draft_model_path = None;
     }
     Ok(ResolvedSpeculativeConfig {
-        strategy,
+        strategy: strategy.clone(),
         native_mtp_enabled,
         mode,
         draft_model_path,
@@ -136,22 +142,18 @@ pub(super) fn resolve_speculative_config(
         draft_n_gpu_layers,
         ngram_min,
         ngram_max,
+        decode: resolve_decode_config(DecodeResolutionInput {
+            requested_strategy: &strategy,
+            native_mtp_enabled,
+            draft_max_tokens: effective_draft_max_tokens,
+            draft_min_tokens,
+            legacy_ngram_min: ngram_min,
+            legacy_ngram_max: ngram_max,
+            model_config,
+            global_config,
+            package_generation,
+        })?,
     })
-}
-
-const NATIVE_MTP_ENABLED_ENV: &str = "SKIPPY_NATIVE_MTP_ENABLED";
-
-fn native_mtp_env_override() -> Option<bool> {
-    let value = std::env::var(NATIVE_MTP_ENABLED_ENV).ok()?;
-    parse_native_mtp_env_override(&value)
-}
-
-fn parse_native_mtp_env_override(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    }
 }
 
 fn resolve_native_mtp_strategy(
@@ -160,22 +162,7 @@ fn resolve_native_mtp_strategy(
     supports_native_mtp: bool,
     package_generation: Option<&PackageGenerationInfo>,
     model_path: &Path,
-    environment_override: Option<bool>,
 ) -> Result<(String, bool)> {
-    if let Some(enabled) = environment_override {
-        if enabled && !supports_native_mtp {
-            bail!("{NATIVE_MTP_ENABLED_ENV}=1 requires proven native MTP support for this model");
-        }
-        return Ok((
-            if enabled {
-                "mtp".to_string()
-            } else {
-                "disabled".to_string()
-            },
-            enabled,
-        ));
-    }
-
     let native_mtp_enabled = match strategy.as_str() {
         "auto" => {
             auto_defaults_enabled
@@ -191,9 +178,426 @@ fn resolve_native_mtp_strategy(
             true
         }
         "disabled" => false,
-        _ => bail!("skippy speculative.strategy must be auto, disabled, or mtp"),
+        package_strategy if package_strategy_exists(package_generation, package_strategy) => {
+            let speculative = package_generation
+                .and_then(|generation| generation.speculative_decoding.as_ref())
+                .expect("checked package strategy exists");
+            strategy_uses_native_mtp(speculative, package_strategy)
+        }
+        _ => bail!(
+            "skippy speculative.strategy must be auto, disabled, mtp, or a strategy declared by model-package.json"
+        ),
     };
     Ok((strategy, native_mtp_enabled))
+}
+
+struct DecodeResolutionInput<'a> {
+    requested_strategy: &'a str,
+    native_mtp_enabled: bool,
+    draft_max_tokens: u32,
+    draft_min_tokens: u32,
+    legacy_ngram_min: u32,
+    legacy_ngram_max: u32,
+    model_config: Option<&'a SpeculativeConfig>,
+    global_config: Option<&'a SpeculativeConfig>,
+    package_generation: Option<&'a PackageGenerationInfo>,
+}
+
+fn resolve_decode_config(input: DecodeResolutionInput<'_>) -> Result<SpeculativeDecodeConfig> {
+    let mut config = package_decode_config(input.requested_strategy, input.package_generation)?
+        .unwrap_or_else(SpeculativeDecodeConfig::default);
+    config.requested_strategy = input.requested_strategy.to_string();
+
+    if input.native_mtp_enabled {
+        config.native_mtp.enabled = true;
+        config.native_mtp.max_draft_tokens = input.draft_max_tokens.max(1) as usize;
+        config.native_mtp.min_draft_tokens = input.draft_min_tokens as usize;
+    }
+    if config.native_mtp.enabled && config.effective_strategy == "disabled" {
+        config.effective_strategy = "native-mtp".to_string();
+    }
+
+    let ngram_min = pick_optional_u32(
+        input.model_config.and_then(|config| config.ngram_min),
+        input.global_config.and_then(|config| config.ngram_min),
+    )
+    .unwrap_or(input.legacy_ngram_min);
+    let ngram_max = pick_optional_u32(
+        input.model_config.and_then(|config| config.ngram_max),
+        input.global_config.and_then(|config| config.ngram_max),
+    )
+    .unwrap_or(input.legacy_ngram_max);
+    let ngram_proposer = pick_owned(
+        input
+            .model_config
+            .and_then(|config| config.ngram_proposer.clone()),
+        input
+            .global_config
+            .and_then(|config| config.ngram_proposer.clone()),
+    );
+    let ngram_max_proposal_tokens = pick_optional_u32(
+        input
+            .model_config
+            .and_then(|config| config.ngram_max_proposal_tokens),
+        input
+            .global_config
+            .and_then(|config| config.ngram_max_proposal_tokens),
+    );
+    if config.ngram.is_some() || ngram_min > 0 || ngram_max > 0 || ngram_proposer.is_some() {
+        let existing = config.ngram.as_ref();
+        let min_ngram = nonzero_or(
+            ngram_min,
+            existing.map_or(0, |ngram| ngram.min_ngram as u32),
+        );
+        let max_ngram = nonzero_or(
+            ngram_max,
+            existing.map_or(0, |ngram| ngram.max_ngram as u32),
+        );
+        if min_ngram == 0 || max_ngram == 0 || min_ngram > max_ngram {
+            bail!("skippy speculative N-gram proposer requires 0 < ngram_min <= ngram_max");
+        }
+        let kind = match ngram_proposer.as_deref() {
+            Some("cache") => NgramProposerKind::Cache,
+            Some("simple") | None => existing.map_or(NgramProposerKind::Simple, |ngram| ngram.kind),
+            Some(_) => unreachable!("validated by mesh configuration"),
+        };
+        let max_proposal_tokens = ngram_max_proposal_tokens
+            .map(|value| value as usize)
+            .unwrap_or_else(|| {
+                existing.map_or(max_ngram as usize, |ngram| ngram.max_proposal_tokens)
+            });
+        config.ngram = Some(NgramProposalConfig {
+            kind,
+            min_ngram: min_ngram as usize,
+            max_ngram: max_ngram as usize,
+            max_proposal_tokens,
+        });
+        if config.effective_strategy == "disabled" {
+            config.effective_strategy = ngram_effective_strategy(kind).to_string();
+        }
+    }
+
+    let extension_initial = pick_optional_u32(
+        input
+            .model_config
+            .and_then(|config| config.extension_initial_tokens),
+        input
+            .global_config
+            .and_then(|config| config.extension_initial_tokens),
+    );
+    let extension_max = pick_optional_u32(
+        input
+            .model_config
+            .and_then(|config| config.extension_max_tokens),
+        input
+            .global_config
+            .and_then(|config| config.extension_max_tokens),
+    );
+    let extension_backoff = pick_optional_u32(
+        input
+            .model_config
+            .and_then(|config| config.extension_tail_backoff_proposals),
+        input
+            .global_config
+            .and_then(|config| config.extension_tail_backoff_proposals),
+    );
+    if extension_initial.is_some() || extension_max.is_some() || extension_backoff.is_some() {
+        let Some(extension) = config.extension.as_mut() else {
+            bail!("skippy speculative extension controls require a package composite strategy");
+        };
+        if let Some(value) = extension_initial {
+            extension.initial_tokens = value as usize;
+        }
+        if let Some(value) = extension_max {
+            extension.max_tokens = value as usize;
+        }
+        if let Some(value) = extension_backoff {
+            extension.tail_backoff_proposals = value as usize;
+        }
+    }
+    if config.extension.is_some() && (!config.native_mtp.enabled || config.ngram.is_none()) {
+        bail!("skippy speculative extension requires both native MTP and an N-gram proposer");
+    }
+
+    config.native_mtp.reject_cooldown_tokens = pick_optional_u32(
+        input
+            .model_config
+            .and_then(|config| config.native_mtp_reject_cooldown_tokens),
+        input
+            .global_config
+            .and_then(|config| config.native_mtp_reject_cooldown_tokens),
+    )
+    .map_or(config.native_mtp.reject_cooldown_tokens, |value| {
+        value as usize
+    });
+    config.native_mtp.suppress_cooldown_drafts = pick_owned(
+        input
+            .model_config
+            .and_then(|config| config.native_mtp_suppress_cooldown_drafts),
+        input
+            .global_config
+            .and_then(|config| config.native_mtp_suppress_cooldown_drafts),
+    )
+    .unwrap_or(config.native_mtp.suppress_cooldown_drafts);
+    config.native_mtp.suppress_cooldown_draft_limit = pick_optional_u32(
+        input
+            .model_config
+            .and_then(|config| config.native_mtp_suppress_cooldown_draft_limit),
+        input
+            .global_config
+            .and_then(|config| config.native_mtp_suppress_cooldown_draft_limit),
+    )
+    .map_or(config.native_mtp.suppress_cooldown_draft_limit, |value| {
+        value as usize
+    });
+    config.verify_window.min_tokens = pick_optional_u32(
+        input
+            .model_config
+            .and_then(|config| config.verify_window_min_tokens),
+        input
+            .global_config
+            .and_then(|config| config.verify_window_min_tokens),
+    )
+    .map_or(config.verify_window.min_tokens, |value| value as usize);
+    config.verify_window.max_tokens = pick_optional_u32(
+        input
+            .model_config
+            .and_then(|config| config.verify_window_max_tokens),
+        input
+            .global_config
+            .and_then(|config| config.verify_window_max_tokens),
+    )
+    .map_or(config.verify_window.max_tokens, |value| value as usize);
+    config.verify_window.pipeline_depth = pick_optional_u32(
+        input
+            .model_config
+            .and_then(|config| config.verify_window_pipeline_depth),
+        input
+            .global_config
+            .and_then(|config| config.verify_window_pipeline_depth),
+    )
+    .map_or(config.verify_window.pipeline_depth, |value| value as usize);
+    if config.verify_window.min_tokens > config.verify_window.max_tokens {
+        bail!("skippy speculative verify window requires min_tokens <= max_tokens");
+    }
+    Ok(config)
+}
+
+fn package_decode_config(
+    requested_strategy: &str,
+    package_generation: Option<&PackageGenerationInfo>,
+) -> Result<Option<SpeculativeDecodeConfig>> {
+    let Some(speculative) =
+        package_generation.and_then(|generation| generation.speculative_decoding.as_ref())
+    else {
+        return Ok(None);
+    };
+    let strategy_name = if requested_strategy == "auto" {
+        speculative.default.as_str()
+    } else {
+        requested_strategy
+    };
+    let Some(strategy) = speculative.strategies.get(strategy_name) else {
+        return Ok(None);
+    };
+    let mut native_mtp = None;
+    let mut ngram = None;
+    match strategy.strategy_type.as_str() {
+        "native-mtp" => {
+            native_mtp = Some(native_proposer_config(
+                strategy
+                    .proposer
+                    .as_deref()
+                    .and_then(|name| speculative.proposers.get(name)),
+                strategy,
+            )?);
+        }
+        "ngram-simple" | "ngram-cache" => {
+            ngram = Some(ngram_proposer_config(
+                strategy
+                    .proposer
+                    .as_deref()
+                    .and_then(|name| speculative.proposers.get(name)),
+                strategy.strategy_type.as_str(),
+            )?);
+        }
+        "composite" => {
+            let primary = strategy
+                .primary
+                .as_deref()
+                .and_then(|name| speculative.proposers.get(name))
+                .ok_or_else(|| anyhow::anyhow!("package speculative strategy {strategy_name} has no native MTP primary proposer"))?;
+            let extender = strategy
+                .extender
+                .as_deref()
+                .and_then(|name| speculative.proposers.get(name))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "package speculative strategy {strategy_name} has no N-gram extender"
+                    )
+                })?;
+            native_mtp = Some(native_proposer_config(Some(primary), strategy)?);
+            ngram = Some(ngram_proposer_config(
+                Some(extender),
+                extender.proposer_type.as_str(),
+            )?);
+        }
+        other => bail!("package speculative strategy {strategy_name} has unsupported type {other}"),
+    }
+    let extension = strategy.extension_policy.as_ref().map(extension_config);
+    let verify_window = strategy
+        .window_policy
+        .as_ref()
+        .map(verify_window_config)
+        .unwrap_or(VerifyWindowConfig {
+            min_tokens: 1,
+            max_tokens: 4,
+            pipeline_depth: 1,
+        });
+    let effective_strategy = match (native_mtp.is_some(), ngram.as_ref().map(|value| value.kind)) {
+        (true, Some(NgramProposerKind::Simple)) => "native-mtp+ngram-simple",
+        (true, Some(NgramProposerKind::Cache)) => "native-mtp+ngram-cache",
+        (true, None) => "native-mtp",
+        (false, Some(kind)) => ngram_effective_strategy(kind),
+        (false, None) => "disabled",
+    };
+    Ok(Some(SpeculativeDecodeConfig {
+        requested_strategy: requested_strategy.to_string(),
+        effective_strategy: effective_strategy.to_string(),
+        native_mtp: native_mtp.unwrap_or(NativeMtpProposalConfig {
+            enabled: false,
+            max_draft_tokens: 1,
+            min_draft_tokens: 0,
+            reject_cooldown_tokens: 0,
+            suppress_cooldown_drafts: false,
+            suppress_cooldown_draft_limit: 0,
+        }),
+        ngram,
+        extension,
+        verify_window,
+    }))
+}
+
+fn native_proposer_config(
+    proposer: Option<&PackageSpeculativeProposerInfo>,
+    legacy_strategy: &PackageSpeculativeStrategyInfo,
+) -> Result<NativeMtpProposalConfig> {
+    let (proposer_type, prediction_depth, layer_indices) = proposer.map_or(
+        (
+            legacy_strategy.strategy_type.as_str(),
+            legacy_strategy.prediction_depth,
+            legacy_strategy.layer_indices.as_slice(),
+        ),
+        |proposer| {
+            (
+                proposer.proposer_type.as_str(),
+                proposer.prediction_depth,
+                proposer.layer_indices.as_slice(),
+            )
+        },
+    );
+    if proposer_type != "native-mtp" || prediction_depth != Some(1) || layer_indices.is_empty() {
+        bail!("package native MTP proposer is not valid for the embedded runtime");
+    }
+    Ok(NativeMtpProposalConfig {
+        enabled: true,
+        max_draft_tokens: 1,
+        min_draft_tokens: 0,
+        reject_cooldown_tokens: 0,
+        suppress_cooldown_drafts: false,
+        suppress_cooldown_draft_limit: 0,
+    })
+}
+
+fn ngram_proposer_config(
+    proposer: Option<&PackageSpeculativeProposerInfo>,
+    expected_type: &str,
+) -> Result<NgramProposalConfig> {
+    let proposer = proposer
+        .ok_or_else(|| anyhow::anyhow!("package N-gram strategy must reference a proposer"))?;
+    let kind = match proposer.proposer_type.as_str() {
+        "ngram-simple" => NgramProposerKind::Simple,
+        "ngram-cache" => NgramProposerKind::Cache,
+        other => bail!("package N-gram proposer has unsupported type {other}"),
+    };
+    if expected_type != "composite" && expected_type != proposer.proposer_type {
+        bail!("package N-gram strategy type does not match its proposer");
+    }
+    let min_ngram = proposer
+        .ngram_min
+        .ok_or_else(|| anyhow::anyhow!("package N-gram proposer has no ngram_min"))?;
+    let max_ngram = proposer
+        .ngram_max
+        .ok_or_else(|| anyhow::anyhow!("package N-gram proposer has no ngram_max"))?;
+    let max_proposal_tokens = proposer.max_proposal_tokens.unwrap_or(max_ngram);
+    Ok(NgramProposalConfig {
+        kind,
+        min_ngram: min_ngram as usize,
+        max_ngram: max_ngram as usize,
+        max_proposal_tokens: max_proposal_tokens as usize,
+    })
+}
+
+fn extension_config(policy: &PackageExtensionPolicyInfo) -> NgramExtensionConfig {
+    NgramExtensionConfig {
+        initial_tokens: policy.initial_tokens as usize,
+        max_tokens: policy.max_tokens as usize,
+        tail_backoff_proposals: policy.tail_backoff_proposals as usize,
+    }
+}
+
+fn verify_window_config(policy: &PackageWindowPolicyInfo) -> VerifyWindowConfig {
+    VerifyWindowConfig {
+        min_tokens: policy.min_window as usize,
+        max_tokens: policy.max_window as usize,
+        pipeline_depth: 1,
+    }
+}
+
+fn ngram_effective_strategy(kind: NgramProposerKind) -> &'static str {
+    match kind {
+        NgramProposerKind::Simple => "ngram-simple",
+        NgramProposerKind::Cache => "ngram-cache",
+    }
+}
+
+fn nonzero_or(value: u32, default: u32) -> u32 {
+    if value == 0 { default } else { value }
+}
+
+fn pick_optional_u32(model: Option<u32>, global: Option<u32>) -> Option<u32> {
+    pick_owned(model, global)
+}
+
+fn package_strategy_exists(generation: Option<&PackageGenerationInfo>, strategy: &str) -> bool {
+    generation
+        .and_then(|generation| generation.speculative_decoding.as_ref())
+        .is_some_and(|speculative| speculative.strategies.contains_key(strategy))
+}
+
+fn strategy_uses_native_mtp(
+    speculative: &PackageSpeculativeDecodingInfo,
+    strategy_name: &str,
+) -> bool {
+    let Some(strategy) = speculative.strategies.get(strategy_name) else {
+        return false;
+    };
+    match strategy.strategy_type.as_str() {
+        "native-mtp" => strategy
+            .proposer
+            .as_deref()
+            .and_then(|name| speculative.proposers.get(name))
+            .map_or(
+                strategy.prediction_depth == Some(1) && !strategy.layer_indices.is_empty(),
+                |proposer| proposer.proposer_type == "native-mtp",
+            ),
+        "composite" => strategy
+            .primary
+            .as_deref()
+            .and_then(|name| speculative.proposers.get(name))
+            .is_some_and(|proposer| proposer.proposer_type == "native-mtp"),
+        _ => false,
+    }
 }
 
 fn reject_unsupported_speculative_runtime_fields(
@@ -328,16 +732,7 @@ fn package_generation_supports_default_native_mtp(
 ) -> bool {
     generation
         .and_then(|generation| generation.speculative_decoding.as_ref())
-        .is_some_and(|speculative| {
-            speculative
-                .strategies
-                .get(&speculative.default)
-                .is_some_and(|strategy| {
-                    strategy.strategy_type == "native-mtp"
-                        && strategy.prediction_depth == Some(1)
-                        && !strategy.layer_indices.is_empty()
-                })
-        })
+        .is_some_and(|speculative| strategy_uses_native_mtp(speculative, &speculative.default))
 }
 
 fn package_generation_supports_native_mtp(generation: Option<&PackageGenerationInfo>) -> bool {
@@ -347,11 +742,7 @@ fn package_generation_supports_native_mtp(generation: Option<&PackageGenerationI
 }
 
 fn speculative_supports_native_mtp(speculative: &PackageSpeculativeDecodingInfo) -> bool {
-    speculative.strategies.get("mtp").is_some_and(|strategy| {
-        strategy.strategy_type == "native-mtp"
-            && strategy.prediction_depth == Some(1)
-            && !strategy.layer_indices.is_empty()
-    })
+    strategy_uses_native_mtp(speculative, "mtp")
 }
 
 fn direct_gguf_supports_native_mtp(model_path: &Path) -> bool {
@@ -387,53 +778,4 @@ fn incompatible_draft_pair_reason(
 fn infer_family_from_path_string(path: &Path) -> Option<String> {
     infer_family_capability(&path.display().to_string(), 0, 0)
         .map(|capability| capability.family_id.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::Path;
-
-    use super::{parse_native_mtp_env_override, resolve_native_mtp_strategy};
-
-    #[test]
-    fn parses_native_mtp_environment_override() {
-        assert_eq!(parse_native_mtp_env_override(" true "), Some(true));
-        assert_eq!(parse_native_mtp_env_override("OFF"), Some(false));
-        assert_eq!(parse_native_mtp_env_override("invalid"), None);
-    }
-
-    #[test]
-    fn native_mtp_override_disables_an_auto_detected_model() {
-        let (strategy, enabled) = resolve_native_mtp_strategy(
-            "auto".to_string(),
-            true,
-            true,
-            None,
-            Path::new("/tmp/model.gguf"),
-            Some(false),
-        )
-        .unwrap();
-
-        assert_eq!(strategy, "disabled");
-        assert!(!enabled);
-    }
-
-    #[test]
-    fn native_mtp_override_requires_proven_model_support() {
-        let error = resolve_native_mtp_strategy(
-            "disabled".to_string(),
-            true,
-            false,
-            None,
-            Path::new("/tmp/model.gguf"),
-            Some(true),
-        )
-        .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("SKIPPY_NATIVE_MTP_ENABLED=1 requires proven native MTP support")
-        );
-    }
 }

@@ -2,13 +2,8 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
-use super::{
-    NativeMtpDraftOrigin, NativeMtpHybridProposal, native_mtp_ngram_hybrid_enabled,
-    native_mtp_ngram_max_proposal_tokens, native_mtp_ngram_size,
-    native_mtp_ngram_tail_backoff_proposals, native_mtp_reject_cooldown_tokens,
-    native_mtp_suppress_cooldown_draft_limit, native_mtp_suppress_cooldown_drafts_enabled,
-    native_mtp_verify_window_max_tokens, native_mtp_verify_window_min_tokens,
-};
+use super::{NativeMtpDraftOrigin, NativeMtpHybridProposal};
+use crate::frontend::SpeculativeDecodeConfig;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::frontend) struct NativeMtpDecodeOptions {
@@ -43,30 +38,29 @@ pub(in crate::frontend) fn native_mtp_trim_action(
 }
 
 impl NativeMtpDecodeOptions {
-    pub(in crate::frontend) fn from_env() -> Self {
+    pub(in crate::frontend) fn from_config(config: &SpeculativeDecodeConfig) -> Self {
         Self {
-            max_draft_tokens: 1,
-            min_draft_tokens: 0,
-            reject_cooldown_tokens: native_mtp_reject_cooldown_tokens(),
-            suppress_cooldown_drafts: native_mtp_suppress_cooldown_drafts_enabled(),
-            suppress_cooldown_draft_limit: native_mtp_suppress_cooldown_draft_limit(),
-            ngram_hybrid: native_mtp_ngram_hybrid_enabled(),
-            ngram_size: native_mtp_ngram_size(),
-            ngram_max_proposal_tokens: native_mtp_ngram_max_proposal_tokens(),
-            ngram_tail_backoff_proposals: native_mtp_ngram_tail_backoff_proposals(),
-            verify_window_min_tokens: native_mtp_verify_window_min_tokens(),
-            verify_window_max_tokens: native_mtp_verify_window_max_tokens(),
+            max_draft_tokens: config.native_mtp.max_draft_tokens.max(1),
+            min_draft_tokens: config
+                .native_mtp
+                .min_draft_tokens
+                .min(config.native_mtp.max_draft_tokens.max(1)),
+            reject_cooldown_tokens: config.native_mtp.reject_cooldown_tokens,
+            suppress_cooldown_drafts: config.native_mtp.suppress_cooldown_drafts,
+            suppress_cooldown_draft_limit: config.native_mtp.suppress_cooldown_draft_limit,
+            ngram_hybrid: config.extension.is_some() && config.ngram.is_some(),
+            ngram_size: config.ngram.as_ref().map_or(0, |ngram| ngram.min_ngram),
+            ngram_max_proposal_tokens: config
+                .extension
+                .as_ref()
+                .map_or(0, |extension| extension.max_tokens),
+            ngram_tail_backoff_proposals: config
+                .extension
+                .as_ref()
+                .map_or(0, |extension| extension.tail_backoff_proposals),
+            verify_window_min_tokens: config.verify_window.min_tokens.max(1),
+            verify_window_max_tokens: config.verify_window.max_tokens.max(1),
         }
-    }
-
-    pub(in crate::frontend) fn with_window(
-        mut self,
-        max_draft_tokens: usize,
-        min_draft_tokens: usize,
-    ) -> Self {
-        self.max_draft_tokens = max_draft_tokens.max(1);
-        self.min_draft_tokens = min_draft_tokens.min(self.max_draft_tokens);
-        self
     }
 
     pub(in crate::frontend) fn verify_window_bounds(self) -> (usize, usize) {

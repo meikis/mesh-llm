@@ -203,9 +203,7 @@ pub async fn serve_openai(args: ServeOpenAiArgs) -> Result<()> {
         adaptive_speculative_window: false,
         ngram_min: 0,
         ngram_max: 0,
-        native_mtp_enabled: false,
-        native_mtp_max_tokens: 1,
-        native_mtp_min_tokens: 0,
+        speculative: SpeculativeDecodeConfig::default(),
         generation_limit: Arc::new(Semaphore::new(args.generation_concurrency)),
         generation_queue_depth: Arc::new(AtomicUsize::new(0)),
         generation_queue_limit: args.generation_concurrency,
@@ -229,6 +227,91 @@ pub async fn serve_openai(args: ServeOpenAiArgs) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpeculativeDecodeConfig {
+    pub requested_strategy: String,
+    pub effective_strategy: String,
+    pub native_mtp: NativeMtpProposalConfig,
+    pub ngram: Option<NgramProposalConfig>,
+    pub extension: Option<NgramExtensionConfig>,
+    pub verify_window: VerifyWindowConfig,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeMtpProposalConfig {
+    pub enabled: bool,
+    pub max_draft_tokens: usize,
+    pub min_draft_tokens: usize,
+    pub reject_cooldown_tokens: usize,
+    pub suppress_cooldown_drafts: bool,
+    pub suppress_cooldown_draft_limit: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NgramProposerKind {
+    Simple,
+    Cache,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NgramProposalConfig {
+    pub kind: NgramProposerKind,
+    pub min_ngram: usize,
+    pub max_ngram: usize,
+    pub max_proposal_tokens: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NgramExtensionConfig {
+    pub initial_tokens: usize,
+    pub max_tokens: usize,
+    pub tail_backoff_proposals: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifyWindowConfig {
+    pub min_tokens: usize,
+    pub max_tokens: usize,
+    pub pipeline_depth: usize,
+}
+
+impl Default for SpeculativeDecodeConfig {
+    fn default() -> Self {
+        Self {
+            requested_strategy: "auto".to_string(),
+            effective_strategy: "disabled".to_string(),
+            native_mtp: NativeMtpProposalConfig {
+                enabled: false,
+                max_draft_tokens: 1,
+                min_draft_tokens: 0,
+                reject_cooldown_tokens: 0,
+                suppress_cooldown_drafts: false,
+                suppress_cooldown_draft_limit: 0,
+            },
+            ngram: None,
+            extension: None,
+            verify_window: VerifyWindowConfig {
+                min_tokens: 1,
+                max_tokens: 4,
+                pipeline_depth: 1,
+            },
+        }
+    }
+}
+
+impl SpeculativeDecodeConfig {
+    fn insert_telemetry_attrs(&self, attrs: &mut BTreeMap<String, Value>) {
+        attrs.insert(
+            "llama_stage.spec.requested_strategy".to_string(),
+            json!(self.requested_strategy),
+        );
+        attrs.insert(
+            "llama_stage.spec.effective_strategy".to_string(),
+            json!(self.effective_strategy),
+        );
+    }
+}
+
 #[derive(Clone)]
 pub struct EmbeddedOpenAiArgs {
     pub bind_addr: SocketAddr,
@@ -248,6 +331,7 @@ pub struct EmbeddedOpenAiArgs {
     pub speculative_window: usize,
     pub adaptive_speculative_window: bool,
     pub draft_n_gpu_layers: Option<i32>,
+    pub speculative: SpeculativeDecodeConfig,
     pub ngram_min: usize,
     pub ngram_max: usize,
     pub native_mtp_enabled: bool,
@@ -579,9 +663,6 @@ pub fn embedded_openai_backend(args: EmbeddedOpenAiArgs) -> Result<EmbeddedOpenA
         prefill_reply_credit_limit,
         lane_pool,
         prediction_returns: args.prediction_returns.clone(),
-        native_mtp_enabled: args.native_mtp_enabled,
-        native_mtp_max_tokens: args.native_mtp_max_tokens,
-        native_mtp_min_tokens: args.native_mtp_min_tokens,
     };
     args.telemetry
         .emit("stage.openai_server_start", lifecycle_attrs(&args.config));
@@ -612,9 +693,7 @@ pub fn embedded_openai_backend(args: EmbeddedOpenAiArgs) -> Result<EmbeddedOpenA
         adaptive_speculative_window: args.adaptive_speculative_window,
         ngram_min: args.ngram_min,
         ngram_max: args.ngram_max,
-        native_mtp_enabled: args.native_mtp_enabled,
-        native_mtp_max_tokens: args.native_mtp_max_tokens,
-        native_mtp_min_tokens: args.native_mtp_min_tokens,
+        speculative: args.speculative,
         generation_limit: Arc::new(Semaphore::new(args.generation_concurrency)),
         generation_queue_depth: Arc::new(AtomicUsize::new(0)),
         generation_queue_limit: args.generation_concurrency,
@@ -658,9 +737,7 @@ struct StageOpenAiBackend {
     adaptive_speculative_window: bool,
     ngram_min: usize,
     ngram_max: usize,
-    native_mtp_enabled: bool,
-    native_mtp_max_tokens: usize,
-    native_mtp_min_tokens: usize,
+    speculative: SpeculativeDecodeConfig,
     generation_limit: Arc<Semaphore>,
     generation_queue_depth: Arc<AtomicUsize>,
     generation_queue_limit: usize,
@@ -906,9 +983,6 @@ enum OpenAiBackendMode {
         prefill_reply_credit_limit: usize,
         lane_pool: Option<Arc<PersistentStageLanePool>>,
         prediction_returns: Option<Arc<PredictionReturnHub>>,
-        native_mtp_enabled: bool,
-        native_mtp_max_tokens: usize,
-        native_mtp_min_tokens: usize,
     },
 }
 
@@ -1937,9 +2011,8 @@ struct LocalGeneration<'a> {
     max_tokens: u32,
     sampling: &'a SamplingConfig,
     chat_sampling_metadata: Option<&'a str>,
+    speculative: &'a SpeculativeDecodeConfig,
     native_mtp_enabled: bool,
-    native_mtp_max_tokens: usize,
-    native_mtp_min_tokens: usize,
     hook_request: Option<ChatCompletionRequest>,
     hook_runtime: Option<tokio::runtime::Handle>,
     cancellation: Option<&'a openai_frontend::CancellationToken>,
@@ -1958,11 +2031,11 @@ struct EmbeddedStageZeroGeneration<'a> {
     draft: Option<Arc<Mutex<DraftRunner>>>,
     speculative_window: usize,
     adaptive_speculative_window: bool,
+    speculative: &'a SpeculativeDecodeConfig,
     ngram_min: usize,
     ngram_max: usize,
     native_mtp_enabled: bool,
     native_mtp_max_tokens: usize,
-    native_mtp_min_tokens: usize,
     prompt_token_ids: &'a [i32],
     max_tokens: u32,
     sampling: &'a SamplingConfig,

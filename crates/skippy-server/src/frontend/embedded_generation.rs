@@ -25,9 +25,8 @@ impl StageOpenAiBackend {
                     max_tokens: request.max_tokens,
                     sampling: request.sampling,
                     chat_sampling_metadata: request.chat_sampling_metadata,
+                    speculative: request.speculative,
                     native_mtp_enabled: request.native_mtp_enabled,
-                    native_mtp_max_tokens: request.native_mtp_max_tokens,
-                    native_mtp_min_tokens: request.native_mtp_min_tokens,
                     hook_request: request.hook_request,
                     hook_runtime: request.hook_runtime,
                     cancellation: request.cancellation,
@@ -661,8 +660,7 @@ impl StageOpenAiBackend {
             )?;
             let mut fused_reached_stop = false;
             let mut native_mtp = NativeMtpVerifier::default();
-            let native_mtp_options = NativeMtpDecodeOptions::from_env()
-                .with_window(request.native_mtp_max_tokens, request.native_mtp_min_tokens);
+            let native_mtp_options = NativeMtpDecodeOptions::from_config(request.speculative);
             let mut native_mtp_counters = NativeMtpDecodeCounters::default();
             let mut native_mtp_reject_cooldown_remaining = 0usize;
             let mut native_mtp_suppress_cooldown_drafts_remaining = 0usize;
@@ -810,7 +808,7 @@ impl StageOpenAiBackend {
                     }
                 }
             }
-            let mut cached_ngram_proposer = CachedNgramProposer::from_env()?;
+            let mut cached_ngram_proposer = CachedNgramProposer::from_config(request.speculative)?;
             let max_speculative_window = request.speculative_window.max(1);
             let mut adaptive_window = if request.adaptive_speculative_window {
                 max_speculative_window.min(4)
@@ -858,8 +856,9 @@ impl StageOpenAiBackend {
                 }
                 _ => None,
             };
-            let mut verify_window_scheduler =
-                VerifyWindowScheduler::new(VerifyWindowPipelineConfig::from_env());
+            let mut verify_window_scheduler = VerifyWindowScheduler::new(
+                VerifyWindowPipelineConfig::new(request.speculative.verify_window.pipeline_depth),
+            );
             let composite_sidecar_enabled =
                 native_mtp_options.ngram_hybrid && draft_guard.is_none();
             let native_mtp_verify_windows_enabled =
@@ -1970,6 +1969,9 @@ impl StageOpenAiBackend {
                 "llama_stage.downstream_wait_ms".to_string(),
                 json!(decode_downstream_wait_ms),
             );
+            request
+                .speculative
+                .insert_telemetry_attrs(&mut decode_attrs);
             speculative_stats.insert_attrs(&mut decode_attrs);
             let native_mtp_stats = native_mtp.stats();
             cache_stats.native_mtp_stats = native_mtp_stats;

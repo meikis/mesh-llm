@@ -419,6 +419,7 @@ fn embedded_openai_args_from(
         speculative_window: embedded_args.speculative_window,
         adaptive_speculative_window: embedded_args.adaptive_speculative_window,
         draft_n_gpu_layers: embedded_args.draft_n_gpu_layers,
+        speculative: embedded_args.speculative,
         ngram_min: embedded_args.ngram_min,
         ngram_max: embedded_args.ngram_max,
         native_mtp_enabled: embedded_args.native_mtp_enabled,

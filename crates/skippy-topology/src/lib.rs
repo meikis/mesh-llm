@@ -417,6 +417,11 @@ pub const STAGE_RUNTIME_LLAMA_FAMILY_EXPECTATIONS: &[StageRuntimeFamilyExpectati
         recurrent_or_hybrid: false,
     },
     StageRuntimeFamilyExpectation {
+        llama_architecture: "inkling",
+        family_id: "inkling",
+        recurrent_or_hybrid: true,
+    },
+    StageRuntimeFamilyExpectation {
         llama_architecture: "internlm2",
         family_id: "internlm2",
         recurrent_or_hybrid: false,

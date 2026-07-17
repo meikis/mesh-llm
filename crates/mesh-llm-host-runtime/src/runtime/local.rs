@@ -1326,7 +1326,13 @@ async fn load_split_runtime_generation_inner(
         stage_index: downstream.stage_index,
         endpoint: downstream_endpoint,
     });
-    let vision_projector_loaded = runtime_options.config.projector_path.is_some();
+    let media_capability_evidence = models::runtime_media_capability_evidence(
+        runtime_options
+            .config
+            .projector_path
+            .as_deref()
+            .map(Path::new),
+    );
     let node_for_hook = spec.node.clone();
     let model_ref = spec.model_ref.to_string();
     let reporter_model_ref = model_ref.clone();
@@ -1359,9 +1365,7 @@ async fn load_split_runtime_generation_inner(
     let capabilities = models::runtime_verified_model_capabilities(
         spec.model_ref,
         spec.model_path,
-        models::RuntimeMediaCapabilityEvidence {
-            vision_projector_loaded,
-        },
+        media_capability_evidence,
     );
 
     spec.node
@@ -3637,12 +3641,13 @@ async fn start_runtime_skippy_model(
         resolved.model_fit.cache_type_v.to_ascii_uppercase(),
         context_length / 1024,
     );
+    let media_capability_evidence = models::runtime_media_capability_evidence(
+        resolved.hardware.projector_path.as_deref().map(Path::new),
+    );
     let capabilities = models::runtime_verified_model_capabilities(
         &model_name,
         spec.model_path,
-        models::RuntimeMediaCapabilityEvidence {
-            vision_projector_loaded: resolved.hardware.projector_path.is_some(),
-        },
+        media_capability_evidence,
     );
     let embedded_openai = resolved.to_embedded_openai_args(0, false)?;
     let mut options = resolved
@@ -3723,12 +3728,13 @@ async fn start_runtime_layer_package_model(
         resolved.model_fit.cache_type_v.to_ascii_uppercase(),
         context_length / 1024,
     );
+    let media_capability_evidence = models::runtime_media_capability_evidence(
+        resolved.hardware.projector_path.as_deref().map(Path::new),
+    );
     let capabilities = models::runtime_verified_model_capabilities(
         &model_name,
         spec.model_path,
-        models::RuntimeMediaCapabilityEvidence {
-            vision_projector_loaded: resolved.hardware.projector_path.is_some(),
-        },
+        media_capability_evidence,
     );
     let activation_width = skippy_stage_activation_width(package.activation_width, &model_name)?;
     let run_id = format!("mesh-skippy-{}", now_unix_nanos());

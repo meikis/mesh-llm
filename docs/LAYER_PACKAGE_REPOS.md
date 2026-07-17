@@ -66,6 +66,7 @@ dry-run by default and must be confirmed explicitly before submitting jobs:
 ```bash
 mesh-llm models package unsloth/Qwen3-8B-GGUF:Q4_K_M --dry-run
 mesh-llm models package unsloth/Qwen3-8B-GGUF:Q4_K_M --confirm --follow
+mesh-llm models package unsloth/inkling-GGUF:UD-Q2_K_XL --dry-run
 ```
 
 The hidden compatibility alias is `mesh-llm model-package`; prefer
@@ -85,8 +86,17 @@ Important options:
 - `--update-script`: refresh the bucket script when needed.
 
 The source model should stay in colon-selector form, for example
-`unsloth/Qwen3-8B-GGUF:Q4_K_M`. Do not split the quant into a separate `--quant`
-argument for generated job inputs.
+`unsloth/Qwen3-8B-GGUF:Q4_K_M`. A source revision may be requested as
+`org/repo@revision:quant`. The job resolves that revision to an immutable commit
+SHA before planning and mounts the source model volume at that SHA. Do not split
+the quant into a separate `--quant` argument for generated job inputs.
+
+Repository GGUFs whose basenames start with `mmproj` are discovered as
+multimodal projector sidecars, not model quants. The job passes them to
+`skippy-model-package write-package`, publishes them under `projectors/`, and
+preserves the source pipeline tag in the package model card. This is how a
+combined vision/audio projector such as Inkling's `mmproj-BF16.gguf` travels
+with its Q2 layer package.
 
 ## Publishing flow
 

@@ -3,7 +3,7 @@ use tokio_stream::StreamExt;
 
 use ::model_package::jobs::HfJobsClient;
 use ::model_package::permissions;
-use ::model_package::prepare::{self, DiscoveredQuant, PrepareParams};
+use ::model_package::prepare::{self, DiscoveredQuant, PrepareJob, PrepareParams};
 use ::model_package::script;
 use serde_json::json;
 
@@ -95,7 +95,13 @@ pub async fn dispatch_model_package(args: ModelPrepareArgs<'_>) -> Result<()> {
     // If no quant specified, list available quants and exit.
     // This path doesn't need HF_TOKEN — works for public repos.
     if source_quant.is_none() {
-        return run_list_quants(&hf_client, source_repo, json).await;
+        return run_list_quants(
+            &hf_client,
+            source_repo,
+            source_model_ref.revision.as_deref(),
+            json,
+        )
+        .await;
     }
 
     let submitting = confirm && !dry_run;
@@ -116,6 +122,7 @@ pub async fn dispatch_model_package(args: ModelPrepareArgs<'_>) -> Result<()> {
     eprintln!("🔍 Resolving source...");
     let params = PrepareParams {
         source_repo: source_repo.to_string(),
+        source_revision: source_model_ref.revision.clone(),
         quant: source_quant.map(|s| s.to_string()),
         target: target.map(|s| s.to_string()),
         model_id: model_id.map(|s| s.to_string()),
@@ -129,7 +136,82 @@ pub async fn dispatch_model_package(args: ModelPrepareArgs<'_>) -> Result<()> {
 
     let job = prepare::resolve(&hf_client, params, &perms).await?;
 
-    // Print resolved info.
+    print_prepare_job(&job, &perms);
+
+    if !submitting {
+        let redacted = redacted_spec(&job.spec);
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "dryRun": true,
+                    "confirmRequired": true,
+                    "sourceRepo": job.source_repo,
+                    "sourceRevision": job.source_revision,
+                    "sourceFile": job.source_file,
+                    "projectors": job.projectors,
+                    "targetRepo": job.target_repo,
+                    "modelId": job.model_id,
+                    "jobPlan": job.job_plan,
+                    "spec": redacted,
+                }))?
+            );
+        } else {
+            eprintln!();
+            eprintln!("🔍 Dry run — no HF Job was submitted. Add --confirm to submit.");
+            println!("{}", serde_json::to_string_pretty(&redacted)?);
+        }
+        return Ok(());
+    }
+
+    ensure_bucket_script_current(&hf_client).await?;
+
+    // Submit.
+    eprintln!();
+    let jobs_client = jobs_client.as_ref().expect("jobs client initialized");
+    let info = jobs_client.submit(&job.namespace, &job.spec).await?;
+    let job_url = format!(
+        "{}/jobs/{}/{}",
+        jobs_client.endpoint(),
+        job.namespace,
+        info.id
+    );
+    eprintln!("🚀 Submitted: {}", info.id);
+    eprintln!("   Console: {job_url}");
+    eprintln!("   Status:  mesh-llm models package --status {}", info.id);
+    eprintln!("   Logs:    mesh-llm models package --logs {}", info.id);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "submitted": true,
+                "job": info,
+                "jobUrl": job_url,
+                "namespace": job.namespace,
+                "sourceRepo": job.source_repo,
+                "sourceRevision": job.source_revision,
+                "sourceFile": job.source_file,
+                "projectors": job.projectors,
+                "targetRepo": job.target_repo,
+                "modelId": job.model_id,
+                "jobPlan": job.job_plan,
+            }))?
+        );
+    }
+
+    // Follow logs if requested.
+    if follow {
+        eprintln!();
+        eprintln!("📜 Following logs...");
+        eprintln!();
+        follow_until_done(jobs_client, &job.namespace, &info.id).await?;
+    }
+
+    Ok(())
+}
+
+fn print_prepare_job(job: &PrepareJob, perms: &permissions::PermissionCheck) {
     let shard_info = model_ref::split_gguf_shard_info(&job.source_file);
     let shard_str = if let Some(shard) = shard_info {
         format!(" ({} shards)", shard.total)
@@ -138,7 +220,11 @@ pub async fn dispatch_model_package(args: ModelPrepareArgs<'_>) -> Result<()> {
     };
 
     eprintln!("   Repo:   {}", job.source_repo);
+    eprintln!("   Commit: {}", job.source_revision);
     eprintln!("   File:   {}{}", job.source_file, shard_str);
+    for projector in &job.projectors {
+        eprintln!("   MMProj: {}", projector.path);
+    }
     eprintln!();
     eprintln!(
         "🔑 Permissions: {} ({})",
@@ -181,89 +267,25 @@ pub async fn dispatch_model_package(args: ModelPrepareArgs<'_>) -> Result<()> {
         job.job_plan.unit_label,
         format_cost(job.job_plan.max_cost_usd)
     );
-
-    if !submitting {
-        let redacted = redacted_spec(&job.spec);
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
-                    "dryRun": true,
-                    "confirmRequired": true,
-                    "sourceRepo": job.source_repo,
-                    "sourceFile": job.source_file,
-                    "targetRepo": job.target_repo,
-                    "modelId": job.model_id,
-                    "jobPlan": job.job_plan,
-                    "spec": redacted,
-                }))?
-            );
-        } else {
-            eprintln!();
-            eprintln!("🔍 Dry run — no HF Job was submitted. Add --confirm to submit.");
-            println!("{}", serde_json::to_string_pretty(&redacted)?);
-        }
-        return Ok(());
-    }
-
-    ensure_bucket_script_current(&hf_client).await?;
-
-    // Submit.
-    eprintln!();
-    let jobs_client = jobs_client.as_ref().expect("jobs client initialized");
-    let info = jobs_client.submit(&job.namespace, &job.spec).await?;
-    let job_url = format!(
-        "{}/jobs/{}/{}",
-        jobs_client.endpoint(),
-        job.namespace,
-        info.id
-    );
-    eprintln!("🚀 Submitted: {}", info.id);
-    eprintln!("   Console: {job_url}");
-    eprintln!("   Status:  mesh-llm models package --status {}", info.id);
-    eprintln!("   Logs:    mesh-llm models package --logs {}", info.id);
-
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "submitted": true,
-                "job": info,
-                "jobUrl": job_url,
-                "namespace": job.namespace,
-                "sourceRepo": job.source_repo,
-                "sourceFile": job.source_file,
-                "targetRepo": job.target_repo,
-                "modelId": job.model_id,
-                "jobPlan": job.job_plan,
-            }))?
-        );
-    }
-
-    // Follow logs if requested.
-    if follow {
-        eprintln!();
-        eprintln!("📜 Following logs...");
-        eprintln!();
-        follow_until_done(jobs_client, &job.namespace, &info.id).await?;
-    }
-
-    Ok(())
 }
 
 async fn run_list_quants(
     client: &hf_hub::HFClient,
     source_repo: &str,
+    source_revision: Option<&str>,
     json_output: bool,
 ) -> Result<()> {
-    let quants = prepare::list_quants(client, source_repo).await?;
+    let inventory = prepare::list_inventory(client, source_repo, source_revision).await?;
+    let quants = inventory.quants;
 
     if json_output {
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "sourceRepo": source_repo,
+                "sourceRevision": source_revision,
                 "quants": quants,
+                "projectors": inventory.projectors,
             }))?
         );
         return Ok(());

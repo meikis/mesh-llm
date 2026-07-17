@@ -22,7 +22,7 @@ def run(*command: str, cwd: Path | None = None) -> None:
 
 
 def ensure_build_tools() -> None:
-    required = ("git", "curl", "cmake", "c++")
+    required = ("git", "curl", "cmake", "c++", "ld.lld")
     if any(shutil.which(tool) is None for tool in required):
         if shutil.which("apt-get") is None:
             raise RuntimeError(f"missing build tools: {required}")
@@ -35,6 +35,7 @@ def ensure_build_tools() -> None:
             "cmake",
             "curl",
             "git",
+            "lld",
             "pkg-config",
         )
     if shutil.which("cargo") is None:

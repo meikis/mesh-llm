@@ -177,6 +177,7 @@ fn resolve_native_mtp_strategy(
             }
             true
         }
+        "ngram-simple" | "ngram-cache" => false,
         "disabled" => false,
         package_strategy if package_strategy_exists(package_generation, package_strategy) => {
             let speculative = package_generation
@@ -258,7 +259,14 @@ fn resolve_decode_config(input: DecodeResolutionInput<'_>) -> Result<Speculative
         }
         let kind = match ngram_proposer.as_deref() {
             Some("cache") => NgramProposerKind::Cache,
-            Some("simple") | None => existing.map_or(NgramProposerKind::Simple, |ngram| ngram.kind),
+            Some("simple") => NgramProposerKind::Simple,
+            None => existing.map_or_else(
+                || match input.requested_strategy {
+                    "ngram-cache" => NgramProposerKind::Cache,
+                    _ => NgramProposerKind::Simple,
+                },
+                |ngram| ngram.kind,
+            ),
             Some(_) => unreachable!("validated by mesh configuration"),
         };
         let max_proposal_tokens = ngram_max_proposal_tokens

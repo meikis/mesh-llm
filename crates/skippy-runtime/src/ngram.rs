@@ -2,6 +2,10 @@ use std::ptr::{self, NonNull};
 
 use anyhow::{Context, Result, bail};
 
+/// llama.cpp's stateful N-gram cache supports match windows up to four tokens.
+/// The proposal length remains independently configurable.
+pub const NGRAM_CACHE_MAX_NGRAM: usize = 4;
+
 /// Uses llama.cpp's ngram-simple proposer against accepted history, including
 /// the current sampled token as the final item in `history`.
 pub fn simple_draft(
@@ -53,6 +57,14 @@ pub struct Cache {
 
 impl Cache {
     pub fn new(ngram_min: usize, ngram_max: usize) -> Result<Self> {
+        if ngram_min == 0 || ngram_min > ngram_max {
+            bail!("cache N-gram proposer requires 0 < ngram_min <= ngram_max");
+        }
+        if ngram_max > NGRAM_CACHE_MAX_NGRAM {
+            bail!(
+                "cache N-gram proposer ngram_max {ngram_max} exceeds llama.cpp limit {NGRAM_CACHE_MAX_NGRAM}"
+            );
+        }
         let ngram_min = u16::try_from(ngram_min).context("cache N-gram minimum exceeds limit")?;
         let ngram_max = u16::try_from(ngram_max).context("cache N-gram maximum exceeds limit")?;
         let mut raw = ptr::null_mut();
@@ -140,7 +152,7 @@ impl Drop for Cache {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cache, simple_draft};
+    use super::{Cache, NGRAM_CACHE_MAX_NGRAM, simple_draft};
 
     #[test]
     fn drafts_the_continuation_from_the_latest_matching_ngram() {
@@ -173,5 +185,15 @@ mod tests {
         assert_eq!(cache.draft_after(&[9], 1).unwrap(), vec![7]);
         cache.append(&[9, 7, 1]).unwrap();
         assert_eq!(cache.draft_after(&[9], 1).unwrap(), vec![7]);
+    }
+
+    #[test]
+    fn cache_rejects_match_windows_above_the_llama_limit() {
+        let error = match Cache::new(2, NGRAM_CACHE_MAX_NGRAM + 1) {
+            Ok(_) => panic!("must reject max > 4"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("exceeds llama.cpp limit 4"));
     }
 }

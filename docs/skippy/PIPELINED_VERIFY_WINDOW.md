@@ -206,7 +206,7 @@ package can expose native MTP plus a request-local cache sidecar as follows:
         "cache": {
           "type": "ngram-cache",
           "ngram_min": 2,
-          "ngram_max": 6,
+          "ngram_max": 4,
           "max_proposal_tokens": 10,
           "history_scope": "request"
         }
@@ -301,7 +301,7 @@ the built-in request-local cache proposer explicitly:
 strategy = "mtp"
 ngram_proposer = "cache"
 ngram_min = 2
-ngram_max = 6
+ngram_max = 4
 ngram_max_proposal_tokens = 6
 extension_max_tokens = 6
 ```
@@ -323,7 +323,7 @@ mesh-llm serve meshllm/GLM-4.7-Flash-MTP-GGUF:Q4_K_M --split --no-draft \
   --speculative-strategy mtp \
   --speculative-ngram-proposer cache \
   --speculative-ngram-min 2 \
-  --speculative-ngram-max 6 \
+  --speculative-ngram-max 4 \
   --speculative-extension-max-tokens 8 \
   --speculative-verify-window-pipeline-depth 2
 ```

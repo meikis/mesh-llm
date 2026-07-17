@@ -310,7 +310,7 @@ without changing the MTP source:
     "cache": {
       "type": "ngram-cache",
       "ngram_min": 2,
-      "ngram_max": 6,
+      "ngram_max": 4,
       "max_proposal_tokens": 10,
       "history_scope": "request"
     }
@@ -331,8 +331,9 @@ without changing the MTP source:
 ```
 
 Supported proposer types are `native-mtp`, `ngram-simple`, and
-`ngram-cache`. An `ngram-cache` proposer MUST use `history_scope: "request"`:
-it contains only target-committed history for one request and is never shared
+`ngram-cache`. An `ngram-cache` proposer MUST use `history_scope: "request"`
+and `ngram_max` no greater than `4`, llama.cpp's current cache match-window
+limit. It contains only target-committed history for one request and is never shared
 between users or sessions. A `composite` strategy MUST use a `native-mtp`
 primary and an N-gram extender. Its `extension_policy` bounds the adaptive
 tail; every combined candidate is still verified by one target VerifyWindow.

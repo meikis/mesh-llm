@@ -323,6 +323,15 @@ impl SpeculativeDecodeConfig {
                 "N-gram proposer requires 0 < min_ngram <= max_ngram and max_proposal_tokens >= min_ngram"
             );
         }
+        if let Some(ngram) = &self.ngram
+            && ngram.kind == NgramProposerKind::Cache
+            && ngram.max_ngram > skippy_runtime::NGRAM_CACHE_MAX_NGRAM
+        {
+            bail!(
+                "cache N-gram proposer max_ngram must not exceed llama.cpp limit {}",
+                skippy_runtime::NGRAM_CACHE_MAX_NGRAM
+            );
+        }
         if self.extension.is_some() && (!self.native_mtp.enabled || self.ngram.is_none()) {
             bail!("N-gram extension requires both native MTP and an N-gram proposer");
         }
@@ -433,6 +442,27 @@ mod standalone_speculative_config_tests {
 
         assert_eq!(decoded, config);
         decoded.validate().expect("valid composite plan");
+    }
+
+    #[test]
+    fn standalone_speculative_config_rejects_cache_windows_above_llama_limit() {
+        let config = SpeculativeDecodeConfig {
+            ngram: Some(NgramProposalConfig {
+                kind: NgramProposerKind::Cache,
+                min_ngram: 2,
+                max_ngram: skippy_runtime::NGRAM_CACHE_MAX_NGRAM + 1,
+                max_proposal_tokens: 6,
+            }),
+            ..SpeculativeDecodeConfig::default()
+        };
+
+        let error = config.validate().expect_err("cache max must be bounded");
+
+        assert!(
+            error
+                .to_string()
+                .contains("must not exceed llama.cpp limit 4")
+        );
     }
 }
 

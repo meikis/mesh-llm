@@ -30,7 +30,7 @@ mod ngram;
 pub mod package;
 mod runtime_events;
 pub use native_mtp::NativeMtpDraft;
-pub use ngram::{Cache as NgramCache, simple_draft as ngram_simple_draft};
+pub use ngram::{Cache as NgramCache, NGRAM_CACHE_MAX_NGRAM, simple_draft as ngram_simple_draft};
 
 pub const MAX_LOGIT_BIAS: usize = 256;
 pub const GGML_TYPE_F16: u32 = 1;

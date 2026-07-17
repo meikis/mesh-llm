@@ -797,6 +797,22 @@ fn validate_ngram_proposer(
         );
     }
     if proposer.proposer_type == "ngram-cache"
+        && max as usize > skippy_runtime::NGRAM_CACHE_MAX_NGRAM
+    {
+        report.error(
+            "unsupported_ngram_cache_max_window",
+            format!(
+                "N-gram cache proposer {name} ngram_max {max} exceeds llama.cpp limit {}",
+                skippy_runtime::NGRAM_CACHE_MAX_NGRAM
+            ),
+            Some("model-package.json".to_string()),
+            format!(
+                "set ngram_max to at most {} while keeping max_proposal_tokens independent",
+                skippy_runtime::NGRAM_CACHE_MAX_NGRAM
+            ),
+        );
+    }
+    if proposer.proposer_type == "ngram-cache"
         && proposer.history_scope.as_deref() != Some("request")
     {
         report.error(
@@ -1689,7 +1705,7 @@ mod tests {
                         "cache": {
                             "type": "ngram-cache",
                             "ngram_min": 2,
-                            "ngram_max": 6,
+                            "ngram_max": 4,
                             "max_proposal_tokens": 6,
                             "history_scope": "request"
                         }
@@ -1846,6 +1862,38 @@ mod tests {
 
         assert!(!report.valid);
         assert_issue(&report, "invalid_ngram_cache_history_scope");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preflight_rejects_ngram_cache_window_above_llama_limit() {
+        let dir = unique_test_dir("ngram-cache-max-window");
+        let package = write_package_fixture(&dir, true);
+        write_generation_to_manifest(
+            &package,
+            serde_json::json!({
+                "speculative_decoding": {
+                    "default": "cache",
+                    "proposers": {
+                        "cache": {
+                            "type": "ngram-cache",
+                            "ngram_min": 2,
+                            "ngram_max": 5,
+                            "max_proposal_tokens": 6,
+                            "history_scope": "request"
+                        }
+                    },
+                    "strategies": {
+                        "cache": { "type": "ngram-cache", "proposer": "cache" }
+                    }
+                }
+            }),
+        );
+
+        let report = preflight_package(&package, &PackagePreflightOptions::default());
+
+        assert!(!report.valid);
+        assert_issue(&report, "unsupported_ngram_cache_max_window");
         fs::remove_dir_all(dir).unwrap();
     }
 

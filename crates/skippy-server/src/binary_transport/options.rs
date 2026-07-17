@@ -216,7 +216,7 @@ mod tests {
             ngram: Some(NgramProposalConfig {
                 kind: NgramProposerKind::Cache,
                 min_ngram: 2,
-                max_ngram: 6,
+                max_ngram: 4,
                 max_proposal_tokens: 6,
             }),
             extension: Some(NgramExtensionConfig {

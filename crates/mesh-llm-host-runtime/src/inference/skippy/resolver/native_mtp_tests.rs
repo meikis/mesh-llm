@@ -72,7 +72,7 @@ fn native_mtp_cache_generation() -> PackageGenerationInfo {
             prediction_depth: None,
             layer_indices: Vec::new(),
             ngram_min: Some(2),
-            ngram_max: Some(6),
+            ngram_max: Some(4),
             max_proposal_tokens: Some(10),
             history_scope: Some("request".to_string()),
         },
@@ -118,7 +118,7 @@ fn ngram_cache_generation() -> PackageGenerationInfo {
             prediction_depth: None,
             layer_indices: Vec::new(),
             ngram_min: Some(2),
-            ngram_max: Some(6),
+            ngram_max: Some(4),
             max_proposal_tokens: Some(6),
             history_scope: Some("request".to_string()),
         },
@@ -365,7 +365,7 @@ verify_window_pipeline_depth = 2
         .expect("cache proposer should resolve");
     assert_eq!(ngram.kind, skippy_server::NgramProposerKind::Cache);
     assert_eq!(ngram.min_ngram, 2);
-    assert_eq!(ngram.max_ngram, 6);
+    assert_eq!(ngram.max_ngram, 4);
     assert_eq!(ngram.max_proposal_tokens, 9);
     let extension = resolved
         .speculative
@@ -424,7 +424,7 @@ fn direct_native_mtp_can_use_a_request_local_cache_extension() {
 strategy = "mtp"
 ngram_proposer = "cache"
 ngram_min = 2
-ngram_max = 6
+ngram_max = 4
 ngram_max_proposal_tokens = 6
 "#,
     );
@@ -464,6 +464,79 @@ ngram_max_proposal_tokens = 6
         openai.speculative.ngram.as_ref().map(|ngram| ngram.kind),
         Some(skippy_server::NgramProposerKind::Cache)
     );
+}
+
+#[test]
+fn direct_cache_strategy_rejects_an_unsupported_cache_window() {
+    let mesh_config = parse_config(
+        r#"
+[defaults.speculative]
+strategy = "ngram-cache"
+ngram_proposer = "cache"
+ngram_min = 2
+ngram_max = 5
+ngram_max_proposal_tokens = 6
+"#,
+    );
+    let model_file = temp_model_file();
+
+    let error = resolve_skippy_config(SkippyConfigResolveRequest {
+        mesh_config: &mesh_config,
+        model_id: "meshllm/GLM-4.7-Flash-MTP-GGUF",
+        model_path: model_file.path(),
+        model_bytes: 4 * 1024 * 1024 * 1024,
+        allocatable_memory_bytes: None,
+        request_defaults: None,
+        package_generation: None,
+    })
+    .expect_err("cache windows above the llama.cpp limit must be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("must not exceed llama.cpp limit 4")
+    );
+}
+
+#[test]
+fn direct_cache_strategy_resolves_a_request_local_cache_proposer() {
+    let mesh_config = parse_config(
+        r#"
+[defaults.speculative]
+strategy = "ngram-cache"
+ngram_min = 2
+ngram_max = 4
+ngram_max_proposal_tokens = 6
+"#,
+    );
+    let model_file = temp_model_file();
+
+    let resolved = resolve_skippy_config(SkippyConfigResolveRequest {
+        mesh_config: &mesh_config,
+        model_id: "meshllm/GLM-4.7-Flash-MTP-GGUF",
+        model_path: model_file.path(),
+        model_bytes: 4 * 1024 * 1024 * 1024,
+        allocatable_memory_bytes: None,
+        request_defaults: None,
+        package_generation: None,
+    })
+    .expect("direct cache strategy should resolve");
+
+    assert!(!resolved.speculative.native_mtp_enabled);
+    assert_eq!(
+        resolved.speculative.decode.effective_strategy,
+        "ngram-cache"
+    );
+    let ngram = resolved
+        .speculative
+        .decode
+        .ngram
+        .as_ref()
+        .expect("direct cache strategy should select an N-gram proposer");
+    assert_eq!(ngram.kind, skippy_server::NgramProposerKind::Cache);
+    assert_eq!(ngram.min_ngram, 2);
+    assert_eq!(ngram.max_ngram, 4);
+    assert_eq!(ngram.max_proposal_tokens, 6);
 }
 
 #[test]

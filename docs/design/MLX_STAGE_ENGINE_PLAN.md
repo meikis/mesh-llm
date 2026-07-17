@@ -618,11 +618,12 @@ the trait in a new `skippy-engine` crate, implement it for the existing
 behavior change; ship this independently of MLX. Validate with existing
 `skippy-correctness` and `mic-lab` runs.
 
-> **Partially implemented on this branch.** The engine-neutral crate and an
-> additive reduced binary server lane now exist, and MLX uses them for the
-> two-process proof. The mature llama runtime has not yet been migrated from
-> concrete `RuntimeState`; that compatibility refactor remains before the
-> engine-neutral lane can replace the default server internals.
+> **Partially implemented on this branch.** The engine-neutral crate, an
+> additive reduced binary server lane, and a dense `LlamaStageEngine` adapter
+> over the existing `RuntimeState` now exist; MLX uses the same contract for the
+> two-process proof. The mature llama server has not yet been switched from its
+> concrete `RuntimeState` path because its broader batching, cache, MTP, and
+> multimodal surface still needs capability-aware migration.
 
 **Phase 2 — Solo MLX serving + JIT quant (the workflow win; lead here).**
 `MlxStageEngine` as a single-stage/whole-model engine: open/load, session,
@@ -758,9 +759,9 @@ Spikes 1 and 2 are more decisive than any standalone token/s benchmark.
 
 1. Add tensor-at-a-time MLX quantization to the materializer and measure peak
    RSS against the one-source-tensor memory contract.
-2. Add the llama `StageEngine` adapter and route normal `skippy-server` launch
-   through the engine-neutral contract; the MLX two-process binary-wire proof
-   is complete.
+2. Route normal `skippy-server` launch through the engine-neutral contract while
+   retaining capability-gated llama-only batching/cache/MTP/multimodal paths;
+   the dense llama adapter and MLX two-process binary-wire proof are complete.
 3. Run **Spike 2 (boundary fence)** at frontier residual widths and keep it as a
    go/no-go gate.
 4. Use Nemotron-H as the first frontier-family follow-up already represented in

@@ -7863,6 +7863,7 @@ dependencies = [
  "blake3",
  "clap",
  "futures-util",
+ "half",
  "libc",
  "openai-frontend",
  "opentelemetry-proto",

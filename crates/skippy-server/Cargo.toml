@@ -23,6 +23,7 @@ base64 = "0.22"
 blake3.workspace = true
 clap.workspace = true
 futures-util = "0.3"
+half = "2"
 skippy-runtime = { path = "../skippy-runtime", version = "0.72.1"  }
 skippy-protocol = { path = "../skippy-protocol", version = "0.72.1"  }
 skippy-engine = { path = "../skippy-engine", version = "0.72.1" }

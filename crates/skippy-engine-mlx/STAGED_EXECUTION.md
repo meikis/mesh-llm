@@ -12,6 +12,9 @@ This is a production-shaped bridge, not yet the default mesh launch path:
   buffer descriptors.
 - `skippy-server::engine_transport` serves that contract using the existing
   `StageWireMessage`, ready handshake, activation codec, and reply codec.
+- `skippy-server::llama_engine` proves the existing llama `RuntimeState` can
+  implement the same dense contract, including F16/BF16/F32 residual conversion
+  and checkpoint/restore/trim delegation, without changing the native ABI.
 - `MlxStageEngine` loads one materialized partial SafeTensors file, owns
   per-session KV caches on a dedicated MLX worker thread, and executes only its
   configured layer range.

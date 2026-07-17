@@ -13,6 +13,7 @@ pub mod frontend;
 pub mod http;
 pub mod kv_integration;
 pub mod kv_proto;
+pub mod llama_engine;
 pub mod package;
 pub mod runtime_state;
 pub mod telemetry;

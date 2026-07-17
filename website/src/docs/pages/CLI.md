@@ -208,6 +208,36 @@ Switches:
 - `--trust-policy <TRUST_POLICY>`: override peer ownership trust policy.
 - `--trust-owner <TRUST_OWNER>`: add trusted owner IDs on top of the local trust store.
 
+### Speculative decoding overrides
+
+Advanced `serve` invocations can temporarily override a package or config-file
+speculative decoding plan. CLI values have highest precedence; fields you omit
+continue to come from the selected model, defaults, or model package.
+
+```bash
+mesh-llm serve meshllm/GLM-4.7-Flash-MTP-GGUF:Q4_K_M --split --no-draft \
+  --speculative-strategy mtp \
+  --speculative-ngram-proposer cache \
+  --speculative-ngram-min 2 \
+  --speculative-ngram-max 4 \
+  --speculative-ngram-max-proposal-tokens 6 \
+  --speculative-extension-initial-tokens 2 \
+  --speculative-extension-max-tokens 6 \
+  --speculative-verify-window-pipeline-depth 2
+```
+
+- `--speculative-strategy <STRATEGY>`: select `auto`, `disabled`, `mtp`, a built-in direct-GGUF N-gram strategy, or a strategy declared by the model package.
+- `--speculative-ngram-proposer <simple|cache>`: choose the N-gram implementation. The cache proposer is request-local.
+- `--speculative-ngram-min <N>` / `--speculative-ngram-max <N>`: set the history match bounds.
+- `--speculative-ngram-max-proposal-tokens <N>`: cap the N-gram continuation proposed at once.
+- `--speculative-extension-initial-tokens <N>` / `--speculative-extension-max-tokens <N>`: set the adaptive N-gram tail bounds when extending native MTP.
+- `--speculative-extension-tail-backoff-proposals <N>`: pause extension attempts after a rejected N-gram tail.
+- `--speculative-native-mtp-reject-cooldown-tokens <N>`: set the generated-token cooldown after native MTP rejection.
+- `--speculative-native-mtp-suppress-cooldown-drafts`: suppress native drafts during cooldown; `--speculative-native-mtp-allow-cooldown-drafts` explicitly disables a configured suppression policy.
+- `--speculative-native-mtp-suppress-cooldown-draft-limit <N>`: cap the native drafts suppressed by one cooldown.
+- `--speculative-verify-window-min-tokens <N>` / `--speculative-verify-window-max-tokens <N>`: set adaptive verification window bounds.
+- `--speculative-verify-window-pipeline-depth <N>`: set the maximum in-flight asynchronous verification windows.
+
 ## Commands
 
 ### `models`

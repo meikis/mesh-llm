@@ -756,7 +756,6 @@ gpu_id = "pci:0000:65:00.0"
             "models",
             "plugins",
             "settings",
-            "strategy",
         ];
 
         let mut total = 0usize;

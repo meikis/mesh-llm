@@ -820,7 +820,49 @@
       }
     },
     {
+      "canonical_path": "defaults.speculative.extension_initial_tokens",
+      "support": "supported",
+      "source": {
+        "kind": "built_in"
+      }
+    },
+    {
+      "canonical_path": "defaults.speculative.extension_max_tokens",
+      "support": "supported",
+      "source": {
+        "kind": "built_in"
+      }
+    },
+    {
+      "canonical_path": "defaults.speculative.extension_tail_backoff_proposals",
+      "support": "supported",
+      "source": {
+        "kind": "built_in"
+      }
+    },
+    {
       "canonical_path": "defaults.speculative.mode",
+      "support": "supported",
+      "source": {
+        "kind": "built_in"
+      }
+    },
+    {
+      "canonical_path": "defaults.speculative.native_mtp_reject_cooldown_tokens",
+      "support": "supported",
+      "source": {
+        "kind": "built_in"
+      }
+    },
+    {
+      "canonical_path": "defaults.speculative.native_mtp_suppress_cooldown_draft_limit",
+      "support": "supported",
+      "source": {
+        "kind": "built_in"
+      }
+    },
+    {
+      "canonical_path": "defaults.speculative.native_mtp_suppress_cooldown_drafts",
       "support": "supported",
       "source": {
         "kind": "built_in"
@@ -834,7 +876,21 @@
       }
     },
     {
+      "canonical_path": "defaults.speculative.ngram_max_proposal_tokens",
+      "support": "supported",
+      "source": {
+        "kind": "built_in"
+      }
+    },
+    {
       "canonical_path": "defaults.speculative.ngram_min",
+      "support": "supported",
+      "source": {
+        "kind": "built_in"
+      }
+    },
+    {
+      "canonical_path": "defaults.speculative.ngram_proposer",
       "support": "supported",
       "source": {
         "kind": "built_in"
@@ -849,6 +905,34 @@
     },
     {
       "canonical_path": "defaults.speculative.spec_default",
+      "support": "supported",
+      "source": {
+        "kind": "built_in"
+      }
+    },
+    {
+      "canonical_path": "defaults.speculative.strategy",
+      "support": "supported",
+      "source": {
+        "kind": "built_in"
+      }
+    },
+    {
+      "canonical_path": "defaults.speculative.verify_window_max_tokens",
+      "support": "supported",
+      "source": {
+        "kind": "built_in"
+      }
+    },
+    {
+      "canonical_path": "defaults.speculative.verify_window_min_tokens",
+      "support": "supported",
+      "source": {
+        "kind": "built_in"
+      }
+    },
+    {
+      "canonical_path": "defaults.speculative.verify_window_pipeline_depth",
       "support": "supported",
       "source": {
         "kind": "built_in"

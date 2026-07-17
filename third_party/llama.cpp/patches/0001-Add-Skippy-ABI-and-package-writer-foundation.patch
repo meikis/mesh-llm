@@ -1,4 +1,4 @@
-From e6e79890d1c4ee545fa0fc22e293a732f465cf7f Mon Sep 17 00:00:00 2001
+From 44fbcee408ecf53a7ee56963368642062715eca4 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Fri, 26 Jun 2026 13:47:52 +1000
 Subject: [PATCH 01/16] Add Skippy ABI and package writer foundation
@@ -421,7 +421,7 @@ index c8ecb0a2..660dee46 100644
      }
  
 diff --git a/src/llama-graph.h b/src/llama-graph.h
-index c84cb6a4..cbcb2be0 100644
+index 7ed490ce..a7986a87 100644
 --- a/src/llama-graph.h
 +++ b/src/llama-graph.h
 @@ -30,6 +30,18 @@ class llama_memory_recurrent_context;

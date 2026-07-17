@@ -9780,6 +9780,7 @@ ngram_max_proposal_tokens = 6
             args: Vec::new(),
             tools: Vec::new(),
             manifest: None,
+            web_ui: plugin::PluginWebUiState::default(),
             startup: None,
             error: None,
         };

@@ -1,4 +1,4 @@
-From ddd450fcad04bfdd786473ef19e7b8825e83ddf3 Mon Sep 17 00:00:00 2001
+From c1d935460e27f2522207cd248b0cb95ab10d2b79 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Fri, 26 Jun 2026 13:47:53 +1000
 Subject: [PATCH 08/16] Add external decode, media prefill, and newer family
@@ -255,7 +255,7 @@ index 03873edb..fb804ffd 100644
          const auto & embeddings_layer_inp = params.cparams.embeddings_layer_inp;
          for (size_t il = 0; il < embeddings_layer_inp.size(); ++il) {
 diff --git a/src/llama-graph.h b/src/llama-graph.h
-index 1a35e293..08af6f7a 100644
+index d9e241a1..2e0d9c3b 100644
 --- a/src/llama-graph.h
 +++ b/src/llama-graph.h
 @@ -49,6 +49,13 @@ struct skippy_activation_rwkv7_v_first {
@@ -282,7 +282,7 @@ index 1a35e293..08af6f7a 100644
  
  // certain models (typically multi-modal) can produce different types of graphs
  enum llm_graph_type {
-@@ -205,6 +215,22 @@ private:
+@@ -208,6 +218,22 @@ private:
      int64_t n_embd;
  };
  
@@ -305,7 +305,7 @@ index 1a35e293..08af6f7a 100644
  class llm_graph_input_pos : public llm_graph_input_i {
  public:
      llm_graph_input_pos(uint32_t n_pos_per_embd) : n_pos_per_embd(n_pos_per_embd) {}
-@@ -856,6 +882,7 @@ public:
+@@ -859,6 +885,7 @@ public:
      ggml_tensor * get_embd_pooled() const { return t_embd_pooled; }
      ggml_tensor * get_h_nextn()     const { return t_h_nextn; }
      ggml_tensor * get_skippy_rwkv7_v_first() const { return t_skippy_rwkv7_v_first; }
@@ -313,7 +313,7 @@ index 1a35e293..08af6f7a 100644
  
      ggml_tensor * get_layer_inp(int il) const { return t_layer_inp[il]; }
  
-@@ -892,6 +919,7 @@ public:
+@@ -895,6 +922,7 @@ public:
      ggml_tensor * t_embd_pooled = nullptr;
      ggml_tensor * t_h_nextn     = nullptr; // [n_embd, n_outputs] hidden state before final output norm
      ggml_tensor * t_skippy_rwkv7_v_first = nullptr;

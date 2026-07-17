@@ -1,4 +1,4 @@
-From fa85f758a664b6273a1a32db61907960f7674aff Mon Sep 17 00:00:00 2001
+From 4e961a921cfe7a5977ac781e8dfbfcdb04a7e725 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Fri, 26 Jun 2026 13:47:53 +1000
 Subject: [PATCH 10/16] Add MTP execution support and sampling cleanup
@@ -296,10 +296,10 @@ index a6bd7fd9..cfb4a8fa 100644
  
  #ifdef __cplusplus
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 1b2287c1..72b0993c 100644
+index c0bfd7db..9ab7be4b 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -1958,9 +1958,22 @@ int llama_context::decode(const llama_batch & batch_inp) {
+@@ -1989,9 +1989,22 @@ int llama_context::decode(const llama_batch & batch_inp) {
  
                  const uint32_t n_embd  = hparams.n_embd_out();
                  float * embd_nextn_out = embd_nextn.data + offset*n_embd;
@@ -337,10 +337,10 @@ index fb804ffd..a75f0b75 100644
      ggml_tensor * kq_mask_all = ggml_fill(ctx0, kq_mask, -INFINITY);
  
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 0ed6a3c1..211dc447 100644
+index 474daf17..5b83c0c0 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
-@@ -2177,6 +2177,14 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params,
+@@ -2190,6 +2190,14 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params,
                          }
                      }
  
@@ -783,7 +783,7 @@ index 32fe6def..10bf235f 100644
  }
 -
 diff --git a/src/models/models.h b/src/models/models.h
-index 7a52e7bc..b40f9811 100644
+index a86ae05a..e9a7c0c2 100644
 --- a/src/models/models.h
 +++ b/src/models/models.h
 @@ -1068,6 +1068,10 @@ struct llama_model_deepseek2 : public llama_model_base {
@@ -797,7 +797,7 @@ index 7a52e7bc..b40f9811 100644
      std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
  };
  
-@@ -1217,6 +1221,7 @@ struct llama_model_glm_dsa : public llama_model_base {
+@@ -1218,6 +1222,7 @@ struct llama_model_glm_dsa : public llama_model_base {
      void load_arch_tensors(llama_model_loader & ml) override;
  
      using graph = llama_model_deepseek2::graph;

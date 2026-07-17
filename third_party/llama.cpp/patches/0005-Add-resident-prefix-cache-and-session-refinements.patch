@@ -1,4 +1,4 @@
-From 191f732a88e228d42353809d70ceda57afc8fed6 Mon Sep 17 00:00:00 2001
+From 6ef5b5c66a88af43d7f4d853a848ce638d0db170 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Fri, 26 Jun 2026 13:47:52 +1000
 Subject: [PATCH 05/16] Add resident prefix cache and session refinements

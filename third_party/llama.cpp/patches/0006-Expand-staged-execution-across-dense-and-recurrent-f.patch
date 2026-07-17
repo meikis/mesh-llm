@@ -1,4 +1,4 @@
-From 3fbfb3baa70748989018dca2e0d0477ddc87f2f9 Mon Sep 17 00:00:00 2001
+From 3067d86be715f1933b80b60950f8fe254d441380 Mon Sep 17 00:00:00 2001
 From: Mesh-LLM CI <ci@mesh-llm.local>
 Date: Fri, 26 Jun 2026 13:47:53 +1000
 Subject: [PATCH 06/16] Expand staged execution across dense and recurrent

@@ -13,9 +13,6 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from huggingface_hub import HfApi
-
-
 def run(*command: str, cwd: Path | None = None) -> None:
     print("+", " ".join(command), flush=True)
     subprocess.run(command, cwd=cwd, check=True)
@@ -138,6 +135,8 @@ def convert(args: argparse.Namespace, root: Path) -> Path:
 
 
 def upload(args: argparse.Namespace, artifact_dir: Path) -> None:
+    from huggingface_hub import HfApi
+
     api = HfApi(token=os.environ["HF_TOKEN"])
     api.create_repo(args.target_repo, repo_type="model", private=False, exist_ok=True)
     api.upload_large_folder(
@@ -157,7 +156,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-splits", type=int, default=1)
     parser.add_argument("--split-max-size", default="50G")
     parser.add_argument("--max-memory", default="24G")
-    parser.add_argument("--work-dir", default="/tmp/skippy-convert")
+    parser.add_argument("--work-dir", default="/data/skippy-convert")
     parser.add_argument("--mesh-repo", default="https://github.com/Mesh-LLM/mesh-llm.git")
     parser.add_argument("--mesh-revision", required=True)
     return parser.parse_args()
@@ -165,6 +164,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    os.environ.setdefault("HF_HOME", str(Path(args.work_dir) / "hf-home"))
     ensure_build_tools()
     mesh_root = Path("/tmp/mesh-llm")
     checkout_mesh(args.mesh_repo, args.mesh_revision, mesh_root)

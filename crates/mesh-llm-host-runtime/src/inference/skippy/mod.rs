@@ -185,6 +185,14 @@ impl SkippyTelemetryOptions {
             level: TelemetryLevel::Debug,
         }
     }
+
+    pub(crate) fn summary(metrics_otlp_grpc: String) -> Self {
+        Self {
+            metrics_otlp_grpc: Some(metrics_otlp_grpc),
+            queue_capacity: 1024,
+            level: TelemetryLevel::Summary,
+        }
+    }
 }
 
 pub(crate) fn default_skippy_openai_guardrails() -> OpenAiGuardrailsConfig {

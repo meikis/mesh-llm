@@ -5947,18 +5947,17 @@ async fn attach_local_release_attestation(node: &mesh::Node) -> Result<()> {
 }
 
 fn skippy_telemetry_options(options: &RuntimeOptions) -> skippy::SkippyTelemetryOptions {
-    if !options.debug {
-        return skippy::SkippyTelemetryOptions::off();
+    let endpoint = options
+        .skippy_metrics_otlp_grpc
+        .as_deref()
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .map(str::to_owned);
+    match (endpoint, options.debug) {
+        (Some(endpoint), true) => skippy::SkippyTelemetryOptions::debug(Some(endpoint)),
+        (Some(endpoint), false) => skippy::SkippyTelemetryOptions::summary(endpoint),
+        (None, _) => skippy::SkippyTelemetryOptions::off(),
     }
-
-    skippy::SkippyTelemetryOptions::debug(
-        options
-            .skippy_metrics_otlp_grpc
-            .as_deref()
-            .map(str::trim)
-            .filter(|endpoint| !endpoint.is_empty())
-            .map(str::to_owned),
-    )
 }
 
 fn configure_run_auto_process_state(
@@ -10793,6 +10792,41 @@ ngram_max_proposal_tokens = 6
         assert!(metrics.contains(&hardware::Metric::GpuFacts));
         assert!(metrics.contains(&hardware::Metric::VramBytes));
         assert!(metrics.contains(&hardware::Metric::IsSoc));
+    }
+
+    #[test]
+    fn skippy_telemetry_endpoint_enables_summary_without_debug() {
+        let options = RuntimeOptions {
+            skippy_metrics_otlp_grpc: Some("http://127.0.0.1:14317".to_string()),
+            ..RuntimeOptions::default()
+        };
+
+        let telemetry = skippy_telemetry_options(&options);
+
+        assert_eq!(
+            telemetry.metrics_otlp_grpc.as_deref(),
+            Some("http://127.0.0.1:14317")
+        );
+        assert_eq!(
+            telemetry.level,
+            skippy_server::telemetry::TelemetryLevel::Summary
+        );
+    }
+
+    #[test]
+    fn skippy_telemetry_debug_keeps_debug_level_when_endpoint_is_set() {
+        let options = RuntimeOptions {
+            debug: true,
+            skippy_metrics_otlp_grpc: Some("http://127.0.0.1:14317".to_string()),
+            ..RuntimeOptions::default()
+        };
+
+        let telemetry = skippy_telemetry_options(&options);
+
+        assert_eq!(
+            telemetry.level,
+            skippy_server::telemetry::TelemetryLevel::Debug
+        );
     }
 
     #[test]

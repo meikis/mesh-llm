@@ -56,7 +56,6 @@
         "hunyuan-dense",
         "hunyuan-moe",
         "hunyuan-vl",
-        "inkling",
         "openai-moe"
       ]
     },

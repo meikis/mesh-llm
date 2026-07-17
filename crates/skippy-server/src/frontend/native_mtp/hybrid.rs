@@ -53,7 +53,6 @@ impl CompositeProposalProvider {
         max_ngram_extension_tokens: usize,
         cached_ngram_proposer: Option<&mut CachedNgramProposer>,
     ) -> OpenAiResult<NativeMtpHybridProposal> {
-        let max_proposal_tokens = max_proposal_tokens.min(self.max_proposal_tokens);
         let native_mtp_tokens =
             &native_mtp_tokens[..native_mtp_tokens.len().min(max_proposal_tokens)];
         if !self.enabled || self.max_proposal_tokens == 0 || max_ngram_extension_tokens == 0 {
@@ -64,6 +63,7 @@ impl CompositeProposalProvider {
 
         let ngram_limit = max_proposal_tokens
             .saturating_sub(native_mtp_tokens.len())
+            .min(self.max_proposal_tokens)
             .min(max_ngram_extension_tokens);
         let (
             ngram_tokens,
@@ -464,6 +464,35 @@ mod tests {
         assert!(proposal.ngram_span_available());
         assert!(proposal.ngram_mtp_prefix_agreed());
         assert!(!proposal.ngram_mtp_prefix_disagreed());
+    }
+
+    #[test]
+    fn mtp_only_provider_preserves_native_proposals() {
+        let mut options = options();
+        options.ngram_hybrid = false;
+        options.ngram_max_proposal_tokens = 0;
+        let provider = CompositeProposalProvider::from_options(options);
+
+        let proposal = provider.propose(&[9, 10, 11], &[], 2);
+
+        assert_eq!(proposal.tokens(), &[9, 10]);
+        assert_eq!(proposal.native_mtp_token_count(), 2);
+        assert_eq!(proposal.ngram_token_count(), 0);
+    }
+
+    #[test]
+    fn ngram_limit_does_not_truncate_the_native_prefix() {
+        let mut options = options();
+        options.ngram_max_proposal_tokens = 1;
+        let provider = CompositeProposalProvider::from_options(options);
+
+        let proposal = provider
+            .propose_with_ngram_extension(&[9, 10, 11], &[], 3, 1, None)
+            .unwrap();
+
+        assert_eq!(proposal.tokens(), &[9, 10, 11]);
+        assert_eq!(proposal.native_mtp_token_count(), 3);
+        assert_eq!(proposal.ngram_token_count(), 0);
     }
 
     #[test]

@@ -214,12 +214,16 @@ impl PredictionReturnReceiver {
     }
 
     pub(crate) fn try_recv_expected(&self, expected: WireReplyKind) -> Result<Option<StageReply>> {
+        self.try_recv_one_of(std::slice::from_ref(&expected))
+    }
+
+    pub(crate) fn try_recv_one_of(&self, expected: &[WireReplyKind]) -> Result<Option<StageReply>> {
         let Some(reply) = self.try_recv()? else {
             return Ok(None);
         };
-        if reply.kind != expected {
+        if !expected.contains(&reply.kind) {
             bail!(
-                "expected {expected:?} direct prediction return, got {:?}",
+                "expected one of {expected:?} from direct prediction return, got {:?}",
                 reply.kind
             );
         }
@@ -282,6 +286,13 @@ impl PredictionReturnSinks {
                 return Ok(None);
             }
             thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    pub(crate) fn remove(&self, request_id: u64, session_id: u64) {
+        let key = PredictionReturnKey::new(request_id, session_id);
+        if let Ok(mut streams) = self.streams.lock() {
+            streams.remove(&key);
         }
     }
 }
@@ -510,6 +521,32 @@ mod tests {
             .unwrap()
             .expect("registered prediction return sink");
         assert_eq!(stream.peer_addr().unwrap(), client.local_addr().unwrap());
+    }
+
+    #[test]
+    fn prediction_return_sinks_remove_abandoned_streams() {
+        let request_id = 41;
+        let session_id = 43;
+        let sinks = PredictionReturnSinks::default();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+
+        sinks
+            .insert_opened_sink(
+                prediction_return_open_message(request_id, session_id),
+                server,
+            )
+            .unwrap();
+        sinks.remove(request_id, session_id);
+
+        assert!(
+            sinks
+                .take_wait(request_id, session_id, Duration::from_millis(1))
+                .unwrap()
+                .is_none()
+        );
+        drop(client);
     }
 
     #[test]

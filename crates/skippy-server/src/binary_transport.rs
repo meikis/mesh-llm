@@ -48,6 +48,7 @@ pub(crate) mod forwarding;
 mod kv_eviction;
 mod options;
 mod preconnect;
+mod restore_prefill_decode;
 mod socket;
 mod wire;
 
@@ -63,6 +64,9 @@ use self::kv_eviction::{
 };
 pub use self::options::{BinaryStageOptions, EmbeddedOpenAiStageOptions, parse_wire_dtype};
 use self::preconnect::spawn_downstream_preconnector;
+use self::restore_prefill_decode::handle_binary_restore_prefill_decode_control;
+#[cfg(test)]
+use self::restore_prefill_decode::restore_prefill_decode_as_decode_message;
 use self::socket::*;
 pub use self::wire::WireCondition;
 pub(crate) use self::wire::write_stage_message_conditioned;
@@ -729,6 +733,8 @@ fn handle_binary_connection(
                 reset_start_unix_nanos,
                 reset_end_unix_nanos,
             );
+            prediction_return_streams.remove(&(message.request_id, message.session_id));
+            prediction_return_sinks.remove(message.request_id, message.session_id);
             send_reply_ack_with_stats(&mut *upstream, stop_stats).context("send stop ACK")?;
             continue;
         }
@@ -896,6 +902,7 @@ fn handle_binary_connection(
                     activation_width,
                     control_started,
                     control_stats,
+                    prediction_return_sinks,
                     &mut prediction_return_streams,
                     downstream_connect_timeout_secs,
                     native_mtp_enabled,
@@ -2451,6 +2458,9 @@ fn configure_prediction_return_stream(
     prediction_return_sinks: &PredictionReturnSinks,
     prediction_return_streams: &mut BTreeMap<(u64, u64), TcpStream>,
 ) {
+    if prediction_return_streams.contains_key(&(request_id, session_id)) {
+        return;
+    }
     match prediction_return_sinks.take_wait(request_id, session_id, Duration::from_millis(250)) {
         Ok(Some(stream)) => {
             prediction_return_streams.insert((request_id, session_id), stream);
@@ -2480,247 +2490,6 @@ fn configure_prediction_return_stream(
             );
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn handle_binary_restore_prefill_decode_control(
-    config: &StageConfig,
-    topology: Option<&StageTopology>,
-    runtime: &Arc<Mutex<RuntimeState>>,
-    kv: Option<&Arc<KvStageIntegration>>,
-    telemetry: &Telemetry,
-    session_id: &str,
-    wire_session_id: u64,
-    mut message: StageWireMessage,
-    downstream: Option<&mut TcpStream>,
-    wire_dtype: WireActivationDType,
-    downstream_wire_condition: WireCondition,
-    activation_width: i32,
-    control_started: Instant,
-    mut control_stats: StageReplyStats,
-    prediction_return_streams: &mut BTreeMap<(u64, u64), TcpStream>,
-    downstream_connect_timeout_secs: u64,
-    native_mtp_enabled: bool,
-) -> Result<()> {
-    let (prefix_tokens, current_token) = restore_decode_sideband(&message)?;
-    let local = maybe_prefix_cache_control(
-        config,
-        runtime,
-        kv,
-        telemetry,
-        session_id,
-        &message,
-        prefix_tokens,
-    );
-    control_stats.merge(local.stats);
-    if !local.hit {
-        let mut attrs = binary_message_attrs(config, wire_session_id, &message);
-        attrs.insert("skippy.kv.control_hit".to_string(), json!(false));
-        attrs.insert(
-            "llama_stage.elapsed_ms".to_string(),
-            json!(elapsed_ms(control_started)),
-        );
-        telemetry.emit_debug("stage.binary_prefix_cache_decode_control", attrs);
-        send_one_off_direct_return(
-            config,
-            topology,
-            &message,
-            wire_dtype,
-            downstream_connect_timeout_secs,
-            StageReply {
-                kind: WireReplyKind::Ack,
-                predicted: 0,
-                predicted_tokens: Vec::new(),
-                native_mtp_draft: None,
-                window: Default::default(),
-                stats: control_stats,
-            },
-        )
-        .context("send restore-decode miss direct ACK")?;
-        return Ok(());
-    }
-
-    let input = input_activation_frame(config, topology, &mut message, activation_width)?;
-    let decode_message = restore_prefill_decode_as_decode_message(&message, current_token);
-    let compute_started = Instant::now();
-    let (predicted_token, output, runtime_lock_wait_ms, runtime_lock_hold_ms, proactive_eviction) = {
-        let lock_started = Instant::now();
-        let mut runtime = runtime.lock().expect("runtime lock poisoned");
-        let runtime_lock_wait_ms = elapsed_ms(lock_started);
-        let lock_hold_started = Instant::now();
-        if let Some(metadata) = message.chat_sampling_metadata.as_deref() {
-            let sampling = runtime_sampling_config(message.sampling.as_ref());
-            runtime
-                .configure_chat_sampling(
-                    session_id,
-                    metadata,
-                    message.state.prompt_token_count.max(0) as u64,
-                    sampling.as_ref(),
-                )
-                .context("configure restore-decode chat sampling")?;
-        }
-        let proactive_eviction = evict_binary_resident_prefix_for_decode(
-            &mut runtime,
-            kv,
-            session_id,
-            BinaryProactiveEvictionPlan {
-                required: true,
-                ensure_session_before_eviction: false,
-            },
-        )?;
-        let (predicted, _, output) = run_binary_stage_message(
-            &mut runtime,
-            session_id,
-            &decode_message,
-            &[current_token],
-            input.as_ref(),
-            BinaryStageExecutionOptions::new(
-                downstream.is_none(),
-                stage_output_activation_capacity(
-                    config,
-                    decode_message.token_count,
-                    activation_width,
-                )?,
-                native_mtp_enabled,
-            ),
-        )
-        .context("execute restore-decode stage message")?;
-        (
-            predicted,
-            output,
-            runtime_lock_wait_ms,
-            elapsed_ms(lock_hold_started),
-            proactive_eviction,
-        )
-    };
-    let compute_ms = elapsed_ms(compute_started);
-    emit_binary_proactive_eviction(telemetry, &proactive_eviction);
-
-    if let Some(downstream) = downstream {
-        let forwarded =
-            forwarded_stage_message_timed(config, &message, &output, wire_dtype, activation_width)
-                .context("forward restore-decode activation")?;
-        write_stage_message_conditioned(
-            &mut *downstream,
-            &forwarded.message,
-            wire_dtype,
-            downstream_wire_condition,
-        )
-        .context("forward restore-decode downstream")?;
-        let mut attrs = binary_message_attrs(config, wire_session_id, &message);
-        attrs.insert("skippy.kv.control_hit".to_string(), json!(true));
-        attrs.insert(
-            "llama_stage.elapsed_ms".to_string(),
-            json!(elapsed_ms(control_started)),
-        );
-        attrs.insert("llama_stage.compute_ms".to_string(), json!(compute_ms));
-        attrs.insert(
-            "llama_stage.runtime_lock_wait_ms".to_string(),
-            json!(runtime_lock_wait_ms),
-        );
-        attrs.insert(
-            "llama_stage.runtime_lock_hold_ms".to_string(),
-            json!(runtime_lock_hold_ms),
-        );
-        proactive_eviction.insert_attrs(&mut attrs);
-        attrs.insert(
-            "llama_stage.forward_activation_bytes".to_string(),
-            json!(forwarded.message.activation.len()),
-        );
-        attrs.insert(
-            "llama_stage.activation_encode_ms".to_string(),
-            json!(forwarded.activation_encode_ms),
-        );
-        telemetry.emit_debug("stage.binary_prefix_cache_decode_control", attrs);
-        let downstream_reply =
-            recv_reply(&mut *downstream).context("restore-decode downstream reply")?;
-        if downstream_reply.kind != WireReplyKind::PredictedToken {
-            bail!(
-                "restore-decode expected downstream PredictedToken, got {:?}",
-                downstream_reply.kind
-            );
-        }
-        control_stats.merge(downstream_reply.stats);
-        send_one_off_direct_return(
-            config,
-            topology,
-            &message,
-            wire_dtype,
-            downstream_connect_timeout_secs,
-            StageReply {
-                stats: control_stats,
-                ..downstream_reply
-            },
-        )
-        .context("relay restore-decode direct predicted reply")?;
-        return Ok(());
-    }
-
-    {
-        let mut runtime = runtime.lock().expect("runtime lock poisoned");
-        let record = maybe_record_binary_full_prefill(
-            config,
-            &mut runtime,
-            kv,
-            telemetry,
-            session_id,
-            &message,
-            message.tokens.as_slice(),
-        );
-        add_binary_record_stats(&mut control_stats, config, &record);
-    }
-    let mut attrs = binary_message_attrs(config, wire_session_id, &message);
-    attrs.insert("skippy.kv.control_hit".to_string(), json!(true));
-    attrs.insert(
-        "llama_stage.elapsed_ms".to_string(),
-        json!(elapsed_ms(control_started)),
-    );
-    attrs.insert("llama_stage.compute_ms".to_string(), json!(compute_ms));
-    attrs.insert(
-        "llama_stage.runtime_lock_wait_ms".to_string(),
-        json!(runtime_lock_wait_ms),
-    );
-    attrs.insert(
-        "llama_stage.runtime_lock_hold_ms".to_string(),
-        json!(runtime_lock_hold_ms),
-    );
-    proactive_eviction.insert_attrs(&mut attrs);
-    telemetry.emit_debug("stage.binary_prefix_cache_decode_control", attrs);
-    let return_stream = prediction_return_streams
-        .get_mut(&(message.request_id, message.session_id))
-        .ok_or_else(|| anyhow!("missing direct prediction return stream"))?;
-    direct_return::send_direct_prediction_return(
-        return_stream,
-        StageReply {
-            kind: WireReplyKind::PredictedToken,
-            predicted: predicted_token,
-            predicted_tokens: vec![predicted_token],
-            native_mtp_draft: None,
-            window: Default::default(),
-            stats: control_stats,
-        },
-    )
-    .context("send restore-decode direct predicted reply")?;
-    Ok(())
-}
-
-fn send_one_off_direct_return(
-    config: &StageConfig,
-    topology: Option<&StageTopology>,
-    message: &StageWireMessage,
-    wire_dtype: WireActivationDType,
-    downstream_connect_timeout_secs: u64,
-    reply: StageReply,
-) -> Result<()> {
-    let mut stream = direct_return::open_prediction_return_stream(
-        config,
-        topology,
-        message.request_id,
-        message.session_id,
-        wire_dtype,
-        downstream_connect_timeout_secs,
-    )?;
-    direct_return::send_direct_prediction_return(&mut stream, reply)
 }
 
 fn send_stage_reply(stream: &mut TcpStream, reply: StageReply) -> Result<()> {
@@ -2758,36 +2527,6 @@ fn emit_binary_proactive_eviction(telemetry: &Telemetry, eviction: &BinaryProact
     } else {
         telemetry.emit_debug("stage.binary_kv_record_decision", eviction.attrs());
     }
-}
-
-fn restore_decode_sideband(message: &StageWireMessage) -> Result<(&[i32], i32)> {
-    let Some((&current, prefix_tokens)) = message.tokens.split_last() else {
-        bail!("restore-decode message requires prefix tokens plus current token");
-    };
-    if prefix_tokens.is_empty() {
-        bail!("restore-decode message requires non-empty prefix tokens");
-    }
-    Ok((prefix_tokens, current))
-}
-
-fn restore_prefill_decode_as_decode_message(
-    message: &StageWireMessage,
-    current_token: i32,
-) -> StageWireMessage {
-    let mut decode = message.clone();
-    decode.kind = WireMessageKind::DecodeEmbd;
-    decode.token_count = 1;
-    decode.tokens = vec![current_token];
-    decode.positions.clear();
-    decode.activation.clear();
-    decode.raw_bytes.clear();
-    decode.state.phase = StageStateHeader::new(
-        WireMessageKind::DecodeEmbd,
-        message.state.dtype().unwrap_or(WireActivationDType::F32),
-    )
-    .phase;
-    decode.state.current_token = current_token;
-    decode
 }
 
 #[allow(clippy::too_many_arguments)]

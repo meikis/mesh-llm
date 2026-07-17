@@ -337,16 +337,33 @@ pub(crate) fn receive_embedded_stage_reply(
     prediction_return: Option<&PredictionReturnReceiver>,
     expected_reply: WireReplyKind,
 ) -> OpenAiResult<StageReply> {
+    receive_embedded_stage_reply_one_of(
+        downstream,
+        prediction_return,
+        std::slice::from_ref(&expected_reply),
+    )
+}
+
+pub(crate) fn receive_embedded_stage_reply_one_of(
+    downstream: &mut TcpStream,
+    prediction_return: Option<&PredictionReturnReceiver>,
+    expected_replies: &[WireReplyKind],
+) -> OpenAiResult<StageReply> {
+    if expected_replies.is_empty() {
+        return Err(OpenAiError::backend(
+            "at least one expected stage reply kind is required",
+        ));
+    }
     let Some(prediction_return) = prediction_return else {
-        return receive_downstream_stage_reply(downstream, expected_reply);
+        return receive_downstream_stage_reply_one_of(downstream, expected_replies);
     };
-    poll_direct_or_downstream_reply(downstream, prediction_return, expected_reply)
+    poll_direct_or_downstream_reply(downstream, prediction_return, expected_replies)
 }
 
 fn poll_direct_or_downstream_reply(
     downstream: &mut TcpStream,
     prediction_return: &PredictionReturnReceiver,
-    expected_reply: WireReplyKind,
+    expected_replies: &[WireReplyKind],
 ) -> OpenAiResult<StageReply> {
     let previous_timeout = downstream.read_timeout().map_err(openai_io_error)?;
     downstream
@@ -355,7 +372,7 @@ fn poll_direct_or_downstream_reply(
     let started = Instant::now();
     loop {
         if let Some(reply) = prediction_return
-            .try_recv_expected(expected_reply)
+            .try_recv_one_of(expected_replies)
             .map_err(openai_backend_error)?
         {
             restore_downstream_read_timeout(downstream, previous_timeout)?;
@@ -363,12 +380,12 @@ fn poll_direct_or_downstream_reply(
         }
         if downstream_reply_available(downstream)? {
             restore_downstream_read_timeout(downstream, previous_timeout)?;
-            return receive_downstream_stage_reply(downstream, expected_reply);
+            return receive_downstream_stage_reply_one_of(downstream, expected_replies);
         }
         if started.elapsed() >= DIRECT_RETURN_FALLBACK_TIMEOUT {
             restore_downstream_read_timeout(downstream, previous_timeout)?;
             return Err(OpenAiError::backend(format!(
-                "timed out waiting for {expected_reply:?} reply from direct return or downstream"
+                "timed out waiting for one of {expected_replies:?} from direct return or downstream"
             )));
         }
     }
@@ -400,16 +417,101 @@ fn restore_downstream_read_timeout(
         .map_err(openai_io_error)
 }
 
-fn receive_downstream_stage_reply(
+fn receive_downstream_stage_reply_one_of(
     downstream: &mut TcpStream,
-    expected_reply: WireReplyKind,
+    expected_replies: &[WireReplyKind],
 ) -> OpenAiResult<StageReply> {
     let reply = recv_reply(&mut *downstream).map_err(openai_io_error)?;
-    if reply.kind != expected_reply {
+    if !expected_replies.contains(&reply.kind) {
         return Err(OpenAiError::backend(format!(
-            "expected {expected_reply:?} reply from downstream, got {:?}",
+            "expected one of {expected_replies:?} from downstream, got {:?}",
             reply.kind
         )));
     }
     Ok(reply)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_stage_reply_accepts_fused_restore_hits_and_misses_from_direct_return() {
+        assert_eq!(
+            receive_direct_reply_one_of(
+                WireReplyKind::PredictedToken,
+                &[WireReplyKind::PredictedToken, WireReplyKind::Ack],
+            ),
+            WireReplyKind::PredictedToken
+        );
+        assert_eq!(
+            receive_direct_reply_one_of(
+                WireReplyKind::Ack,
+                &[WireReplyKind::PredictedToken, WireReplyKind::Ack],
+            ),
+            WireReplyKind::Ack
+        );
+    }
+
+    fn receive_direct_reply_one_of(
+        reply_kind: WireReplyKind,
+        expected_replies: &[WireReplyKind],
+    ) -> WireReplyKind {
+        let request_id = 17;
+        let session_id = 23;
+        let hub = Arc::new(PredictionReturnHub::default());
+        let receiver = hub.register(request_id, session_id).unwrap();
+        let (mut direct_client, direct_server) = tcp_pair();
+        let hub_thread = {
+            let hub = hub.clone();
+            std::thread::spawn(move || {
+                hub.handle_return_connection(
+                    StageWireMessage {
+                        kind: WireMessageKind::PredictionReturnOpen,
+                        pos_start: 0,
+                        token_count: 0,
+                        state: StageStateHeader::new(
+                            WireMessageKind::PredictionReturnOpen,
+                            WireActivationDType::F32,
+                        ),
+                        request_id,
+                        session_id,
+                        sampling: None,
+                        chat_sampling_metadata: None,
+                        tokens: Vec::new(),
+                        positions: Vec::new(),
+                        activation: Vec::new(),
+                        raw_bytes: Vec::new(),
+                    },
+                    direct_server,
+                )
+            })
+        };
+        skippy_protocol::binary::send_reply_message(
+            &mut direct_client,
+            &StageReply {
+                kind: reply_kind,
+                predicted: 0,
+                predicted_tokens: Vec::new(),
+                native_mtp_draft: None,
+                window: Default::default(),
+                stats: StageReplyStats::default(),
+            },
+        )
+        .unwrap();
+        let (mut downstream, _downstream_peer) = tcp_pair();
+        let reply =
+            receive_embedded_stage_reply_one_of(&mut downstream, Some(&receiver), expected_replies)
+                .unwrap();
+        drop(direct_client);
+        hub_thread.join().unwrap().unwrap();
+        reply.kind
+    }
+
+    fn tcp_pair() -> (TcpStream, TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (client, server)
+    }
 }

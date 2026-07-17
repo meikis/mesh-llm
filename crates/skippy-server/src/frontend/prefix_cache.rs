@@ -984,7 +984,11 @@ impl StageOpenAiBackend {
         .map_err(openai_io_error)?;
         let forward_write_ms = write_timer.elapsed_ms();
         let wait_timer = PhaseTimer::start();
-        let downstream_reply = recv_reply(&mut *downstream).map_err(openai_io_error)?;
+        let downstream_reply = super::embedded_execution::receive_embedded_stage_reply_one_of(
+            downstream,
+            request.prediction_return.as_ref(),
+            &[WireReplyKind::PredictedToken, WireReplyKind::Ack],
+        )?;
         let downstream_wait_ms = wait_timer.elapsed_ms();
         let downstream_missed = downstream_reply.kind != WireReplyKind::PredictedToken
             || downstream_reply.stats.kv_lookup_errors > 0

@@ -222,9 +222,11 @@ impl StageOpenAiBackend {
             let buffer_exhausted = buffer.is_empty();
             (buffer_exhausted, accepted_proposal_tokens)
         };
+        let previous_verify_width = adaptive_verify_window.current_tokens();
         let window_adjusted = adaptive_verify_window.observe(fully_accepted_window);
         native_mtp_counters.observe_adaptive_verify_window(
             proposal_tokens.len(),
+            previous_verify_width,
             adaptive_verify_window.current_tokens(),
         );
         if native_mtp_verify_decision.rejected

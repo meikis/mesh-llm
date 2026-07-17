@@ -225,6 +225,7 @@ impl NativeMtpDecodeCounters {
     pub(in crate::frontend) fn observe_adaptive_verify_window(
         &mut self,
         width: usize,
+        previous_width: usize,
         next_width: usize,
     ) {
         self.adaptive_verify_window_count += 1;
@@ -235,8 +236,8 @@ impl NativeMtpDecodeCounters {
             self.adaptive_verify_window_width_min.min(width)
         };
         self.adaptive_verify_window_width_max = self.adaptive_verify_window_width_max.max(width);
-        self.adaptive_verify_window_grow_count += usize::from(next_width > width);
-        self.adaptive_verify_window_shrink_count += usize::from(next_width < width);
+        self.adaptive_verify_window_grow_count += usize::from(next_width > previous_width);
+        self.adaptive_verify_window_shrink_count += usize::from(next_width < previous_width);
     }
 
     pub(in crate::frontend) fn insert_summary_attrs(
@@ -615,7 +616,7 @@ mod tests {
         counters.observe_suppressed_cooldown_draft();
         counters.observe_hybrid_proposal(&composite_proposal(), 3);
         counters.observe_ngram_tail_rejection();
-        counters.observe_adaptive_verify_window(2, 3);
+        counters.observe_adaptive_verify_window(2, 2, 3);
 
         let mut attrs = BTreeMap::new();
         counters.insert_summary_attrs(
@@ -703,11 +704,33 @@ mod tests {
     }
 
     #[test]
+    fn short_candidate_does_not_look_like_adaptive_window_growth() {
+        let mut counters = NativeMtpDecodeCounters::default();
+        counters.observe_adaptive_verify_window(1, 4, 4);
+
+        let mut attrs = BTreeMap::new();
+        counters.insert_summary_attrs(&mut attrs, options());
+
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.adaptive_verify_window_width_sum"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.adaptive_verify_window_grow_count"),
+            Some(&json!(0))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.adaptive_verify_window_shrink_count"),
+            Some(&json!(0))
+        );
+    }
+
+    #[test]
     fn response_timings_show_hybrid_widening_evidence() {
         let mut counters = NativeMtpDecodeCounters::default();
         counters.observe_verify_window_verification(NativeMtpDraftOrigin::InitialSerial, true);
         counters.observe_hybrid_proposal(&composite_proposal(), 3);
-        counters.observe_adaptive_verify_window(2, 3);
+        counters.observe_adaptive_verify_window(2, 2, 3);
         let telemetry = NativeMtpDecodeTelemetry::new(
             NativeMtpDecodeOptions {
                 max_draft_tokens: 1,

@@ -1214,9 +1214,11 @@ impl StageOpenAiBackend {
                                     break;
                                 }
                             }
+                            let previous_verify_width = adaptive_verify_window.current_tokens();
                             adaptive_verify_window.observe(pipeline_continues);
                             native_mtp_counters.observe_adaptive_verify_window(
                                 window.proposal_tokens.len(),
+                                previous_verify_width,
                                 adaptive_verify_window.current_tokens(),
                             );
                             if !pipeline_continues || reached_stop {

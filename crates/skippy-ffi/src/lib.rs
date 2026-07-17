@@ -1,9 +1,10 @@
 pub const ABI_VERSION_MAJOR: u32 = 0;
 pub const ABI_VERSION_MINOR: u32 = 1;
-pub const ABI_VERSION_PATCH: u32 = 30;
+pub const ABI_VERSION_PATCH: u32 = 31;
 pub const FEATURE_BACKEND_DEVICES: u64 = 1 << 23;
 pub const FEATURE_RUNTIME_EVENTS: u64 = 1 << 24;
 pub const FEATURE_NATIVE_MTP_N1: u64 = 1 << 25;
+pub const FEATURE_INKLING_MTP_MM: u64 = 1 << 26;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -359,6 +360,8 @@ pub struct ActivationDesc {
     pub payload_bytes: u64,
     pub flags: u64,
 }
+
+pub const ACTIVATION_FLAG_INKLING_MTP_EMBD: u64 = 1 << 2;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -869,6 +872,7 @@ mod dynamic {
         mtmd_decode_use_mrope(ctx: *const MtmdContext) -> bool;
         mtmd_input_chunk_get_type(chunk: *const Opaque) -> MtmdInputChunkType;
         mtmd_input_chunk_get_n_tokens(chunk: *const Opaque) -> usize;
+        mtmd_input_chunk_get_tokens_text(chunk: *const Opaque, out_count: *mut usize) -> *const i32;
         mtmd_input_chunk_get_tokens_image(chunk: *const Opaque) -> *const Opaque;
         mtmd_helper_image_get_decoder_pos(image: *const Opaque, pos_0: i32, out_pos: *mut MtmdDecoderPos);
         mtmd_helper_eval_chunks(ctx: *mut MtmdContext, lctx: *mut Opaque, chunks: *const MtmdInputChunks, n_past: i32, seq_id: i32, n_batch: i32, logits_last: bool, new_n_past: *mut i32) -> c_int;
@@ -1157,6 +1161,20 @@ pub fn skippy_abi_features() -> u64 {
     let fns = dynamic::skippy_abi_features_optional()
         .expect("skippy_abi_features not available in loaded runtime");
     unsafe { fns() }
+}
+
+/// Returns the active Skippy ABI feature bitmask through a safe Rust wrapper.
+#[cfg(feature = "dynamic-runtime")]
+pub fn abi_features() -> u64 {
+    skippy_abi_features()
+}
+
+/// Returns the statically linked Skippy ABI feature bitmask.
+#[cfg(not(feature = "dynamic-runtime"))]
+pub fn abi_features() -> u64 {
+    // SAFETY: the statically linked ABI exposes this nullary query with no
+    // caller-owned pointers or lifetime requirements.
+    unsafe { skippy_abi_features() }
 }
 
 #[cfg(not(feature = "dynamic-runtime"))]
@@ -1752,6 +1770,11 @@ unsafe extern "C" {
     pub fn mtmd_input_chunk_get_type(chunk: *const Opaque) -> MtmdInputChunkType;
 
     pub fn mtmd_input_chunk_get_n_tokens(chunk: *const Opaque) -> usize;
+
+    pub fn mtmd_input_chunk_get_tokens_text(
+        chunk: *const Opaque,
+        out_count: *mut usize,
+    ) -> *const i32;
 
     pub fn mtmd_input_chunk_get_tokens_image(chunk: *const Opaque) -> *const Opaque;
 

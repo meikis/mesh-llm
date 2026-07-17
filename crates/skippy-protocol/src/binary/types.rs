@@ -189,10 +189,12 @@ pub mod state_flags {
     pub const CHAT_SAMPLING_METADATA: i32 = 1 << 5;
     pub const RWKV7_V_FIRST_SIDEBAND: i32 = 1 << 6;
     pub const GEMMA3N_ALTUP_SIDEBAND: i32 = 1 << 7;
+    pub const INKLING_MTP_EMBD_SIDEBAND: i32 = 1 << 8;
 }
 
 pub const ACTIVATION_FLAG_RWKV7_V_FIRST: u64 = 1 << 0;
 pub const ACTIVATION_FLAG_GEMMA3N_ALTUP: u64 = 1 << 1;
+pub const ACTIVATION_FLAG_INKLING_MTP_EMBD: u64 = 1 << 2;
 
 pub fn activation_frame_flags_from_state_flags(flags: i32) -> u64 {
     let mut frame_flags = 0;
@@ -201,6 +203,9 @@ pub fn activation_frame_flags_from_state_flags(flags: i32) -> u64 {
     }
     if (flags & state_flags::GEMMA3N_ALTUP_SIDEBAND) != 0 {
         frame_flags |= ACTIVATION_FLAG_GEMMA3N_ALTUP;
+    }
+    if (flags & state_flags::INKLING_MTP_EMBD_SIDEBAND) != 0 {
+        frame_flags |= ACTIVATION_FLAG_INKLING_MTP_EMBD;
     }
     frame_flags
 }
@@ -212,6 +217,9 @@ pub fn activation_state_flags_from_frame_flags(flags: u64) -> i32 {
     }
     if (flags & ACTIVATION_FLAG_GEMMA3N_ALTUP) != 0 {
         state |= state_flags::GEMMA3N_ALTUP_SIDEBAND;
+    }
+    if (flags & ACTIVATION_FLAG_INKLING_MTP_EMBD) != 0 {
+        state |= state_flags::INKLING_MTP_EMBD_SIDEBAND;
     }
     state
 }

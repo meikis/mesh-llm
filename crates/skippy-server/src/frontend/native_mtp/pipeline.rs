@@ -202,4 +202,33 @@ mod tests {
                 .ngram_tail_rejected(pipeline.accepted_tokens())
         );
     }
+
+    #[test]
+    fn later_ngram_rejection_does_not_reject_an_accepted_native_prefix() {
+        let mut pipeline = CompositeProposalPipeline::new(
+            proposal(vec![9, 1, 2, 3, 4], 1),
+            Some(NativeMtpDraftOrigin::InitialSerial),
+            2,
+        );
+
+        let first = pipeline.next_window(2).unwrap();
+        assert_eq!(first.proposal_tokens(), &[9, 1]);
+        assert_eq!(first.expected_free_target(), Some(2));
+        pipeline.observe_accepted(3);
+
+        let second = pipeline.next_window(2).unwrap();
+        assert_eq!(second.proposal_tokens(), &[3, 4]);
+        pipeline.observe_accepted(0);
+
+        assert!(
+            !pipeline
+                .proposal()
+                .native_mtp_prefix_rejected(pipeline.accepted_tokens())
+        );
+        assert!(
+            pipeline
+                .proposal()
+                .ngram_tail_rejected(pipeline.accepted_tokens())
+        );
+    }
 }

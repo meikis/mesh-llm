@@ -664,8 +664,10 @@ impl StageOpenAiBackend {
             let mut native_mtp_counters = NativeMtpDecodeCounters::default();
             let mut native_mtp_reject_cooldown_remaining = 0usize;
             let mut native_mtp_suppress_cooldown_drafts_remaining = 0usize;
-            let mut ngram_sidecar_controller =
-                NgramSidecarController::new(native_mtp_options.ngram_max_proposal_tokens);
+            let mut ngram_sidecar_controller = NgramSidecarController::new(
+                native_mtp_options.ngram_initial_extension_tokens,
+                native_mtp_options.ngram_max_proposal_tokens,
+            );
             if let Some(mut fused) = fused_first_decode.take() {
                 current = fused.predicted;
                 let mut fused_native_mtp_draft = fused.native_mtp_draft.take();

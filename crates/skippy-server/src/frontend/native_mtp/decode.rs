@@ -14,6 +14,7 @@ pub(in crate::frontend) struct NativeMtpDecodeOptions {
     pub(in crate::frontend) suppress_cooldown_draft_limit: usize,
     pub(in crate::frontend) ngram_hybrid: bool,
     pub(in crate::frontend) ngram_size: usize,
+    pub(in crate::frontend) ngram_initial_extension_tokens: usize,
     pub(in crate::frontend) ngram_max_proposal_tokens: usize,
     pub(in crate::frontend) ngram_tail_backoff_proposals: usize,
     pub(in crate::frontend) verify_window_min_tokens: usize,
@@ -50,6 +51,10 @@ impl NativeMtpDecodeOptions {
             suppress_cooldown_draft_limit: config.native_mtp.suppress_cooldown_draft_limit,
             ngram_hybrid: config.extension.is_some() && config.ngram.is_some(),
             ngram_size: config.ngram.as_ref().map_or(0, |ngram| ngram.min_ngram),
+            ngram_initial_extension_tokens: config
+                .extension
+                .as_ref()
+                .map_or(0, |extension| extension.initial_tokens),
             ngram_max_proposal_tokens: config
                 .extension
                 .as_ref()
@@ -266,6 +271,10 @@ impl NativeMtpDecodeCounters {
         attrs.insert(
             "llama_stage.native_mtp.ngram_size".to_string(),
             json!(options.ngram_size),
+        );
+        attrs.insert(
+            "llama_stage.native_mtp.ngram_initial_extension_tokens".to_string(),
+            json!(options.ngram_initial_extension_tokens),
         );
         attrs.insert(
             "llama_stage.native_mtp.ngram_max_proposal_tokens".to_string(),
@@ -519,6 +528,10 @@ impl NativeMtpDecodeTelemetry {
             json!(self.options.ngram_size),
         );
         timings.insert(
+            "native_mtp_ngram_initial_extension_tokens".to_string(),
+            json!(self.options.ngram_initial_extension_tokens),
+        );
+        timings.insert(
             "native_mtp_ngram_max_proposal_tokens".to_string(),
             json!(self.options.ngram_max_proposal_tokens),
         );
@@ -552,6 +565,7 @@ mod tests {
             suppress_cooldown_draft_limit: 0,
             ngram_hybrid: true,
             ngram_size: 2,
+            ngram_initial_extension_tokens: 2,
             ngram_max_proposal_tokens: 4,
             ngram_tail_backoff_proposals: 2,
             verify_window_min_tokens: 1,
@@ -565,6 +579,29 @@ mod tests {
             &[1, 2, 3, 9, 1, 2, 3, 9, 1, 2, 3],
             4,
         )
+    }
+
+    #[test]
+    fn decode_options_preserve_configured_initial_extension_width() {
+        let config = SpeculativeDecodeConfig {
+            extension: Some(crate::frontend::NgramExtensionConfig {
+                initial_tokens: 3,
+                max_tokens: 7,
+                tail_backoff_proposals: 2,
+            }),
+            ngram: Some(crate::frontend::NgramProposalConfig {
+                kind: crate::frontend::NgramProposerKind::Cache,
+                min_ngram: 2,
+                max_ngram: 4,
+                max_proposal_tokens: 7,
+            }),
+            ..SpeculativeDecodeConfig::default()
+        };
+
+        let options = NativeMtpDecodeOptions::from_config(&config);
+
+        assert_eq!(options.ngram_initial_extension_tokens, 3);
+        assert_eq!(options.ngram_max_proposal_tokens, 7);
     }
 
     #[test]
@@ -591,6 +628,7 @@ mod tests {
                 suppress_cooldown_draft_limit: 2,
                 ngram_hybrid: true,
                 ngram_size: 8,
+                ngram_initial_extension_tokens: 2,
                 ngram_max_proposal_tokens: 4,
                 ngram_tail_backoff_proposals: 6,
                 verify_window_min_tokens: 1,
@@ -629,6 +667,10 @@ mod tests {
         assert_eq!(
             attrs.get("llama_stage.native_mtp.reject_cooldown_tokens"),
             Some(&json!(6))
+        );
+        assert_eq!(
+            attrs.get("llama_stage.native_mtp.ngram_initial_extension_tokens"),
+            Some(&json!(2))
         );
         assert_eq!(
             attrs.get("llama_stage.native_mtp.hybrid_accepted_tail_token_count"),
@@ -675,6 +717,7 @@ mod tests {
                 suppress_cooldown_draft_limit: 0,
                 ngram_hybrid: true,
                 ngram_size: 8,
+                ngram_initial_extension_tokens: 2,
                 ngram_max_proposal_tokens: 4,
                 ngram_tail_backoff_proposals: 6,
                 verify_window_min_tokens: 1,
@@ -689,6 +732,10 @@ mod tests {
         assert_eq!(
             timings.get("native_mtp_ngram_hybrid_enabled"),
             Some(&json!(true))
+        );
+        assert_eq!(
+            timings.get("native_mtp_ngram_initial_extension_tokens"),
+            Some(&json!(2))
         );
         assert_eq!(
             timings.get("native_mtp_hybrid_native_tokens"),

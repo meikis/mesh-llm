@@ -240,13 +240,16 @@ pub(in crate::frontend) struct NgramSidecarController {
 }
 
 impl NgramSidecarController {
-    pub(in crate::frontend) fn new(max_proposal_tokens: usize) -> Self {
-        let initial_extension_tokens = MIN_NGRAM_EXTENSION_TOKENS.min(max_proposal_tokens);
+    pub(in crate::frontend) fn new(
+        initial_extension_tokens: usize,
+        max_extension_tokens: usize,
+    ) -> Self {
+        let initial_extension_tokens = initial_extension_tokens.min(max_extension_tokens);
         Self {
             remaining_proposals: 0,
             initial_extension_tokens,
             current_extension_tokens: initial_extension_tokens,
-            max_extension_tokens: max_proposal_tokens,
+            max_extension_tokens,
         }
     }
 
@@ -446,6 +449,7 @@ mod tests {
             suppress_cooldown_draft_limit: 0,
             ngram_hybrid: true,
             ngram_size: 2,
+            ngram_initial_extension_tokens: 2,
             ngram_max_proposal_tokens: 4,
             ngram_tail_backoff_proposals: 2,
             verify_window_min_tokens: 1,
@@ -595,7 +599,7 @@ mod tests {
     #[test]
     fn tail_rejection_resets_and_backs_off_only_mtp_extensions() {
         let proposal = NativeMtpHybridProposal::from_parts(vec![9, 10, 11], 1, true);
-        let mut controller = NgramSidecarController::new(4);
+        let mut controller = NgramSidecarController::new(2, 4);
 
         assert!(controller.observe_tail_outcome(&proposal, 1, 2));
         assert_eq!(controller.remaining_proposals(), 2);
@@ -609,7 +613,7 @@ mod tests {
     #[test]
     fn backoff_preserves_the_native_mtp_prefix() {
         let provider = CompositeProposalProvider::from_options(options());
-        let mut controller = NgramSidecarController::new(4);
+        let mut controller = NgramSidecarController::new(2, 4);
         let rejected_tail = NativeMtpHybridProposal::from_parts(vec![9, 1, 2], 1, true);
         assert!(controller.observe_tail_outcome(&rejected_tail, 1, 1));
 
@@ -639,12 +643,12 @@ mod tests {
     #[test]
     fn fully_accepted_tail_grows_the_next_extension_budget() {
         let proposal = NativeMtpHybridProposal::from_parts(vec![9, 1, 2], 1, true);
-        let mut controller = NgramSidecarController::new(6);
+        let mut controller = NgramSidecarController::new(3, 6);
 
-        assert_eq!(controller.extension_limit(&[9], 5), 2);
-        assert!(!controller.observe_tail_outcome(&proposal, 3, 4));
-        assert_eq!(controller.current_extension_tokens(), 3);
         assert_eq!(controller.extension_limit(&[9], 5), 3);
+        assert!(!controller.observe_tail_outcome(&proposal, 3, 4));
+        assert_eq!(controller.current_extension_tokens(), 4);
+        assert_eq!(controller.extension_limit(&[9], 5), 4);
     }
 
     #[test]

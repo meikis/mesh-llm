@@ -10,6 +10,7 @@ import argparse
 import os
 import shutil
 import subprocess
+import urllib.request
 from pathlib import Path
 
 
@@ -61,22 +62,46 @@ def model_parts(args: argparse.Namespace) -> list[Path]:
     return parts
 
 
+def require_gguf_magic(path: Path) -> Path:
+    with path.open("rb") as handle:
+        magic = handle.read(4)
+    if magic != b"GGUF":
+        raise RuntimeError(f"invalid GGUF magic for {path}: {magic!r}")
+    return path
+
+
+def projector_path(args: argparse.Namespace) -> Path:
+    if not args.projector_url:
+        return require_gguf_magic(Path(args.projector))
+    target = Path(args.projector_local_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(f"{target.suffix}.part")
+    print(f"+ download {args.projector_url} -> {target}", flush=True)
+    with urllib.request.urlopen(args.projector_url) as response, temporary.open("wb") as output:
+        shutil.copyfileobj(response, output, length=8 * 1024 * 1024)
+    temporary.replace(target)
+    return require_gguf_magic(target)
+
+
 def certify(args: argparse.Namespace, mesh_root: Path) -> None:
     binary = mesh_root / "target" / "release" / "skippy-quantize"
     run("just", "skippy-quantize-standalone-release-build", "cpu", cwd=mesh_root)
+    target_parts = [require_gguf_magic(path) for path in model_parts(args)]
+    mtp_draft = require_gguf_magic(Path(args.mtp_draft))
+    projector = projector_path(args)
     command = [str(binary), "validate-mtp-attach"]
-    for part in model_parts(args):
+    for part in target_parts:
         command.extend(("--model", str(part)))
     command.extend(
         (
             "--mtp-draft",
-            args.mtp_draft,
+            str(mtp_draft),
             "--layer-count",
             str(args.layer_count),
             "--ctx-size",
             str(args.ctx_size),
             "--projector",
-            args.projector,
+            str(projector),
             "--json",
         )
     )
@@ -103,6 +128,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-parts", type=int, default=1)
     parser.add_argument("--mtp-draft", required=True)
     parser.add_argument("--projector", required=True)
+    parser.add_argument("--projector-url")
+    parser.add_argument("--projector-local-path", default="/tmp/mmproj.gguf")
     parser.add_argument("--layer-count", type=int, required=True)
     parser.add_argument("--mtp-layer-count", type=int)
     parser.add_argument("--ctx-size", type=int, default=64)

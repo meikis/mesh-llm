@@ -140,7 +140,7 @@ def upload(args: argparse.Namespace, artifact_dir: Path) -> None:
 
     api = HfApi(token=os.environ["HF_TOKEN"])
     api.create_repo(args.target_repo, repo_type="model", private=False, exist_ok=True)
-    api.upload_large_folder(
+    api.upload_folder(
         repo_id=args.target_repo,
         repo_type="model",
         folder_path=str(artifact_dir),

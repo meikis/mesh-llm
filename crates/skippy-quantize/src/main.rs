@@ -22,6 +22,7 @@ mod llama_load;
 mod locking;
 mod manifest;
 mod memory_budget;
+mod mtp_attach;
 mod native_convert;
 mod native_quantize;
 mod output;
@@ -59,6 +60,7 @@ use memory_budget::{
     MemoryBudgetPlanInput, MemoryPolicy, MemorySize, effective_stream_buffer_bytes,
     native_convert_stream_working_set_bytes, print_memory_budget_plan,
 };
+use mtp_attach::{ValidateMtpAttachArgs, run_validate_mtp_attach};
 use native_convert::{build_native_convert_command, run_native_convert};
 use native_quantize::{build_native_quantize_command, run_native_quantize};
 use output::{
@@ -112,6 +114,7 @@ enum Command {
     RunQuantWindow(RunQuantWindowArgs),
     VerifyJob(VerifyJobArgs),
     ValidateLlamaLoad(ValidateLlamaLoadArgs),
+    ValidateMtpAttach(ValidateMtpAttachArgs),
     ValidateTensorTypes(ValidateTensorTypesArgs),
     ValidateSplits(ValidateSplitsArgs),
 }
@@ -513,6 +516,7 @@ fn main() -> Result<()> {
             args.json,
         ),
         Command::ValidateLlamaLoad(args) => run_validate_llama_load(args),
+        Command::ValidateMtpAttach(args) => run_validate_mtp_attach(args),
         Command::ValidateTensorTypes(args) => validate_tensor_types_command(&args.file, args.json),
         Command::ValidateSplits(args) => validate_splits_command(
             &args.root,

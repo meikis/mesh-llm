@@ -200,9 +200,9 @@ impl StageOpenAiBackend {
             && committed_positions == consumed_positions
             && !reached_stop;
         let native_mtp_prefix_rejected = proposal_buffer.as_ref().is_some_and(|buffer| {
-            buffer
-                .proposal()
-                .native_mtp_prefix_rejected(native_mtp_verify_decision.accepted_proposal_tokens)
+            buffer.native_mtp_prefix_rejected_after(
+                native_mtp_verify_decision.accepted_proposal_tokens,
+            )
         });
         let (buffer_exhausted, accepted_proposal_tokens) = {
             let buffer = proposal_buffer.as_mut().expect("proposal buffer retained");

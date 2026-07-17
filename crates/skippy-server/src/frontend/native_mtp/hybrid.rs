@@ -347,6 +347,14 @@ impl BufferedCompositeProposal {
         self.accepted_tokens
     }
 
+    pub(in crate::frontend) fn native_mtp_prefix_rejected_after(
+        &self,
+        accepted_window_tokens: usize,
+    ) -> bool {
+        self.proposal
+            .native_mtp_prefix_rejected(self.accepted_tokens.saturating_add(accepted_window_tokens))
+    }
+
     pub(in crate::frontend) fn accept_window(
         &mut self,
         verified_tokens: &[i32],
@@ -693,6 +701,19 @@ mod tests {
 
         assert!(buffer.is_empty());
         assert_eq!(buffer.accepted_tokens(), 3);
+    }
+
+    #[test]
+    fn later_tail_rejection_does_not_reject_an_accepted_native_prefix() {
+        let mut buffer = BufferedCompositeProposal::new(NativeMtpHybridProposal::from_parts(
+            vec![9, 10, 11, 12],
+            1,
+            true,
+        ));
+
+        buffer.accept_window(&[9, 10], Some(11));
+
+        assert!(!buffer.native_mtp_prefix_rejected_after(0));
     }
 
     #[test]
